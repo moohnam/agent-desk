@@ -1,3 +1,4 @@
+import { ArrowDown, ArrowLeft, ArrowUp, Ellipsis, Keyboard, PenLine, Pin, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -10,7 +11,7 @@ import { SkillsDialog } from './Skills.tsx';
 import { MODE_LABEL, MODEL_LABEL } from '../../hub/src/compose.ts';
 import { STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
 import { PostView } from './PostView.tsx';
-import { draftsOf, pruneDrafts, useDraftTasks } from './drafts.ts';
+import { pruneDrafts, useDraftTasks } from './drafts.ts';
 import { DEFAULT_WIDTH, WIDTH_PRESETS, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
 import { modelShort, projectColor, projectListLabel } from './projects.ts';
@@ -173,7 +174,12 @@ export function App() {
   const switchView = (v: View) => {
     if (v === view) return;
     setView(v);
+    // The open thread belonged to the old view's columns; the new view starts without it.
+    if (threadTask) { if (history.state?.thread) history.back(); else setThreadTask(null); }
     setActive(0);
+    // A view opens at its top: no selection or kept scroll position carries over from the last visit.
+    setSelection({});
+    atTop.current.clear(); feedAnchor.current.clear(); seenTop.current.clear();
     const x = VIEWS.find((y) => y.id === v)!;
     setToast(`${x.key} ${x.label} 뷰`);
   };
@@ -432,13 +438,19 @@ export function App() {
     glideStop.current = stop;
     raf = requestAnimationFrame(step);
   };
-  /** Scrolls a column's feed (only it, not the deck) to show a post. */
+  /**
+   * Scrolls a column's feed (only it, not the deck) to show a post, with its group's head line
+   * (project and task) too when both fit on screen.
+   */
   const revealPost = (colId: string, postId: number) => {
     const feed = document.querySelector(`section[data-col="${colId}"] .feed`);
     const el = feed?.querySelector(`[data-post="${postId}"]`);
     if (!feed || !el) return;
-    const top = el.getBoundingClientRect().top - feed.getBoundingClientRect().top;
-    const bottom = top + el.getBoundingClientRect().height;
+    const at = feed.getBoundingClientRect().top;
+    const head = el.closest('.group')?.querySelector(':scope > .ctx');
+    const bottom = el.getBoundingClientRect().bottom - at;
+    const headTop = head ? head.getBoundingClientRect().top - at : Infinity;
+    const top = bottom - headTop <= feed.clientHeight ? headTop : el.getBoundingClientRect().top - at;
     if (top < 0) feed.scrollTop += top;
     else if (bottom > feed.clientHeight) feed.scrollTop += Math.min(top, bottom - feed.clientHeight);
   };
@@ -449,6 +461,10 @@ export function App() {
     pressing.current = true;
     window.addEventListener('pointerup', () => { pressing.current = false; }, { once: true });
   };
+  useLayoutEffect(() => {
+    deckRef.current?.scrollTo({ left: 0 });
+    for (const f of deckRef.current?.querySelectorAll<HTMLElement>('section[data-col] .feed') ?? []) f.scrollTop = 0;
+  }, [view]);
   // Keep the selected post (or column) visible.
   useEffect(() => {
     if (!activeCol) return;
@@ -467,6 +483,11 @@ export function App() {
 
   const select = (colId: string, postId: number) => setSelection((s) => ({ ...s, [colId]: postId }));
   const focusColumn = (i: number) => setActive(Math.max(0, Math.min(i, deck.length - 1)));
+  /** h/l: the next column that way; on the status board (F4), empty columns are passed over. */
+  const stepColumn = (dir: -1 | 1) => {
+    const skip = (c: DeckColumn) => view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0;
+    for (let i = activeIdx + dir; i >= 0 && i < deck.length; i += dir) if (!skip(deck[i])) return focusColumn(i);
+  };
   const toggleExpanded = (id: number) => setExpanded((prev) => {
     const next = new Set(prev);
     if (!next.delete(id)) next.add(id);
@@ -663,17 +684,14 @@ export function App() {
     }
     return out;
   }, [deck, drafts]);
-  /** "작성 중": opens the threads holding unsent text in turn, with the cursor in that box. */
+  /** "작성 중": opens the threads holding an unsent reply in turn, with the cursor in the reply box. */
   const jumpDraft = () => {
     const list = [...drafts].filter((id) => hub.tasks.has(id))
       .sort((a, b) => hub.tasks.get(b)!.updated_at.localeCompare(hub.tasks.get(a)!.updated_at));
     if (!list.length) return;
     const i = (jumpIndex.current.draft ?? -1) + 1;
     jumpIndex.current.draft = i;
-    const taskId = list[i % list.length];
-    const key = draftsOf(taskId).find((k) => !k.startsWith('reply:'));
-    if (key) answerQuestion(taskId, key.slice(key.indexOf(':') + 1));
-    else replyTo(taskId, activeCol?.id);
+    replyTo(list[i % list.length], activeCol?.id);
   };
   const jumpTo = (key: TaskStatus | 'stalled') => {
     const hit = (t: TaskView) => (key === 'stalled' ? stalled.has(t.id) : t.status === key);
@@ -914,8 +932,8 @@ export function App() {
       switch (e.key) {
         case 'j': case 'ArrowDown': go(cur + 1); break;
         case 'k': case 'ArrowUp': go(cur < 0 ? 0 : cur - 1); break;
-        case 'h': case 'ArrowLeft': focusColumn(activeIdx - 1); break;
-        case 'l': case 'ArrowRight': focusColumn(activeIdx + 1); break;
+        case 'h': case 'ArrowLeft': stepColumn(-1); break;
+        case 'l': case 'ArrowRight': stepColumn(1); break;
         case 'J': nextTask(1); break;
         case 'K': nextTask(-1); break;
         case 'G': go(posts.length - 1); break;
@@ -1026,13 +1044,13 @@ export function App() {
           <Chip kind="err" n={counts.error} label="오류" title="오류 난 작업을 차례로 보기" onClick={() => jumpTo('error')} />
         </nav>
         <div className="top-actions">
-          <button className="btn primary" title="새 작업 (i)" onClick={() => (drawer ? setDrawer(false) : openDrawer())}>
-            새 작업 <kbd>i</kbd>
+          <button className="btn primary" title="새 작업 (i)" aria-label="새 작업" onClick={() => (drawer ? setDrawer(false) : openDrawer())}>
+            <SquarePen />
           </button>
-          <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" onClick={() => setSkillsOpen(true)}>스킬</button>
-          <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #low … #max (#ultra는 Codex)" onClick={() => setModelOpen(true)}>모델</button>
-          {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" onClick={() => setAccessOpen(true)}>폰에서 열기</button>}
-          <button className="btn help-btn" title="단축키 (?)" onClick={() => setHelp(true)}>?</button>
+          <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
+          <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #low … #max (#ultra는 Codex)" aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
+          {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
+          <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
       </header>
 
@@ -1040,7 +1058,7 @@ export function App() {
         <div className="runner-warn" role="alert">러너 연결이 끊겼습니다. 실행 중인 세션 상태를 확인할 수 없습니다.</div>
       )}
 
-      <ApprovalQueue items={queue} tasks={hub.tasks} drafts={drafts} focus={queueFocus} showAll={queueAll}
+      <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
       <div className="workspace">
@@ -1090,7 +1108,7 @@ export function App() {
                   {isThread && threadMore && (
                     <div className="older-posts">
                       <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
-                        {threadLoadingEarlier ? '불러오는 중…' : '↑ 이전 기록 더 보기'}
+                        {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
                       </button>
                     </div>
                   )}
@@ -1118,7 +1136,7 @@ export function App() {
                     return older.more && (
                       <div className="older-posts">
                         <button disabled={older.loading} onClick={older.load}>
-                          {older.loading ? '불러오는 중…' : '↓ 이전 글 더 보기'}
+                          {older.loading ? '불러오는 중…' : <><ArrowDown /> 이전 글 더 보기</>}
                         </button>
                       </div>
                     );
@@ -1136,7 +1154,7 @@ export function App() {
           })}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
-              <span>＋ 컬럼 추가</span><kbd>c</kbd>
+              <Plus aria-label="컬럼 추가" /><kbd>c</kbd>
             </button>
           )}
         </main>
@@ -1196,7 +1214,7 @@ export function App() {
 
 /** Marks a task holding unsent text in its reply or answer box. */
 export function DraftBadge() {
-  return <span className="draft-badge" title="보내지 않은 답글이 있습니다 (이 기기에 저장됨)">✎ 작성 중</span>;
+  return <span className="draft-badge" title="보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>;
 }
 
 function Chip({ kind, n, label, hint, title, onClick }: {
@@ -1280,7 +1298,7 @@ function ColumnHead({ def, count, projects, tasks, renaming, onRenaming, onRenam
       )}
       <span className="count">{count}</span>
       <span className="filter" title={label}>{label}</span>
-      <button className="icon-btn" title="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}>⋯</button>
+      <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
     </header>
   );
 }
@@ -1293,14 +1311,14 @@ function ThreadHead({ task, project, model, events, now, draft, onClose, onPin, 
   return (
     <header className="thread-head">
       <div className="row1">
-        <button className="back" title="스레드 닫기 (q)" onClick={onClose}>←</button>
+        <button className="back" title="스레드 닫기 (q)" aria-label="스레드 닫기" onClick={onClose}><ArrowLeft /></button>
         {task && <span className="thread-chip" style={{ '--pc': projectColor(task.project_id) } as CSSProperties} title={project?.root_path}>{task.project_name}#{task.seq}</span>}
         <h2 title={task?.title}>{task?.title ?? '스레드'}</h2>
         {task?.source === 'external' && <TerminalBadge />}
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
-        {task && <button className="icon-btn" title="컬럼으로 고정 (p)" onClick={onPin}>📌</button>}
-        <button className="icon-btn" title="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}>⋯</button>
+        {task && <button className="icon-btn" title="컬럼으로 고정 (p)" aria-label="컬럼으로 고정" onClick={onPin}><Pin /></button>}
+        <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
       </div>
       {task && (
         <div className="meta">
@@ -1369,7 +1387,7 @@ function ColumnMenu({ x, y, width, thread, fixed, canLeft, canRight, onClose, on
         <>
           <button className="item" onClick={onPin}>새 컬럼으로 고정 <kbd>p</kbd></button>
           {addTo.length > 0 && <div className="lbl"><span>이 작업을 컬럼에 추가</span></div>}
-          {addTo.map((c) => <button key={c.id} className="item" onClick={() => onAddTo(c.id)}>＋ {c.title}</button>)}
+          {addTo.map((c) => <button key={c.id} className="item" onClick={() => onAddTo(c.id)}><Plus /> {c.title}</button>)}
           <hr />
           <button className="item" onClick={onDelete}>스레드 닫기 <kbd>q</kbd></button>
         </>

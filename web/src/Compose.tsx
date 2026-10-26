@@ -1,3 +1,4 @@
+import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
   DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, modelEngine, modelProblem, parseCompose, wantedEngine,
@@ -16,7 +17,7 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } }}>
       <div className={`dialog${wide ? ' wide' : ''}`} role="dialog" aria-label={title}>
-        <header><h2>{title}</h2><button className="icon-btn" onClick={onClose} title="닫기 (Esc)">✕</button></header>
+        <header><h2>{title}</h2><button className="icon-btn" onClick={onClose} title="닫기 (Esc)" aria-label="닫기"><X /></button></header>
         {children}
       </div>
     </div>
@@ -162,7 +163,7 @@ function ComposeField({ value, onChange, onSubmit, inputRef, projects, tasks, me
       {!app && (
         <>
           <button type="button" className="attach" title="파일 첨부: 허브가 있는 Mac에 올리고 경로를 넣습니다"
-            onClick={() => picker.current?.click()}>📎</button>
+            aria-label="파일 첨부" onClick={() => picker.current?.click()}><Paperclip /></button>
           <input ref={picker} type="file" multiple hidden
             onChange={(e) => { void files.upload([...(e.target.files ?? [])]); e.target.value = ''; }} />
         </>
@@ -320,7 +321,7 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
     <aside className="compose" aria-label="새 작업">
       <header className="cmp-head">
         <h2>새 작업 · 지시</h2>
-        <button className="icon-btn" title="닫기" onClick={onClose}>✕</button>
+        <button className="icon-btn" title="닫기" aria-label="닫기" onClick={onClose}><X /></button>
       </header>
       <div className="cmp-body">
         <ComposeField value={text} onChange={setText} onSubmit={submit} inputRef={inputRef} rows={6}
@@ -448,9 +449,9 @@ export function ReplyBox({ task, inputRef, onError, onSend }: {
               <span className="t" title={q.text}>{q.text}</span>
               <span className="q-acts">
                 <button className="icon-btn" disabled={i === 0} title="먼저 보내기"
-                  onClick={() => api.moveQueued(task.id, q.id, i - 1).catch((e) => onError(e.message))}>↑</button>
+                  aria-label="먼저 보내기" onClick={() => api.moveQueued(task.id, q.id, i - 1).catch((e) => onError(e.message))}><ArrowUp /></button>
                 <button className="icon-btn" disabled={i === all.length - 1} title="나중에 보내기"
-                  onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}>↓</button>
+                  aria-label="나중에 보내기" onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}><ArrowDown /></button>
                 <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
                   onClick={() => api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message))}>지금 보내기</button>
                 <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>
@@ -474,7 +475,7 @@ export function ReplyBox({ task, inputRef, onError, onSend }: {
             title={c.delivery ? '본문의 태그를 따릅니다' : `이 답글을 #${d}: ${DELIVERY_LABEL[d]}`}
             onClick={() => setPick(pick === d ? null : d)}>#{d}</button>
         ))}
-        {running && <button className="btn" title="중단 (s) · 대기 중인 메시지도 취소" onClick={() => api.interrupt(task.id).catch((e) => onError(e.message))}>중단 <kbd>s</kbd></button>}
+        {running && <button className="btn stop-btn" title="중단 (s) · 대기 중인 메시지도 취소" aria-label="중단" onClick={() => api.interrupt(task.id).catch((e) => onError(e.message))}><Square /> <kbd>s</kbd></button>}
         <span className="spacer" />
         <span><kbd>⌘</kbd><kbd>↵</kbd></span>
         <button className="btn primary" disabled={!ok || busy} onClick={submit}>{branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>

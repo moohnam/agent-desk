@@ -21,6 +21,7 @@ const INSTRUCTIONS = `Agent Desk: 사용자가 여러 에이전트 작업을 한
 2. 의미 있는 진행이 있을 때 desk_post로 짧게 알리고, 큰 단계가 끝나면 desk_checkpoint로 정리합니다.
 3. 사용자 판단이 필요하면 desk_ask로 묻고 답을 기다립니다. "아직 답 없음"이 오면 desk_wait_answer를 다시 호출합니다.
 4. 작업을 마치면 desk_finish를 호출합니다.
+사용자가 이 세션을 데스크로 "넘겨", "옮겨", "가져가"라고 하면 desk_handoff를 씁니다. 세션 ID는 Claude Code면 \`echo $CLAUDE_CODE_SESSION_ID\`, Codex면 \`echo $CODEX_THREAD_ID\`로 얻습니다(비어 있으면 생략). 넘긴 뒤에는 이 터미널 세션을 더 진행하지 말고 종료하라고 사용자에게 알립니다.
 데스크에 쓰는 글은 한국어로 씁니다.`;
 
 const str = (description: string) => ({ type: 'string', description });
@@ -81,6 +82,21 @@ const TOOLS = [
     inputSchema: { type: 'object', required: ['task_id'], properties: { task_id: str('desk_attach가 준 task_id'), summary: str('최종 결과 요약') } },
   },
   {
+    name: 'desk_handoff',
+    description: '이 터미널 세션을 데스크로 넘깁니다. 데스크가 같은 대화를 이어 가는 작업을 만들고, 지금까지의 대화(도구 호출은 이름만)를 스레드에 옮깁니다. 사용자가 넘기라고 요청했을 때만 호출하세요. 넘긴 뒤 이 세션은 종료해야 합니다.',
+    inputSchema: {
+      type: 'object', required: ['engine', 'cwd'],
+      properties: {
+        engine: { type: 'string', enum: ['claude', 'codex'], description: '이 세션의 에이전트 종류' },
+        session_id: str('이 세션의 ID. Claude Code: $CLAUDE_CODE_SESSION_ID, Codex: $CODEX_THREAD_ID. 없으면 cwd에서 가장 최근 세션을 씁니다'),
+        cwd: str('작업 디렉터리 절대 경로'),
+        title: str('작업 제목 (짧게)'),
+        summary: str('지금까지 한 일과 남은 일 요약 (마크다운). 데스크에서 이어 받을 사람이 읽습니다'),
+        task_id: str('desk_attach로 이미 붙은 작업이면 그 task_id. 그 작업이 데스크 작업으로 바뀝니다'),
+      },
+    },
+  },
+  {
     name: 'desk_list_tasks',
     description: '데스크의 작업 목록을 봅니다. cwd를 주면 그 디렉터리를 포함하는 프로젝트의 작업만 보여 줍니다. 이전 작업에 다시 붙을 task_id를 찾을 때 씁니다.',
     inputSchema: { type: 'object', properties: { cwd: str('작업 디렉터리 절대 경로') } },
@@ -128,6 +144,11 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
     case 'desk_finish':
       hub.finishExternal(a.task_id, a.summary);
       return text('작업을 종료했습니다.');
+    case 'desk_handoff': {
+      const r = hub.handoff({ engine: a.engine, sessionId: a.session_id, cwd: a.cwd, title: a.title, summary: a.summary, taskId: a.task_id });
+      if (r.already) return text(`이미 데스크가 이어 가는 세션입니다. task_id: ${r.task.id} (@${r.task.project_name} › ${r.task.title})`);
+      return text(`데스크로 넘겼습니다. task_id: ${r.task.id} (@${r.task.project_name} › ${r.task.title}), 세션 ${r.sessionId}, 기록 ${r.imported}건. 이제 데스크에서 이 대화를 이어 갑니다. 사용자에게 이 터미널 세션을 종료하라고 알리고, 더 진행하지 마세요.`);
+    }
     case 'desk_list_tasks': {
       const projects = a.cwd ? new Set(hub.store.projectsContaining(a.cwd).map((p) => p.id)) : null;
       const tasks = hub.state().tasks.filter((t) => !projects || projects.has(t.project_id)).slice(0, 50);

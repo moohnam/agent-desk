@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { statSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
   type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from './compose.ts';
 import { Store, feedEvent, now, type Approval, type Event, type Question, type Session, type Task, type TaskStatus } from './db.ts';
+import { findSession } from './importer.ts';
 import { RunnerClient } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
 import type { Answers, LiveSession, RunnerToHub } from './runner/protocol.ts';
@@ -179,11 +180,16 @@ export class Hub {
     this.publishTask(taskId);
   }
 
-  createProject(name: string, rootPath: string) {
+  /** With `create`, a missing directory is made (with its parents) instead of refused. */
+  createProject(name: string, rootPath: string, create = false) {
     if (!name?.trim() || !rootPath?.trim()) throw new HttpError(400, 'name and root_path are required');
-    let isDir = false;
-    try { isDir = statSync(rootPath).isDirectory(); } catch { /* reported below */ }
-    if (!isDir) throw new HttpError(400, `root_path is not a directory: ${rootPath}`);
+    let st;
+    try { st = statSync(rootPath); } catch { /* missing */ }
+    if (!st && create) {
+      try { mkdirSync(rootPath, { recursive: true }); } catch (e) { throw new HttpError(400, `디렉터리를 만들지 못했습니다: ${rootPath} (${(e as Error).message})`); }
+    } else if (!st?.isDirectory()) {
+      throw new HttpError(400, st ? `디렉터리가 아니라 파일입니다: ${rootPath}` : `디렉터리가 없습니다: ${rootPath}`);
+    }
     const project = { id: randomUUID(), name: name.trim(), root_path: rootPath, created_at: now() };
     this.store.createProject(project);
     return project;
@@ -206,8 +212,14 @@ export class Hub {
       if (project && project.root_path !== path) {
         throw new HttpError(409, `@${project.name}은 이미 ${project.root_path}로 등록되어 있습니다`);
       }
-      project ??= this.createProject(c.mention.name, path);
-      return this.createTask(project.id, '', text, c.mode);
+      // Naming a new directory there is how a new project starts: it is made, and the thread says so.
+      let made = false;
+      if (!project) { try { statSync(path); } catch { made = true; } }
+      project ??= this.createProject(c.mention.name, path, true);
+      const view = this.createTask(project.id, '', text, c.mode);
+      const session = made ? this.store.latestSession(view.id) : undefined;
+      if (session) this.addEvent(session.id, view.id, 'status', { kind: 'status', state: 'mkdir', detail: { path } });
+      return view;
     }
     if (!project) throw new HttpError(404, `등록되지 않은 프로젝트입니다: @${c.mention.name}. @${c.mention.name}:/경로로 정의하세요`);
     if (c.delivery === 'new') return this.createTask(project.id, '', text, c.mode);
@@ -585,6 +597,64 @@ export class Hub {
     if (summary?.trim()) this.addEvent(session.id, taskId, 'assistant', { text: summary.trim(), via: 'mcp' });
     this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'finished', detail: { summary: summary?.trim() } });
     this.setStatus(taskId, session.id, 'done');
+  }
+
+  /**
+   * Takes over a terminal Claude Code or Codex session: a desk task that resumes the same engine
+   * conversation, with its history (tool calls as names only) in the thread. `id`: the engine's
+   * session id; without it, the newest session that ran in `cwd`. With `taskId` (an attached task)
+   * that task continues as the desk's instead of a new one, keeping its posts and skipping the history.
+   */
+  handoff(a: { engine?: string; sessionId?: string; cwd: string; title?: string; summary?: string; taskId?: string }) {
+    if (!a.cwd?.trim()) throw new HttpError(400, 'cwd가 필요합니다');
+    const engine = a.engine === 'codex' ? 'codex' : 'claude';
+    const cwd0 = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
+    let found;
+    try { found = findSession(engine, a.sessionId?.trim() || undefined, cwd0); }
+    catch (err) { throw new HttpError(404, err instanceof Error ? err.message : String(err)); }
+    const existing = this.store.sessionByEngineId(found.id);
+    if (existing?.source === 'app') {
+      return { task: this.taskView(this.store.getTask(existing.task_id)!), sessionId: found.id, imported: 0, already: true };
+    }
+    // The engine resumes a conversation from the directory it ran in.
+    const cwd = found.cwd ?? cwd0;
+    const ts = now();
+    let task: Task;
+    if (a.taskId) {
+      const old = this.externalSession(a.taskId);
+      for (const q of this.store.pendingQuestions().filter((x) => x.task_id === a.taskId)) {
+        this.settleQuestion(q, 'cancelled', null);
+        this.addEvent(old.id, a.taskId, 'question', { questionId: q.id, text: q.text, decision: 'cancelled' });
+      }
+      this.store.updateSession(old.id, { status: 'done' });
+      if (a.title?.trim()) this.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
+      task = this.store.getTask(a.taskId)!;
+    } else {
+      const project = this.store.projectsContaining(cwd)[0] ?? this.createProject(this.freeProjectName(basename(cwd) || 'root'), cwd);
+      const firstUser = found.events.find((e) => e.kind === 'user')?.text ?? '';
+      task = this.store.createTask({
+        id: randomUUID(), project_id: project.id,
+        title: (a.title?.trim() || firstUser.split('\n')[0] || `${ENGINE_LABEL[engine]} 세션`).slice(0, 120),
+        status: 'idle', checkpoint_md: null, created_by: OWNER, created_at: ts, updated_at: ts,
+      });
+    }
+    const sessionId = randomUUID();
+    this.store.createSession({
+      id: sessionId, task_id: task.id, engine, engine_session_id: found.id, cwd,
+      source: 'app', status: 'idle', runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts,
+      permission_mode: DEFAULT_MODE, model: null, effort: null,
+    });
+    const history = a.taskId ? [] : found.events;
+    this.store.importEvents(sessionId, task.id, history.map((e) => ({
+      ts: e.ts, kind: e.kind, payload: e.kind === 'tool' ? { kind: 'tool', name: e.name } : { text: e.text },
+    })));
+    this.addEvent(sessionId, task.id, 'status', { kind: 'status', state: 'handoff', detail: {
+      engine, engine_session_id: found.id, cwd, imported: history.length,
+    } });
+    const note = `터미널 ${ENGINE_LABEL[engine]} 세션을 넘겨받았습니다${history.length ? ` (기록 ${history.length}건)` : ''}. 답글을 쓰면 같은 대화로 이어집니다.`;
+    this.addEvent(sessionId, task.id, 'assistant', { text: a.summary?.trim() ? `${note}\n\n${a.summary.trim()}` : note, via: 'handoff' });
+    this.setStatus(task.id, sessionId, 'idle');
+    return { task: this.taskView(this.store.getTask(task.id)!), sessionId: found.id, imported: history.length, already: false };
   }
 
   private onRunnerMessage(m: RunnerToHub) {

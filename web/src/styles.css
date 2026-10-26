@@ -54,6 +54,16 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
 @keyframes pulse { 50% { opacity: .3; } }
 
 .app { display: flex; flex-direction: column; height: 100%; }
+/* Icons (lucide): sized by the text around them, one stroke weight everywhere. */
+svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: -0.2em; flex: none; }
+.btn:has(> svg.lucide:only-child), .btn.stop-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; }
+.btn > svg.lucide:only-child { width: 16px; height: 16px; }
+/* The top bar's buttons carry only an icon: a size up and a firmer line, so each reads at a glance. */
+.topbar .btn > svg.lucide:only-child { width: 18px; height: 18px; stroke-width: 2; }
+.icon-btn, .thread-head .back { display: inline-flex; align-items: center; justify-content: center; }
+.add-col svg.lucide { width: 20px; height: 20px; }
+/* A filled square reads as stop; an outline one looks like a checkbox. */
+.stop-btn svg.lucide { width: 11px; height: 11px; fill: currentColor; }
 .btn { border: 1px solid var(--border); background: var(--col); border-radius: 7px; padding: 4px 10px; font-size: 13px; white-space: nowrap; }
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
@@ -170,7 +180,10 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
 
 /* ── 글 묶음과 글 ── */
-.group { border-bottom: 1px solid var(--border); box-shadow: inset 3px 0 0 var(--pc, transparent); }
+.group { position: relative; border-bottom: 1px solid var(--border); }
+/* The color bar sits above the posts: a hovered or selected post's background would paint over a shadow. */
+.group::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 6px; pointer-events: none; z-index: 3;
+  background: linear-gradient(90deg, var(--pc, transparent) 3px, var(--tc, transparent) 3px); }
 .ctx { display: flex; align-items: center; gap: 6px; padding: 9px 12px 0; font-size: 12px; color: var(--muted); min-width: 0; cursor: pointer; }
 .ctx:hover .ttl { color: var(--text); }
 .pdot { width: 8px; height: 8px; border-radius: 2px; flex: none; display: inline-block; }
@@ -188,9 +201,9 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 
 .post { position: relative; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 10px; padding: 8px 12px 10px; cursor: default; }
 .post:hover { background: var(--hover); }
-/* 선택: 진한 배경과 테두리. 왼쪽 3px는 묶음의 프로젝트 색 막대이니 비워 둡니다. */
+/* 선택: 진한 배경과 테두리. 왼쪽 6px는 묶음의 색 막대(프로젝트·작업)이니 비워 둡니다. */
 .post.selected { background: color-mix(in srgb, var(--accent) 11%, var(--col)); }
-.post.selected::before { content: ""; position: absolute; inset: 1px 1px 1px 4px; border: 2px solid var(--accent); border-radius: 6px;
+.post.selected::before { content: ""; position: absolute; inset: 1px 1px 1px 7px; border: 2px solid var(--accent); border-radius: 6px;
   pointer-events: none; z-index: 2; }
 .av-wrap { position: relative; display: flex; justify-content: center; }
 .av { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700;
@@ -284,7 +297,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .activity .summary { border: 0; background: transparent; color: inherit; display: inline-flex; gap: 5px; align-items: center;
   border-radius: 5px; padding: 1px 4px; margin-left: -4px; text-align: left; font-size: 12.5px; }
 .activity .summary:hover { background: var(--hover); color: var(--text); }
-.activity .tri { display: inline-block; transition: transform .12s; font-size: 10px; }
+.activity .tri { display: inline-block; transition: transform .12s; width: 12px; height: 12px; vertical-align: -0.15em; }
 .activity.open .tri { transform: rotate(90deg); }
 .activity .err-mark { color: var(--bad); font-weight: 600; }
 .activity ul { list-style: none; margin: 4px 0 0; padding: 6px 8px; border-left: 2px solid var(--line); background: var(--code); border-radius: 0 6px 6px 0; }
@@ -525,7 +538,7 @@ textarea.input { resize: none; }
 .chip.draft { color: var(--accent); }
 
 /* Tasks of one project: the project color, then a stripe turned by the task's hue (#1 keeps it). */
-.group { --tc: oklch(from var(--pc, transparent) l c calc(h + var(--th, 0))); box-shadow: inset 3px 0 0 var(--pc, transparent), inset 6px 0 0 var(--tc); }
+.group { --tc: oklch(from var(--pc, transparent) l c calc(h + var(--th, 0))); }
 .group .ctx .seq { margin-left: 4px; padding: 0 5px; border-radius: 4px; color: var(--text);
   background: color-mix(in srgb, var(--tc) 28%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 60%, transparent); }
 

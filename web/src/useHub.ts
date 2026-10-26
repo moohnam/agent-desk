@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { mergeEvents } from './posts.ts';
 import { assignProjectColors } from './projects.ts';
@@ -128,76 +128,100 @@ function accepts(q: FeedQuery, e: HubEvent, task: TaskView | undefined): boolean
 
 export interface ColumnFeed { events: HubEvent[]; more: boolean; loading: boolean }
 
+/** Queries kept beyond the ones shown, so switching views (F1–F4) back and forth shows them at once. */
+const FEED_CACHE = 40;
+
+/**
+ * A query's events. `live`: a shown column uses it, so live events reach it; one that was hidden
+ * missed some and fetches its newest page again when shown. `at`: the state reload (`synced`) its
+ * newest page is from. `used`: when a column last showed it, for dropping the oldest unused.
+ */
+interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; used: number }
+
 /**
  * Each feed column's events, filtered by the hub to what the column shows, newest page first and
- * older pages on request (`loadEarlier`), kept live. A column whose filter changes starts over.
+ * older pages on request (`loadEarlier`), kept live. Events are kept per query, not per column:
+ * a view switch shows the queries it had at once and only fetches their newest page quietly.
  */
 export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
   onEvent: (fn: (e: HubEvent) => void) => () => void, synced: number) {
-  const [feeds, setFeeds] = useState<Map<string, ColumnFeed & { key: string }>>(new Map());
+  const cache = useRef(new Map<string, FeedEntry>());
+  const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.map((d) => [d.id, feedQuery(d.filter, tasks)]));
   const sig = JSON.stringify([...queries]);
-  const current = useRef({ queries, tasks });
-  current.current = { queries, tasks };
+  const current = useRef({ tasks });
+  current.current = { tasks };
+  // The query each column showed last: a column whose query changes starts from those events.
+  const shown = useRef(new Map<string, string>());
 
-  // The newest page of each column whose query changed, and of all after a reconnect.
-  const fetched = useRef(new Map<string, string>());
+  const set = (key: string, f: (e: FeedEntry) => FeedEntry) => {
+    const e = cache.current.get(key);
+    if (e) { cache.current.set(key, f(e)); bump(); }
+  };
+
   useEffect(() => {
-    const want = new Map(JSON.parse(sig) as [string, FeedQuery][]);
-    setFeeds((prev) => new Map([...prev].filter(([id]) => want.has(id))));
+    const want = JSON.parse(sig) as [string, FeedQuery][];
+    const keys = new Set(want.map(([, q]) => JSON.stringify(q)));
+    const t = Date.now();
+    const c = cache.current;
+    for (const [k, e] of c) if (e.live && !keys.has(k)) c.set(k, { ...e, live: false });
     for (const [id, q] of want) {
       const key = JSON.stringify(q);
-      const at = `${key}@${synced}`;
-      if (fetched.current.get(id) === at) continue;
-      const fresh = !fetched.current.get(id)?.startsWith(`${key}@`);
-      fetched.current.set(id, at);
-      setFeeds((prev) => new Map(prev).set(id, fresh || !prev.has(id)
-        ? { key, events: [], more: false, loading: true } : { ...prev.get(id)!, loading: true }));
-      api.feed(FEED_PAGE, undefined, q).then((page) => setFeeds((prev) => {
-        const cur = prev.get(id);
-        if (!cur || cur.key !== key) return prev;
-        // A reload after a reconnect keeps the older pages already shown.
-        const keepsOlder = cur.events.length > 0 && page.length > 0 && cur.events[0].id < page[0].id;
-        return new Map(prev).set(id, { key, events: mergeEvents(cur.events, page), more: keepsOlder ? cur.more : page.length >= FEED_PAGE, loading: false });
-      })).catch(() => setFeeds((prev) => {
-        const cur = prev.get(id);
-        return cur?.key === key ? new Map(prev).set(id, { ...cur, loading: false }) : prev;
-      }));
+      const cur = c.get(key);
+      const prev = shown.current.get(id);
+      shown.current.set(id, key);
+      if (cur?.live && cur.at === synced) { c.set(key, { ...cur, used: t }); continue; }
+      if (cur) c.set(key, { ...cur, live: true, used: t });
+      else {
+        // Narrowed to the new query, the column's events stay up while the page comes.
+        const seed = prev ? c.get(prev)?.events.filter((e) => accepts(q, e, current.current.tasks.get(e.task_id))) ?? [] : [];
+        c.set(key, { q, events: seed, more: false, loading: true, at: synced, live: true, used: t });
+      }
+      c.set(key, { ...c.get(key)!, at: synced });
+      api.feed(FEED_PAGE, undefined, q).then((page) => set(key, (e) => {
+        // A reload after a reconnect or a view switch keeps the older pages already shown.
+        const keepsOlder = e.events.length > 0 && page.length > 0 && e.events[0].id < page[0].id;
+        return { ...e, events: mergeEvents(e.events, page), more: keepsOlder ? e.more : page.length >= FEED_PAGE, loading: false };
+      }), () => set(key, (e) => ({ ...e, loading: false })));
     }
-    for (const id of fetched.current.keys()) if (!want.has(id)) fetched.current.delete(id);
+    for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) shown.current.delete(id);
+    const unused = [...c].filter(([, e]) => !e.live).sort((a, b) => b[1].used - a[1].used);
+    for (const [k] of unused.slice(FEED_CACHE)) c.delete(k);
+    bump();
   }, [sig, synced]);
 
   useEffect(() => onEvent((e) => {
-    const { queries, tasks } = current.current;
-    setFeeds((prev) => {
-      let next: typeof prev | null = null;
-      for (const [id, q] of queries) {
-        const cur = prev.get(id);
-        if (!cur || cur.key !== JSON.stringify(q) || !accepts(q, e, tasks.get(e.task_id))) continue;
-        next ??= new Map(prev);
-        next.set(id, { ...cur, events: mergeEvents(cur.events, [e]) });
-      }
-      return next ?? prev;
-    });
+    const task = current.current.tasks.get(e.task_id);
+    let any = false;
+    for (const [k, f] of cache.current) {
+      if (!f.live || !accepts(f.q, e, task)) continue;
+      cache.current.set(k, { ...f, events: mergeEvents(f.events, [e]) });
+      any = true;
+    }
+    if (any) bump();
   }), [onEvent]);
 
-  const loadEarlier = useCallback((id: string) => {
-    const cur = feeds.get(id);
-    const q = current.current.queries.get(id);
-    const oldest = cur?.events[0]?.id;
-    if (!cur || !q || !oldest || !cur.more || cur.loading) return;
-    setFeeds((prev) => (prev.get(id)?.key === cur.key ? new Map(prev).set(id, { ...prev.get(id)!, loading: true }) : prev));
-    const done = (page: HubEvent[] | null) => setFeeds((prev) => {
-      const now = prev.get(id);
-      if (now?.key !== cur.key) return prev;
-      return new Map(prev).set(id, page
-        ? { ...now, events: mergeEvents(page, now.events), more: page.length >= FEED_PAGE, loading: false }
-        : { ...now, loading: false });
-    });
-    api.feed(FEED_PAGE, oldest, q).then(done, () => done(null));
-  }, [feeds]);
+  const feeds = useMemo(() => {
+    const out = new Map<string, ColumnFeed>();
+    for (const [id, q] of JSON.parse(sig) as [string, FeedQuery][]) {
+      const e = cache.current.get(JSON.stringify(q));
+      if (e) out.set(id, e);
+    }
+    return out;
+  }, [sig, version]);
 
-  return { feeds: feeds as Map<string, ColumnFeed>, loadEarlier };
+  const loadEarlier = useCallback((id: string) => {
+    const key = shown.current.get(id);
+    const cur = key ? cache.current.get(key) : undefined;
+    const oldest = cur?.events[0]?.id;
+    if (!key || !cur || !oldest || !cur.more || cur.loading) return;
+    set(key, (e) => ({ ...e, loading: true }));
+    api.feed(FEED_PAGE, oldest, cur.q).then(
+      (page) => set(key, (e) => ({ ...e, events: mergeEvents(page, e.events), more: page.length >= FEED_PAGE, loading: false })),
+      () => set(key, (e) => ({ ...e, loading: false })));
+  }, []);
+
+  return { feeds, loadEarlier };
 }
 
 /** Full event history of one task (the feed only keeps recent events), kept live. */

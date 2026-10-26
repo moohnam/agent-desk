@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Modal } from './Compose.tsx';
 import { STATUS_LABEL } from './format.ts';
@@ -160,7 +161,7 @@ function Picker({ value, onChange, find, chip, total, noun, empty }: {
             <span key={id} className="pchip" title={c.title}>
               <span className="pdot" style={{ background: c.color }} />
               <span>{c.label}</span>
-              <button type="button" aria-label={`${c.label} 빼기`} onClick={(e) => { e.stopPropagation(); onChange(value.filter((x) => x !== id)); }}>✕</button>
+              <button type="button" aria-label={`${c.label} 빼기`} onClick={(e) => { e.stopPropagation(); onChange(value.filter((x) => x !== id)); }}><X /></button>
             </span>
           );
         })}

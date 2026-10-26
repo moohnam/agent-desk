@@ -1,3 +1,4 @@
+import { ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useState } from 'react';
 import { MODE_LABEL, MODEL_LABEL, type ModelName, type PermissionMode } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
@@ -121,7 +122,7 @@ function PostViewInner(props: Props) {
           <span className="name">{author(post, task)}</span>
           {post.kind !== 'user' && model && <span className="handle">{modelShort(model)}</span>}
           {tag}
-          {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)">✎ 작성 중</span>}
+          {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>}
           <span className="spacer" />
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
             {relTime(post.event.ts)}
@@ -272,7 +273,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   );
 }
 
-const STATE_LABEL: Record<string, string> = { started: '세션 시작', model_changed: '모델 적용', turn_done: '턴 완료', finished: '작업 종료' };
+const STATE_LABEL: Record<string, string> = { started: '세션 시작', model_changed: '모델 적용', turn_done: '턴 완료', finished: '작업 종료', handoff: '터미널 세션 넘겨받음' };
 
 /** A model/effort switch (status 'model'): "모델 → Opus · effort high". */
 const modelSwitch = (d: { model?: ModelName | null; effort?: string | null }) =>
@@ -301,7 +302,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
   return (
     <div className={`activity${expanded ? ' open' : ''}`} onClick={(e) => e.stopPropagation()}>
       <button className="summary" onClick={onToggle} title="펼치기 (o)">
-        <span className="tri">▶</span>{line}{errors > 0 && <span className="err-mark"> · 실패 {errors}</span>}
+        <ChevronRight className="tri" />{line}{errors > 0 && <span className="err-mark"> · 실패 {errors}</span>}
       </button>
       {expanded && (
         <ul>
@@ -326,6 +327,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
                 <li key={e.id} className="note">
                   {e.payload.state === 'mode' ? `모드 → ${MODE_LABEL[d.mode as PermissionMode]}`
                     : e.payload.state === 'model' ? modelSwitch(d)
+                    : e.payload.state === 'mkdir' ? `디렉터리를 새로 만들었습니다 · ${d.path}`
                     : e.payload.state === 'forked' ? `포크 → ${d.seq ? `#${d.seq} ` : ''}“${d.title}” (새 작업)` : STATE_LABEL[e.payload.state] ?? e.payload.state}
                   {d.model && e.payload.state !== 'model' ? ` · ${modelShort(d.model)}` : ''}
                   {d.duration_ms != null ? ` · ${(d.duration_ms / 1000).toFixed(1)}초` : ''}

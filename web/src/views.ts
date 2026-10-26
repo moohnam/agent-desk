@@ -10,7 +10,7 @@ export const VIEWS: { id: View; key: string; label: string; title: string }[] = 
   { id: 'custom', key: 'F1', label: '내 컬럼', title: '직접 구성한 컬럼' },
   { id: 'project', key: 'F2', label: '프로젝트', title: '프로젝트마다 컬럼 하나 (최근 작업 순)' },
   { id: 'task', key: 'F3', label: '작업', title: '작업마다 컬럼 하나 (진행 중인 작업 먼저)' },
-  { id: 'status', key: 'F4', label: '상태', title: '응답 대기 · 실행 중 · 멈춤·오류 · 작성 중 · 완료' },
+  { id: 'status', key: 'F4', label: '상태', title: '응답 대기 · 멈춤·오류 · 작성 중 · 실행 중 · 완료 ' },
 ];
 /** F2 and F3 make at most this many columns. */
 export const VIEW_MAX = 12;
@@ -52,15 +52,19 @@ export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, Ta
     const pick = [...all.filter(active).sort(newest), ...all.filter((t) => !active(t)).sort(newest)].slice(0, VIEW_MAX);
     cols = pick.map((t) => ({ id: `v:t:${t.id}`, title: `${t.project_name}#${t.seq} ${t.title}`, filter: { taskIds: [t.id] } }));
   } else {
-    const trouble = all.filter((t) => t.status === 'error' || stalled.has(t.id)).map((t) => t.id);
-    const drafting = all.filter((t) => drafts.has(t.id)).map((t) => t.id);
+    // Each task in one column: the first of 응답 대기, 멈춤·오류, 작성 중, 실행 중, 완료 that fits.
+    const place = (t: TaskView) => t.status === 'waiting' ? 'wait'
+      : t.status === 'error' || stalled.has(t.id) ? 'trouble'
+      : drafts.has(t.id) ? 'draft'
+      : t.status === 'running' ? 'run' : 'done';
+    const ids = (where: string) => { const r = all.filter((t) => place(t) === where).map((t) => t.id); return r.length ? r : NONE; };
     // One card per task by default: the board is about which tasks are where.
     cols = [
-      { id: 'v:s:wait', title: '응답 대기', note: '승인·질문을 기다리는 작업', filter: { statuses: ['waiting'] } },
-      { id: 'v:s:run', title: '실행 중', note: '실행 중인 작업', filter: { statuses: ['running'] } },
-      { id: 'v:s:trouble', title: '멈춤·오류', note: '오류 · 3분 넘게 응답 없음', filter: { taskIds: trouble.length ? trouble : NONE } },
-      { id: 'v:s:draft', title: '작성 중', note: '보내지 않은 답글이 있는 작업', filter: { taskIds: drafting.length ? drafting : NONE } },
-      { id: 'v:s:done', title: '완료', note: '끝났거나 다음 지시를 기다리는 작업', filter: { statuses: ['done', 'idle'] } },
+      { id: 'v:s:wait', title: '응답 대기', note: '승인·질문을 기다리는 작업', filter: { taskIds: ids('wait') } },
+      { id: 'v:s:run', title: '실행 중', note: '실행 중인 작업', filter: { taskIds: ids('run') } },
+      { id: 'v:s:trouble', title: '멈춤·오류', note: '오류 · 3분 넘게 응답 없음', filter: { taskIds: ids('trouble') } },
+      { id: 'v:s:draft', title: '작성 중', note: '보내지 않은 답글이 있는 작업', filter: { taskIds: ids('draft') } },
+      { id: 'v:s:done', title: '완료', note: '끝났거나 다음 지시를 기다리는 작업', filter: { taskIds: ids('done') } },
     ];
     return cols.map((c) => ({ ...c, byTask: byTask[c.id] ?? true }));
   }

@@ -4,7 +4,8 @@ import { useSyncExternalStore } from 'react';
  * Unsent text, kept per box on this device (localStorage) so it survives switching threads,
  * closing the drawer and reloading. Keys: `drawer`, `reply:<taskId>`, `question:<questionId>`
  * (a terminal task's question), `ask:<approvalId>` (an engine's multiple-choice question).
- * A draft names its task so the desk can show which threads hold unsent text.
+ * A draft names its task; only reply drafts mark the task "작성 중". An unsent answer belongs to
+ * a task that is already waiting (응답 대기), and marking it would move it on the status board.
  */
 export interface Draft<T = unknown> { taskId?: string; value: T; at: number }
 
@@ -32,7 +33,7 @@ addEventListener('pagehide', save);
 
 let snapshot = taskSet();
 function taskSet(): Set<string> {
-  return new Set([...drafts.values()].map((d) => d.taskId).filter((t): t is string => !!t));
+  return new Set([...drafts].filter(([k, d]) => k.startsWith('reply:') && d.taskId).map(([, d]) => d.taskId!));
 }
 /** Recomputes the task set, and tells listeners only when it changed (not on every keystroke). */
 function changed() {
@@ -65,12 +66,7 @@ export function pruneDrafts(keep: (key: string, d: Draft) => boolean) {
   if (any) changed();
 }
 
-/** Tasks that hold unsent text in some box. */
+/** Tasks with an unsent reply. */
 export function useDraftTasks(): Set<string> {
   return useSyncExternalStore((l) => { listeners.add(l); return () => listeners.delete(l); }, () => snapshot);
-}
-
-/** Keys of the task's drafts, newest first. */
-export function draftsOf(taskId: string): string[] {
-  return [...drafts].filter(([, d]) => d.taskId === taskId).sort((a, b) => b[1].at - a[1].at).map(([k]) => k);
 }

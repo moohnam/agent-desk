@@ -1,3 +1,4 @@
+import { Save, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { suggestSearch, type SearchOption } from './search.ts';
 import type { Project, TaskView } from './types.ts';
@@ -72,8 +73,8 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
             </div>
           )}
         </div>
-        <button className="icon-btn" title="이 검색을 컬럼으로 저장" disabled={!value.trim()} onClick={onSave}>💾</button>
-        <button className="icon-btn" title="검색 닫기 (결과에서 q · 빈 검색창에서 Esc)" onClick={onClose}>✕</button>
+        <button className="icon-btn" title="이 검색을 컬럼으로 저장" disabled={!value.trim()} aria-label="검색을 컬럼으로 저장" onClick={onSave}><Save /></button>
+        <button className="icon-btn" title="검색 닫기 (결과에서 q · 빈 검색창에서 Esc)" aria-label="검색 닫기" onClick={onClose}><X /></button>
       </div>
       <div className="search-meta">
         {value.trim() ? <span>글 {count}개</span> : <span>/ 로 언제든 검색 · Enter: 결과로 이동</span>}

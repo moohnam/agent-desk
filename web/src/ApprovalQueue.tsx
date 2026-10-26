@@ -1,3 +1,4 @@
+import { ArrowUpRight, ChevronDown } from 'lucide-react';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
 import { projectColor } from './projects.ts';
@@ -20,8 +21,8 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
 }
 
 /** Everything waiting on me, pinned above the deck; hidden when there is nothing. */
-export function ApprovalQueue({ items, tasks, drafts, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
-  items: QueueItem[]; tasks: Map<string, TaskView>; drafts: Set<string>; focus: number | null; showAll: boolean;
+export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
+  items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null; showAll: boolean;
   onShowAll: (v: boolean) => void; onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
   onOpen: (item: QueueItem) => void; onFocus: (i: number) => void;
 }) {
@@ -47,7 +48,6 @@ export function ApprovalQueue({ items, tasks, drafts, focus, showAll, onShowAll,
             <span className="where" title={task?.title}>
               <span className="pdot" style={{ background: projectColor(task?.project_id ?? '') }} />
               <b>{task?.project_name ?? '?'}</b><span className="ttl">› {task?.title ?? ''}</span>
-              {drafts.has(item.task_id) && <span className="draft-badge" title="보내지 않은 답이 있습니다">✎</span>}
             </span>
             {item.kind === 'approval' && isAsk(item.approval.tool_name) ? (
               <span className="tool" title={askSummary(item.approval.input)}><span className="qtag">질문</span> {askSummary(item.approval.input)}</span>
@@ -66,14 +66,14 @@ export function ApprovalQueue({ items, tasks, drafts, focus, showAll, onShowAll,
               ) : (
                 <button className="yes" title="스레드에서 답하기 (Enter)" onClick={(e) => { e.stopPropagation(); onOpen(item); }}>답하기</button>
               )}
-              <button className="icon-btn" title="스레드 (Enter)" onClick={(e) => { e.stopPropagation(); onOpen(item); }}>↗</button>
+              <button className="icon-btn" title="스레드 (Enter)" onClick={(e) => { e.stopPropagation(); onOpen(item); }} aria-label="스레드 열기"><ArrowUpRight /></button>
             </span>
           </div>
         );
       })}
       {(rest > 0 || (showAll && items.length > QUEUE_ROWS)) && (
         <button className="link queue-more" onClick={() => onShowAll(!showAll)}>
-          {showAll ? '접기' : `외 ${rest}건 ▾`}
+          {showAll ? '접기' : <>외 {rest}건 <ChevronDown /></>}
         </button>
       )}
     </section>

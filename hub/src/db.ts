@@ -45,6 +45,8 @@ export function feedEvent(e: Event): Event {
 /** What a feed column shows; see listFeed. */
 export interface FeedFilter { taskIds?: string[]; projectIds?: string[]; statuses?: string[]; kinds?: string[]; q?: string }
 /** Event kinds whose payload holds text a search should look at (not tool input or output). */
+/** How an imported event's payload starts (importEvents). */
+const IMPORTED = '{"imported":true';
 const TEXT_KINDS = ['user', 'assistant', 'update', 'question', 'approval', 'status'];
 /** The text a post shows (web postText), so a search does not match JSON keys or other fields. */
 const POST_TEXT = "coalesce(json_extract(e.payload_json, '$.text'), json_extract(e.payload_json, '$.toolName'), json_extract(e.payload_json, '$.detail.message'), '')";
@@ -243,6 +245,23 @@ export class Store {
     return { id: Number(r.lastInsertRowid), session_id: sessionId, task_id: taskId, ts, kind, payload };
   }
   /**
+   * Adds a taken-over session's history at once, with its original times. The payloads start with
+   * `"imported":true`, which keeps them out of the all-tasks feed (IMPORTED); the thread shows them.
+   */
+  importEvents(sessionId: string, taskId: string, events: { ts: string; kind: EventKind; payload: Record<string, unknown> }[]) {
+    const ins = this.db.prepare('INSERT INTO event (session_id, task_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)');
+    this.db.exec('BEGIN');
+    try {
+      for (const e of events) ins.run(sessionId, taskId, e.ts || now(), e.kind, JSON.stringify({ imported: true, ...e.payload }));
+      this.db.exec('COMMIT');
+    } catch (err) { this.db.exec('ROLLBACK'); throw err; }
+  }
+  /** The desk session already continuing this engine conversation, if any. */
+  sessionByEngineId(engineSessionId: string): Session | undefined {
+    return this.db.prepare('SELECT * FROM session WHERE engine_session_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(engineSessionId) as unknown as Session | undefined;
+  }
+  /**
    * The task's newest `limit` events, oldest first; `since`: also every event from that id on.
    * `before`: only events below that id, so a client pages further back from its oldest event.
    */
@@ -276,6 +295,8 @@ export class Store {
       where.push(`${col} IN (${vals.map(() => '?').join(',')})`);
       args.push(...vals);
     };
+    // Taken-over history belongs in its thread and a column for that task, not in the timeline.
+    if (!f.taskIds?.length) where.push(`e.payload_json NOT LIKE '${IMPORTED}%'`);
     within('e.task_id', f.taskIds);
     within('t.project_id', f.projectIds);
     within('t.status', f.statuses);
