@@ -18,6 +18,7 @@ import type { Approval, ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Pro
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch } from './search.ts';
+import { VIEWS, viewColumns, useView, type View } from './views.ts';
 
 const THREAD = 'thread';
 /** The temporary search column, right of the column that shows everything; not saved. */
@@ -38,6 +39,8 @@ const PHONE = '(max-width: 760px)';
 /** Idle time after which a feed scrolled away from new posts returns to the top. */
 const IDLE_RETURN_MS = 20_000;
 const DRAWER_KEY = 'agent-desk.composeOpen';
+/** Shown when a built view (F2–F4) is asked to change its columns. */
+const FIXED_NOTE = '자동으로 만든 뷰는 편집할 수 없습니다. F1(내 컬럼)에서 편집하세요.';
 const EXTERNAL_NOTE = '터미널 세션입니다. 에이전트가 질문하면 여기서 답할 수 있습니다.';
 
 interface DeckColumn { id: string; def?: ColumnDef; placed: PlacedPost[]; posts: Post[] }
@@ -104,7 +107,8 @@ function latinKey(e: KeyboardEvent): string {
 
 export function App() {
   const hub = useHub();
-  const [columns, setColumns] = useColumns();
+  const [custom, setCustom] = useColumns();
+  const { view, setView, byTask: viewByTask, setByTask: setViewByTask } = useView();
   const [widths, setWidth] = useColumnWidths();
   // Index into the approval queue while it has keyboard focus (`a`).
   const [queueFocus, setQueueFocus] = useState<number | null>(null);
@@ -154,6 +158,25 @@ export function App() {
     const t = setInterval(() => setTick((n) => n + 1), 30_000);
     return () => clearInterval(t);
   }, []);
+  const drafts = useDraftTasks();
+  // Recomputed on every tick, since a task stalls without any new message.
+  const stalled = useMemo(() => {
+    const now = Date.now();
+    return new Set([...hub.tasks.values()].filter((t) => stalledMinutes(t, now) != null).map((t) => t.id));
+  }, [hub.tasks, tick]);
+  // F1 is the user's columns; F2–F4 are built from the tasks and only change "작업별로 묶어 보기".
+  const editable = view === 'custom';
+  const columns = useMemo(() => (view === 'custom' ? custom
+    : viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask)),
+  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
+  const setColumns: typeof setCustom = editable ? setCustom : () => setToast(FIXED_NOTE);
+  const switchView = (v: View) => {
+    if (v === view) return;
+    setView(v);
+    setActive(0);
+    const x = VIEWS.find((y) => y.id === v)!;
+    setToast(`${x.key} ${x.label} 뷰`);
+  };
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 2500);
@@ -234,6 +257,18 @@ export function App() {
   const atTop = useRef(new Map<string, boolean>());
   const seenTop = useRef(new Map<string, number>());
   const [unseen, setUnseen] = useState<Record<string, number>>({});
+  /**
+   * Per feed column scrolled away from the top: the first post in view and its offset from the
+   * feed's top. Posts arriving above it are pushed out of view instead of pushing it down; done
+   * here rather than by the browser's scroll anchoring, which WebKit (the desktop app) lacks.
+   */
+  const feedAnchor = useRef(new Map<string, { id: number; top: number }>());
+  const markAnchor = (colId: string, feed: HTMLElement) => {
+    const feedTop = feed.getBoundingClientRect().top;
+    const el = [...feed.querySelectorAll<HTMLElement>('[data-post]')].find((x) => x.getBoundingClientRect().bottom > feedTop);
+    if (el) feedAnchor.current.set(colId, { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop });
+    else feedAnchor.current.delete(colId);
+  };
   // Layout effect: runs before the browser's scroll anchoring reports the insert as a scroll.
   useLayoutEffect(() => {
     const next: Record<string, number> = {};
@@ -241,6 +276,15 @@ export function App() {
       const top = col.posts[0]?.id;
       if (col.id === THREAD || top == null) continue;
       const seen = seenTop.current.get(col.id);
+      const anchor = atTop.current.get(col.id) === false ? feedAnchor.current.get(col.id) : undefined;
+      if (anchor) {
+        const feed = document.querySelector<HTMLElement>(`section[data-col="${col.id}"] .feed`);
+        const el = feed?.querySelector<HTMLElement>(`[data-post="${anchor.id}"]`);
+        if (feed && el) {
+          const moved = el.getBoundingClientRect().top - feed.getBoundingClientRect().top - anchor.top;
+          if (Math.abs(moved) >= 1) feed.scrollTop += moved;
+        }
+      }
       if (seen == null || atTop.current.get(col.id) !== false) {
         seenTop.current.set(col.id, top);
         const feed = document.querySelector(`section[data-col="${col.id}"] .feed`);
@@ -272,7 +316,8 @@ export function App() {
     if (older.more && !older.loading && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 300) older.load();
     const top = feed.scrollTop < 40;
     atTop.current.set(colId, top);
-    if (!top) return;
+    if (!top) { markAnchor(colId, feed); return; }
+    feedAnchor.current.delete(colId);
     const first = deck.find((c) => c.id === colId)?.posts[0];
     if (first) seenTop.current.set(colId, first.id);
     setUnseen(({ [colId]: _, ...rest }) => rest);
@@ -321,8 +366,6 @@ export function App() {
     for (const t of hub.tasks.values()) if (t.status === 'running' || t.status === 'error') c[t.status]++;
     return c;
   }, [hub.tasks]);
-  // Recomputed on every tick, since a task stalls without any new message.
-  const drafts = useDraftTasks();
   // Drafts outlive nothing they belong to: a deleted task, or a question answered elsewhere.
   useEffect(() => {
     if (!hub.synced) return;
@@ -330,10 +373,6 @@ export function App() {
       && (!k.startsWith('question:') || hub.questions.has(k.slice('question:'.length)))
       && (!k.startsWith('ask:') || hub.approvals.has(k.slice('ask:'.length))));
   }, [hub.synced, hub.tasks, hub.questions, hub.approvals]);
-  const stalled = useMemo(() => {
-    const now = Date.now();
-    return new Set([...hub.tasks.values()].filter((t) => stalledMinutes(t, now) != null).map((t) => t.id));
-  }, [hub.tasks, tick]);
 
   const widthOf = (id: string) => widths[id] ?? (id === THREAD ? THREAD_WIDTH : DEFAULT_WIDTH);
 
@@ -677,7 +716,8 @@ export function App() {
   const toggleByTask = (colId: string) => {
     const col = columns.find((c) => c.id === colId);
     if (!col) return;
-    setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, byTask: !c.byTask } : c)));
+    if (editable) setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, byTask: !c.byTask } : c)));
+    else setViewByTask((b) => ({ ...b, [colId]: !col.byTask }));
     setToast(col.byTask ? `“${col.title}”: 글을 모두 봅니다.` : `“${col.title}”: 작업마다 최근 글 하나만 봅니다.`);
   };
   /**
@@ -688,43 +728,48 @@ export function App() {
     if (phone) { setToast('컬럼은 PC 화면에서 쓸 수 있습니다.'); return; }
     const col = deck.find((c) => c.id === colId);
     if (!col) return;
-    const own = new Set(columns.filter((c) => c.filter.taskIds?.length === 1).map((c) => c.filter.taskIds![0]));
+    const own = new Set(custom.filter((c) => c.filter.taskIds?.length === 1).map((c) => c.filter.taskIds![0]));
     const ids = [...new Set(col.posts.map((p) => p.taskId))].filter((id) => hub.tasks.has(id) && !own.has(id));
     const active = (id: string) => ['running', 'waiting'].includes(hub.tasks.get(id)!.status);
     const pick = [...ids.filter(active), ...ids.filter((id) => !active(id))].slice(0, SPLIT_MAX);
     if (!pick.length) { setToast(ids.length || !col.posts.length ? '나눌 작업이 없습니다.' : '이 컬럼의 작업은 모두 이미 컬럼이 있습니다.'); return; }
     const made: ColumnDef[] = pick.map((id) => ({ id: crypto.randomUUID(), title: hub.tasks.get(id)!.title, filter: { taskIds: [id] } }));
-    const k = columns.findIndex((c) => c.id === colId);
-    const next = [...columns];
+    // From a built view the columns go to the end of F1, which then shows.
+    const k = custom.findIndex((c) => c.id === colId);
+    const next = [...custom];
     next.splice(k < 0 ? next.length : k + 1, 0, ...made);
-    setColumns(next);
+    setCustom(next);
+    setView('custom');
     setFocusCol(made[0].id);
     setToast(`작업 ${made.length}개를 컬럼으로 나눴습니다${ids.length > made.length ? ` (진행 중·최근 순으로 ${SPLIT_MAX}개까지)` : ''}.`);
   };
   const pinTask = (taskId: string) => {
     if (phone) { setToast('컬럼은 PC 화면에서 쓸 수 있습니다.'); return; }
-    const have = columns.find((c) => c.filter.taskIds?.length === 1 && c.filter.taskIds[0] === taskId);
+    const have = custom.find((c) => c.filter.taskIds?.length === 1 && c.filter.taskIds[0] === taskId);
+    setView('custom');
     if (have) { setFocusCol(have.id); setToast('이미 컬럼으로 고정한 작업입니다.'); return; }
     const def: ColumnDef = { id: crypto.randomUUID(), title: hub.tasks.get(taskId)?.title ?? '작업', filter: { taskIds: [taskId] } };
     const from = activeCol?.id === THREAD ? threadAfter : activeCol?.def?.id;
-    const k = columns.findIndex((c) => c.id === from);
-    const next = [...columns];
+    const k = custom.findIndex((c) => c.id === from);
+    const next = [...custom];
     next.splice(k < 0 ? next.length : k + 1, 0, def);
-    setColumns(next);
+    setCustom(next);
     setFocusCol(def.id);
   };
   /** Adds a task to a column that already lists tasks (a column without one shows every task). */
   const addToColumn = (colId: string, taskId: string) => {
-    const col = columns.find((c) => c.id === colId);
+    const col = custom.find((c) => c.id === colId);
     if (!col?.filter.taskIds?.length) return;
+    setView('custom');
     if (!col.filter.taskIds.includes(taskId)) {
-      setColumns(columns.map((c) => (c.id === colId ? { ...c, filter: { ...c.filter, taskIds: [...col.filter.taskIds!, taskId] } } : c)));
+      setCustom(custom.map((c) => (c.id === colId ? { ...c, filter: { ...c.filter, taskIds: [...col.filter.taskIds!, taskId] } } : c)));
     }
     setFocusCol(colId);
     setToast(`“${col.title}” 컬럼에 추가했습니다.`);
   };
   const deleteColumn = (id: string) => {
     if (id === SEARCH) { closeSearch(); return; }
+    if (!editable) { setToast(FIXED_NOTE); return; }
     setColumns(columns.filter((c) => c.id !== id));
     setToast('컬럼을 삭제했습니다.');
   };
@@ -767,10 +812,11 @@ export function App() {
     const text = (search ?? '').trim();
     if (!text) return;
     const def: ColumnDef = { id: crypto.randomUUID(), title: text, filter: parseSearch(text, hub.projects, hub.tasks.values()).filter };
-    const k = columns.findIndex((c) => isAllFilter(c.filter));
-    const next = [...columns];
+    const k = custom.findIndex((c) => isAllFilter(c.filter));
+    const next = [...custom];
     next.splice(k + 1, 0, def);
-    setColumns(next);
+    setCustom(next);
+    setView('custom');
     if (threadAfter === SEARCH) setThreadAfter(def.id);
     closeSearch();
     setFocusCol(def.id);
@@ -783,6 +829,9 @@ export function App() {
       // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
       const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
       if (denying || columnDialog || menu || skillsOpen || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
+      // F1–F4: the deck's views, also while typing.
+      const fv = !ev.ctrlKey && !ev.shiftKey && VIEWS.find((x) => x.key === ev.key);
+      if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }
       const t = ev.target as HTMLElement;
       if (t.closest('input, textarea, select')) return;
       const e = { key: latinKey(ev), preventDefault: () => ev.preventDefault() };
@@ -896,12 +945,12 @@ export function App() {
           if (taskId) api.interrupt(taskId).then(() => setToast('중단을 요청했습니다.'), fail);
           break;
         }
-        case 'c': setColumnDialog({}); break;
+        case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
         case 'p': { const id = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null); if (id) pinTask(id); break; }
         case 'v': if (activeCol?.def && activeCol.id !== SEARCH) toggleByTask(activeCol.id); break;
         case 'e':
           if (activeCol?.id === SEARCH) openSearch();
-          else if (activeCol?.def) setColumnDialog({ column: activeCol.def });
+          else if (activeCol?.def) { if (editable) setColumnDialog({ column: activeCol.def }); else setToast(FIXED_NOTE); }
           break;
         case '/': openSearch(); break;
         case 'D':
@@ -959,6 +1008,15 @@ export function App() {
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
             title={!hub.connected ? '러너: 허브 연결이 끊겨 알 수 없음' : runnerOk ? '러너 연결됨' : '러너 연결 끊김'} />
         </span>
+        {!phone && (
+          <nav className="views" aria-label="뷰">
+            {VIEWS.map((v) => (
+              <button key={v.id} aria-pressed={view === v.id} title={v.title} onClick={() => switchView(v.id)}>
+                <kbd>{v.key}</kbd>{v.label}
+              </button>
+            ))}
+          </nav>
+        )}
         <nav className="attn" aria-label="주의가 필요한 작업">
           <Chip kind="wait" n={queue.length} label="응답 대기" hint="a"
             title="응답 대기열로 이동: 승인 요청과 에이전트 질문 (a)" onClick={() => setQueueFocus(0)} />
@@ -1017,7 +1075,7 @@ export function App() {
                     unknown={parsedSearch.unknown} onDone={searchResults} onClose={closeSearch} onSave={saveSearch} />
                 ) : (
                   <ColumnHead def={col.def!} count={col.posts.length} projects={projectsById} tasks={hub.tasks}
-                    renaming={renaming === col.id} onRenaming={(on) => setRenaming(on ? col.id : null)}
+                    renaming={renaming === col.id} onRenaming={(on) => setRenaming(on && editable ? col.id : null)}
                     onRename={(title) => setColumns((cs) => cs.map((c) => (c.id === col.id ? { ...c, title } : c)))}
                     onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
                 )}
@@ -1076,7 +1134,7 @@ export function App() {
               </section>
             );
           })}
-          {!phone && (
+          {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
               <span>＋ 컬럼 추가</span><kbd>c</kbd>
             </button>
@@ -1103,8 +1161,9 @@ export function App() {
 
       {menu && menuCol >= 0 && (
         <ColumnMenu x={menu.x} y={menu.y} width={widthOf(menu.colId)} thread={menu.colId === THREAD}
-          onRename={menuDef >= 0 ? () => { setRenaming(menu.colId); setMenu(null); } : undefined}
-          addTo={menu.colId === THREAD && threadTask ? columns.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
+          fixed={!editable}
+          onRename={menuDef >= 0 && editable ? () => { setRenaming(menu.colId); setMenu(null); } : undefined}
+          addTo={menu.colId === THREAD && threadTask ? custom.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
           onAddTo={(colId) => { if (threadTask) addToColumn(colId, threadTask); setMenu(null); }}
           onPin={() => { if (threadTask) pinTask(threadTask); setMenu(null); }}
           byTask={menuDef >= 0 ? !!columns[menuDef].byTask : undefined}
@@ -1187,7 +1246,7 @@ function ExternalNote({ pending, onAnswer }: { pending: boolean; onAnswer: () =>
 
 function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<string, TaskView>): string {
   const f = def.filter;
-  const text = [
+  const text = def.note ?? ([
     f.taskIds?.length ? f.taskIds.map((id) => {
       const t = tasks.get(id);
       return t ? `${t.project_name}#${t.seq} · ${STATUS_LABEL[t.status]}` : '삭제된 작업';
@@ -1196,7 +1255,7 @@ function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<
     f.kinds?.length ? f.kinds.map((k) => KIND_LABEL[k]).join('·') : null,
     f.statuses?.length ? f.statuses.map((s) => STATUS_LABEL[s]).join('·') : null,
     f.query ? `“${f.query}”` : null,
-  ].filter(Boolean).join(' · ') || '모든 글';
+  ].filter(Boolean).join(' · ') || '모든 글');
   return def.byTask ? `${text} · 작업별` : text;
 }
 
@@ -1276,8 +1335,10 @@ function ContextHint({ post, task, pending, ask, question }: {
 }
 
 /** The ⋯ menu: width presets plus column actions, anchored under its button. */
-function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
-  x: number; y: number; width: number; thread: boolean; canLeft: boolean; canRight: boolean;
+function ColumnMenu({ x, y, width, thread, fixed, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
+  x: number; y: number; width: number; thread: boolean; canLeft: boolean;
+  /** A column of a built view (F2–F4): only width and grouping change. */
+  fixed: boolean; canRight: boolean;
   onClose: () => void; onRename?: () => void;
   /** A user column: whether it shows one card per task; undefined for others (search). */
   byTask?: boolean; onByTask: () => void; onSplit: () => void;
@@ -1315,18 +1376,20 @@ function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, 
       ) : (
         <>
           {onRename && <button className="item" onClick={onRename}>이름 바꾸기</button>}
-          <button className="item" onClick={onEdit}>작업·필터 편집 <kbd>e</kbd></button>
+          {!fixed && <button className="item" onClick={onEdit}>작업·필터 편집 <kbd>e</kbd></button>}
           {byTask != null && <>
             <button className="item" role="menuitemcheckbox" aria-checked={byTask} onClick={onByTask}>
               {byTask ? '✓ ' : ''}작업별로 묶어 보기 <kbd>v</kbd></button>
             <button className="item" onClick={onSplit}>작업별 컬럼으로 나누기</button>
           </>}
+          {fixed ? <div className="lbl"><span>자동 뷰: 편집은 <kbd>F1</kbd> 내 컬럼에서</span></div> : <>
           <button className="item" disabled={!canLeft} onClick={() => onMove(-1)}>왼쪽으로 <kbd>H</kbd></button>
           <button className="item" disabled={!canRight} onClick={() => onMove(1)}>오른쪽으로 <kbd>L</kbd></button>
           <hr />
           <button className="item danger" onClick={() => (confirm ? onDelete() : setConfirm(true))}>
             {confirm ? '한 번 더 누르면 삭제' : '컬럼 삭제'} <kbd>D D</kbd>
           </button>
+          </>}
         </>
       )}
     </div>
@@ -1338,7 +1401,7 @@ const KEYS: [string, string][] = [
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍)'], ['Ctrl `', '작성 서랍 열기 / 닫기 (입력 중에도, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
-  ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기'],
+  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기'],
   ['⌘ Enter', '작성창·답 입력란에서 보내기'], ['Tab', '@프로젝트 · #태그 완성'], ['#auto / #ask', '이제부터 자동 승인 / 매번 확인'],
   ['#스킬이름', '그 메시지에만 데스크 스킬 적용 (상단 스킬 버튼에서 관리)'],
   ['#later / #now', '실행 중에 보낸 메시지: 턴이 끝난 뒤 (기본) / 지금 턴에 끼워넣기'],
