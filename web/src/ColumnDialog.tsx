@@ -36,6 +36,7 @@ export function ColumnDialog({ column, projects, tasks, onClose, onSave, onDelet
       ? projectListLabel(projectIds.map((id) => projects.find((p) => p.id === id)?.name ?? '?'))
       : kinds.length ? kinds.map((k) => KIND_LABEL[k]).join('·') : '전체';
     onSave({
+      ...(column?.byTask ? { byTask: true } : {}),
       id: column?.id ?? crypto.randomUUID(),
       title: title.trim() || fallback,
       filter: {

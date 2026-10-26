@@ -20,8 +20,8 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
 }
 
 /** Everything waiting on me, pinned above the deck; hidden when there is nothing. */
-export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
-  items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null; showAll: boolean;
+export function ApprovalQueue({ items, tasks, drafts, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
+  items: QueueItem[]; tasks: Map<string, TaskView>; drafts: Set<string>; focus: number | null; showAll: boolean;
   onShowAll: (v: boolean) => void; onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
   onOpen: (item: QueueItem) => void; onFocus: (i: number) => void;
 }) {
@@ -47,6 +47,7 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
             <span className="where" title={task?.title}>
               <span className="pdot" style={{ background: projectColor(task?.project_id ?? '') }} />
               <b>{task?.project_name ?? '?'}</b><span className="ttl">› {task?.title ?? ''}</span>
+              {drafts.has(item.task_id) && <span className="draft-badge" title="보내지 않은 답이 있습니다">✎</span>}
             </span>
             {item.kind === 'approval' && isAsk(item.approval.tool_name) ? (
               <span className="tool" title={askSummary(item.approval.input)}><span className="qtag">질문</span> {askSummary(item.approval.input)}</span>

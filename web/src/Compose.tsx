@@ -4,6 +4,7 @@ import {
   type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
+import { getDraft, setDraft } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
 import { useSettings } from './settings.ts';
@@ -284,16 +285,14 @@ function Preview({ ok, rows }: { ok: boolean; rows: Row[] }) {
 
 // ── 작성 서랍 ──
 
-/** The drawer's unsent text, kept while it is closed (until the page reloads). */
-let drawerDraft = '';
-
 /** Left drawer for new work: `@project` continues its last task, `@name:/path` starts a project. */
 export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
   projects: Project[]; tasks: TaskView[]; inputRef: RefObject<HTMLTextAreaElement | null>;
   onClose: () => void; onSent: (task: TaskView) => void;
 }) {
-  const [text, setText] = useState(drawerDraft);
-  useEffect(() => { drawerDraft = text; }, [text]);
+  // Unsent text stays while the drawer is closed and across reloads (drafts.ts).
+  const [text, setText] = useState(() => getDraft<string>('drawer') ?? '');
+  useEffect(() => { setDraft('drawer', text, { empty: !text.trim() }); }, [text]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const skills = useSkills();
@@ -376,11 +375,14 @@ export function ReplyBox({ task, inputRef, onError, onSend }: {
   /** Right before a message goes out (its event can arrive before the reply); the thread then follows it. */
   onSend?: () => void;
 }) {
-  const [text, setText] = useState('');
+  // Mounted per task (keyed by its id): the box restores the task's unsent reply and keeps it as a
+  // draft until it is sent, across other threads and reloads.
+  const draftKey = `reply:${task.id}`;
+  const [text, setText] = useState(() => getDraft<{ text: string }>(draftKey)?.text ?? '');
   const [busy, setBusy] = useState(false);
-  const [pick, setPick] = useState<Delivery | null>(null);
+  const [pick, setPick] = useState<Delivery | null>(() => getDraft<{ pick: Delivery | null }>(draftKey)?.pick ?? null);
   const [sent, setSent] = useState<string | null>(null);
-  useEffect(() => { setText(''); setPick(null); setSent(null); }, [task.id]);
+  useEffect(() => { setDraft(draftKey, { text, pick }, { taskId: task.id, empty: !text.trim() }); }, [draftKey, text, pick, task.id]);
   const skills = useSkills();
   const c = parseCompose(text, skillNames(skills));
   const name = engineName(task.engine);

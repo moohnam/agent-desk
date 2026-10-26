@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ASK_USER, type Answers } from '../../hub/src/runner/protocol.ts';
 import { api } from './api.ts';
+import { getDraft, setDraft } from './drafts.ts';
 import type { Approval, Post } from './types.ts';
 
 /** A multiple-choice question an engine session asks (Claude's AskUserQuestion, Codex's request_user_input). */
@@ -34,13 +35,24 @@ export function AskCard({ post, approval, onError }: {
   const p = post.event.payload;
   const qs: AskQuestion[] = Array.isArray(p.input?.questions) ? p.input.questions : [];
   const r = post.resolution?.payload;
-  const [picks, setPicks] = useState<Pick[]>(() => qs.map(() => EMPTY));
+  // Unsent choices are kept as a draft (drafts.ts) while the question waits; a secret answer never is.
+  const draftKey = `ask:${p.approvalId}`;
+  const [picks, setPicks] = useState<Pick[]>(() => {
+    const saved = getDraft<Pick[]>(draftKey);
+    return saved?.length === qs.length ? saved : qs.map(() => EMPTY);
+  });
   const [busy, setBusy] = useState(false);
   // Shown between a successful answer and its approval event arriving.
   const [sent, setSent] = useState<Answers | null>(null);
   const answers: Answers | undefined = r?.answers ?? sent ?? undefined;
   const outcome = answers ? 'answered' : r ? (r.decision === 'allowed' ? 'empty' : r.decision === 'cancelled' ? 'cancelled' : 'skipped')
     : approval ? null : 'closed';
+
+  useEffect(() => {
+    const kept = picks.map((x, i) => (qs[i]?.secret ? { ...x, other: '' } : x));
+    const empty = !!outcome || kept.every((x) => !x.labels.length && !x.other.trim());
+    setDraft(draftKey, kept, { taskId: post.taskId, empty });
+  }, [draftKey, picks, outcome, post.taskId]);
 
   const set = (i: number, f: (p: Pick) => Pick) => setPicks((ps) => ps.map((x, k) => (k === i ? f(x) : x)));
   const choose = (i: number, label: string) => set(i, (x) => qs[i].multiSelect

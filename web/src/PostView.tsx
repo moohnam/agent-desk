@@ -1,7 +1,8 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { MODE_LABEL, MODEL_LABEL, type ModelName, type PermissionMode } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
+import { getDraft, setDraft } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
 import { LongText, Markdown } from './Markdown.tsx';
 import { modelShort } from './projects.ts';
@@ -16,6 +17,8 @@ interface Props {
   question?: Question;
   colId: string;
   selected: boolean;
+  /** Its task holds unsent text in a reply or answer box. */
+  draft?: boolean;
   expanded: boolean;
   working: boolean;
   flash: boolean;
@@ -67,7 +70,7 @@ function samePost(a: Props, b: Props): boolean {
     || x.parent?.kind !== y.parent?.kind || x.activity.length !== y.activity.length
     || x.activity.some((e, i) => e !== y.activity[i]))) return false;
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
-  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick'] as const) {
+  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick', 'draft'] as const) {
     if (a[k] !== b[k]) return false;
   }
   return !a.onOpenThread === !b.onOpenThread;
@@ -118,6 +121,7 @@ function PostViewInner(props: Props) {
           <span className="name">{author(post, task)}</span>
           {post.kind !== 'user' && model && <span className="handle">{modelShort(model)}</span>}
           {tag}
+          {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)">✎ 작성 중</span>}
           <span className="spacer" />
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
             {relTime(post.event.ts)}
@@ -220,12 +224,15 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   const onLocalLink = useMemo(() => openLink(post.taskId, onError), [post.taskId, onError]);
   const body = useMemo(() => <Markdown text={String(p.text ?? '')} onLocalLink={onLocalLink} />, [p.text, onLocalLink]);
   const r = post.resolution;
-  const [text, setText] = useState('');
+  // An unsent answer is kept as a draft (drafts.ts) while the question waits.
+  const draftKey = `question:${p.questionId}`;
+  const [text, setText] = useState(() => getDraft<string>(draftKey) ?? '');
   const [busy, setBusy] = useState(false);
   // Shown between a successful answer and its `user` event arriving.
   const [sent, setSent] = useState<string | null>(null);
   const answer = r?.kind === 'user' ? String(r.payload.text ?? '') : sent;
   const outcome = answer != null ? 'answered' : r ? 'cancelled' : question ? null : 'closed';
+  useEffect(() => { setDraft(draftKey, text, { taskId: post.taskId, empty: !!outcome || !text.trim() }); }, [draftKey, text, outcome, post.taskId]);
 
   const submit = async () => {
     const body = text.trim();

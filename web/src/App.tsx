@@ -10,6 +10,7 @@ import { SkillsDialog } from './Skills.tsx';
 import { MODE_LABEL, MODEL_LABEL } from '../../hub/src/compose.ts';
 import { STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
 import { PostView } from './PostView.tsx';
+import { draftsOf, pruneDrafts, useDraftTasks } from './drafts.ts';
 import { DEFAULT_WIDTH, WIDTH_PRESETS, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
 import { modelShort, projectColor, projectListLabel } from './projects.ts';
@@ -23,6 +24,8 @@ const THREAD = 'thread';
 const SEARCH = 'search';
 /** Typing pauses this long before the search column asks the hub again. */
 const SEARCH_DEBOUNCE_MS = 250;
+/** "작업별 컬럼으로 나누기" makes at most this many columns at once. */
+const SPLIT_MAX = 6;
 /** On a phone there are no columns: one feed of everything, with the thread laid over it. */
 const PHONE_FEED: ColumnDef = { id: 'phone', title: '전체', filter: {} };
 const THREAD_WIDTH = 460;
@@ -70,6 +73,16 @@ function modelsOf(...lists: HubEvent[][]): Map<string, string> {
 }
 
 /** Splits a placed feed into runs of connected posts, each shown under one task header. */
+/** "작업별로 묶기": each task's newest post, newest first, drawn as one card. */
+function newestPerTask(newestFirst: Post[]): PlacedPost[] {
+  const seen = new Set<string>();
+  return newestFirst.filter((p) => !seen.has(p.taskId) && seen.add(p.taskId)).map((post) => ({ post, up: false, down: false }));
+}
+
+/** Hue offset that tells a project's tasks apart: #1 keeps the project color, later ones turn around it. */
+const TASK_HUES = [0, 45, -45, 90, -90, 135, -135];
+const taskHue = (seq: number | undefined) => TASK_HUES[((seq ?? 1) - 1) % TASK_HUES.length];
+
 function groupsOf(placed: PlacedPost[]): PlacedPost[][] {
   const out: PlacedPost[][] = [];
   for (const p of placed) {
@@ -208,8 +221,10 @@ export function App() {
   const deck: DeckColumn[] = useMemo(() => {
     const column = (id: string, placed: PlacedPost[], def?: ColumnDef): DeckColumn =>
       ({ id, def, placed, posts: placed.map((x) => x.post) });
-    const cols = deckDefs.map((c) =>
-      column(c.id, placeFeed((columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)))), c));
+    const cols = deckDefs.map((c) => {
+      const posts = (columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)));
+      return column(c.id, c.byTask ? newestPerTask(posts) : placeFeed(posts), c);
+    });
     if (threadTask) cols.splice(threadSlot(threadAfter), 0, column(THREAD, placeThread(threadPosts)));
     return cols;
   }, [deckDefs, columnPosts, hub.tasks, threadTask, threadPosts, threadAfter]);
@@ -307,6 +322,14 @@ export function App() {
     return c;
   }, [hub.tasks]);
   // Recomputed on every tick, since a task stalls without any new message.
+  const drafts = useDraftTasks();
+  // Drafts outlive nothing they belong to: a deleted task, or a question answered elsewhere.
+  useEffect(() => {
+    if (!hub.synced) return;
+    pruneDrafts((k, d) => (!d.taskId || hub.tasks.has(d.taskId))
+      && (!k.startsWith('question:') || hub.questions.has(k.slice('question:'.length)))
+      && (!k.startsWith('ask:') || hub.approvals.has(k.slice('ask:'.length))));
+  }, [hub.synced, hub.tasks, hub.questions, hub.approvals]);
   const stalled = useMemo(() => {
     const now = Date.now();
     return new Set([...hub.tasks.values()].filter((t) => stalledMinutes(t, now) != null).map((t) => t.id));
@@ -588,6 +611,31 @@ export function App() {
   };
 
   /** Topbar chips: cycle through matching tasks and show each one's newest post. */
+  /** Per column, the newest post of each task holding a draft: where "작성 중" shows. */
+  const draftPosts = useMemo(() => {
+    const out = new Set<string>();
+    if (!drafts.size) return out;
+    for (const col of deck) {
+      if (col.id === THREAD) continue;
+      const seen = new Set<string>();
+      for (const p of col.posts) {
+        if (drafts.has(p.taskId) && !seen.has(p.taskId)) { seen.add(p.taskId); out.add(`${col.id}:${p.id}`); }
+      }
+    }
+    return out;
+  }, [deck, drafts]);
+  /** "작성 중": opens the threads holding unsent text in turn, with the cursor in that box. */
+  const jumpDraft = () => {
+    const list = [...drafts].filter((id) => hub.tasks.has(id))
+      .sort((a, b) => hub.tasks.get(b)!.updated_at.localeCompare(hub.tasks.get(a)!.updated_at));
+    if (!list.length) return;
+    const i = (jumpIndex.current.draft ?? -1) + 1;
+    jumpIndex.current.draft = i;
+    const taskId = list[i % list.length];
+    const key = draftsOf(taskId).find((k) => !k.startsWith('reply:'));
+    if (key) answerQuestion(taskId, key.slice(key.indexOf(':') + 1));
+    else replyTo(taskId, activeCol?.id);
+  };
   const jumpTo = (key: TaskStatus | 'stalled') => {
     const hit = (t: TaskView) => (key === 'stalled' ? stalled.has(t.id) : t.status === key);
     const list = [...hub.tasks.values()].filter(hit).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
@@ -625,6 +673,34 @@ export function App() {
     const k = deck.findIndex((c) => c.id === focusCol);
     if (k >= 0) { setActive(k); setFocusCol(null); }
   }, [deck, focusCol]);
+  /** Toggles "작업별로 묶기" on a user column. */
+  const toggleByTask = (colId: string) => {
+    const col = columns.find((c) => c.id === colId);
+    if (!col) return;
+    setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, byTask: !c.byTask } : c)));
+    setToast(col.byTask ? `“${col.title}”: 글을 모두 봅니다.` : `“${col.title}”: 작업마다 최근 글 하나만 봅니다.`);
+  };
+  /**
+   * "작업별 컬럼으로 나누기": a column per task shown in the column, right after it. Active tasks
+   * first, then the most recent, at most SPLIT_MAX; tasks that already have their own column are skipped.
+   */
+  const splitColumn = (colId: string) => {
+    if (phone) { setToast('컬럼은 PC 화면에서 쓸 수 있습니다.'); return; }
+    const col = deck.find((c) => c.id === colId);
+    if (!col) return;
+    const own = new Set(columns.filter((c) => c.filter.taskIds?.length === 1).map((c) => c.filter.taskIds![0]));
+    const ids = [...new Set(col.posts.map((p) => p.taskId))].filter((id) => hub.tasks.has(id) && !own.has(id));
+    const active = (id: string) => ['running', 'waiting'].includes(hub.tasks.get(id)!.status);
+    const pick = [...ids.filter(active), ...ids.filter((id) => !active(id))].slice(0, SPLIT_MAX);
+    if (!pick.length) { setToast(ids.length || !col.posts.length ? '나눌 작업이 없습니다.' : '이 컬럼의 작업은 모두 이미 컬럼이 있습니다.'); return; }
+    const made: ColumnDef[] = pick.map((id) => ({ id: crypto.randomUUID(), title: hub.tasks.get(id)!.title, filter: { taskIds: [id] } }));
+    const k = columns.findIndex((c) => c.id === colId);
+    const next = [...columns];
+    next.splice(k < 0 ? next.length : k + 1, 0, ...made);
+    setColumns(next);
+    setFocusCol(made[0].id);
+    setToast(`작업 ${made.length}개를 컬럼으로 나눴습니다${ids.length > made.length ? ` (진행 중·최근 순으로 ${SPLIT_MAX}개까지)` : ''}.`);
+  };
   const pinTask = (taskId: string) => {
     if (phone) { setToast('컬럼은 PC 화면에서 쓸 수 있습니다.'); return; }
     const have = columns.find((c) => c.filter.taskIds?.length === 1 && c.filter.taskIds[0] === taskId);
@@ -740,7 +816,15 @@ export function App() {
       // J / K: the first post of the next / previous run of another task's posts (`#1`, `#2` of a
       // project are different tasks).
       const taskOf = (i: number) => posts[i].taskId;
+      // In a thread every post is the same task, so J / K step between the user's own posts instead.
+      const nextUser = (dir: 1 | -1) => {
+        let i = cur < 0 ? (dir > 0 ? 0 : posts.length - 1) : cur + dir;
+        while (i >= 0 && i < posts.length && posts[i].kind !== 'user') i += dir;
+        if (i >= 0 && i < posts.length) go(i);
+        else setToast(dir > 0 ? '아래에 내 글이 더 없습니다.' : '위에 내 글이 더 없습니다.');
+      };
       const nextTask = (dir: 1 | -1) => {
+        if (activeCol?.id === THREAD) return nextUser(dir);
         if (cur < 0) return go(0);
         let i = cur;
         while (i + dir >= 0 && i + dir < posts.length && taskOf(i + dir) === taskOf(cur)) i += dir;
@@ -814,6 +898,7 @@ export function App() {
         }
         case 'c': setColumnDialog({}); break;
         case 'p': { const id = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null); if (id) pinTask(id); break; }
+        case 'v': if (activeCol?.def && activeCol.id !== SEARCH) toggleByTask(activeCol.id); break;
         case 'e':
           if (activeCol?.id === SEARCH) openSearch();
           else if (activeCol?.def) setColumnDialog({ column: activeCol.def });
@@ -852,6 +937,7 @@ export function App() {
       question={p.kind === 'question' ? hub.questions.get(p.event.payload.questionId) : undefined} onError={setToast}
       colId={colId} selected={i === activeIdx && selection[colId] === p.id} flash={flash === p.id}
       expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread} tick={tick}
+      draft={draftPosts.has(`${colId}:${p.id}`)}
       onSelect={() => {
         const a = postActions.current;
         const k = a.deck.findIndex((c) => c.id === colId);
@@ -878,6 +964,7 @@ export function App() {
             title="응답 대기열로 이동: 승인 요청과 에이전트 질문 (a)" onClick={() => setQueueFocus(0)} />
           <Chip kind="run" n={counts.running} label="실행 중" title="실행 중인 작업을 차례로 보기" onClick={() => jumpTo('running')} />
           <Chip kind="stall" n={stalled.size} label="멈춤" title="3분 넘게 응답이 없는 실행 중 작업을 차례로 보기" onClick={() => jumpTo('stalled')} />
+          <Chip kind="draft" n={drafts.size} label="작성 중" title="보내지 않은 답글이 있는 스레드를 차례로 열기" onClick={jumpDraft} />
           <Chip kind="err" n={counts.error} label="오류" title="오류 난 작업을 차례로 보기" onClick={() => jumpTo('error')} />
         </nav>
         <div className="top-actions">
@@ -895,7 +982,7 @@ export function App() {
         <div className="runner-warn" role="alert">러너 연결이 끊겼습니다. 실행 중인 세션 상태를 확인할 수 없습니다.</div>
       )}
 
-      <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
+      <ApprovalQueue items={queue} tasks={hub.tasks} drafts={drafts} focus={queueFocus} showAll={queueAll}
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
       <div className="workspace">
@@ -921,7 +1008,7 @@ export function App() {
                 onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
                 {isThread ? (
                   <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
-                    model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now}
+                    model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
                     onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
                     onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
                 ) : col.id === SEARCH ? (
@@ -958,7 +1045,7 @@ export function App() {
                             : post.kind === 'question' && hub.questions.has(post.event.payload.questionId)));
                         return (
                           <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
-                            style={task ? { '--pc': projectColor(task.project_id) } as CSSProperties : undefined}>
+                            style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
                             {task && <GroupContext task={task} now={now} onOpen={() => openThread(task.id, { from: col.id })} />}
                             {group.map((pp) => renderPost(pp, col.id, i, false))}
                           </div>
@@ -983,7 +1070,7 @@ export function App() {
                   <ExternalNote pending={!!questionOf(threadTaskView.id)}
                     onAnswer={() => { const q = questionOf(threadTaskView.id); if (q) answerQuestion(threadTaskView.id, q); }} />
                 ) : (
-                  <ReplyBox task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+                  <ReplyBox key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
                 ))}
                 <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
               </section>
@@ -1020,6 +1107,9 @@ export function App() {
           addTo={menu.colId === THREAD && threadTask ? columns.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
           onAddTo={(colId) => { if (threadTask) addToColumn(colId, threadTask); setMenu(null); }}
           onPin={() => { if (threadTask) pinTask(threadTask); setMenu(null); }}
+          byTask={menuDef >= 0 ? !!columns[menuDef].byTask : undefined}
+          onByTask={() => { toggleByTask(menu.colId); setMenu(null); }}
+          onSplit={() => { splitColumn(menu.colId); setMenu(null); }}
           canLeft={menuDef > 0} canRight={menuDef >= 0 && menuDef < columns.length - 1} onClose={() => setMenu(null)}
           onWidth={(px) => setWidth(menu.colId, px)}
           onEdit={() => { if (menu.colId === SEARCH) openSearch(); else setColumnDialog({ column: deck[menuCol].def }); setMenu(null); }}
@@ -1043,6 +1133,11 @@ export function App() {
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
     </div>
   );
+}
+
+/** Marks a task holding unsent text in its reply or answer box. */
+export function DraftBadge() {
+  return <span className="draft-badge" title="보내지 않은 답글이 있습니다 (이 기기에 저장됨)">✎ 작성 중</span>;
 }
 
 function Chip({ kind, n, label, hint, title, onClick }: {
@@ -1092,7 +1187,7 @@ function ExternalNote({ pending, onAnswer }: { pending: boolean; onAnswer: () =>
 
 function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<string, TaskView>): string {
   const f = def.filter;
-  return [
+  const text = [
     f.taskIds?.length ? f.taskIds.map((id) => {
       const t = tasks.get(id);
       return t ? `${t.project_name}#${t.seq} · ${STATUS_LABEL[t.status]}` : '삭제된 작업';
@@ -1102,6 +1197,7 @@ function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<
     f.statuses?.length ? f.statuses.map((s) => STATUS_LABEL[s]).join('·') : null,
     f.query ? `“${f.query}”` : null,
   ].filter(Boolean).join(' · ') || '모든 글';
+  return def.byTask ? `${text} · 작업별` : text;
 }
 
 function ColumnHead({ def, count, projects, tasks, renaming, onRenaming, onRename, onMenu }: {
@@ -1130,9 +1226,9 @@ function ColumnHead({ def, count, projects, tasks, renaming, onRenaming, onRenam
   );
 }
 
-function ThreadHead({ task, project, model, events, now, onClose, onPin, onMenu }: {
+function ThreadHead({ task, project, model, events, now, draft, onClose, onPin, onMenu }: {
   task: TaskView | undefined; project: Project | undefined; model: string | undefined; events: HubEvent[];
-  now: number; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
+  now: number; draft: boolean; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
 }) {
   const turns = events.filter((e) => e.kind === 'status' && e.payload.state === 'turn_done').length;
   return (
@@ -1143,6 +1239,7 @@ function ThreadHead({ task, project, model, events, now, onClose, onPin, onMenu 
         <h2 title={task?.title}>{task?.title ?? '스레드'}</h2>
         {task?.source === 'external' && <TerminalBadge />}
         {task && <StatusBadge task={task} now={now} />}
+        {draft && <DraftBadge />}
         {task && <button className="icon-btn" title="컬럼으로 고정 (p)" onClick={onPin}>📌</button>}
         <button className="icon-btn" title="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}>⋯</button>
       </div>
@@ -1179,9 +1276,11 @@ function ContextHint({ post, task, pending, ask, question }: {
 }
 
 /** The ⋯ menu: width presets plus column actions, anchored under its button. */
-function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, onEdit, onMove, onDelete }: {
+function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
   x: number; y: number; width: number; thread: boolean; canLeft: boolean; canRight: boolean;
   onClose: () => void; onRename?: () => void;
+  /** A user column: whether it shows one card per task; undefined for others (search). */
+  byTask?: boolean; onByTask: () => void; onSplit: () => void;
   /** Thread: the columns of tasks this task can join. */
   addTo: ColumnDef[]; onAddTo: (colId: string) => void; onPin: () => void; onWidth: (px: number) => void; onEdit: () => void; onMove: (dir: -1 | 1) => void; onDelete: () => void;
 }) {
@@ -1217,6 +1316,11 @@ function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, 
         <>
           {onRename && <button className="item" onClick={onRename}>이름 바꾸기</button>}
           <button className="item" onClick={onEdit}>작업·필터 편집 <kbd>e</kbd></button>
+          {byTask != null && <>
+            <button className="item" role="menuitemcheckbox" aria-checked={byTask} onClick={onByTask}>
+              {byTask ? '✓ ' : ''}작업별로 묶어 보기 <kbd>v</kbd></button>
+            <button className="item" onClick={onSplit}>작업별 컬럼으로 나누기</button>
+          </>}
           <button className="item" disabled={!canLeft} onClick={() => onMove(-1)}>왼쪽으로 <kbd>H</kbd></button>
           <button className="item" disabled={!canRight} onClick={() => onMove(1)}>오른쪽으로 <kbd>L</kbd></button>
           <hr />
@@ -1230,11 +1334,11 @@ function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, 
 }
 
 const KEYS: [string, string][] = [
-  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
+  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업. 스레드에서는 다음 / 이전 내 글)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍)'], ['Ctrl `', '작성 서랍 열기 / 닫기 (입력 중에도, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
-  ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기'],
+  ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기'],
   ['⌘ Enter', '작성창·답 입력란에서 보내기'], ['Tab', '@프로젝트 · #태그 완성'], ['#auto / #ask', '이제부터 자동 승인 / 매번 확인'],
   ['#스킬이름', '그 메시지에만 데스크 스킬 적용 (상단 스킬 버튼에서 관리)'],
   ['#later / #now', '실행 중에 보낸 메시지: 턴이 끝난 뒤 (기본) / 지금 턴에 끼워넣기'],

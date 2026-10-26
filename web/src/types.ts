@@ -61,7 +61,8 @@ export interface PlacedPost { post: Post; up: boolean; down: boolean }
 
 /** Empty or missing fields mean "no restriction". */
 export interface ColumnFilter { taskIds?: string[]; projectIds?: string[]; kinds?: PostKind[]; statuses?: TaskStatus[]; query?: string }
-export interface ColumnDef { id: string; title: string; filter: ColumnFilter }
+/** `byTask`: one card per task (its newest post) instead of every post. */
+export interface ColumnDef { id: string; title: string; filter: ColumnFilter; byTask?: boolean }
 
 /** A desk skill: skills/<name>/SKILL.md plus optional scripts, shared by Claude and Codex. */
 export interface SkillFile { path: string; size: number; executable: boolean }
