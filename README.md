@@ -11,20 +11,73 @@ TweetDeck처럼 여러 컬럼에서 CLI 에이전트(Claude Code, Codex) 작업�
 | `web/` | React + Vite 화면. 컬럼, 스레드, 작성 서랍, 승인 대기열, 검색, 스킬 관리. |
 | `desktop/` | 허브 화면을 창 하나로 띄우는 Tauri v2 셸. Finder에서 끌어다 놓은 파일의 절대 경로를 전달합니다. 자세한 내용은 [`desktop/README.md`](desktop/README.md). |
 
-## 실행
+## 설치
 
-Node 26 이상이 필요합니다(TypeScript를 빌드 없이 직접 실행하고 `node:sqlite`를 씁니다). Claude 작업에는 Claude Code 로그인, Codex 작업에는 `codex` CLI가 필요합니다.
+### 1. 준비물
+
+| 항목 | 용도 | 설치 |
+| --- | --- | --- |
+| Node.js 26 이상 | 허브·러너 실행 (TypeScript를 빌드 없이 직접 실행하고 `node:sqlite`를 씀) | https://nodejs.org 또는 `brew install node` |
+| Claude Code | Claude 작업. 앱이 띄우는 세션은 이 로그인 정보를 씀 | `npm install -g @anthropic-ai/claude-code` 후 `claude`를 한 번 실행해 로그인 |
+| Codex CLI (선택) | Codex 작업 | `npm install -g @openai/codex` 후 `codex login` |
+| Xcode Command Line Tools, Rust (선택) | macOS 데스크톱 앱 빌드 | `xcode-select --install`, https://rustup.rs |
+
+`node -v`가 `v26` 이상인지 확인합니다. Codex를 쓰지 않으면 Codex CLI 없이도 동작합니다(Codex 작업만 실패).
+
+### 2. 받아서 빌드
 
 ```sh
+git clone https://github.com/moohnam/agent-desk.git
+cd agent-desk
 npm install
 npm run build    # web/dist 생성
+```
+
+### 3. 실행
+
+```sh
 npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 ```
 
-- 허브는 러너가 떠 있지 않으면 러너를 함께 띄웁니다. 러너만 따로 띄우거나 끄려면 `npm run runner` / `npm run runner:stop`을 씁니다.
-- 개발 중에는 `npm run hub`(파일 변경 시 재시작)와 `npm run web`(Vite, http://127.0.0.1:5173)을 각각 띄웁니다.
+브라우저로 http://127.0.0.1:4317 을 엽니다. 처음 실행하면 `data/`에 DB와 접속 토큰이 생깁니다.
+
+- 허브는 러너(에이전트 세션을 실행하는 프로세스, `127.0.0.1:4318`)가 없으면 따로 띄웁니다. 러너는 허브와 별개 프로세스라 허브를 꺼도 실행 중인 작업이 계속됩니다.
+- 터미널을 닫아도 허브를 유지하려면 백그라운드로 띄웁니다: `nohup npm start >> data/hub.log 2>&1 &`
+
+### 4. 끄기
+
+| 대상 | 방법 |
+| --- | --- |
+| 허브 | 실행한 터미널에서 `Ctrl+C`, 백그라운드면 `pkill -f "node src/index.ts"` |
+| 러너 | `npm run runner:stop`. 실행 중인 세션도 함께 끝나며, 다시 띄운 뒤 다음 메시지에서 이전 대화를 resume으로 이어감 |
+
+### 5. 업데이트
+
+```sh
+git pull
+npm install
+npm run build
+```
+
+이후 허브를 재시작합니다. 열려 있는 화면은 새로고침(`⌘R`)만 하면 됩니다. `hub/src/runner/`가 바뀌었으면 작업이 없을 때 러너도 재시작합니다(`npm run runner:stop` 후 허브가 다시 띄움, 또는 `npm run runner`).
+
+### 6. 데스크톱 앱 (macOS, 선택)
+
+허브 화면을 별도 창으로 띄우고, Finder에서 끌어다 놓은 파일의 실제 경로를 넘겨 줍니다. 앱을 열 때 허브가 꺼져 있으면 빌드한 저장소에서 허브를 띄웁니다.
+
+```sh
+cd desktop
+npm install --workspaces=false
+npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹 서명). 실행 중인 앱은 먼저 종료
+```
+
+서명·공증하지 않은 앱이라 처음 실행 때 막히면 Finder에서 우클릭 후 "열기"를 고릅니다. 자세한 동작은 [`desktop/README.md`](desktop/README.md)를 봅니다.
+
+### 개발
+
+- `npm run hub`(파일 변경 시 허브 재시작)와 `npm run web`(Vite, http://127.0.0.1:5173)을 각각 띄웁니다.
 - 타입 검사: `npm run typecheck`
-- 실행 데이터(DB, 접속 토큰, 로그, 업로드, 스킬)는 모두 `data/`에 생기며 저장소에는 올리지 않습니다.
+- 실행 데이터(DB, 접속 토큰, 로그, 업로드, 스킬)는 모두 `data/`에 생기며 저장소에는 올리지 않습니다. `data/access-token`은 다른 사람에게 보이지 않게 둡니다.
 
 ### 환경 변수
 
@@ -43,28 +96,6 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 ### 다른 기기에서 열기
 
 화면 상단의 **폰에서 열기**에 나오는 QR 코드(허브 시작 로그에도 나옴)를 스캔하면 접속 토큰이 쿠키로 저장됩니다. 이 Mac에서 `localhost`·`127.0.0.1`로 접속할 때는 토큰이 필요 없습니다. 토큰 파일을 지우고 허브를 재시작하면 새 토큰이 발급되고, 이전 기기는 다시 스캔해야 합니다. 로컬 파일 링크 열기는 Mac에서만 동작합니다.
-
-## 기능
-
-- **작업**: 프로젝트(작업 디렉터리)마다 Claude Code 또는 Codex 세션을 띄우고, 후속 지시·중단·resume을 합니다. 작업마다 `프로젝트#번호`가 붙습니다.
-- **승인과 질문**: 도구 실행 승인/거절, 에이전트 질문(선택지 포함)에 답하기. 응답을 기다리는 작업은 승인 대기열(`a`)에 모입니다.
-- **메시지 대기열**: 실행 중에 보낸 메시지는 턴이 끝난 뒤 보내며(`#later`, 기본), `#now`는 지금 턴에 끼워 넣습니다. 대기 중인 메시지는 수정·순서 변경·바로 보내기가 됩니다.
-- **컬럼**: 작업·프로젝트·종류·상태·검색어로 컬럼을 구성하고, 이름 변경(제목 더블클릭)·폭 조절·순서 변경을 합니다. 설정은 브라우저에 저장합니다.
-- **검색**: `/`로 검색 컬럼을 열고 `#project:`, `#status:`, `#kind:`, `#task:` 필터를 씁니다.
-- **첨부**: 파일·이미지를 끌어다 놓거나 붙여 넣으면 `data/uploads`에 저장해 경로를 넘깁니다. 폰에서도 올릴 수 있습니다.
-- **스킬**: 상단 스킬 버튼에서 데스크 스킬을 만들고 고칩니다. 메시지에 `#스킬이름`을 쓰면 그 메시지에만 적용합니다.
-- **터미널 세션 붙이기(MCP)**: 허브의 `/mcp`(Streamable HTTP)를 `agent-desk` MCP 서버로 등록하면, 터미널에서 돌던 Claude Code·Codex 세션이 `desk_attach`, `desk_post`, `desk_checkpoint`, `desk_ask`, `desk_finish`로 데스크에 진행을 올리고 질문할 수 있습니다.
-
-  ```sh
-  claude mcp add --scope user --transport http agent-desk http://127.0.0.1:4317/mcp
-  ```
-
-  Codex는 `~/.codex/config.toml`에 다음을 추가합니다.
-
-  ```toml
-  [mcp_servers.agent-desk]
-  url = "http://127.0.0.1:4317/mcp"
-  ```
 
 ## 기본 사용법
 
@@ -132,6 +163,28 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 | `c` / `e` / `p` / `D D` | 컬럼 추가 / 편집 / 작업 고정 / 삭제 |
 | `H` / `L`, `<` / `>` | 컬럼 옮기기, 폭 조절 |
 | `?` | 전체 단축키 도움말 |
+
+## 기능
+
+- **작업**: 프로젝트(작업 디렉터리)마다 Claude Code 또는 Codex 세션을 띄우고, 후속 지시·중단·resume을 합니다. 작업마다 `프로젝트#번호`가 붙습니다.
+- **승인과 질문**: 도구 실행 승인/거절, 에이전트 질문(선택지 포함)에 답하기. 응답을 기다리는 작업은 승인 대기열(`a`)에 모입니다.
+- **메시지 대기열**: 실행 중에 보낸 메시지는 턴이 끝난 뒤 보내며(`#later`, 기본), `#now`는 지금 턴에 끼워 넣습니다. 대기 중인 메시지는 수정·순서 변경·바로 보내기가 됩니다.
+- **컬럼**: 작업·프로젝트·종류·상태·검색어로 컬럼을 구성하고, 이름 변경(제목 더블클릭)·폭 조절·순서 변경을 합니다. 설정은 브라우저에 저장합니다.
+- **검색**: `/`로 검색 컬럼을 열고 `#project:`, `#status:`, `#kind:`, `#task:` 필터를 씁니다.
+- **첨부**: 파일·이미지를 끌어다 놓거나 붙여 넣으면 `data/uploads`에 저장해 경로를 넘깁니다. 폰에서도 올릴 수 있습니다.
+- **스킬**: 상단 스킬 버튼에서 데스크 스킬을 만들고 고칩니다. 메시지에 `#스킬이름`을 쓰면 그 메시지에만 적용합니다.
+- **터미널 세션 붙이기(MCP)**: 허브의 `/mcp`(Streamable HTTP)를 `agent-desk` MCP 서버로 등록하면, 터미널에서 돌던 Claude Code·Codex 세션이 `desk_attach`, `desk_post`, `desk_checkpoint`, `desk_ask`, `desk_finish`로 데스크에 진행을 올리고 질문할 수 있습니다.
+
+  ```sh
+  claude mcp add --scope user --transport http agent-desk http://127.0.0.1:4317/mcp
+  ```
+
+  Codex는 `~/.codex/config.toml`에 다음을 추가합니다.
+
+  ```toml
+  [mcp_servers.agent-desk]
+  url = "http://127.0.0.1:4317/mcp"
+  ```
 
 ## API (일부)
 
