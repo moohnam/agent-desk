@@ -1,0 +1,93 @@
+import type { Approval, HubEvent, Project, Question, Settings, Skill, TaskView } from './types.ts';
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+  return data as T;
+}
+
+/** A feed column's filter as the hub applies it (see feedQuery in useHub.ts). */
+export interface FeedQuery { taskIds?: string[]; projectIds?: string[]; statuses?: string[]; kinds?: string[]; q?: string; members?: string[] }
+
+/** Events per feed page: a full page means older ones may exist. */
+export const FEED_PAGE = 1000;
+
+export const api = {
+  state: () => call<{ projects: Project[]; tasks: TaskView[]; approvals: Approval[]; questions: Question[]; runner: { connected: boolean }; client?: { local: boolean } }>('GET', '/state'),
+  /**
+   * The newest `limit` events, oldest first; `before`: those before that event id; `q`: only those a
+   * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
+   */
+  feed: (limit = FEED_PAGE, before?: number, q: FeedQuery = {}) => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (before) p.set('before', String(before));
+    if (q.taskIds) p.set('task', q.taskIds.join(','));
+    if (q.projectIds) p.set('project', q.projectIds.join(','));
+    if (q.statuses) p.set('status', q.statuses.join(','));
+    if (q.kinds) p.set('kind', q.kinds.join(','));
+    if (q.q) p.set('q', q.q);
+    return call<HubEvent[]>('GET', `/feed?${p}`);
+  },
+  /**
+   * A page of a task's history, oldest first: its newest events (below `before`, when given), and
+   * every event from `since` on. `more`: older events exist before the page.
+   */
+  events: (taskId: string, at: { since?: number; before?: number; ids?: number[] } = {}) => {
+    const q = new URLSearchParams();
+    if (at.ids?.length) q.set('ids', at.ids.join(','));
+    if (at.since) q.set('since', String(at.since));
+    if (at.before) q.set('before', String(at.before));
+    const qs = q.toString();
+    // A hub not yet restarted answers with the bare array (newest 500, no paging).
+    return call<{ events: HubEvent[]; more: boolean } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`)
+      .then((r) => (Array.isArray(r) ? { events: r, more: false } : r));
+  },
+  /** Saves a file on the hub's machine (for a device without it); returns the saved path. */
+  upload: async (file: File) => {
+    const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    return data as { path: string };
+  },
+  /** Has the hub download a web file (an image dragged in from a page); returns the saved path. */
+  uploadUrl: (url: string) => call<{ path: string }>('POST', '/uploads', { url }),
+  createProject: (name: string, root_path: string) => call<Project>('POST', '/projects', { name, root_path }),
+  compose: (text: string) => call<TaskView>('POST', '/compose', { text }),
+  createTask: (project_id: string, title: string, prompt: string) =>
+    call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
+  /** Returns the task that got the message: a new one for #new or #fork. */
+  send: (taskId: string, text: string) => call<{ task_id: string }>('POST', `/tasks/${taskId}/messages`, { text }),
+  cancelQueued: (taskId: string, queuedId: string) => call('DELETE', `/tasks/${taskId}/queue/${queuedId}`),
+  /** Sends a waiting message at once: into the running turn, like #now. */
+  sendQueuedNow: (taskId: string, queuedId: string) => call('POST', `/tasks/${taskId}/queue/${queuedId}/send`),
+  /** Moves a waiting message to `index` (0 = sent first). */
+  moveQueued: (taskId: string, queuedId: string, index: number) => call('PUT', `/tasks/${taskId}/queue/${queuedId}`, { index }),
+  interrupt: (taskId: string) => call('POST', `/tasks/${taskId}/interrupt`),
+  /** `answers`: picks for an agent's multiple-choice question, keyed by question text. */
+  resolve: (approvalId: string, allow: boolean, message?: string, answers?: Record<string, string>) =>
+    call('POST', `/approvals/${approvalId}`, { allow, message, answers }),
+  answer: (questionId: string, answer: string) => call('POST', `/questions/${questionId}`, { answer }),
+  /** Opens a link from a reply in its local app (via the hub, which may run `open`). */
+  open: (href: string, taskId?: string) => call<{ ok: true }>('POST', '/open', { href, task_id: taskId }),
+  /** Addresses (with QR codes) other devices open the desk at; only on the hub's own machine. */
+  access: () => call<{ urls: { url: string; qr: string }[] }>('GET', '/access'),
+  settings: () => call<Settings>('GET', '/settings'),
+  /** Only the engines and keys given change; null clears one. */
+  saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }) => call<Settings>('PUT', '/settings', s),
+  skills: () => call<Skill[]>('GET', '/skills'),
+  createSkill: (name: string, description: string) => call<Skill>('POST', '/skills', { name, description }),
+  deleteSkill: (name: string) => call('DELETE', `/skills/${name}`),
+  readSkillFile: (name: string, path: string) =>
+    call<{ path: string; content: string; executable: boolean }>('GET', `/skills/${name}/file?path=${encodeURIComponent(path)}`),
+  writeSkillFile: (name: string, path: string, content: string) =>
+    call<Skill>('PUT', `/skills/${name}/file?path=${encodeURIComponent(path)}`, { content }),
+  deleteSkillFile: (name: string, path: string) =>
+    call<Skill>('DELETE', `/skills/${name}/file?path=${encodeURIComponent(path)}`),
+};

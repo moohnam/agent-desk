@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+*.db
+*.log
+.DS_Store
+
+# 구현 외 자료는 로컬에만 둡니다.
+LOG/
+LOG*.md
+docs/
+design/
+review.md
+nostr_agent_architecture_updated.md

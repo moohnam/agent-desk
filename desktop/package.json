@@ -1,0 +1,15 @@
+{
+  "name": "agent-desk-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build --bundles app",
+    "icon": "tauri icon app-icon.png",
+    "deploy": "npm run build && rm -rf \"/Applications/Agent Desk.app\" && cp -R \"src-tauri/target/release/bundle/macos/Agent Desk.app\" /Applications/ && codesign --force --deep -s - \"/Applications/Agent Desk.app\""
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

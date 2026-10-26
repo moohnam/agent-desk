@@ -1,0 +1,17 @@
+{
+  "name": "agent-desk",
+  "private": true,
+  "workspaces": [
+    "hub",
+    "web"
+  ],
+  "scripts": {
+    "hub": "npm --workspace hub run dev",
+    "web": "npm --workspace web run dev",
+    "build": "npm --workspace web run build",
+    "start": "npm --workspace hub run start",
+    "typecheck": "npm --workspace hub run typecheck && npm --workspace web run typecheck",
+    "runner": "node hub/src/runner/daemon.ts",
+    "runner:stop": "kill $(cat data/runner.pid)"
+  }
+}
