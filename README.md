@@ -13,6 +13,36 @@ TweetDeck처럼 여러 컬럼에서 CLI 에이전트(Claude Code, Codex) 작업�
 
 ## 설치
 
+### 한 번에 설치·실행 (에이전트용)
+
+사람이 해야 하는 일은 Claude Code 로그인(`claude` 실행 후 브라우저 인증)과, Codex를 쓸 경우 `codex login`뿐입니다. 나머지는 아래 명령을 차례로 실행하면 됩니다. `npm start`는 끝나지 않는 서버이므로 백그라운드로 띄웁니다.
+
+```sh
+node -v                       # v26 이상이어야 함
+claude --version              # Claude Code가 설치·로그인되어 있어야 Claude 작업이 돎
+git clone https://github.com/moohnam/agent-desk.git
+cd agent-desk
+npm install                   # fsevents install-scripts 경고는 무시해도 됨
+npm run build
+mkdir -p data
+nohup npm start >> data/hub.log 2>&1 &
+sleep 3
+curl -s http://127.0.0.1:4317/api/state   # {"projects":[],...,"runner":{...}} 이 오면 성공
+```
+
+- 이미 다른 허브가 떠 있으면 포트를 바꿉니다: `PORT=4417 RUNNER_PORT=4418 nohup npm start ...`. 러너 포트도 함께 바꿔야 기존 러너와 섞이지 않습니다.
+- 동작 확인용 작업 하나 보내기(도구를 쓰지 않아 승인 없이 끝남):
+
+  ```sh
+  mkdir -p /tmp/desk-try
+  curl -s -X POST -H 'content-type: application/json' \
+    -d '{"text":"@try:/tmp/desk-try #haiku 도구를 쓰지 말고 OK 한 단어로만 답해"}' \
+    http://127.0.0.1:4317/api/compose
+  curl -s http://127.0.0.1:4317/api/state   # 몇 초 뒤 tasks[0].status 가 "done"
+  ```
+
+- 접속 토큰(`data/access-token`)과 `data/hub.log`(토큰이 든 접속 주소가 찍힘)는 출력하거나 공유하지 않습니다.
+
 ### 1. 준비물
 
 | 항목 | 용도 | 설치 |
