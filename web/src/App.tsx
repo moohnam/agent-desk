@@ -704,11 +704,13 @@ export function App() {
   // vim-style navigation. Ignored while typing or while a dialog is open.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
-      if (denying || columnDialog || menu || skillsOpen || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
+      const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
+      if (denying || columnDialog || menu || skillsOpen || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
       const t = ev.target as HTMLElement;
       if (t.closest('input, textarea, select')) return;
       const e = { key: latinKey(ev), preventDefault: () => ev.preventDefault() };
-      if (help) { if (e.key === 'Escape' || e.key === '?' || e.key === 'q') setHelp(false); return; }
+      if (help && !mine) { if (e.key === 'Escape' || e.key === '?' || e.key === 'q') setHelp(false); return; }
 
       if (queueFocus != null) {
         const item = queue[queueFocus];
@@ -747,6 +749,25 @@ export function App() {
         if (dir < 0) while (i > 0 && taskOf(i - 1) === taskOf(i)) i--;
         go(i);
       };
+      // Ctrl+Shift+J / K: the next / previous task run's topmost instruction (a post the user wrote);
+      // a run's later instructions and runs without one are skipped.
+      const landing = (i: number) => {
+        if (posts[i].kind !== 'user') return false;
+        for (let j = i - 1; j >= 0 && taskOf(j) === taskOf(i); j--) if (posts[j].kind === 'user') return false;
+        return true;
+      };
+      const nextMine = (dir: 1 | -1) => {
+        let i = cur < 0 ? (dir > 0 ? 0 : posts.length - 1) : cur + dir;
+        while (i >= 0 && i < posts.length && !landing(i)) i += dir;
+        if (i >= 0 && i < posts.length) go(i);
+        else setToast(dir > 0 ? '아래에 지시한 글이 더 없습니다.' : '위에 지시한 글이 더 없습니다.');
+      };
+      if (mine) {
+        if (help || queueFocus != null) return;
+        nextMine(ev.code === 'KeyJ' ? 1 : -1);
+        e.preventDefault();
+        return;
+      }
       const now = Date.now();
       let handled = true;
       // `gr`: back to the column showing everything, at its newest post.
@@ -1209,7 +1230,7 @@ function ColumnMenu({ x, y, width, thread, canLeft, canRight, onClose, onWidth, 
 }
 
 const KEYS: [string, string][] = [
-  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
+  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍)'], ['Ctrl `', '작성 서랍 열기 / 닫기 (입력 중에도, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],

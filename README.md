@@ -83,13 +83,43 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 
 ### 5. 업데이트
 
+먼저 받고 다시 빌드합니다.
+
 ```sh
 git pull
 npm install
 npm run build
+git diff --stat HEAD@{1} -- hub web desktop   # 무엇이 바뀌었는지 확인
 ```
 
-이후 허브를 재시작합니다. 열려 있는 화면은 새로고침(`⌘R`)만 하면 됩니다. `hub/src/runner/`가 바뀌었으면 작업이 없을 때 러너도 재시작합니다(`npm run runner:stop` 후 허브가 다시 띄움, 또는 `npm run runner`).
+바뀐 위치에 따라 필요한 만큼만 다시 띄웁니다.
+
+| 바뀐 위치 | 할 일 |
+| --- | --- |
+| `web/` | 없음. 허브가 새 `web/dist`를 바로 제공하므로 열린 화면(브라우저·앱)에서 `⌘R`로 새로고침만 합니다 |
+| `hub/src/` (러너 제외) | 허브 재시작. 실행 중인 작업은 러너에서 계속 돕니다 |
+| `hub/src/runner/` | 실행 중인 작업이 없을 때 러너 재시작: `npm run runner:stop` (허브가 몇 초 안에 새 러너를 띄움) |
+| `desktop/` | 데스크톱 앱 재설치 (아래) |
+| `package.json`, `package-lock.json` | `npm install` 후 허브 재시작 |
+
+허브 재시작(백그라운드로 띄운 경우):
+
+```sh
+pkill -f "node src/index.ts"
+nohup npm start >> data/hub.log 2>&1 &
+```
+
+데스크톱 앱 업데이트(`desktop/`이 바뀌었을 때만 필요):
+
+```sh
+osascript -e 'quit app "Agent Desk"'   # 실행 중인 앱 종료
+cd desktop
+npm install --workspaces=false
+npm run deploy                         # 다시 빌드해 /Applications/Agent Desk.app 교체
+open -a "Agent Desk"
+```
+
+앱은 허브를 담는 창일 뿐이라 `web/`·`hub/` 변경에는 다시 빌드할 필요가 없습니다. 앱을 다시 빌드해도 허브와 러너는 끊기지 않습니다.
 
 ### 6. 데스크톱 앱 (macOS, 선택)
 
@@ -182,6 +212,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | --- | --- |
 | `j` / `k` | 아래 / 위 글 |
 | `J` / `K` | 다음 / 이전 작업의 글로 |
+| `Ctrl Shift J` / `K` | 다음 / 이전 작업의 내 지시 글로 (같은 작업이 이어지면 맨 위 지시 하나만) |
 | `h` / `l` | 왼쪽 / 오른쪽 컬럼 |
 | `gg` / `G` / `gr` | 맨 위 / 맨 아래 / 전체 컬럼의 가장 최근 글 |
 | `Enter` / `q` | 스레드 열기 / 닫기 |
