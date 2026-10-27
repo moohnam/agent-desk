@@ -2,6 +2,8 @@
 
 TweetDeck처럼 여러 컬럼에서 CLI 에이전트(Claude Code, Codex) 작업을 보고, 지시하고, 승인하고, 이어서 진행하는 로컬 우선 데스크입니다. 같은 네트워크의 폰에서도 열 수 있고, macOS 데스크톱 앱(Tauri)으로도 띄울 수 있습니다.
 
+현재 구현의 사용 기술·데이터 흐름·설계와 제약은 [기술과 구현 설계](docs/technology-and-design.md)를 참고하세요.
+
 ## 구성
 
 | 위치 | 역할 |
@@ -149,7 +151,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | `AGENT_DESK_UPLOADS` | `data/uploads` | 첨부 파일 저장 위치 |
 | `AGENT_DESK_SKILLS_HOME` | `data/desk-plugin` | 데스크 스킬(로컬 Claude Code 플러그인 `desk`) |
 | `RUNNER_PORT` | `4318` | 러너 포트 |
-| `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 resume |
+| `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 resume. 상단바의 열린 세션 목록에서 바로 닫을 수도 있음 |
 | `RUNNER_LOG` / `RUNNER_PID_FILE` | `data/runner.log` / `data/runner.pid` | 러너 로그와 PID 파일 |
 | `CODEX_BIN` | `codex` | Codex 실행 파일 |
 
@@ -268,6 +270,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | POST | `/api/tasks/:id/messages` | 후속 지시 (세션이 없으면 resume) |
 | PUT·DELETE | `/api/tasks/:id/queue/:id` | 대기 중인 메시지 수정·삭제 (`POST …/send`: 바로 보내기) |
 | POST | `/api/tasks/:id/interrupt` | 진행 중인 턴 중단 |
+| POST | `/api/tasks/:id/close` | 세션(엔진 프로세스) 닫기. 기록은 남고 다음 답글에서 resume |
 | POST | `/api/approvals/:id` | 승인 / 거절 |
 | POST | `/api/questions/:id` | 질문에 답하기 |
 | POST | `/api/uploads` | 첨부 업로드 |

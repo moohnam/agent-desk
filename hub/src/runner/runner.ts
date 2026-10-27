@@ -32,7 +32,8 @@ export class Runner {
     this.start = opts.start ?? null;
   }
 
-  get capabilities() { return { engines: Object.keys(ENGINES) }; }
+  /** `close`: understands the close command (older runners ignore it). */
+  get capabilities() { return { engines: Object.keys(ENGINES), close: true }; }
 
   /** Sessions still running, so a reconnecting hub can learn what is busy and awaiting approval. */
   snapshot(): LiveSession[] {
@@ -118,6 +119,14 @@ export class Runner {
       case 'interrupt':
         void this.sessions.get(cmd.sessionId)?.adapter?.interrupt();
         break;
+      case 'close': {
+        const entry = this.sessions.get(cmd.sessionId);
+        if (!entry) break;
+        this.drop(cmd.sessionId, entry);
+        entry.adapter?.close();
+        this.emit({ type: 'closed', sessionId: cmd.sessionId, busy: entry.live.busy, reason: 'user' });
+        break;
+      }
       case 'approval_result': {
         const entry = this.sessions.get(cmd.sessionId);
         if (!entry) break;

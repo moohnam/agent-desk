@@ -66,6 +66,8 @@ export class Hub {
   private runner: RunnerClient;
   /** Sessions with a turn in progress (runner `busy`), set as soon as the hub sends them work. */
   private busy = new Set<string>();
+  /** Whether the connected runner can close a session on request (runners before it ignore the command). */
+  private runnerCloses = false;
 
   constructor(store: Store, skills = new SkillStore()) {
     this.store = store;
@@ -451,6 +453,14 @@ export class Hub {
     this.runner.handle({ type: 'interrupt', sessionId: session.id });
   }
 
+  /** Ends the task's live session to free its process; the history stays and the next reply resumes it. */
+  closeSession(taskId: string) {
+    const session = this.store.latestSession(taskId);
+    if (!session || session.source !== 'app' || !this.runner.has(session.id)) throw new HttpError(409, '열려 있는 세션이 없습니다');
+    if (!this.runnerCloses) throw new HttpError(409, '지금 러너는 세션 닫기를 지원하지 않습니다. 러너를 재시작하면 쓸 수 있습니다');
+    this.runner.handle({ type: 'close', sessionId: session.id });
+  }
+
   /** The working directory of a task's latest session, for resolving relative links in its replies. */
   cwdOf(taskId: string): string | undefined { return this.store.latestSession(taskId)?.cwd ?? undefined; }
 
@@ -660,6 +670,7 @@ export class Hub {
   private onRunnerMessage(m: RunnerToHub) {
     if (m.type === 'hello') {
       this.store.upsertRunner(m.runnerId, m.host, m.capabilities);
+      this.runnerCloses = !!(m.capabilities as { close?: boolean } | null)?.close;
       this.reconcile(m.sessions);
       return;
     }
@@ -715,6 +726,13 @@ export class Hub {
         }
         // Older runners do not report `busy`; then the task still running/waiting means mid-turn.
         const status = this.store.getTask(taskId)?.status;
+        if (m.reason === 'user') {
+          this.dropQueue(session.id, taskId, '세션을 닫아서');
+          this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'closed', detail: { busy: !!m.busy } });
+          if (status === 'running' || status === 'waiting') this.setStatus(taskId, session.id, 'idle');
+          else this.publishTask(taskId);
+          break;
+        }
         const midTurn = m.reason !== 'idle' && (m.busy ?? (status === 'running' || status === 'waiting'));
         if (m.error || midTurn) this.dropQueue(session.id, taskId, '세션이 종료되어');
         if (m.error) {

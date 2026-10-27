@@ -171,6 +171,9 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
         case 'POST /tasks/:id/interrupt':
           hub.interrupt(id);
           return send(res, 202, { ok: true });
+        case 'POST /tasks/:id/close':
+          hub.closeSession(id);
+          return send(res, 202, { ok: true });
         case 'POST /approvals/:id': {
           const b = await readJson(req);
           hub.resolveApproval(id, b.allow === true, b.message, answersOf(b.answers));

@@ -70,6 +70,8 @@ export const api = {
   /** Moves a waiting message to `index` (0 = sent first). */
   moveQueued: (taskId: string, queuedId: string, index: number) => call('PUT', `/tasks/${taskId}/queue/${queuedId}`, { index }),
   interrupt: (taskId: string) => call('POST', `/tasks/${taskId}/interrupt`),
+  /** Ends the task's engine process; the next reply resumes the conversation. */
+  closeSession: (taskId: string) => call('POST', `/tasks/${taskId}/close`),
   /** `answers`: picks for an agent's multiple-choice question, keyed by question text. */
   resolve: (approvalId: string, allow: boolean, message?: string, answers?: Record<string, string>) =>
     call('POST', `/approvals/${approvalId}`, { allow, message, answers }),

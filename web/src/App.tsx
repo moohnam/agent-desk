@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, ArrowUp, Ellipsis, Keyboard, PenLine, Pin, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, Cpu, Ellipsis, Keyboard, PenLine, Pin, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -8,6 +8,7 @@ import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './Approva
 import { ColumnDialog, KIND_LABEL } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, Modal, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
+import { SessionsDialog, openSessions } from './Sessions.tsx';
 import { MODE_LABEL, MODEL_LABEL } from '../../hub/src/compose.ts';
 import { STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
 import { PostView } from './PostView.tsx';
@@ -135,6 +136,7 @@ export function App() {
   const [help, setHelp] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const composeRef = useRef<HTMLTextAreaElement>(null);
@@ -160,6 +162,7 @@ export function App() {
     return () => clearInterval(t);
   }, []);
   const drafts = useDraftTasks();
+  const liveCount = useMemo(() => openSessions(hub.tasks.values()).length, [hub.tasks]);
   // Recomputed on every tick, since a task stalls without any new message.
   const stalled = useMemo(() => {
     const now = Date.now();
@@ -176,6 +179,8 @@ export function App() {
     setView(v);
     // The open thread belonged to the old view's columns; the new view starts without it.
     if (threadTask) { if (history.state?.thread) history.back(); else setThreadTask(null); }
+    // So did the search column.
+    setSearch(null); setSearchApplied('');
     setActive(0);
     // A view opens at its top: no selection or kept scroll position carries over from the last visit.
     setSelection({});
@@ -1047,6 +1052,8 @@ export function App() {
           <button className="btn primary" title="새 작업 (i)" aria-label="새 작업" onClick={() => (drawer ? setDrawer(false) : openDrawer())}>
             <SquarePen />
           </button>
+          <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
+            onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
           <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
           <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #low … #max (#ultra는 Codex)" aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
@@ -1207,6 +1214,7 @@ export function App() {
       {help && <Help onClose={() => setHelp(false)} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog onClose={() => setAccessOpen(false)} />}
+      {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
     </div>
   );

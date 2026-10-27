@@ -327,6 +327,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
                 <li key={e.id} className="note">
                   {e.payload.state === 'mode' ? `모드 → ${MODE_LABEL[d.mode as PermissionMode]}`
                     : e.payload.state === 'model' ? modelSwitch(d)
+                    : e.payload.state === 'closed' ? (d.busy ? '진행 중이던 턴을 끊고 세션을 닫았습니다' : '세션을 닫았습니다')
                     : e.payload.state === 'mkdir' ? `디렉터리를 새로 만들었습니다 · ${d.path}`
                     : e.payload.state === 'forked' ? `포크 → ${d.seq ? `#${d.seq} ` : ''}“${d.title}” (새 작업)` : STATE_LABEL[e.payload.state] ?? e.payload.state}
                   {d.model && e.payload.state !== 'model' ? ` · ${modelShort(d.model)}` : ''}

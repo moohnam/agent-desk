@@ -29,6 +29,8 @@ export type HubToRunner =
   /** Changes what is given; takes effect from the next turn. */
   | { type: 'set_model'; sessionId: string; model?: ModelName; effort?: Effort }
   | { type: 'interrupt'; sessionId: string }
+  /** Ends the session now (the user closed it); a turn in progress is cut. */
+  | { type: 'close'; sessionId: string }
   | { type: 'approval_result'; sessionId: string; approvalId: string; allow: boolean; message?: string; answers?: Answers };
 
 export type RunnerEvent =
@@ -53,9 +55,10 @@ export type RunnerToHub =
   | { type: 'approval_cancelled'; sessionId: string; approvalId: string }
   /**
    * The session ended. `busy`: whether a turn was still in progress (runner's view). `reason`
-   * 'idle': the runner closed it after RUNNER_IDLE_MS without activity; the next message resumes it.
+   * 'idle': the runner closed it after RUNNER_IDLE_MS without activity; 'user': the user closed it.
+   * Either way the next message resumes it.
    */
-  | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' };
+  | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' | 'user' };
 
 export interface EngineAdapter {
   send(text: string, skills?: string[], steer?: boolean): void;
