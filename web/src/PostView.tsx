@@ -110,6 +110,9 @@ function PostViewInner(props: Props) {
   return (
     <article className={cls.filter(Boolean).join(' ')} data-post={post.id} data-col={props.colId}
       onClick={(e) => {
+        // In the thread a click is for reading and copying text: it neither selects the post nor
+        // scrolls. j/k still move the selection there.
+        if (props.inThread) return;
         props.onSelect();
         // A click opens the thread, unless it hit a control in the post or ended a text selection.
         if ((e.target as HTMLElement).closest('a, button, input, textarea, select, summary, label')) return;

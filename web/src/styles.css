@@ -147,7 +147,20 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .av.mini { width: 20px; height: 20px; font-size: 9.5px; }
 
 /* ── 작업 공간: 작성 서랍 + 컬럼 덱 ── */
-.workspace { flex: 1; min-height: 0; display: flex; }
+.workspace { position: relative; flex: 1; min-height: 0; display: flex; }
+/* The thread on the right part of the workspace beside a narrower deck (f toggles it back to a column). */
+.thread-split { position: relative; flex: 0 0 50%; min-width: 0; display: flex; padding: 8px 8px 8px 0; }
+/* Too small to split: the thread covers the workspace while it has the focus (t / h / l go back to the deck). */
+.thread-split.cover { position: absolute; inset: 0; z-index: 15; padding: 8px; background: var(--bg); }
+.thread-split.cover.away { visibility: hidden; pointer-events: none; }
+.thread-split .column { flex: 1; width: auto; min-width: 0; }
+.thread-split .col-resize { display: none; }
+.thread-split .wbadge { z-index: 6; }
+.split-resize { position: absolute; top: 8px; left: -8px; bottom: 8px; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
+.split-resize::after { content: ""; position: absolute; top: 50%; left: 2px; width: 3px; height: 36px; margin-top: -18px; border-radius: 2px;
+  background: var(--border); opacity: 0; transition: opacity .15s; }
+.split-resize:hover::after, .split-resize.dragging::after { opacity: 1; }
+.split-resize.dragging::after { background: var(--accent); top: 0; height: 100%; margin-top: 0; }
 .compose { flex: none; width: 300px; border-right: 1px solid var(--border); background: var(--col); display: flex; flex-direction: column; min-height: 0; }
 /* Wide screens: no snapping, so the deck glides to opened columns without a snap-back afterwards. */
 .deck { position: relative; flex: 1; min-width: 0; display: flex; gap: 8px; padding: 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }

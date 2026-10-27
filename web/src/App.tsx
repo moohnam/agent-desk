@@ -20,7 +20,7 @@ import type { Approval, ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Pro
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch } from './search.ts';
-import { VIEWS, viewColumns, useView, type View } from './views.ts';
+import { ORDERED, SORT_LABEL, VIEWS, applyOrder, viewColumns, useView, type View, type ViewSort } from './views.ts';
 
 const THREAD = 'thread';
 /** The temporary search column, right of the column that shows everything; not saved. */
@@ -41,6 +41,16 @@ const PHONE = '(max-width: 760px)';
 /** Idle time after which a feed scrolled away from new posts returns to the top. */
 const IDLE_RETURN_MS = 20_000;
 const DRAWER_KEY = 'agent-desk.composeOpen';
+/** '0': the thread opens as a column beside the others; otherwise it floats over the right half. */
+const FLOAT_KEY = 'agent-desk.threadFloat';
+/** Share of the workspace the split thread takes, as a percentage. */
+const SPLIT_KEY = 'agent-desk.threadSplit';
+const PANE_MIN = 30, PANE_MAX = 70, PANE_DEFAULT = 50;
+/**
+ * On a small workspace the split thread grows to at least PANE_MIN_PX; when that would leave the
+ * deck less than DECK_MIN_PX, the thread covers the whole workspace instead.
+ */
+const PANE_MIN_PX = 560, DECK_MIN_PX = 420;
 /** Shown when a built view (F2–F4) is asked to change its columns. */
 const FIXED_NOTE = '자동으로 만든 뷰는 편집할 수 없습니다. F1(내 컬럼)에서 편집하세요.';
 const EXTERNAL_NOTE = '터미널 세션입니다. 에이전트가 질문하면 여기서 답할 수 있습니다.';
@@ -110,7 +120,7 @@ function latinKey(e: KeyboardEvent): string {
 export function App() {
   const hub = useHub();
   const [custom, setCustom] = useColumns();
-  const { view, setView, byTask: viewByTask, setByTask: setViewByTask } = useView();
+  const { view, setView, byTask: viewByTask, setByTask: setViewByTask, order: viewOrder, setOrder: setViewOrder } = useView();
   const [widths, setWidth] = useColumnWidths();
   // Index into the approval queue while it has keyboard focus (`a`).
   const [queueFocus, setQueueFocus] = useState<number | null>(null);
@@ -168,11 +178,15 @@ export function App() {
     const now = Date.now();
     return new Set([...hub.tasks.values()].filter((t) => stalledMinutes(t, now) != null).map((t) => t.id));
   }, [hub.tasks, tick]);
-  // F1 is the user's columns; F2–F4 are built from the tasks and only change "작업별로 묶어 보기".
+  // F1 is the user's columns; F2–F4 are built from the tasks and only change "작업별로 묶어 보기"
+  // (and, on F2 and F3, the column order).
   const editable = view === 'custom';
+  const reorderable = editable || ORDERED.includes(view);
   const columns = useMemo(() => (view === 'custom' ? custom
-    : viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask)),
-  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
+    : applyOrder(viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask), viewOrder[view], (c) =>
+      (c.filter.projectIds ? hub.projects.find((p) => p.id === c.filter.projectIds![0])?.created_at
+        : hub.tasks.get(c.filter.taskIds?.[0] ?? '')?.created_at) ?? '')),
+  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewOrder]);
   const setColumns: typeof setCustom = editable ? setCustom : () => setToast(FIXED_NOTE);
   const switchView = (v: View) => {
     if (v === view) return;
@@ -212,6 +226,32 @@ export function App() {
     = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined);
   const threadPosts = useMemo(() => buildPosts(threadEvents), [threadEvents]);
   const phone = useMedia(PHONE);
+  // The thread as a panel on the right half of the workspace, next to a narrower deck, instead of a column.
+  const [floatPref, setFloatPref] = useState(() => { try { return localStorage.getItem(FLOAT_KEY) !== '0'; } catch { return true; } });
+  /**
+   * The thread's selected post and its offset from the feed's top across a float switch: the
+   * thread is drawn anew elsewhere, and it should come back showing the same post at the same place.
+   */
+  const floatAnchor = useRef<{ id: number; top: number } | null>(null);
+  const [split, setSplit] = useState(() => {
+    const v = Number((() => { try { return localStorage.getItem(SPLIT_KEY); } catch { return null; } })());
+    return v >= PANE_MIN && v <= PANE_MAX ? v : PANE_DEFAULT;
+  });
+  const resizeSplit = (pct: number | null) => {
+    const v = pct ?? PANE_DEFAULT;
+    setSplit(v);
+    try { if (pct == null) localStorage.removeItem(SPLIT_KEY); else localStorage.setItem(SPLIT_KEY, String(v)); } catch { /* ignore */ }
+  };
+  const toggleFloat = () => {
+    const id = selection[THREAD];
+    const feed = threadFeed();
+    const el = id != null ? feed?.querySelector(`[data-post="${id}"]`) : null;
+    floatAnchor.current = id != null ? { id, top: el && feed ? el.getBoundingClientRect().top - feed.getBoundingClientRect().top : 0 } : null;
+    try { localStorage.setItem(FLOAT_KEY, floatPref ? '0' : '1'); } catch { /* ignore */ }
+    setToast(floatPref ? '스레드를 컬럼으로 보기' : '스레드를 오른쪽 절반에 보기');
+    setFloatPref(!floatPref);
+  };
+  const floatThread = floatPref && !phone && !!threadTask;
   const parsedSearch = useMemo(() => parseSearch(searchApplied, hub.projects, hub.tasks.values()),
     [searchApplied, hub.projects, hub.tasks]);
   const deckDefs = useMemo(() => {
@@ -388,6 +428,20 @@ export function App() {
   const widthOf = (id: string) => widths[id] ?? (id === THREAD ? THREAD_WIDTH : DEFAULT_WIDTH);
 
   const deckRef = useRef<HTMLElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  /** The workspace's width left for the deck and the split thread (the compose drawer's taken out). */
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = workspaceRef.current;
+    if (!el) return;
+    const measure = () => setWorkspaceWidth(el.clientWidth - (el.querySelector<HTMLElement>(':scope > .compose')?.offsetWidth ?? 0));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [drawer]);
+  const paneWidth = Math.max(Math.round(workspaceWidth * split / 100), PANE_MIN_PX);
+  const paneCover = workspaceWidth - paneWidth < DECK_MIN_PX;
   /**
    * Glides the deck sideways just enough to show column `id` whole, and the column before it too
    * when both fit (a thread next to the column it was opened from). No movement if already shown.
@@ -445,17 +499,20 @@ export function App() {
   };
   /**
    * Scrolls a column's feed (only it, not the deck) to show a post, with its group's head line
-   * (project and task) too when both fit on screen.
+   * (project and task) too when both fit on screen. The post's top always shows: a post taller
+   * than the feed lands at its top, not its bottom.
    */
   const revealPost = (colId: string, postId: number) => {
     const feed = document.querySelector(`section[data-col="${colId}"] .feed`);
     const el = feed?.querySelector(`[data-post="${postId}"]`);
     if (!feed || !el) return;
     const at = feed.getBoundingClientRect().top;
+    const box = el.getBoundingClientRect();
+    const elTop = box.top - at, bottom = box.bottom - at;
+    // Thread posts have no group head line; then the post's own top is the line to show.
     const head = el.closest('.group')?.querySelector(':scope > .ctx');
-    const bottom = el.getBoundingClientRect().bottom - at;
-    const headTop = head ? head.getBoundingClientRect().top - at : Infinity;
-    const top = bottom - headTop <= feed.clientHeight ? headTop : el.getBoundingClientRect().top - at;
+    const headTop = head ? head.getBoundingClientRect().top - at : elTop;
+    const top = bottom - headTop <= feed.clientHeight ? headTop : elTop;
     if (top < 0) feed.scrollTop += top;
     else if (bottom > feed.clientHeight) feed.scrollTop += Math.min(top, bottom - feed.clientHeight);
   };
@@ -473,7 +530,8 @@ export function App() {
   // Keep the selected post (or column) visible.
   useEffect(() => {
     if (!activeCol) return;
-    revealColumn(activeCol.id, activeCol.id === THREAD ? deck[activeIdx - 1]?.id : undefined);
+    // The split thread is always in view; the deck beside it stays where it is.
+    if (!(floatThread && activeCol.id === THREAD)) revealColumn(activeCol.id, activeCol.id === THREAD ? deck[activeIdx - 1]?.id : undefined);
     const id = selection[activeCol.id];
     if (id != null && !pressing.current) revealPost(activeCol.id, id);
   }, [activeCol?.id, selection]);
@@ -488,10 +546,28 @@ export function App() {
 
   const select = (colId: string, postId: number) => setSelection((s) => ({ ...s, [colId]: postId }));
   const focusColumn = (i: number) => setActive(Math.max(0, Math.min(i, deck.length - 1)));
-  /** h/l: the next column that way; on the status board (F4), empty columns are passed over. */
+  /** The deck column focused last, for t and h/l to come back to from the thread. */
+  const lastDeckCol = useRef<string | undefined>(undefined);
+  useEffect(() => { if (activeCol && activeCol.id !== THREAD) lastDeckCol.current = activeCol.id; }, [activeCol?.id]);
+  const backToDeck = () => {
+    const at = deck.findIndex((c) => c.id === lastDeckCol.current);
+    focusColumn(at >= 0 ? at : deck.findIndex((c) => c.id !== THREAD));
+  };
+  /**
+   * h/l: the next column that way; on the status board (F4), empty columns are passed over. The
+   * split thread is beside the deck, not in it: h/l pass it over, and from it they go back to the deck.
+   */
   const stepColumn = (dir: -1 | 1) => {
-    const skip = (c: DeckColumn) => view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0;
+    if (floatThread && activeCol?.id === THREAD) return backToDeck();
+    const skip = (c: DeckColumn) => (view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0)
+      || (floatThread && c.id === THREAD);
     for (let i = activeIdx + dir; i >= 0 && i < deck.length; i += dir) if (!skip(deck[i])) return focusColumn(i);
+  };
+  /** t: to the open thread, and from it back to the column focused before. */
+  const toggleThreadFocus = () => {
+    if (!threadTask) return setToast('열린 스레드가 없습니다.');
+    if (activeCol?.id === THREAD) backToDeck();
+    else focusColumn(deck.findIndex((c) => c.id === THREAD));
   };
   const toggleExpanded = (id: number) => setExpanded((prev) => {
     const next = new Set(prev);
@@ -614,7 +690,18 @@ export function App() {
     const ro = new ResizeObserver(stickThread);
     ro.observe(feed);
     return () => ro.disconnect();
-  }, [threadTask, threadAt]);
+  }, [threadTask, threadAt, floatThread]);
+  useLayoutEffect(() => {
+    const anchor = floatAnchor.current;
+    floatAnchor.current = null;
+    const feed = threadFeed();
+    const el = anchor && feed?.querySelector(`[data-post="${anchor.id}"]`);
+    if (!anchor || !feed || !el) return;
+    // A narrower or wider thread rewraps the posts; keep at least the post's top in view.
+    const top = Math.max(0, Math.min(anchor.top, feed.clientHeight - 40));
+    feed.scrollTop += el.getBoundingClientRect().top - feed.getBoundingClientRect().top - top;
+    threadAtBottom.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  }, [floatThread]);
   const onThreadSend = () => {
     sentFrom.current = threadPosts[threadPosts.length - 1]?.id ?? 0;
     threadAtBottom.current = true;
@@ -723,8 +810,15 @@ export function App() {
     if (k < 0 || to < 0 || to >= columns.length) return;
     const next = [...columns];
     [next[k], next[to]] = [next[to], next[k]];
-    setColumns(next);
+    if (editable) setColumns(next);
+    // A built view keeps the order it is left in; new projects and tasks still come in automatically.
+    else if (reorderable) setViewOrder((o) => ({ ...o, [view]: next.map((c) => c.id) }));
+    else { setToast(FIXED_NOTE); return; }
     setFocusCol(id!);
+  };
+  const sortColumns = (sort: ViewSort) => {
+    setViewOrder((o) => ({ ...o, [view]: sort }));
+    setToast(`${VIEWS.find((x) => x.id === view)!.label} 뷰: ${SORT_LABEL[sort]} 정렬`);
   };
   /**
    * Shows a task as its own feed column (`p`), right of the column it is viewed from, or focuses
@@ -969,6 +1063,8 @@ export function App() {
           break;
         }
         case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
+        case 'f': if (threadTask && !phone) toggleFloat(); break;
+        case 't': toggleThreadFocus(); break;
         case 'p': { const id = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null); if (id) pinTask(id); break; }
         case 'v': if (activeCol?.def && activeCol.id !== SEARCH) toggleByTask(activeCol.id); break;
         case 'e':
@@ -1022,6 +1118,87 @@ export function App() {
       onOpenThread={inThread ? undefined : () => postActions.current.openThread(p.taskId, { from: colId, post: p.id })} />
   );
 
+  const threadIdx = deck.findIndex((c) => c.id === THREAD);
+  /** One deck column; the thread is drawn outside the deck when it floats. */
+  const renderColumn = (col: DeckColumn, i: number) => {
+    const isThread = col.id === THREAD;
+    return (
+      <section key={col.id} data-col={col.id}
+        className={`column${i === activeIdx ? ' focused' : ''}${isThread ? ' thread' : ''}`}
+        style={{ '--w': `${widthOf(col.id)}px`,
+          ...(isThread && threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
+        onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
+        {isThread ? (
+          <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
+            model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
+            onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
+            onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
+        ) : col.id === SEARCH ? (
+          <SearchHead value={search ?? ''} onChange={setSearch} inputRef={searchRef} projects={hub.projects}
+            tasks={[...hub.tasks.values()]} count={`${col.posts.length}${feeds.get(SEARCH)?.more ? '+' : ''}`}
+            unknown={parsedSearch.unknown} onDone={searchResults} onClose={closeSearch} onSave={saveSearch} />
+        ) : (
+          <ColumnHead def={col.def!} count={col.posts.length} projects={projectsById} tasks={hub.tasks}
+            renaming={renaming === col.id} onRenaming={(on) => setRenaming(on && editable ? col.id : null)}
+            onRename={(title) => setColumns((cs) => cs.map((c) => (c.id === col.id ? { ...c, title } : c)))}
+            onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
+        )}
+        <div className={`feed${isThread ? ' thread-feed' : ''}`}
+          onScroll={isThread ? (e) => { const f = e.currentTarget; threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40; }
+            : (e) => onFeedScroll(col.id, e.currentTarget)}>
+          {!isThread && unseen[col.id] ? (
+            <div className="new-posts">
+              <button onClick={() => showNewest(col.id)}>↑ 새 글 {unseen[col.id]}개</button>
+            </div>
+          ) : null}
+          {isThread && threadMore && (
+            <div className="older-posts">
+              <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
+                {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
+              </button>
+            </div>
+          )}
+          {isThread
+            ? col.placed.map((pp) => renderPost(pp, col.id, i, true))
+            : groupsOf(col.placed).map((group) => {
+                const task = hub.tasks.get(group[0].post.taskId);
+                const pending = group.some(({ post }) => !post.resolution
+                  && (post.kind === 'approval' ? hub.approvals.has(post.event.payload.approvalId)
+                    : post.kind === 'question' && hub.questions.has(post.event.payload.questionId)));
+                return (
+                  <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
+                    style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
+                    {task && <GroupContext task={task} now={now} onOpen={() => openThread(task.id, { from: col.id })} />}
+                    {group.map((pp) => renderPost(pp, col.id, i, false))}
+                  </div>
+                );
+              })}
+          {col.posts.length === 0 && (
+            <p className="empty">{col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : isThread ? (threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…') : hub.events.length === 0
+              ? 'i를 눌러 첫 작업을 시작하세요.' : feeds.get(col.id)?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}</p>
+          )}
+          {!isThread && (() => {
+            const older = olderOf(col.id);
+            return older.more && (
+              <div className="older-posts">
+                <button disabled={older.loading} onClick={older.load}>
+                  {older.loading ? '불러오는 중…' : <><ArrowDown /> 이전 글 더 보기</>}
+                </button>
+              </div>
+            );
+          })()}
+        </div>
+        {isThread && threadTaskView && (threadTaskView.source === 'external' ? (
+          <ExternalNote pending={!!questionOf(threadTaskView.id)}
+            onAnswer={() => { const q = questionOf(threadTaskView.id); if (q) answerQuestion(threadTaskView.id, q); }} />
+        ) : (
+          <ReplyBox key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+        ))}
+        <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
+      </section>
+    );
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -1068,7 +1245,7 @@ export function App() {
       <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef}>
         {drawer && (
           <ComposeDrawer projects={hub.projects} tasks={[...hub.tasks.values()]} inputRef={composeRef}
             onClose={() => setDrawer(false)}
@@ -1081,90 +1258,21 @@ export function App() {
             }} />
         )}
         <main className={`deck${phone ? ' phone' : ''}`} ref={deckRef}>
-          {deck.map((col, i) => {
-            const isThread = col.id === THREAD;
-            return (
-              <section key={col.id} data-col={col.id}
-                className={`column${i === activeIdx ? ' focused' : ''}${isThread ? ' thread' : ''}`}
-                style={{ '--w': `${widthOf(col.id)}px`,
-                  ...(isThread && threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
-                onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
-                {isThread ? (
-                  <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
-                    model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
-                    onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
-                    onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
-                ) : col.id === SEARCH ? (
-                  <SearchHead value={search ?? ''} onChange={setSearch} inputRef={searchRef} projects={hub.projects}
-                    tasks={[...hub.tasks.values()]} count={`${col.posts.length}${feeds.get(SEARCH)?.more ? '+' : ''}`}
-                    unknown={parsedSearch.unknown} onDone={searchResults} onClose={closeSearch} onSave={saveSearch} />
-                ) : (
-                  <ColumnHead def={col.def!} count={col.posts.length} projects={projectsById} tasks={hub.tasks}
-                    renaming={renaming === col.id} onRenaming={(on) => setRenaming(on && editable ? col.id : null)}
-                    onRename={(title) => setColumns((cs) => cs.map((c) => (c.id === col.id ? { ...c, title } : c)))}
-                    onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
-                )}
-                <div className={`feed${isThread ? ' thread-feed' : ''}`}
-                  onScroll={isThread ? (e) => { const f = e.currentTarget; threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40; }
-                    : (e) => onFeedScroll(col.id, e.currentTarget)}>
-                  {!isThread && unseen[col.id] ? (
-                    <div className="new-posts">
-                      <button onClick={() => showNewest(col.id)}>↑ 새 글 {unseen[col.id]}개</button>
-                    </div>
-                  ) : null}
-                  {isThread && threadMore && (
-                    <div className="older-posts">
-                      <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
-                        {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
-                      </button>
-                    </div>
-                  )}
-                  {isThread
-                    ? col.placed.map((pp) => renderPost(pp, col.id, i, true))
-                    : groupsOf(col.placed).map((group) => {
-                        const task = hub.tasks.get(group[0].post.taskId);
-                        const pending = group.some(({ post }) => !post.resolution
-                          && (post.kind === 'approval' ? hub.approvals.has(post.event.payload.approvalId)
-                            : post.kind === 'question' && hub.questions.has(post.event.payload.questionId)));
-                        return (
-                          <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
-                            style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
-                            {task && <GroupContext task={task} now={now} onOpen={() => openThread(task.id, { from: col.id })} />}
-                            {group.map((pp) => renderPost(pp, col.id, i, false))}
-                          </div>
-                        );
-                      })}
-                  {col.posts.length === 0 && (
-                    <p className="empty">{col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : isThread ? (threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…') : hub.events.length === 0
-                      ? 'i를 눌러 첫 작업을 시작하세요.' : feeds.get(col.id)?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}</p>
-                  )}
-                  {!isThread && (() => {
-                    const older = olderOf(col.id);
-                    return older.more && (
-                      <div className="older-posts">
-                        <button disabled={older.loading} onClick={older.load}>
-                          {older.loading ? '불러오는 중…' : <><ArrowDown /> 이전 글 더 보기</>}
-                        </button>
-                      </div>
-                    );
-                  })()}
-                </div>
-                {isThread && threadTaskView && (threadTaskView.source === 'external' ? (
-                  <ExternalNote pending={!!questionOf(threadTaskView.id)}
-                    onAnswer={() => { const q = questionOf(threadTaskView.id); if (q) answerQuestion(threadTaskView.id, q); }} />
-                ) : (
-                  <ReplyBox key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
-                ))}
-                <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
-              </section>
-            );
-          })}
+          {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
               <Plus aria-label="컬럼 추가" /><kbd>c</kbd>
             </button>
           )}
         </main>
+        {floatThread && threadIdx >= 0 && (
+          // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
+          <div className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
+            style={paneCover ? undefined : { flexBasis: paneWidth }}>
+            {!paneCover && <SplitHandle split={split} onResize={resizeSplit} />}
+            {renderColumn(deck[threadIdx], threadIdx)}
+          </div>
+        )}
       </div>
 
       <footer className="hints">
@@ -1186,11 +1294,14 @@ export function App() {
 
       {menu && menuCol >= 0 && (
         <ColumnMenu x={menu.x} y={menu.y} width={widthOf(menu.colId)} thread={menu.colId === THREAD}
-          fixed={!editable}
+          fixed={!editable} reorderable={reorderable}
+          sort={editable || !reorderable ? undefined : typeof viewOrder[view] === 'string' ? viewOrder[view] as ViewSort : null}
+          onSort={(k) => { sortColumns(k); setMenu(null); }}
           onRename={menuDef >= 0 && editable ? () => { setRenaming(menu.colId); setMenu(null); } : undefined}
           addTo={menu.colId === THREAD && threadTask ? custom.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
           onAddTo={(colId) => { if (threadTask) addToColumn(colId, threadTask); setMenu(null); }}
           onPin={() => { if (threadTask) pinTask(threadTask); setMenu(null); }}
+          floating={floatThread} onFloat={phone ? undefined : () => { toggleFloat(); setMenu(null); }}
           byTask={menuDef >= 0 ? !!columns[menuDef].byTask : undefined}
           onByTask={() => { toggleByTask(menu.colId); setMenu(null); }}
           onSplit={() => { splitColumn(menu.colId); setMenu(null); }}
@@ -1361,10 +1472,14 @@ function ContextHint({ post, task, pending, ask, question }: {
 }
 
 /** The ⋯ menu: width presets plus column actions, anchored under its button. */
-function ColumnMenu({ x, y, width, thread, fixed, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
+function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable, sort, onSort, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
   x: number; y: number; width: number; thread: boolean; canLeft: boolean;
+  /** Thread: whether it takes the right half beside the deck; `onFloat` toggles that (not on a phone). */
+  floating?: boolean; onFloat?: () => void;
   /** A column of a built view (F2–F4): only width and grouping change. */
   fixed: boolean; canRight: boolean;
+  /** F2 and F3 move columns too. `sort`: their sort in force (null: automatic or moved); undefined elsewhere. */
+  reorderable: boolean; sort?: ViewSort | null; onSort: (sort: ViewSort) => void;
   onClose: () => void; onRename?: () => void;
   /** A user column: whether it shows one card per task; undefined for others (search). */
   byTask?: boolean; onByTask: () => void; onSplit: () => void;
@@ -1393,6 +1508,8 @@ function ColumnMenu({ x, y, width, thread, fixed, canLeft, canRight, onClose, on
       <hr />
       {thread ? (
         <>
+          {onFloat && <button className="item" role="menuitemcheckbox" aria-checked={floating} onClick={onFloat}>
+            {floating ? '✓ ' : ''}오른쪽 절반에 보기 <kbd>f</kbd></button>}
           <button className="item" onClick={onPin}>새 컬럼으로 고정 <kbd>p</kbd></button>
           {addTo.length > 0 && <div className="lbl"><span>이 작업을 컬럼에 추가</span></div>}
           {addTo.map((c) => <button key={c.id} className="item" onClick={() => onAddTo(c.id)}><Plus /> {c.title}</button>)}
@@ -1408,9 +1525,15 @@ function ColumnMenu({ x, y, width, thread, fixed, canLeft, canRight, onClose, on
               {byTask ? '✓ ' : ''}작업별로 묶어 보기 <kbd>v</kbd></button>
             <button className="item" onClick={onSplit}>작업별 컬럼으로 나누기</button>
           </>}
-          {fixed ? <div className="lbl"><span>자동 뷰: 편집은 <kbd>F1</kbd> 내 컬럼에서</span></div> : <>
+          {reorderable && <>
           <button className="item" disabled={!canLeft} onClick={() => onMove(-1)}>왼쪽으로 <kbd>H</kbd></button>
           <button className="item" disabled={!canRight} onClick={() => onMove(1)}>오른쪽으로 <kbd>L</kbd></button>
+          {sort !== undefined && (Object.keys(SORT_LABEL) as ViewSort[]).map((k) => (
+            <button key={k} className="item" role="menuitemradio" aria-checked={sort === k} onClick={() => onSort(k)}>
+              {sort === k ? '✓ ' : ''}{SORT_LABEL[k]} 정렬</button>
+          ))}
+          </>}
+          {fixed ? <div className="lbl"><span>자동 뷰: 편집은 <kbd>F1</kbd> 내 컬럼에서</span></div> : <>
           <hr />
           <button className="item danger" onClick={() => (confirm ? onDelete() : setConfirm(true))}>
             {confirm ? '한 번 더 누르면 삭제' : '컬럼 삭제'} <kbd>D D</kbd>
@@ -1427,7 +1550,7 @@ const KEYS: [string, string][] = [
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍)'], ['Ctrl `', '작성 서랍 열기 / 닫기 (입력 중에도, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
-  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기'],
+  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['f', '스레드를 오른쪽 절반 / 컬럼으로 보기 (절반일 때 경계선을 끌어 폭 조절)'], ['t', '스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 h/l은 스레드를 건너뜀)'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기 (F2·F3에서는 옮긴 순서를 뷰마다 기억, 칼럼 메뉴에서 이름순·만든 순 정렬)'],
   ['⌘ Enter', '작성창·답 입력란에서 보내기'], ['Tab', '@프로젝트 · #태그 완성'], ['#auto / #ask', '이제부터 자동 승인 / 매번 확인'],
   ['#스킬이름', '그 메시지에만 데스크 스킬 적용 (상단 스킬 버튼에서 관리)'],
   ['#later / #now', '실행 중에 보낸 메시지: 턴이 끝난 뒤 (기본) / 지금 턴에 끼워넣기'],
@@ -1442,6 +1565,38 @@ function Help({ onClose }: { onClose: () => void }) {
         {KEYS.map(([k, v]) => <div key={k}><dt><kbd>{k}</kbd></dt><dd>{v}</dd></div>)}
       </dl>
     </Modal>
+  );
+}
+
+/** Drag the split thread's left edge to share the workspace; double-click restores half and half. */
+function SplitHandle({ split, onResize }: { split: number; onResize: (pct: number | null) => void }) {
+  const [drag, setDrag] = useState<number | null>(null);
+  return (
+    <>
+      {drag != null && <span className="wbadge">{drag}%</span>}
+      <div className={`split-resize${drag != null ? ' dragging' : ''}`} title="끌어서 폭 조절 · 더블클릭은 절반"
+        onDoubleClick={() => onResize(null)}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          const el = e.currentTarget, startX = e.clientX;
+          const total = el.closest('.workspace')?.getBoundingClientRect().width ?? window.innerWidth;
+          el.setPointerCapture(e.pointerId);
+          document.body.classList.add('resizing');
+          const move = (ev: PointerEvent) => {
+            const pct = Math.min(PANE_MAX, Math.max(PANE_MIN, Math.round(split + (startX - ev.clientX) / total * 100)));
+            setDrag(pct);
+            onResize(pct);
+          };
+          const up = () => {
+            setDrag(null);
+            document.body.classList.remove('resizing');
+            el.removeEventListener('pointermove', move);
+            el.removeEventListener('pointerup', up);
+          };
+          el.addEventListener('pointermove', move);
+          el.addEventListener('pointerup', up);
+        }} />
+    </>
   );
 }
 
