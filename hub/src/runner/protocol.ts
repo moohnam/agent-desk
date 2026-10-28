@@ -12,7 +12,7 @@ export type Answers = Record<string, string>;
 /** The tool name of an agent's multiple-choice question; its input is Claude's AskUserQuestion input. */
 export const ASK_USER = 'AskUserQuestion';
 
-export type Engine = 'claude' | 'codex';
+export type Engine = 'claude' | 'codex' | 'agy';
 
 export type HubToRunner =
   /**

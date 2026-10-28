@@ -130,11 +130,11 @@ export class Hub {
       model: (this.store.setting(`${e}_model`) ?? null) as ModelName | null,
       effort: (this.store.setting(`${e}_effort`) ?? null) as Effort | null,
     });
-    return { claude: get('claude'), codex: get('codex') };
+    return Object.fromEntries(ENGINES.map((e) => [e, get(e)])) as Settings;
   }
   /** Only the engines and keys given change; null clears one. */
   setSettings(s: Partial<Record<EngineName, { model?: ModelName | null; effort?: Effort | null }>>): Settings {
-    const engines = (['claude', 'codex'] as const).filter((e) => s[e]);
+    const engines = ENGINES.filter((e) => s[e]);
     for (const e of engines) {
       const { model, effort } = s[e]!;
       if (model != null && !ENGINE_MODELS[e].includes(model)) throw new HttpError(400, `${ENGINE_LABEL[e]} 모델이 아닙니다: ${model}`);
@@ -298,18 +298,18 @@ export class Hub {
    * is working, a message waits until the turn ends (#later, the default), joins the running turn
    * (#now). #new and #fork start a new task instead, busy or not: a fresh one in the same project,
    * or one that continues from a copy of this task's conversation.
-   * Returns the id of the task that got the message.
+   * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
-  sendMessage(taskId: string, text: string): string {
-    const c = this.parse(text);
+  sendMessage(taskId: string, text: string, routed = false): string {
+    const c = this.parse(text, routed);
     if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     const session = this.store.latestSession(taskId);
     if (!session) throw new HttpError(404, 'task has no session');
     if (session.source !== 'app') throw new HttpError(409, 'external sessions are view-only');
-    const engine = session.engine === 'codex' ? 'codex' : 'claude';
+    const engine = engineOf(session.engine);
     if (c.delivery === 'new') {
       if (!c.body && !c.skills.length) throw new HttpError(400, '#new로 맡길 지시를 함께 쓰세요');
-      return this.createTask(this.store.getTask(taskId)!.project_id, '', text, c.mode, engine).id;
+      return this.createTask(this.store.getTask(taskId)!.project_id, '', text, c.mode, engine, routed).id;
     }
     if (c.engine && c.engine !== engine) {
       throw new HttpError(400, `이 작업은 ${ENGINE_LABEL[engine]}로 진행 중입니다. 엔진은 새 작업에서만 고를 수 있습니다`);
@@ -457,7 +457,7 @@ export class Hub {
       status: 'running', checkpoint_md: null, created_by: OWNER, created_at: ts, updated_at: ts,
     });
     const sessionId = randomUUID();
-    const engine = parent.engine === 'codex' ? 'codex' : 'claude';
+    const engine = engineOf(parent.engine);
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: parent.cwd,
       source: 'app', status: 'running', runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts, permission_mode: permissionMode,
@@ -835,7 +835,7 @@ export class Hub {
   attachExternal(a: { title: string; summary: string; cwd: string; engine?: string; taskId?: string }): TaskView {
     if (!a.cwd?.trim() || !a.summary?.trim()) throw new HttpError(400, 'cwd와 summary가 필요합니다');
     const cwd = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
-    const engine = a.engine === 'codex' ? 'codex' : 'claude';
+    const engine = engineOf(a.engine);
     if (a.taskId) {
       const session = this.externalSession(a.taskId);
       if (a.title?.trim()) this.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));

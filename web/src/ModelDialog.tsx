@@ -1,18 +1,56 @@
-import { useState, type FormEvent } from 'react';
-import { ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, MODEL_LABEL, type EngineName } from '../../hub/src/compose.ts';
+import { useEffect, useState, type FormEvent } from 'react';
+import { RefreshCw } from 'lucide-react';
+import { api } from './api.ts';
+import { ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, type EngineName } from '../../hub/src/compose.ts';
 import { Modal } from './Compose.tsx';
 import { saveSettings, useSettings } from './settings.ts';
-import type { Settings } from './types.ts';
+import { resetTime } from './format.ts';
+import type { EngineUsage, Settings } from './types.ts';
 
-const ENGINES: EngineName[] = ['claude', 'codex'];
 const TAG_HINT: Record<EngineName, string> = {
   claude: '#opus #sonnet #haiku',
   codex: '#sol #astra #terra #luna (계열의 최신 버전)',
+  agy: '#argon #flash (Gemini 계열의 최신 버전, effort는 low·medium·high)',
 };
 
-/** "모델": the model and effort new tasks of each engine start with when the message names none. */
+/** From this share used on, a window shows as running low. */
+const LOW_AT = 80;
+
+/** One engine's limit windows: a bar of the share used and when the window resets. */
+function UsageRows({ usage }: { usage: EngineUsage | undefined | null }) {
+  if (usage === undefined) return <span className="muted small">불러오는 중…</span>;
+  if (usage === null) return <span className="muted small">불러오지 못했습니다</span>;
+  if (usage.error && !usage.windows.length) return <span className="muted small">조회 실패: {usage.error}</span>;
+  return (
+    <ul className="usage">
+      {usage.windows.map((w) => (
+        <li key={w.label} className={w.usedPercent != null && w.usedPercent >= LOW_AT ? 'low' : undefined}>
+          <span className="name">{w.label}</span>
+          <span className="bar" aria-hidden><i style={{ width: `${Math.min(100, w.usedPercent ?? 0)}%` }} /></span>
+          <span className="pct">{w.usedPercent == null ? '?' : `${w.usedPercent}%`}</span>
+          <span className="reset muted">{w.resetsAt ? resetTime(w.resetsAt) : ''}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * "모델": the model and effort new tasks of each engine start with when the message names none,
+ * with how much of each engine's plan limits is used (account-wide, terminal use included).
+ */
 export function ModelDialog({ onClose }: { onClose: () => void }) {
   const cur = useSettings();
+  /** Per engine, read separately so each shows as it arrives: missing while loading, null when the hub couldn't answer. */
+  const [usage, setUsage] = useState<Partial<Record<EngineName, EngineUsage | null>>>({});
+  const loadUsage = (refresh = false) => {
+    setUsage({});
+    for (const e of ENGINES) {
+      api.usage(e, refresh).then((u) => setUsage((p) => ({ ...p, [e]: u })), () => setUsage((p) => ({ ...p, [e]: null })));
+    }
+  };
+  const loading = ENGINES.some((e) => !(e in usage));
+  useEffect(() => loadUsage(), []);
   const [pick, setPick] = useState<Settings>(cur);
   const [error, setError] = useState<string | null>(null);
   const set = (e: EngineName, v: Partial<Settings[EngineName]>) => setPick((p) => ({ ...p, [e]: { ...p[e], ...v } }));

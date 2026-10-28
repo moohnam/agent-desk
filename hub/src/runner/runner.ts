@@ -1,12 +1,13 @@
 import type { Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from './protocol.ts';
 import { startClaude } from './claude.ts';
+import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 
 /** A session neither busy nor awaiting approval for this long is closed; the hub resumes it on the next message. */
 const DEFAULT_IDLE_MS = 30 * 60_000;
 
 type StartEngine = typeof startClaude;
-const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex };
+const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
 
 interface Entry {
   adapter: EngineAdapter | null;

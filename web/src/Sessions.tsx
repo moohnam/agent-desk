@@ -33,7 +33,7 @@ export function SessionsDialog({ tasks, onOpen, onClose }: {
   };
   const row = (t: TaskView, closable: boolean) => (
     <li key={t.id} className="session-row">
-      <span className={`av mini ${t.engine ?? 'claude'}`}>{t.engine === 'codex' ? 'Cx' : 'C'}</span>
+      <span className={`av mini ${t.engine ?? 'claude'}`}>{ENGINE_SHORT[engineOf(t.engine)]}</span>
       <button className="link where" title={`${t.title} · 스레드 열기`} onClick={() => { onOpen(t.id); onClose(); }}>
         <span className="pdot" style={{ background: projectColor(t.project_id) }} />
         <b>{t.project_name}#{t.seq}</b><span className="ttl">{t.title}</span>

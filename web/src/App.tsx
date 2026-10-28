@@ -1286,7 +1286,7 @@ export function App() {
           <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
             onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
           <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
-          <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #low … #max (#ultra는 Codex)" aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
+          <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #argon #flash · #low … #max (#ultra는 Codex)" aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
@@ -1644,8 +1644,8 @@ function ThreadHead({ task, project, model, events, now, draft, handoff, onClose
         <div className="meta">
           <span title={project?.root_path}><span className="pdot" style={{ background: projectColor(task.project_id) }} />{task.project_name}
             <span className="seq" title={`@${task.project_name}#${task.seq}로 이 작업에 보낼 수 있습니다`}>#{task.seq}</span></span>
-          <span title="모델은 #opus #sonnet #haiku(Claude) 또는 #sol #astra #terra #luna(Codex), effort는 #low … #max(#ultra는 Codex) 태그로 바꿉니다">
-            {task.engine === 'codex' ? 'Codex' : 'Claude'}{model ? ` · ${modelShort(model)}` : ''}
+          <span title="모델은 #opus #sonnet #haiku(Claude), #sol #astra #terra #luna(Codex), #argon #flash(agy), effort는 #low … #max(#ultra는 Codex) 태그로 바꿉니다">
+            {ENGINE_LABEL[engineOf(task.engine)]}{model ? ` · ${modelShort(model)}` : ''}
             {/* Switched by a tag, but no turn has run on it yet. */}
             {task.model && !new RegExp(`-${task.model}(-|$)`).test(model ?? '') ? ` → ${MODEL_LABEL[task.model]} (다음 턴)` : ''}
             {task.effort ? ` · effort ${task.effort}` : ''}</span>

@@ -45,7 +45,7 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
         return (
           <div key={item.id} className={`queue-row ${item.kind}${focus === i ? ' selected' : ''}`} onClick={() => onFocus(i)}
             onDoubleClick={() => onOpen(item)}>
-            <span className={`av mini ${engine}`}>{engine === 'codex' ? 'Cx' : 'C'}</span>
+            <span className={`av mini ${engine}`}>{ENGINE_SHORT[engineOf(engine)]}</span>
             <span className="where" title={task?.title}>
               <span className="pdot" style={{ background: projectColor(task?.project_id ?? '') }} />
               <b>{task?.project_name ?? '?'}</b><span className="ttl">› {task?.title ?? ''}</span>

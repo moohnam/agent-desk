@@ -6,13 +6,13 @@
 //                  change state that later messages see:
 //     #auto          switch the session to automatic approval (stays until #ask)
 //     #ask           switch the session to ask before each tool use (DEFAULT_MODE; the SDK's 'default')
-//     #claude/#codex engine for a new task (default claude); an existing task keeps its engine
-//     #opus/#sonnet/#haiku  Claude model, #sol/#astra/#terra/#luna  Codex model family (the latest
-//                    version of it); stays with the task until another model tag. A model tag also picks
+//     #claude/#codex/#agy  engine for a new task (default claude); an existing task keeps its engine
+//     #opus/#sonnet/#haiku  Claude model, #sol/#astra/#terra/#luna  Codex model family, #argon/#flash
+//                    Antigravity (agy) Gemini model family (the latest version of either); stays with the task until another model tag. A model tag also picks
 //                    the engine of a new task. Untagged new tasks use the desk's default for the engine,
 //                    else the engine's own default
 //     #low…#max      reasoning effort for the task, kept the same way; a model that lacks the level
-//                    runs at the nearest one it supports. #ultra is Codex only
+//                    runs at the nearest one it supports (agy: #xhigh and #max run as high). #ultra is Codex only
 //     #later/#now    what to do with a message sent while the task is still working: run it after
 //                    the current turn (#later, the default) or add it to the running turn (#now)
 //     #new           start a new task in the project instead of continuing one: a fresh session in
@@ -29,30 +29,38 @@ export const DEFAULT_MODE: PermissionMode = 'default';
 export const MODE_TAGS: Record<string, PermissionMode> = { auto: 'auto', ask: 'default' };
 export const MODE_LABEL: Record<PermissionMode, string> = { auto: '#auto', default: '#ask' };
 
-export type EngineName = 'claude' | 'codex';
+export type EngineName = 'claude' | 'codex' | 'agy';
 export const DEFAULT_ENGINE: EngineName = 'claude';
-export const ENGINE_LABEL: Record<EngineName, string> = { claude: 'Claude', codex: 'Codex' };
+export const ENGINES: EngineName[] = ['claude', 'codex', 'agy'];
+/** A stored engine name as an engine; anything unknown is Claude, the default. */
+export const engineOf = (e: string | null | undefined): EngineName => (ENGINES as string[]).includes(e ?? '') ? e as EngineName : 'claude';
+export const ENGINE_LABEL: Record<EngineName, string> = { claude: 'Claude', codex: 'Codex', agy: 'Antigravity' };
+/** The engine's avatar letters in the web UI. */
+export const ENGINE_SHORT: Record<EngineName, string> = { claude: 'C', codex: 'Cx', agy: 'Ag' };
 
 /**
  * Models by alias: Claude Code resolves a Claude alias to its latest version; for Codex the runner
- * picks the latest model of the family (codex.ts).
+ * and agy the runner picks the latest model of the family (codex.ts, agy.ts).
  */
-export type ModelName = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna';
+export type ModelName = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna' | 'argon' | 'flash';
 export const ENGINE_MODELS: Record<EngineName, ModelName[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['sol', 'astra', 'terra', 'luna'],
+  agy: ['argon', 'flash'],
 };
-export const MODEL_TAGS: ModelName[] = [...ENGINE_MODELS.claude, ...ENGINE_MODELS.codex];
+export const MODEL_TAGS: ModelName[] = [...ENGINE_MODELS.claude, ...ENGINE_MODELS.codex, ...ENGINE_MODELS.agy];
 export const MODEL_LABEL: Record<ModelName, string> = {
-  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', sol: 'Sol', astra: 'Astra', terra: 'Terra', luna: 'Luna',
+  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', sol: 'Sol', astra: 'Astra', terra: 'Terra', luna: 'Luna', argon: 'Argon', flash: 'Flash',
 };
-export const modelEngine = (m: ModelName): EngineName => (ENGINE_MODELS.claude.includes(m) ? 'claude' : 'codex');
+export const modelEngine = (m: ModelName): EngineName =>
+  (Object.keys(ENGINE_MODELS) as EngineName[]).find((e) => ENGINE_MODELS[e].includes(m))!;
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export const EFFORT_TAGS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const ENGINE_EFFORTS: Record<EngineName, Effort[]> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   codex: EFFORT_TAGS,
+  agy: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 /**
@@ -77,7 +85,7 @@ export const wantedEngine = (c: { engine?: EngineName; model?: ModelName }): Eng
   c.engine ?? (c.model ? modelEngine(c.model) : undefined);
 
 /** Built-in tags; a skill cannot take one of these names. */
-export const RESERVED_TAGS = ['auto', 'ask', 'claude', 'codex', ...MODEL_TAGS, ...EFFORT_TAGS, ...DELIVERY_TAGS];
+export const RESERVED_TAGS = ['auto', 'ask', 'claude', 'codex', 'agy', ...MODEL_TAGS, ...EFFORT_TAGS, ...DELIVERY_TAGS];
 /** Skill names: what a #tag can hold, and a safe directory name. */
 export const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -128,7 +136,7 @@ export function parseCompose(text: string, skills: Iterable<string> = [], route 
   const used: string[] = [];
   body = body.replace(TAG, (all, pre: string, tag: string) => {
     const t = tag.toLowerCase();
-    if (t === 'claude' || t === 'codex') { engine ??= t; return pre; }
+    if (t === 'claude' || t === 'codex' || t === 'agy') { engine ??= t; return pre; }
     if (MODE_TAGS[t]) { mode ??= MODE_TAGS[t]; return pre; }
     if ((MODEL_TAGS as string[]).includes(t)) { model ??= t as ModelName; return pre; }
     if ((EFFORT_TAGS as string[]).includes(t)) { effort ??= t as Effort; return pre; }

@@ -35,6 +35,7 @@ const TAG_OPTIONS: Option[] = [
   { key: 'ask', insert: 'ask', label: '#ask', desc: '이제부터 매번 확인 (기본)', space: true },
   { key: 'claude', insert: 'claude', label: '#claude', desc: '새 작업을 Claude로 (기본)', space: true },
   { key: 'codex', insert: 'codex', label: '#codex', desc: '새 작업을 Codex로', space: true },
+  { key: 'agy', insert: 'agy', label: '#agy', desc: '새 작업을 Antigravity(agy)로', space: true },
   { key: 'opus', insert: 'opus', label: '#opus', desc: 'Claude 모델을 Opus로 (작업에 유지)', space: true },
   { key: 'sonnet', insert: 'sonnet', label: '#sonnet', desc: 'Claude 모델을 Sonnet으로 (작업에 유지)', space: true },
   { key: 'haiku', insert: 'haiku', label: '#haiku', desc: 'Claude 모델을 Haiku로 (작업에 유지)', space: true },
@@ -42,6 +43,8 @@ const TAG_OPTIONS: Option[] = [
   { key: 'astra', insert: 'astra', label: '#astra', desc: 'Codex 모델을 Astra 계열 최신으로 (작업에 유지)', space: true },
   { key: 'terra', insert: 'terra', label: '#terra', desc: 'Codex 모델을 Terra 계열 최신으로 (작업에 유지)', space: true },
   { key: 'luna', insert: 'luna', label: '#luna', desc: 'Codex 모델을 Luna 계열 최신으로 (작업에 유지)', space: true },
+  { key: 'argon', insert: 'argon', label: '#argon', desc: 'agy 모델을 Gemini Argon 계열 최신으로 (작업에 유지)', space: true },
+  { key: 'flash', insert: 'flash', label: '#flash', desc: 'agy 모델을 Gemini Flash 계열 최신으로 (작업에 유지)', space: true },
   { key: 'low', insert: 'low', label: '#low', desc: 'effort 낮게 (작업에 유지)', space: true },
   { key: 'medium', insert: 'medium', label: '#medium', desc: 'effort 보통 (작업에 유지)', space: true },
   { key: 'high', insert: 'high', label: '#high', desc: 'effort 높게 (작업에 유지)', space: true },
@@ -357,8 +360,10 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
           <code>#ask</code><span>이제부터 매번 확인 (기본)</span>
           <code>#claude</code><span>새 작업을 Claude로 (기본)</span>
           <code>#codex</code><span>새 작업을 Codex로</span>
+          <code>#agy</code><span>새 작업을 Antigravity(agy)로</span>
           <code>#opus #sonnet #haiku</code><span>Claude 모델 고르기 (작업에 유지)</span>
           <code>#sol #astra #terra #luna</code><span>Codex 모델 계열 고르기, 최신 버전 (작업에 유지)</span>
+          <code>#argon #flash</code><span>agy(Gemini) 모델 계열 고르기, 최신 버전 (작업에 유지)</span>
           <code>#low … #max</code><span>effort 고르기 (작업에 유지, #ultra는 Codex만)</span>
           <code>#스킬이름</code><span>데스크 스킬을 이 메시지에만 사용</span>
           <code>#later</code><span>실행 중이면 지금 턴이 끝난 뒤 보내기 (기본)</span>

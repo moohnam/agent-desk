@@ -116,6 +116,16 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           req.on('close', () => { clearInterval(ping); hub.bus.off('message', onMessage); });
           return;
         }
+        case 'GET /usage':
+          // `refresh=1`: read again now instead of reusing the last minute's reading.
+          // `engine`: that engine only, so a client can show each as it arrives.
+          {
+            const refresh = url.searchParams.get('refresh') === '1';
+            const engine = url.searchParams.get('engine');
+            if (!engine) return send(res, 200, await readUsage(refresh));
+            if (!(ENGINES as string[]).includes(engine)) throw new HttpError(400, `알 수 없는 엔진입니다: ${engine}`);
+            return send(res, 200, await readEngineUsage(engine as EngineName, refresh));
+          }
         case 'GET /settings':
           return send(res, 200, hub.settings());
         case 'PUT /settings':
