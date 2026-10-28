@@ -456,15 +456,18 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
           {(task.queued ?? []).map((q, i, all) => (
             <li key={q.id}>
               <span className="n">대기 {i + 1}</span>
-              <span className="t" title={q.text}>{q.text}</span>
+              {q.kind ? <span className="t" title={q.text}>{q.kind === 'reset' ? '컨텍스트 재구성: 새 세션으로 넘기기' : '컨텍스트 재구성: 정리본 요청'}</span>
+                : <span className="t" title={q.text}>{q.text}</span>}
               <span className="q-acts">
                 <button className="icon-btn" disabled={i === 0} title="먼저 보내기"
                   aria-label="먼저 보내기" onClick={() => api.moveQueued(task.id, q.id, i - 1).catch((e) => onError(e.message))}><ArrowUp /></button>
                 <button className="icon-btn" disabled={i === all.length - 1} title="나중에 보내기"
                   aria-label="나중에 보내기" onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}><ArrowDown /></button>
-                <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
-                  onClick={() => api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message))}>지금 보내기</button>
-                <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>
+                {!q.kind && <>
+                  <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
+                    onClick={() => api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message))}>지금 보내기</button>
+                  <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>
+                </>}
                 <button className="link" onClick={() => api.cancelQueued(task.id, q.id).catch((e) => onError(e.message))}>취소</button>
               </span>
             </li>

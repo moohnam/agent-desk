@@ -423,12 +423,11 @@ export class Hub {
   sendQueuedNow(taskId: string, queuedId: string) {
     const q = this.store.queued({ taskId }).find((x) => x.id === queuedId);
     if (!q) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
+    if (q.kind === 'reset') throw new HttpError(409, '컨텍스트 재구성은 지금 턴이 끝난 뒤에 실행됩니다');
     this.requireRunner();
     if (!this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const steer = this.runner.has(q.session_id) && this.busy.has(q.session_id);
-    this.addEvent(q.session_id, taskId, 'user', {
-      text: q.text, mode: q.mode ?? undefined, skills: q.skills, delivery: steer ? 'now' : 'later', queued_at: q.created_at,
-    });
+    this.sendQueued(q, steer ? 'now' : 'later');
     this.dispatch(q.session_id, q.body, q.skills, steer);
     this.publishTask(taskId);
   }
@@ -1080,6 +1079,8 @@ export class Hub {
           this.store.setApprovalStatus(approval.id, 'denied');
           this.publish({ type: 'approval', approval: { ...approval, status: 'denied' } });
         }
+        // A session a context reset replaced: the task goes on in the new one.
+        if (this.store.latestSession(taskId)?.id !== session.id) { this.publishTask(taskId); break; }
         // Older runners do not report `busy`; then the task still running/waiting means mid-turn.
         const status = this.store.getTask(taskId)?.status;
         if (m.reason === 'user') {

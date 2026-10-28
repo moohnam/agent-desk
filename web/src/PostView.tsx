@@ -76,7 +76,7 @@ function samePost(a: Props, b: Props): boolean {
     || x.parent?.kind !== y.parent?.kind || x.activity.length !== y.activity.length
     || x.activity.some((e, i) => e !== y.activity[i]))) return false;
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
-  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick', 'draft'] as const) {
+  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick', 'draft', 'picked'] as const) {
     if (a[k] !== b[k]) return false;
   }
   return !a.onOpenThread === !b.onOpenThread;
@@ -113,7 +113,7 @@ function PostViewInner(props: Props) {
     : null;
   // Like Twitter, say whom a post answers unless that post is drawn right above it.
   const replyTo = !up && post.parent ? author(post.parent, task) : null;
-  const cls = ['post', post.kind, up && 'chain-up', down && 'chain-down', selected && 'selected', flash && 'flash'];
+  const cls = ['post', post.kind, post.kind === 'user' && p.handoff === 'reset' && 'reset-start', props.picked !== undefined && 'pickable', props.picked && 'picked', up && 'chain-up', down && 'chain-down', selected && 'selected', flash && 'flash'];
 
   return (
     <article className={cls.filter(Boolean).join(' ')} data-post={post.id} data-col={props.colId}
@@ -130,6 +130,10 @@ function PostViewInner(props: Props) {
       <div className="av-wrap"><div className={`av ${avatar[0]}`}>{avatar[1]}</div></div>
       <div className="main">
         <div className="ph">
+          {props.picked !== undefined && (
+            <input type="checkbox" className="pick" checked={props.picked} title="재구성에 쓸 글로 고르기 (x)" aria-label="재구성에 쓸 글로 고르기"
+              onClick={(e) => e.stopPropagation()} onChange={() => props.onPick?.()} />
+          )}
           <span className="name">{author(post, task)}</span>
           {post.kind !== 'user' && model && <span className="handle">{modelShort(model)}</span>}
           {tag}
@@ -292,7 +296,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   );
 }
 
-const STATE_LABEL: Record<string, string> = { started: '세션 시작', model_changed: '모델 적용', turn_done: '턴 완료', finished: '작업 종료', handoff: '터미널 세션 넘겨받음' };
+const STATE_LABEL: Record<string, string> = { context_reset: '컨텍스트 재구성: 이 세션을 닫고 새 세션으로', started: '세션 시작', model_changed: '모델 적용', turn_done: '턴 완료', finished: '작업 종료', handoff: '터미널 세션 넘겨받음' };
 
 /** A model/effort switch (status 'model'): "모델 → Opus · effort high". */
 const modelSwitch = (d: { model?: ModelName | null; effort?: string | null }) =>
@@ -305,7 +309,8 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
   const modes = events.filter((e) => e.kind === 'status' && (e.payload.state === 'mode' || e.payload.state === 'model'));
   const finished = events.some((e) => e.kind === 'status' && e.payload.state === 'finished');
   const forks = events.filter((e) => e.kind === 'status' && e.payload.state === 'forked').length;
-  if (!tools.length && !done && !modes.length && !finished && !forks) return null;
+  const reset = events.some((e) => e.kind === 'status' && e.payload.state === 'context_reset');
+  if (!tools.length && !done && !modes.length && !finished && !forks && !reset) return null;
 
   const errors = tools.filter((t) => results.get(t.payload.toolUseId)?.payload.isError).length;
   const names = [...new Set(tools.map((t) => t.payload.name))];
@@ -316,6 +321,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
     done ? `턴 완료${cost != null ? ` · 누적 $${Number(cost).toFixed(2)}` : ''}` : null,
     finished ? '작업 종료' : null,
     forks ? `포크 ${forks}개` : null,
+    reset ? '컨텍스트 재구성' : null,
   ].filter(Boolean).join(' · ');
 
   return (

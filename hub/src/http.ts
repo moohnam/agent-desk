@@ -179,6 +179,24 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           hub.moveQueued(id, parts[4], Number(b.index));
           return send(res, 200, { ok: true });
         }
+        case 'POST /tasks/:id/handoff': {
+          const b = await readJson(req);
+          return send(res, 202, hub.requestHandoff(id, {
+            picked: Array.isArray(b.picked) ? b.picked.map(Number) : [],
+            feedback: typeof b.feedback === 'string' ? b.feedback : undefined,
+            current: typeof b.current === 'string' ? b.current : undefined,
+          }));
+        }
+        case 'POST /tasks/:id/reset': {
+          const b = await readJson(req);
+          return send(res, 202, hub.resetContext(id, typeof b.text === 'string' ? b.text : ''));
+        }
+        case 'DELETE /tasks/:id':
+          hub.deleteTask(id);
+          return send(res, 200, { ok: true });
+        case 'DELETE /projects/:id':
+          hub.deleteProject(id);
+          return send(res, 200, { ok: true });
         case 'POST /tasks/:id/interrupt':
           hub.interrupt(id);
           return send(res, 202, { ok: true });

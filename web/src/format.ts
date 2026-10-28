@@ -57,7 +57,7 @@ export function toolSummary(name: string, input: Record<string, any> | undefined
 }
 
 const STATE_LABEL: Record<string, string> = {
-  started: '세션 시작', turn_done: '턴 완료', finished: '작업 종료', error: '오류', interrupted: '중단됨', handoff: '터미널 세션 넘겨받음', mkdir: '디렉터리 새로 만듦', closed: '세션 닫음',
+  started: '세션 시작', context_reset: '컨텍스트 재구성', turn_done: '턴 완료', finished: '작업 종료', error: '오류', interrupted: '중단됨', handoff: '터미널 세션 넘겨받음', mkdir: '디렉터리 새로 만듦', closed: '세션 닫음',
 };
 
 export function eventSummary(e: HubEvent): string {

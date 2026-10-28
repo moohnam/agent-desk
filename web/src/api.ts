@@ -78,9 +78,17 @@ export const api = {
   sendQueuedNow: (taskId: string, queuedId: string) => call('POST', `/tasks/${taskId}/queue/${queuedId}/send`),
   /** Moves a waiting message to `index` (0 = sent first). */
   moveQueued: (taskId: string, queuedId: string, index: number) => call('PUT', `/tasks/${taskId}/queue/${queuedId}`, { index }),
+  /** Asks the task's agent for a handoff summary of the conversation (컨텍스트 재구성), or to revise `current`. */
+  requestHandoff: (taskId: string, a: { picked?: number[]; feedback?: string; current?: string }) =>
+    call<{ queued: boolean }>('POST', `/tasks/${taskId}/handoff`, a),
+  /** Continues the task in a fresh engine session whose first message is `text`, after the running turn. */
+  resetContext: (taskId: string, text: string) => call<{ queued: boolean }>('POST', `/tasks/${taskId}/reset`, { text }),
   interrupt: (taskId: string) => call('POST', `/tasks/${taskId}/interrupt`),
   /** Ends the task's engine process; the next reply resumes the conversation. */
   closeSession: (taskId: string) => call('POST', `/tasks/${taskId}/close`),
+  /** Deletes a task for good, or a project with all its tasks; open sessions are closed first. */
+  deleteTask: (taskId: string) => call('DELETE', `/tasks/${taskId}`),
+  deleteProject: (projectId: string) => call('DELETE', `/projects/${projectId}`),
   /** `answers`: picks for an agent's multiple-choice question, keyed by question text. */
   resolve: (approvalId: string, allow: boolean, message?: string, answers?: Record<string, string>) =>
     call('POST', `/approvals/${approvalId}`, { allow, message, answers }),

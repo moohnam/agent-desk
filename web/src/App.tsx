@@ -1,5 +1,5 @@
-import { ArrowDown, ArrowLeft, ArrowUp, Cpu, Ellipsis, Keyboard, PenLine, Pin, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Cpu, Ellipsis, Keyboard, ListRestart, PenLine, Pin, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog } from './AccessDialog.tsx';
@@ -235,7 +235,11 @@ export function App() {
   const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, loadEarlier }
     = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined);
   const threadPosts = useMemo(() => buildPosts(threadEvents), [threadEvents]);
+  /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
+  const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
   const phone = useMedia(PHONE);
+  /** One list per hub update, so the boxes given it keep their memoized suggestions between renders. */
+  const taskList = useMemo(() => [...hub.tasks.values()], [hub.tasks]);
   // The thread as a panel on the right half of the workspace, next to a narrower deck, instead of a column.
   const [floatPref, setFloatPref] = useState(() => { try { return localStorage.getItem(FLOAT_KEY) !== '0'; } catch { return true; } });
   /**
@@ -834,9 +838,11 @@ export function App() {
     else { setToast(FIXED_NOTE); return; }
     setFocusCol(id!);
   };
-  const sortColumns = (sort: ViewSort) => {
-    setViewOrder((o) => ({ ...o, [view]: sort }));
-    setToast(`${VIEWS.find((x) => x.id === view)!.label} 뷰: ${SORT_LABEL[sort]} 정렬`);
+  /** `null`: back to the view's own order, dropping a sort picked or columns moved. */
+  const sortColumns = (sort: ViewSort | null) => {
+    setViewOrder((o) => { const next = { ...o }; if (sort) next[view] = sort; else delete next[view]; return next; });
+    setCountSnap({});
+    setToast(`${VIEWS.find((x) => x.id === view)!.label} 뷰: ${sort ? `${SORT_LABEL[sort]} 정렬` : `자동 순서 (${AUTO_ORDER[view] ?? '기본'})`}`);
   };
   /**
    * Shows a task as its own feed column (`p`), right of the column it is viewed from, or focuses
@@ -1083,6 +1089,13 @@ export function App() {
         case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
         case 'f': if (threadTask && !phone) toggleFloat(); break;
         case 't': toggleThreadFocus(); break;
+        case 'X':
+          if (threadTask && hub.tasks.get(threadTask)?.source === 'app') toggleHandoff(threadTask);
+          else setToast(threadTask ? '터미널 작업은 컨텍스트를 재구성할 수 없습니다.' : '열린 스레드가 없습니다.');
+          break;
+        case 'x':
+          if (handoff?.open && activeCol?.id === THREAD && selectedPost && pickable(selectedPost.event)) togglePick(selectedPost.taskId, selectedPost.event.id);
+          break;
         case 'p': { const id = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null); if (id) pinTask(id); break; }
         case 'v': if (activeCol?.def && activeCol.id !== SEARCH) toggleByTask(activeCol.id); break;
         case 'e':
@@ -1124,6 +1137,8 @@ export function App() {
       colId={colId} selected={i === activeIdx && selection[colId] === p.id} flash={flash === p.id}
       expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread} tick={tick}
       draft={draftPosts.has(`${colId}:${p.id}`)}
+      picked={inThread && handoff?.open && pickable(p.event) ? handoff.picked.includes(p.event.id) : undefined}
+      onPick={() => togglePick(p.taskId, p.event.id)}
       onSelect={() => {
         const a = postActions.current;
         const k = a.deck.findIndex((c) => c.id === colId);
@@ -1219,41 +1234,19 @@ export function App() {
               </button>
             </div>
           )}
-          {isThread
-            ? col.placed.map((pp) => renderPost(pp, col.id, i, true))
-            : groupsOf(col.placed).map((group) => {
-                const task = hub.tasks.get(group[0].post.taskId);
-                const pending = group.some(({ post }) => !post.resolution
-                  && (post.kind === 'approval' ? hub.approvals.has(post.event.payload.approvalId)
-                    : post.kind === 'question' && hub.questions.has(post.event.payload.questionId)));
-                return (
-                  <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
-                    style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
-                    {task && <GroupContext task={task} now={now} onOpen={() => openThread(task.id, { from: col.id })} />}
-                    {group.map((pp) => renderPost(pp, col.id, i, false))}
-                  </div>
-                );
-              })}
+          {col.placed.map((pp) => renderPost(pp, col.id, i, true))}
           {col.posts.length === 0 && (
-            <p className="empty">{col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : isThread ? (threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…') : hub.events.length === 0
-              ? 'i를 눌러 첫 작업을 시작하세요.' : feeds.get(col.id)?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}</p>
+            <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
           )}
-          {!isThread && (() => {
-            const older = olderOf(col.id);
-            return older.more && (
-              <div className="older-posts">
-                <button disabled={older.loading} onClick={older.load}>
-                  {older.loading ? '불러오는 중…' : <><ArrowDown /> 이전 글 더 보기</>}
-                </button>
-              </div>
-            );
-          })()}
         </div>
-        {isThread && threadTaskView && (threadTaskView.source === 'external' ? (
+        {threadTaskView && (threadTaskView.source === 'external' ? (
           <ExternalNote pending={!!questionOf(threadTaskView.id)}
             onAnswer={() => { const q = questionOf(threadTaskView.id); if (q) answerQuestion(threadTaskView.id, q); }} />
+        ) : handoff?.open ? (
+          <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
+            onError={setToast} onDone={setToast} />
         ) : (
-          <ReplyBox key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
         ))}
         <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
       </section>
@@ -1623,9 +1616,11 @@ function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRenaming,
   );
 }
 
-function ThreadHead({ task, project, model, events, now, draft, onClose, onPin, onMenu }: {
+function ThreadHead({ task, project, model, events, now, draft, handoff, onClose, onPin, onHandoff, onMenu }: {
   task: TaskView | undefined; project: Project | undefined; model: string | undefined; events: HubEvent[];
   now: number; draft: boolean; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
+  /** Context reset: its panel is open, or closed with work kept; null: none. */
+  handoff: 'open' | 'kept' | null; onHandoff: () => void;
 }) {
   const turns = events.filter((e) => e.kind === 'status' && e.payload.state === 'turn_done').length;
   return (
@@ -1637,6 +1632,11 @@ function ThreadHead({ task, project, model, events, now, draft, onClose, onPin, 
         {task?.source === 'external' && <TerminalBadge />}
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
+        {task?.source === 'app' && (
+          <button className={`icon-btn${handoff === 'kept' ? ' kept' : ''}`} aria-pressed={handoff === 'open'}
+            title={handoff === 'kept' ? '컨텍스트 재구성 이어서 하기 (X) · 쓰던 정리본이 있습니다' : handoff === 'open' ? '컨텍스트 재구성 패널 닫기 (X)' : '컨텍스트 재구성: 글을 골라 정리본을 만들고 새 세션으로 넘기기 (X)'}
+            aria-label="컨텍스트 재구성" onClick={onHandoff}><ListRestart /></button>
+        )}
         {task && <button className="icon-btn" title="컬럼으로 고정 (p)" aria-label="컬럼으로 고정" onClick={onPin}><Pin /></button>}
         <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
       </div>
@@ -1679,8 +1679,10 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
   floating?: boolean; onFloat?: () => void;
   /** A column of a built view (F2–F4): only width and grouping change. */
   fixed: boolean; canRight: boolean;
-  /** F2 and F3 move columns too. `sort`: their sort in force (null: automatic or moved); undefined elsewhere. */
-  reorderable: boolean; sort?: ViewSort | null; onSort: (sort: ViewSort) => void;
+  /** F2 moves columns too. `sort`: their sort in force (null: automatic or moved); undefined elsewhere. */
+  reorderable: boolean; sort?: ViewSort | null; onSort: (sort: ViewSort | null) => void;
+  /** A built view's own order (shown when no sort is picked and no column moved); undefined elsewhere. */
+  autoOrder?: { label: string; on: boolean };
   onClose: () => void; onRename?: () => void;
   /** A user column: whether it shows one card per task; undefined for others (search). */
   byTask?: boolean; onByTask: () => void; onSplit: () => void;
@@ -1748,14 +1750,15 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
 
 const KEYS: [string, string][] = [
   ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업. 스레드에서는 다음 / 이전 내 글)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
-  ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
-  ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍)'], ['Ctrl `', '작성 서랍 열기 / 닫기 (입력 중에도, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
+  ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기 · 그다음 작성 서랍 닫기 · 열린 창은 Esc로 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
+  ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍, Esc로 닫기, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
-  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['f', '스레드를 오른쪽 절반 / 컬럼으로 보기 (절반일 때 경계선을 끌어 폭 조절)'], ['t', '스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 h/l은 스레드를 건너뜀)'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기 (F2·F3에서는 옮긴 순서를 뷰마다 기억, 칼럼 메뉴에서 이름순·만든 순 정렬)'],
+  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['f', '스레드를 오른쪽 절반 / 컬럼으로 보기 (절반일 때 경계선을 끌어 폭 조절)'], ['t', '스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 h/l은 스레드를 건너뜀)'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기 (F2에서는 옮긴 순서를 기억, 컬럼 메뉴에서 이름순·만든 순 정렬·자동 순서. F3은 늘 최근 활동순)'],
   ['⌘ Enter', '작성창·답 입력란에서 보내기'], ['Tab', '@프로젝트 · #태그 완성'], ['#auto / #ask', '이제부터 자동 승인 / 매번 확인'],
   ['#스킬이름', '그 메시지에만 데스크 스킬 적용 (상단 스킬 버튼에서 관리)'],
   ['#later / #now', '실행 중에 보낸 메시지: 턴이 끝난 뒤 (기본) / 지금 턴에 끼워넣기'],
   ['@프로젝트#2', '그 프로젝트의 2번 작업에 보내기 (번호는 스레드 머리에 표시)'],
+  ['X / x', '컨텍스트 재구성 패널 열기 / 닫기 · 패널이 열려 있으면 선택한 스레드 글 고르기 (고른 글의 핵심을 정리본에 담아 새 세션으로 넘김)'],
   ['#new / #fork', '같은 프로젝트의 새 작업으로 (이전 대화 없이) / 대화를 이어받은 새 작업으로'], ['?', '이 도움말'],
 ];
 

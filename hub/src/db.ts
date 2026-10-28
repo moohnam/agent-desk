@@ -179,6 +179,7 @@ export class Store {
       // The order messages are sent in; the user can change it. Existing ones keep theirs.
       this.db.exec('ALTER TABLE queued ADD COLUMN ord INTEGER; UPDATE queued SET ord = rowid;');
     }
+    if (!queuedCols.some((c) => c.name === 'kind')) this.db.exec('ALTER TABLE queued ADD COLUMN kind TEXT');
     // After the migrations above, since some index columns they add.
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS session_task ON session(task_id, created_at);
@@ -474,9 +475,13 @@ export class Store {
   }
 
   enqueue(q: Queued) {
-    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, ord)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
-      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at);
+    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, ord)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
+      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null);
+  }
+  /** Hands a session's waiting messages to the session that replaced it. */
+  moveQueued(fromSession: string, toSession: string) {
+    this.db.prepare('UPDATE queued SET session_id = ? WHERE session_id = ?').run(toSession, fromSession);
   }
   /** Waiting messages in the order they go out: of one session, of one task, or all. */
   queued(by: { sessionId?: string; taskId?: string } = {}): Queued[] {
