@@ -71,6 +71,11 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
           <fieldset key={e} className="field-group">
             <legend>{ENGINE_LABEL[e]} <small className="muted">{TAG_HINT[e]}</small></legend>
             <div className="field">
+              <span className="lbl">사용량{usage[e]?.plan ? ` (${usage[e]!.plan})` : ''}
+                <small>계정 전체 기준, 사용 비율과 초기화 시각</small></span>
+              <UsageRows usage={usage[e]} />
+            </div>
+            <div className="field">
               <span className="lbl">모델</span>
               <div className="pills" role="radiogroup" aria-label={`${ENGINE_LABEL[e]} 모델`}>
                 <button type="button" role="radio" className="toggle" aria-pressed={pick[e].model === null} aria-checked={pick[e].model === null}
@@ -96,6 +101,8 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
         ))}
         {error && <p className="error">{error}</p>}
         <div className="form-actions">
+          <button type="button" className="btn" title="사용량 다시 조회" disabled={loading} onClick={() => loadUsage(true)}>
+            <RefreshCw /> 사용량</button>
           <span className="spacer" />
           <button type="button" className="btn" onClick={onClose}>취소</button>
           <button className="btn primary">저장</button>

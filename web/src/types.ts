@@ -43,6 +43,8 @@ export interface Question {
   status: 'pending' | 'answered' | 'cancelled'; answer: string | null; created_at: string; answered_at: string | null;
 }
 
+export type { EngineUsage, UsageWindow } from '../../hub/src/usage.ts';
+
 /** Desk-wide defaults for new tasks of each engine; null: the engine's default. */
 export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
 

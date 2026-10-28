@@ -1,4 +1,4 @@
-import type { Approval, HubEvent, Project, Question, Settings, Skill, TaskView } from './types.ts';
+import type { Approval, EngineUsage, HubEvent, Project, Question, Settings, Skill, TaskView } from './types.ts';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -98,6 +98,8 @@ export const api = {
   /** Addresses (with QR codes) other devices open the desk at; only on the hub's own machine. */
   access: () => call<{ urls: { url: string; qr: string }[] }>('GET', '/access'),
   settings: () => call<Settings>('GET', '/settings'),
+  /** Each engine's plan limits: used share and reset time per window. `refresh`: skip the hub's one-minute cache. */
+  usage: (engine: string, refresh = false) => call<EngineUsage>('GET', `/usage?engine=${engine}${refresh ? '&refresh=1' : ''}`),
   /** Only the engines and keys given change; null clears one. */
   saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }) => call<Settings>('PUT', '/settings', s),
   skills: () => call<Skill[]>('GET', '/skills'),
