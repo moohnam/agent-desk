@@ -95,16 +95,28 @@ export interface Composed {
   body: string;
 }
 
+/** The tool name of the approval card a desk_request (one agent asking another task's) waits on. */
+export const REQUEST_TOOL = 'desk_request';
+
 const MENTION = /(^|\s)@([^\s:@#]+)(?:#(\d+))?(?::(\S+))?/;
 const TAG = /(^|\s)#([a-z0-9][a-z0-9-]*)(?=\s|$)/gi;
 
-/** `skills`: names of the skills that exist; a #tag naming none of them stays as text. */
-export function parseCompose(text: string, skills: Iterable<string> = []): Composed {
+/** Every `@name` or `@name#N` in `text`, in order (paths dropped). */
+export function mentionsIn(text: string): { name: string; no?: number }[] {
+  return [...text.matchAll(new RegExp(MENTION.source, 'g'))].map((m) => ({ name: m[2], no: m[3] ? Number(m[3]) : undefined }));
+}
+
+/**
+ * `skills`: names of the skills that exist; a #tag naming none of them stays as text. `route`: the
+ * compose box's text, whose leading mention (only #tags before it) says where it goes and is taken
+ * out; elsewhere, and in replies, mentions stay in the text the agent gets.
+ */
+export function parseCompose(text: string, skills: Iterable<string> = [], route = true): Composed {
   const known = new Set(skills);
   let body = text;
   let mention: Composed['mention'];
-  const m = MENTION.exec(body);
-  if (m) {
+  const m = route ? MENTION.exec(body) : null;
+  if (m && /^(\s*#[^\s#@]+)*\s*$/.test(body.slice(0, m.index))) {
     mention = { name: m[2], no: m[3] ? Number(m[3]) : undefined, path: m[4] };
     body = body.slice(0, m.index) + m[1] + body.slice(m.index + m[0].length);
   }

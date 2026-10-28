@@ -21,8 +21,15 @@ export interface TaskView {
   /** 'external': a terminal session attached over MCP; the app only answers its questions. */
   source: 'app' | 'external' | null;
   last_event: HubEvent | null; pending_approvals: number; pending_questions: number;
-  /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string }[];
+  /** A Codex async question waiting for my next message, which answers it. Older hubs omit it. */
+  pending_ask?: { event_id: number; text: string; ts: string } | null;
+  /**
+   * Messages waiting for the running turn to end (#later), oldest first. `kind`: a handoff summary
+   * request, or the context reset itself (컨텍스트 재구성).
+   */
+  queued: { id: string; text: string; created_at: string; kind?: 'handoff' | 'reset' }[];
+  /** What the agent left running between turns (subagents, background commands). Older hubs omit it. */
+  background?: { id: string; type: string; description: string; agent?: string }[];
 }
 
 export interface Approval {

@@ -58,7 +58,7 @@ const STATE_LABEL: Record<string, string> = {
 export function eventSummary(e: HubEvent): string {
   const p = e.payload;
   switch (e.kind) {
-    case 'user': return `나: ${p.text}`;
+    case 'user': return p.request ? `@${p.request.from}: ${p.text}` : `나: ${p.text}`;
     case 'question': return p.decision === 'cancelled' ? '질문 취소됨' : `질문: ${p.text}`;
     case 'assistant': return p.text;
     case 'tool': return `${p.name} ${toolSummary(p.name, p.input)}`;

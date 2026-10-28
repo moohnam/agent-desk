@@ -1,9 +1,9 @@
 import { ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { MODE_LABEL, MODEL_LABEL, type ModelName, type PermissionMode } from '../../hub/src/compose.ts';
+import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
-import { getDraft, setDraft } from './drafts.ts';
+import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
 import { LongText, Markdown } from './Markdown.tsx';
 import { modelShort } from './projects.ts';
@@ -34,14 +34,19 @@ interface Props {
   /** Clicking the post (outside its controls) opens its thread; unset inside the thread. */
   onOpenThread?: () => void;
   onError?: (msg: string) => void;
+  /** Context reset (컨텍스트 재구성) is picking posts: whether this one is picked; unset when it can't be. */
+  picked?: boolean;
+  onPick?: () => void;
   /** Changes every clock tick, so the relative time stays fresh in a post that is otherwise unchanged. */
   tick?: number;
 }
 
-const ENGINE_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex' };
+const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
 
 /** Everything except my own posts is said by the task's engine. */
 function author(post: Post, task: TaskView | undefined) {
+  // A question another task's agent asked through the desk (desk_request).
+  if (post.kind === 'user' && post.event.payload.request) return `@${post.event.payload.request.from}`;
   if (post.kind === 'user') return '나';
   const engine = task?.engine ?? 'claude';
   return ENGINE_NAME[engine] ?? engine;
@@ -91,12 +96,15 @@ function PostViewInner(props: Props) {
   ) : post.kind === 'assistant' ? <Markdown text={p.text} onLocalLink={onLocalLink} />
     : richText(String(p.text ?? '')), [post.kind, p, onLocalLink]);
   const engine = task?.engine ?? 'claude';
-  const avatar = post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
-    : [engine, engine === 'codex' ? 'Cx' : 'C'];
+  const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
+    : [engine, ENGINE_SHORT[engineOf(engine)]];
   const tag = post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>
     : post.kind === 'question' ? <span className="tag">질문</span>
     : post.kind === 'alert' ? (p.state === 'interrupted' ? <span className="tag stop">중단됨</span>
       : p.state === 'queue_dropped' ? <span className="tag stop">대기 취소</span> : <span className="tag err">오류</span>)
+    : post.kind === 'user' && p.handoff === 'request' ? <span className="tag via" title="컨텍스트 재구성: 새 세션에 넘길 정리본을 에이전트에게 요청">정리본 요청</span>
+    : post.kind === 'user' && p.handoff === 'reset' ? <span className="tag via" title="이전 대화를 비우고 이 메시지 하나로 새 세션을 시작함">컨텍스트 재구성</span>
+    : post.kind === 'user' && p.request ? <span className="tag via" title="다른 작업의 에이전트가 데스크를 통해 물음. 이번 턴의 마지막 응답이 답으로 전달됩니다">에이전트 질문</span>
     : post.kind === 'user' && p.delivery === 'now' ? <span className="tag via" title="실행 중인 턴에 끼워넣음">#now</span>
     : post.kind === 'user' && p.delivery === 'later' && p.queued_at ? <span className="tag via" title="턴이 끝나기를 기다렸다가 보냄">#later</span>
     // 'bg': what #fork was called before.
@@ -132,6 +140,8 @@ function PostViewInner(props: Props) {
           </time>
         </div>
         {replyTo && <div className="replying">↳ <b>@{replyTo}</b>에게 답글</div>}
+        {post.kind === 'user' && p.request && <div className="replying">⇄ “{p.request.title}”의 에이전트가 물음</div>}
+        {post.kind === 'user' && p.handoff === 'reset' && <div className="replying">↻ 새 세션: 이전 대화 없이 이 정리본으로 이어 갑니다</div>}
         {post.kind === 'user' && p.forked_from && <div className="replying">⑂ {p.forked_from.seq ? `#${p.forked_from.seq} ` : ''}“{p.forked_from.title}”에서 포크</div>}
 
         {post.kind === 'approval' && isAsk(p.toolName) ? (
@@ -168,9 +178,14 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
     : approval ? null : '만료됨';
   return (
     <div className={`approve-card${outcome ? ' resolved' : ''}`}>
-      <div className="what">{p.toolName} {outcome ? '실행 요청' : '실행을 요청합니다'}</div>
-      <pre className="mono">{expanded ? JSON.stringify(p.input, null, 2) : toolSummary(p.toolName, p.input)}</pre>
-      {!expanded && typeof p.input?.description === 'string' && p.input.command && <div className="desc">{p.input.description}</div>}
+      {p.toolName === REQUEST_TOOL ? (<>
+        <div className="what" title={p.input?.title}>{p.input?.to}에게 {outcome ? '보낼 질문' : '질문을 보내려 합니다'}</div>
+        <div className="desc">{richText(String(p.input?.description ?? ''))}</div>
+      </>) : (<>
+        <div className="what">{p.toolName} {outcome ? '실행 요청' : '실행을 요청합니다'}</div>
+        <pre className="mono">{expanded ? JSON.stringify(p.input, null, 2) : toolSummary(p.toolName, p.input)}</pre>
+        {!expanded && typeof p.input?.description === 'string' && p.input.command && <div className="desc">{p.input.description}</div>}
+      </>)}
       <div className="approve-actions">
         {outcome ? (
           <span className={`resolution ${r?.decision === 'allowed' ? 'ok' : 'no'}`}>

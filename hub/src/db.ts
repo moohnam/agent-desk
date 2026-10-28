@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Effort, ModelName, PermissionMode } from './compose.ts';
+import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from './compose.ts';
 
 export type TaskStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
 export type EventKind = 'user' | 'assistant' | 'tool' | 'tool_result' | 'approval' | 'status' | 'update' | 'question';
@@ -90,14 +90,31 @@ export interface Approval {
  * running turn ends; then it is sent and recorded as a `user` event. `text` is what the user wrote,
  * `body`/`skills` what the agent receives.
  */
+/**
+ * A waiting message. `kind` 'handoff': the desk's request for a handoff summary, sent as is;
+ * 'reset': the first message of a fresh session that replaces this one (handoff.ts).
+ */
+export type QueuedKind = 'handoff' | 'reset';
 export interface Queued {
   id: string; task_id: string; session_id: string; text: string; body: string; skills: string[];
-  mode: PermissionMode | null; created_at: string;
+  mode: PermissionMode | null; created_at: string; kind?: QueuedKind | null;
 }
 /** A question an attached (MCP) agent asked the user; it waits for the answer. */
 export interface Question {
   id: string; session_id: string; task_id: string; text: string;
   status: 'pending' | 'answered' | 'cancelled'; answer: string | null; created_at: string; answered_at: string | null;
+}
+/**
+ * A question one agent asks another task's agent through the desk. `approval_id`: the card the user
+ * allows it with (none when the user named the target with @); `queued_id`: the waiting message it
+ * rides while the target is busy; `prompt_event_id`: the target's `user` event that delivered it, after
+ * which the target's last reply in that turn is the answer.
+ */
+export interface AgentRequest {
+  id: string; from_task_id: string; from_session_id: string; to_task_id: string; to_session_id: string; text: string;
+  status: 'approval' | 'queued' | 'running' | 'answered' | 'denied' | 'failed'; answer: string | null;
+  approval_id: string | null; queued_id: string | null; prompt_event_id: number | null;
+  created_at: string; answered_at: string | null;
 }
 
 const SCHEMA = `
@@ -124,6 +141,10 @@ CREATE TABLE IF NOT EXISTS question (
 CREATE TABLE IF NOT EXISTS queued (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, session_id TEXT NOT NULL, text TEXT NOT NULL, body TEXT NOT NULL,
   skills_json TEXT NOT NULL, mode TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS request (
+  id TEXT PRIMARY KEY, from_task_id TEXT NOT NULL, from_session_id TEXT NOT NULL, to_task_id TEXT NOT NULL,
+  to_session_id TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, answer TEXT, approval_id TEXT, queued_id TEXT,
+  prompt_event_id INTEGER, created_at TEXT NOT NULL, answered_at TEXT);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runner (
   id TEXT PRIMARY KEY, host TEXT NOT NULL, capabilities_json TEXT NOT NULL, last_seen TEXT NOT NULL);
@@ -164,6 +185,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS task_project ON task(project_id, seq);
       CREATE INDEX IF NOT EXISTS approval_status ON approval(status, created_at);
       CREATE INDEX IF NOT EXISTS question_status ON question(status, created_at);
+      CREATE INDEX IF NOT EXISTS request_status ON request(status, created_at);
       DROP INDEX IF EXISTS queued_session;
       DROP INDEX IF EXISTS queued_task;
       CREATE INDEX IF NOT EXISTS queued_session_ord ON queued(session_id, ord);
@@ -218,6 +240,28 @@ export class Store {
     this.db.prepare('UPDATE task SET title = ?, updated_at = ? WHERE id = ?').run(title, now(), id);
   }
 
+  /**
+   * Removes tasks with everything recorded for them: sessions, events, approvals, questions, queued
+   * messages, and requests they sent. Requests other tasks sent them stay (settled by the hub first).
+   */
+  deleteTasks(ids: string[]) {
+    if (!ids.length) return;
+    const marks = ids.map(() => '?').join(',');
+    this.db.exec('BEGIN');
+    try {
+      for (const table of ['event', 'approval', 'question', 'queued', 'session']) {
+        this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (${marks})`).run(...ids);
+      }
+      this.db.prepare(`DELETE FROM request WHERE from_task_id IN (${marks})`).run(...ids);
+      this.db.prepare(`DELETE FROM task WHERE id IN (${marks})`).run(...ids);
+      this.db.exec('COMMIT');
+    } catch (err) { this.db.exec('ROLLBACK'); throw err; }
+  }
+  /** Removes a project that has no tasks left. */
+  deleteProject(id: string) {
+    this.db.prepare('DELETE FROM project WHERE id = ?').run(id);
+  }
+
   createSession(s: Session) {
     this.db.prepare(`INSERT INTO session (id, task_id, engine, engine_session_id, cwd, source, status, runner_id,
       created_at, permission_mode, model, effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -257,7 +301,9 @@ export class Store {
     ).all() as unknown as { id: string; task_id: string }[]).filter((r) => !liveSessions.has(r.id));
     const appSessions = new Set((this.db.prepare("SELECT id FROM session WHERE source = 'app'").all() as
       unknown as { id: string }[]).map((r) => r.id));
-    const expired = this.pendingApprovals().filter((a) => appSessions.has(a.session_id) && !liveApprovals.has(a.id));
+    // desk_request cards are the hub's own, not the runner's.
+    const expired = this.pendingApprovals().filter((a) => appSessions.has(a.session_id) && !liveApprovals.has(a.id)
+      && a.tool_name !== REQUEST_TOOL);
     for (const r of lost) {
       this.db.prepare("UPDATE session SET status = 'error' WHERE id = ?").run(r.id);
       this.db.prepare("UPDATE task SET status = 'error', updated_at = ? WHERE id = ? AND status IN ('running', 'waiting')")
@@ -378,6 +424,48 @@ export class Store {
   pendingQuestions(): Question[] {
     return this.db.prepare("SELECT * FROM question WHERE status = 'pending' ORDER BY created_at").all() as unknown as Question[];
   }
+  createRequest(r: AgentRequest) {
+    this.db.prepare(`INSERT INTO request (id, from_task_id, from_session_id, to_task_id, to_session_id, text, status, answer,
+      approval_id, queued_id, prompt_event_id, created_at, answered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(r.id, r.from_task_id, r.from_session_id, r.to_task_id, r.to_session_id, r.text, r.status, r.answer,
+        r.approval_id, r.queued_id, r.prompt_event_id, r.created_at, r.answered_at);
+  }
+  getRequest(id: string): AgentRequest | undefined {
+    return this.db.prepare('SELECT * FROM request WHERE id = ?').get(id) as unknown as AgentRequest | undefined;
+  }
+  updateRequest(id: string, r: Partial<Pick<AgentRequest, 'status' | 'answer' | 'queued_id' | 'prompt_event_id' | 'to_session_id' | 'answered_at'>>) {
+    const keys = Object.keys(r) as (keyof typeof r)[];
+    if (!keys.length) return;
+    this.db.prepare(`UPDATE request SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => r[k] ?? null), id);
+  }
+  /** Requests not settled yet: waiting for approval, queued at the target, or being answered. */
+  openRequests(): AgentRequest[] {
+    return this.db.prepare("SELECT * FROM request WHERE status IN ('approval', 'queued', 'running') ORDER BY created_at")
+      .all() as unknown as AgentRequest[];
+  }
+  /** The task's newest `user` event, or its newest `assistant` one after event `afterId`. */
+  lastEventOf(taskId: string, kind: 'user' | 'assistant', afterId = 0): Event | undefined {
+    const row = this.db.prepare('SELECT * FROM event WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id DESC LIMIT 1')
+      .get(taskId, kind, afterId) as unknown as (Omit<Event, 'payload'> & { payload_json: string }) | undefined;
+    if (!row) return undefined;
+    const { payload_json, ...e } = row;
+    return { ...e, payload: JSON.parse(payload_json) };
+  }
+
+  /**
+   * The task's Codex async question still unanswered: an agent message with `questions` that no
+   * message of mine followed (the next one is the answer).
+   */
+  openAsyncQuestion(taskId: string): { event_id: number; text: string; ts: string } | null {
+    const lastUser = this.lastEventOf(taskId, 'user')?.id ?? 0;
+    const row = this.db.prepare(`SELECT id, ts, payload_json FROM event WHERE task_id = ? AND kind = 'assistant' AND id > ?
+      AND payload_json LIKE '%"questions":[%' ORDER BY id DESC LIMIT 1`).get(taskId, lastUser) as
+      { id: number; ts: string; payload_json: string } | undefined;
+    if (!row) return null;
+    const p = JSON.parse(row.payload_json) as { text?: string; questions?: unknown[] };
+    return p.questions?.length ? { event_id: row.id, text: p.text ?? '', ts: row.ts } : null;
+  }
+
   /** Projects whose root contains `path`, deepest first. */
   projectsContaining(path: string): Project[] {
     return this.listProjects()

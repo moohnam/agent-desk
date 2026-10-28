@@ -54,8 +54,12 @@ const TAG_OPTIONS: Option[] = [
   { key: 'fork', insert: 'fork', label: '#fork', desc: '이 작업의 대화를 이어받은 새 작업으로 동시에 진행', space: true },
 ];
 
-/** Options for the @mention or #tag being typed just before the caret. */
-function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: boolean, skills: Skill[]) {
+/**
+ * Options for the @mention or #tag being typed just before the caret. `mentions`: 'route' where a
+ * mention says where the text goes (and may define a new project), 'refer' where it names a project
+ * or task the agent may ask (replies).
+ */
+function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[]) {
   const before = text.slice(0, caret);
   const no = mentions ? /(^|\s)@([^\s:@#]+)#(\d*)$/.exec(before) : null;
   const numbered = no && projects.find((p) => p.name.toLowerCase() === no[2].toLowerCase());
@@ -74,7 +78,7 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
       key: project.id, insert: project.name, label: `@${project.name}`, space: true, color: projectColor(project.id),
       desc: last ? `› ${last.title}` : project.root_path,
     }));
-    if (q && !projects.some((p) => p.name.toLowerCase() === q.toLowerCase())) {
+    if (mentions === 'route' && q && !projects.some((p) => p.name.toLowerCase() === q.toLowerCase())) {
       items.push({ key: 'new', insert: `${q}:/`, label: `@${q}:/경로`, desc: '새 프로젝트 만들기' });
     }
     return { start: caret - q.length, items, total: ranked.length };
@@ -374,8 +378,10 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
  * send it to a new task instead (a tag typed in the text wins). Waiting replies are listed above the
  * box and can be cancelled.
  */
-export function ReplyBox({ task, inputRef, onError, onSend }: {
+export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   task: TaskView; inputRef: RefObject<HTMLTextAreaElement | null>; onError: (msg: string) => void;
+  /** For @mentions: naming another project or task lets this task's agent ask it (desk_request) without a card. */
+  projects: Project[]; tasks: TaskView[];
   /** Right before a message goes out (its event can arrive before the reply); the thread then follows it. */
   onSend?: () => void;
 }) {
@@ -467,7 +473,7 @@ export function ReplyBox({ task, inputRef, onError, onSend }: {
       )}
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
       <ComposeField value={text} onChange={(v) => { setText(v); setSent(null); }} onSubmit={submit} inputRef={inputRef} rows={2}
-        projects={[]} tasks={[]} mentions={false}
+        projects={projects} tasks={tasks} mentions="refer"
         placeholder={running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">

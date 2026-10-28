@@ -1,4 +1,5 @@
 import { ArrowUpRight, ChevronDown } from 'lucide-react';
+import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../hub/src/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
 import { projectColor } from './projects.ts';
@@ -52,9 +53,13 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
             {item.kind === 'approval' && isAsk(item.approval.tool_name) ? (
               <span className="tool" title={askSummary(item.approval.input)}><span className="qtag">질문</span> {askSummary(item.approval.input)}</span>
             ) : item.kind === 'approval' ? (
-              <span className="tool"><b>{item.approval.tool_name}</b> <span className="mono">{toolSummary(item.approval.tool_name, item.approval.input)}</span></span>
+              item.approval.tool_name === REQUEST_TOOL ? (
+                <span className="tool" title={String((item.approval.input as { description?: string }).description ?? '')}>
+                  <span className="qtag">{String((item.approval.input as { to?: string }).to ?? '')}에게</span> {String((item.approval.input as { description?: string }).description ?? '')}</span>
+              ) : <span className="tool"><b>{item.approval.tool_name}</b> <span className="mono">{toolSummary(item.approval.tool_name, item.approval.input)}</span></span>
             ) : (
-              <span className="tool" title={item.question.text}><span className="qtag">질문</span> {item.question.text}</span>
+              <span className="tool" title={item.kind === 'ask' ? item.text : item.question.text}>
+                <span className="qtag">질문</span> {(item.kind === 'ask' ? item.text : item.question.text).split('\n')[0]}</span>
             )}
             <time dateTime={item.created_at}>{relTime(item.created_at)}</time>
             <span className="acts">
