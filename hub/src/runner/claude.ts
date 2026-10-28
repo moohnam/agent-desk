@@ -85,7 +85,7 @@ export function startClaude(opts: {
       model: opts.model,
       effort: claudeEffort(opts.effort),
       plugins: opts.skillsHome ? [{ type: 'local', path: opts.skillsHome }] : undefined,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: PROMPT_APPEND },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: DESK_INSTRUCTIONS },
       canUseTool: (toolName, input, { signal }) => new Promise<PermissionResult>((resolve) => {
         const approvalId = randomUUID();
         pending.set(approvalId, { resolve, input });

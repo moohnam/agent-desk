@@ -8,12 +8,11 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Effort, ModelName, PermissionMode } from '../compose.ts';
+import { DESK_INSTRUCTIONS } from './instructions.ts';
 import { ASK_USER, type Answers, type EngineAdapter, type RunnerEvent, type RunnerToHub } from './protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
-/** Every utterance becomes a post in the feed, so ask for Korean throughout (same as claude.ts). */
-const DEVELOPER_INSTRUCTIONS = '사용자에게 보이는 모든 발화(작업 중간의 짧은 안내 포함)는 한국어로 작성합니다.';
 
 /**
  * #ask: `untrusted` asks before file edits and any command not known to be read-only; the app
@@ -358,7 +357,7 @@ export function startCodex(opts: {
         return undefined;
       });
       const common = {
-        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: DEVELOPER_INSTRUCTIONS,
+        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: DESK_INSTRUCTIONS,
       };
       // Codex lets one process write a thread. Another client holding it (the Codex app with the
       // conversation open) makes resuming fail; a fork carries the history over to a new thread.
