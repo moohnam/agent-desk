@@ -7,8 +7,10 @@ import { HttpError, type Hub, type HubMessage } from './hub.ts';
 import { handleMcp } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { SkillError } from './skills.ts';
-import { feedEvent } from './db.ts';
+import { feedEvent, type FeedFilter } from './db.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
+import { readEngineUsage, readUsage } from './usage.ts';
+import { ENGINES, type EngineName } from './compose.ts';
 
 const WEB_DIST = resolve(import.meta.dirname, '../../web/dist');
 const MIME: Record<string, string> = {
@@ -50,6 +52,13 @@ function intParam(url: URL, name: string, fallback: number | undefined, max = Nu
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new HttpError(400, `${name}는 1 이상 ${max} 이하의 정수여야 합니다`);
   return n;
+}
+
+/** A feed column's filter from `/feed` parameters: comma lists of tasks, projects, statuses, kinds; `q` a search. */
+function feedFilter(url: URL): FeedFilter {
+  const list = (name: string) => url.searchParams.get(name)?.split(',').filter(Boolean);
+  return { taskIds: list('task'), projectIds: list('project'), statuses: list('status'), kinds: list('kind'),
+    q: url.searchParams.get('q')?.trim() || undefined };
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {
@@ -135,11 +144,13 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           return send(res, 201, { path: await saveUpload(req, uploadsDir, name) });
         }
         case 'GET /feed': {
-          // A column's filter (comma lists, `q` a search); tool payloads come cut (feedEvent).
-          const list = (name: string) => url.searchParams.get(name)?.split(',').filter(Boolean);
-          const f = { taskIds: list('task'), projectIds: list('project'), statuses: list('status'), kinds: list('kind'),
-            q: url.searchParams.get('q')?.trim() || undefined };
-          return send(res, 200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), f).map(feedEvent));
+          // A column's events (feedFilter); tool payloads come cut (feedEvent).
+          return send(res, 200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), feedFilter(url)).map(feedEvent));
+        }
+        case 'GET /feed/:id': {
+          // `/feed/count`: how many posts the column has in all, for its "loaded / total".
+          if (id !== 'count') throw new HttpError(404, `no route for ${route}`);
+          return send(res, 200, hub.store.countFeed(feedFilter(url)));
         }
         case 'GET /tasks/:id/events': {
           // `since`: a thread opened at an older post loads from that post on. `before`: the page of

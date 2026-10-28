@@ -26,18 +26,27 @@ export const WIDTH_PRESETS = [{ label: '좁게', px: 300 }, { label: '보통', p
 export const DEFAULT_WIDTH = 380;
 export const MIN_WIDTH = 260;
 export const MAX_WIDTH = 900;
+/** Wait after the last change before saving a dragged size, in ms. */
+export const SAVE_DELAY = 300;
 
 /** Fixed per-column widths in px, keyed by column id; a missing entry means the column's default. */
 export function useColumnWidths() {
   const [widths, setWidths] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem(WIDTH_KEY) ?? '{}'); } catch { return {}; }
   });
+  // Saved once a drag settles, not on every pointer move.
   useEffect(() => {
-    try { localStorage.setItem(WIDTH_KEY, JSON.stringify(widths)); } catch { /* storage unavailable */ }
+    const t = setTimeout(() => {
+      try { localStorage.setItem(WIDTH_KEY, JSON.stringify(widths)); } catch { /* storage unavailable */ }
+    }, SAVE_DELAY);
+    return () => clearTimeout(t);
   }, [widths]);
   const setWidth = (id: string, px: number | null) => setWidths((w) => {
+    const v = px == null ? undefined : Math.round(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, px)) / 10) * 10;
+    // Unchanged: the same object, so React skips the render.
+    if (w[id] === v) return w;
     const { [id]: _, ...rest } = w;
-    return px == null ? rest : { ...rest, [id]: Math.round(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, px)) / 10) * 10 };
+    return v == null ? rest : { ...rest, [id]: v };
   });
   return [widths, setWidth] as const;
 }

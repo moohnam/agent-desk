@@ -20,12 +20,15 @@ const BY_TASK_KEY = 'agent-desk.viewByTask';
 const ORDER_KEY = 'agent-desk.viewOrder';
 
 /** Views whose columns the user can reorder with H/L or sort; the order is kept per view. */
-export const ORDERED: View[] = ['project', 'task'];
-/** A sort that stays in force as projects and tasks come and go. */
-export type ViewSort = 'name' | 'created';
+export const ORDERED: View[] = ['project'];
+/**
+ * A sort that stays in force as projects and tasks come and go. `count`: most posts in all first, by
+ * the counts when the sort was picked or the view opened, so columns do not move while posts arrive.
+ */
+export type ViewSort = 'name' | 'created' | 'count';
 /** Per view: a sort, or the column ids in the order the user moved them to with H/L. */
 export type ViewOrder = Partial<Record<View, string[] | ViewSort>>;
-export const SORT_LABEL: Record<ViewSort, string> = { name: '이름순', created: '만든 순' };
+export const SORT_LABEL: Record<ViewSort, string> = { name: '이름순', created: '만든 순', count: '글 많은 순' };
 
 /**
  * The current view and, for the built views, "작업별로 묶어 보기" per column id and the column
@@ -52,9 +55,12 @@ export function useView() {
  * Puts a built view's columns in the order the user set. A sort applies to every column, new
  * ones too: by title (numbers in order, so #2 before #10), or oldest first so new columns land at
  * the right end. A moved order keeps the columns it knows in place; one it does not know yet
- * (a new project or task) goes in where the automatic order puts it.
+ * (a new project or task) goes in where the automatic order puts it. `size`: a column's posts in
+ * all for the `count` sort; uncounted ones go last, in their order.
  */
-export function applyOrder(cols: ColumnDef[], order: string[] | ViewSort | undefined, created: (c: ColumnDef) => string): ColumnDef[] {
+export function applyOrder(cols: ColumnDef[], order: string[] | ViewSort | undefined, created: (c: ColumnDef) => string,
+  size: (c: ColumnDef) => number | undefined = () => undefined): ColumnDef[] {
+  if (order === 'count') return [...cols].sort((a, b) => (size(b) ?? -1) - (size(a) ?? -1));
   if (order === 'name') return [...cols].sort((a, b) => a.title.localeCompare(b.title, 'ko', { numeric: true }));
   if (order === 'created') return [...cols].sort((a, b) => created(a).localeCompare(created(b)));
   if (!order?.length) return cols;

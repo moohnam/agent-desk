@@ -20,6 +20,17 @@ export function stalledMinutes(t: TaskView, nowMs = Date.now()): number | null {
   return idle >= STALL_MS ? Math.floor(idle / 60_000) : null;
 }
 
+/** When a limit window resets: "3시간 47분 뒤 · 17:10", with the date when not today. */
+export function resetTime(iso: string, nowMs = Date.now()): string {
+  const t = Date.parse(iso);
+  const m = Math.max(0, Math.round((t - nowMs) / 60000));
+  const rel = m < 60 ? `${m}분 뒤` : m < 1440 ? `${Math.floor(m / 60)}시간 ${m % 60}분 뒤` : `${Math.floor(m / 1440)}일 ${Math.floor((m % 1440) / 60)}시간 뒤`;
+  const d = new Date(t);
+  const p = (n: number) => String(n).padStart(2, '0');
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${rel} · ${d.toDateString() === new Date(nowMs).toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`}`;
+}
+
 export function relTime(iso: string, nowMs = Date.now()): string {
   const s = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
   if (s < 60) return `${s}초 전`;

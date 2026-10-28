@@ -4,14 +4,18 @@ import { mkdirSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, modelProblem, parseCompose, wantedEngine,
+  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, mentionsIn, modelProblem, parseCompose, wantedEngine,
   type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from './compose.ts';
-import { Store, feedEvent, now, type Approval, type Event, type Question, type Session, type Task, type TaskStatus } from './db.ts';
+import {
+  Store, feedEvent, now, type AgentRequest, type Approval, type Event, type Queued, type QueuedKind, type Question, type Session,
+  type Task, type TaskStatus,
+} from './db.ts';
+import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from './handoff.ts';
 import { findSession } from './importer.ts';
 import { RunnerClient } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
-import type { Answers, LiveSession, RunnerToHub } from './runner/protocol.ts';
+import type { Answers, BackgroundTask, LiveSession, RunnerToHub } from './runner/protocol.ts';
 
 export type HubMessage =
   | { type: 'event'; event: Event }

@@ -9,15 +9,28 @@ import { Runner } from './runner.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, writeLine } from './wire.ts';
 
 const MAX_BUFFER = 20_000;
+/** Size (in characters) of the messages kept while no hub is connected; tool inputs can be large. */
+const MAX_BUFFER_CHARS = 64 * 1024 * 1024;
 const PID_FILE = process.env.RUNNER_PID_FILE ?? resolve(import.meta.dirname, '../../../data/runner.pid');
 
 let hub: Socket | null = null;
-const buffer: RunnerToHub[] = [];
+/**
+ * Messages for the next hub, serialized. Over the limits the oldest events go first; state changes
+ * (engine session ids, busy, approvals, closed) are kept, as the hub can't learn them otherwise.
+ */
+const buffer: { line: string; event: boolean }[] = [];
+let bufferSize = 0;
 
 const runner = new Runner(`local-${hostname()}`, (m) => {
   if (hub) { writeLine(hub, m); return; }
-  buffer.push(m);
-  if (buffer.length > MAX_BUFFER) buffer.shift();
+  const line = JSON.stringify(m) + '\n';
+  buffer.push({ line, event: m.type === 'event' });
+  bufferSize += line.length;
+  while (buffer.length > 1 && (buffer.length > MAX_BUFFER || bufferSize > MAX_BUFFER_CHARS)) {
+    const i = buffer.findIndex((x) => x.event);
+    const [gone] = buffer.splice(i >= 0 ? i : 0, 1);
+    bufferSize -= gone.line.length;
+  }
 });
 
 const server = createServer((socket) => {
@@ -27,7 +40,8 @@ const server = createServer((socket) => {
   writeLine(socket, {
     type: 'hello', runnerId: runner.id, host: hostname(), capabilities: runner.capabilities, sessions: runner.snapshot(),
   } satisfies RunnerToHub);
-  for (const m of buffer.splice(0)) writeLine(socket, m);
+  for (const { line } of buffer.splice(0)) socket.write(line);
+  bufferSize = 0;
   readLines(socket, (cmd: HubToRunner) => runner.handle(cmd));
   const drop = () => { if (hub === socket) hub = null; };
   socket.on('close', drop);

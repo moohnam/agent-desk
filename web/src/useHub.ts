@@ -126,31 +126,35 @@ function accepts(q: FeedQuery, e: HubEvent, task: TaskView | undefined): boolean
   return !q.kinds || q.kinds.includes(e.kind);
 }
 
-export interface ColumnFeed { events: HubEvent[]; more: boolean; loading: boolean }
+/** `total`: the column's posts in the hub's database, and their tasks; unknown until counted. */
+export interface ColumnFeed { events: HubEvent[]; more: boolean; loading: boolean; total?: { posts: number; tasks: number } }
 
-/** Queries kept beyond the ones shown, so switching views (F1–F4) back and forth shows them at once. */
-const FEED_CACHE = 40;
+/** A query's total is counted again at most this often (ms) while its events arrive. */
+const COUNT_EVERY = 3000;
+
 
 /**
  * A query's events. `live`: a shown column uses it, so live events reach it; one that was hidden
  * missed some and fetches its newest page again when shown. `at`: the state reload (`synced`) its
- * newest page is from. `used`: when a column last showed it, for dropping the oldest unused.
+ * newest page is from.
  */
-interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; used: number }
+interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean }
 
 /**
  * Each feed column's events, filtered by the hub to what the column shows, newest page first and
  * older pages on request (`loadEarlier`), kept live. Events are kept per query, not per column:
  * a view switch shows the queries it had at once and only fetches their newest page quietly.
+ * `kept`: the columns of every view (F1–F4); a hidden query is dropped, with the older pages
+ * loaded for it, only once none of them uses it (a deleted column, a changed filter).
  */
-export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
-  onEvent: (fn: (e: HubEvent) => void) => () => void, synced: number) {
+export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks: Map<string, TaskView>,
+  onEvent: (fn: (e: HubEvent) => void) => () => void, synced: number, gone: Set<string> = new Set()) {
   const cache = useRef(new Map<string, FeedEntry>());
   const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.map((d) => [d.id, feedQuery(d.filter, tasks)]));
   const sig = JSON.stringify([...queries]);
-  const current = useRef({ tasks });
-  current.current = { tasks };
+  const current = useRef({ tasks, kept });
+  current.current = { tasks, kept };
   // The query each column showed last: a column whose query changes starts from those events.
   const shown = useRef(new Map<string, string>());
 
@@ -158,11 +162,22 @@ export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
     const e = cache.current.get(key);
     if (e) { cache.current.set(key, f(e)); bump(); }
   };
+  // Counts waiting to be fetched, by query key.
+  const counting = useRef(new Map<string, number>());
+  const count = (key: string, delay = 0) => {
+    if (counting.current.has(key)) return;
+    counting.current.set(key, window.setTimeout(() => {
+      counting.current.delete(key);
+      const e = cache.current.get(key);
+      // A hub not yet restarted has no count: the column shows only what it loaded.
+      if (e) api.feedCount(e.q).then((total) => set(key, (x) => ({ ...x, total })), () => {});
+    }, delay));
+  };
+  useEffect(() => () => { for (const t of counting.current.values()) clearTimeout(t); }, []);
 
   useEffect(() => {
     const want = JSON.parse(sig) as [string, FeedQuery][];
     const keys = new Set(want.map(([, q]) => JSON.stringify(q)));
-    const t = Date.now();
     const c = cache.current;
     for (const [k, e] of c) if (e.live && !keys.has(k)) c.set(k, { ...e, live: false });
     for (const [id, q] of want) {
@@ -170,14 +185,15 @@ export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
       const cur = c.get(key);
       const prev = shown.current.get(id);
       shown.current.set(id, key);
-      if (cur?.live && cur.at === synced) { c.set(key, { ...cur, used: t }); continue; }
-      if (cur) c.set(key, { ...cur, live: true, used: t });
+      if (cur?.live && cur.at === synced) continue;
+      if (cur) c.set(key, { ...cur, live: true });
       else {
         // Narrowed to the new query, the column's events stay up while the page comes.
         const seed = prev ? c.get(prev)?.events.filter((e) => accepts(q, e, current.current.tasks.get(e.task_id))) ?? [] : [];
-        c.set(key, { q, events: seed, more: false, loading: true, at: synced, live: true, used: t });
+        c.set(key, { q, events: seed, more: false, loading: true, at: synced, live: true });
       }
       c.set(key, { ...c.get(key)!, at: synced });
+      count(key);
       api.feed(FEED_PAGE, undefined, q).then((page) => set(key, (e) => {
         // A reload after a reconnect or a view switch keeps the older pages already shown.
         const keepsOlder = e.events.length > 0 && page.length > 0 && e.events[0].id < page[0].id;
@@ -185,8 +201,8 @@ export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
       }), () => set(key, (e) => ({ ...e, loading: false })));
     }
     for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) shown.current.delete(id);
-    const unused = [...c].filter(([, e]) => !e.live).sort((a, b) => b[1].used - a[1].used);
-    for (const [k] of unused.slice(FEED_CACHE)) c.delete(k);
+    const used = new Set(current.current.kept().map((d) => JSON.stringify(feedQuery(d.filter, current.current.tasks))));
+    for (const [k, e] of c) if (!e.live && !used.has(k)) c.delete(k);
     bump();
   }, [sig, synced]);
 
@@ -196,6 +212,7 @@ export function useColumnFeeds(defs: ColumnDef[], tasks: Map<string, TaskView>,
     for (const [k, f] of cache.current) {
       if (!f.live || !accepts(f.q, e, task)) continue;
       cache.current.set(k, { ...f, events: mergeEvents(f.events, [e]) });
+      count(k, COUNT_EVERY);
       any = true;
     }
     if (any) bump();

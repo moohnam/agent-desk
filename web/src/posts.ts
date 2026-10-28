@@ -5,8 +5,9 @@ export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity): HubEv
   if (!b.length) return a;
   const last = a[a.length - 1];
   let out: HubEvent[];
-  if (b.length === 1 && (!last || last.id < b[0].id)) {
-    out = [...a, b[0]];
+  if ((!last || last.id < b[0].id) && b.every((e, i) => i === 0 || b[i - 1].id < e.id)) {
+    // All newer and in order (a live batch): append without a Map and a sort.
+    out = a.concat(b);
   } else {
     const byId = new Map<number, HubEvent>();
     for (const e of a) byId.set(e.id, e);

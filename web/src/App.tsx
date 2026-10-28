@@ -9,18 +9,19 @@ import { ColumnDialog, KIND_LABEL } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, Modal, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
-import { MODE_LABEL, MODEL_LABEL } from '../../hub/src/compose.ts';
-import { STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
+import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../hub/src/compose.ts';
+import { inBackground, STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
+import { HandoffPanel, pickable, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { PostView } from './PostView.tsx';
 import { pruneDrafts, useDraftTasks } from './drafts.ts';
-import { DEFAULT_WIDTH, WIDTH_PRESETS, useColumnWidths, useColumns } from './columns.ts';
+import { DEFAULT_WIDTH, SAVE_DELAY, WIDTH_PRESETS, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
 import { modelShort, projectColor, projectListLabel } from './projects.ts';
-import type { Approval, ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Project, TaskStatus, TaskView } from './types.ts';
+import type { Approval, ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Project, Question, TaskStatus, TaskView } from './types.ts';
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch } from './search.ts';
-import { ORDERED, SORT_LABEL, VIEWS, applyOrder, viewColumns, useView, type View, type ViewSort } from './views.ts';
+import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, useView, type View, type ViewSort } from './views.ts';
 
 const THREAD = 'thread';
 /** The temporary search column, right of the column that shows everything; not saved. */
@@ -179,18 +180,27 @@ export function App() {
     return new Set([...hub.tasks.values()].filter((t) => stalledMinutes(t, now) != null).map((t) => t.id));
   }, [hub.tasks, tick]);
   // F1 is the user's columns; F2–F4 are built from the tasks and only change "작업별로 묶어 보기"
-  // (and, on F2 and F3, the column order).
+  // (and, on F2, the column order; F3 always follows recent activity).
   const editable = view === 'custom';
   const reorderable = editable || ORDERED.includes(view);
+  /** Per column, its posts in all when the view opened or the "글 많은 순" sort was picked. */
+  const [countSnap, setCountSnap] = useState<Record<string, number>>({});
+  /** How many columns F2 and F3 show: VIEW_MAX, raised by going right past the last column (older ones). */
+  const [viewLimit, setViewLimit] = useState(VIEW_MAX);
   const columns = useMemo(() => (view === 'custom' ? custom
-    : applyOrder(viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask), viewOrder[view], (c) =>
+    : applyOrder(viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewLimit), ORDERED.includes(view) ? viewOrder[view] : undefined, (c) =>
       (c.filter.projectIds ? hub.projects.find((p) => p.id === c.filter.projectIds![0])?.created_at
-        : hub.tasks.get(c.filter.taskIds?.[0] ?? '')?.created_at) ?? '')),
-  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewOrder]);
+        : hub.tasks.get(c.filter.taskIds?.[0] ?? '')?.created_at) ?? '', (c) => countSnap[c.id])),
+  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewOrder, countSnap, viewLimit]);
+  /** F2 projects (with tasks) or F3 tasks not shown yet: older ones. */
+  const olderCols = view === 'task' ? Math.max(0, hub.tasks.size - viewLimit)
+    : view === 'project' ? Math.max(0, new Set([...hub.tasks.values()].map((t) => t.project_id)).size - viewLimit) : 0;
   const setColumns: typeof setCustom = editable ? setCustom : () => setToast(FIXED_NOTE);
   const switchView = (v: View) => {
     if (v === view) return;
     setView(v);
+    setCountSnap({});
+    setViewLimit(VIEW_MAX);
     // The open thread belonged to the old view's columns; the new view starts without it.
     if (threadTask) { if (history.state?.thread) history.back(); else setThreadTask(null); }
     // So did the search column.
@@ -237,11 +247,14 @@ export function App() {
     const v = Number((() => { try { return localStorage.getItem(SPLIT_KEY); } catch { return null; } })());
     return v >= PANE_MIN && v <= PANE_MAX ? v : PANE_DEFAULT;
   });
-  const resizeSplit = (pct: number | null) => {
-    const v = pct ?? PANE_DEFAULT;
-    setSplit(v);
-    try { if (pct == null) localStorage.removeItem(SPLIT_KEY); else localStorage.setItem(SPLIT_KEY, String(v)); } catch { /* ignore */ }
-  };
+  const resizeSplit = (pct: number | null) => setSplit(pct ?? PANE_DEFAULT);
+  // Saved once a drag settles, not on every pointer move; the default is stored as no value.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { if (split === PANE_DEFAULT) localStorage.removeItem(SPLIT_KEY); else localStorage.setItem(SPLIT_KEY, String(split)); } catch { /* ignore */ }
+    }, SAVE_DELAY);
+    return () => clearTimeout(t);
+  }, [split]);
   const toggleFloat = () => {
     const id = selection[THREAD];
     const feed = threadFeed();
@@ -266,7 +279,20 @@ export function App() {
   // An empty search shows a hint, not a second copy of everything.
   const searching = !!searchApplied.trim();
   const feedDefs = useMemo(() => (searching ? deckDefs : deckDefs.filter((c) => c.id !== SEARCH)), [deckDefs, searching]);
-  const { feeds, loadEarlier: loadEarlierColumn } = useColumnFeeds(feedDefs, hub.tasks, hub.onEvent, hub.synced);
+  // Every view's columns: their loaded events stay while any of them uses the query.
+  const keptDefs = () => [...custom, ...(['project', 'task', 'status'] as const)
+    .flatMap((v) => viewColumns(v, hub.tasks, hub.projects, stalled, drafts, viewByTask))];
+  const { feeds, loadEarlier: loadEarlierColumn } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
+  // "글 많은 순": a column takes its place by its first count, and keeps it until the view opens again.
+  useEffect(() => {
+    if (viewOrder[view] !== 'count') return;
+    const add: Record<string, number> = {};
+    for (const c of columns) {
+      const t = feeds.get(c.id)?.total;
+      if (t && countSnap[c.id] == null) add[c.id] = t.posts;
+    }
+    if (Object.keys(add).length) setCountSnap((s) => ({ ...s, ...add }));
+  }, [feeds, columns, view, viewOrder]);
   const postsCache = useRef(new WeakMap<HubEvent[], Post[]>());
   const columnPosts = useMemo(() => new Map([...feeds].map(([id, f]) => {
     let posts = postsCache.current.get(f.events);
@@ -292,14 +318,22 @@ export function App() {
     const k = deckDefs.findIndex((c) => c.id === after);
     return k < 0 ? deckDefs.length : k + 1;
   };
+  const lastDeck = useRef(new Map<string, DeckColumn>());
   const deck: DeckColumn[] = useMemo(() => {
-    const column = (id: string, placed: PlacedPost[], def?: ColumnDef): DeckColumn =>
-      ({ id, def, placed, posts: placed.map((x) => x.post) });
+    const column = (id: string, placed: PlacedPost[], def?: ColumnDef): DeckColumn => {
+      // The same posts under the same filter: the same object, so the column is not drawn again.
+      const old = lastDeck.current.get(id);
+      if (old && old.placed.length === placed.length
+        && placed.every((x, k) => x.post === old.placed[k].post && x.up === old.placed[k].up && x.down === old.placed[k].down)
+        && (old.def === def || JSON.stringify(old.def) === JSON.stringify(def))) return old;
+      return { id, def, placed, posts: placed.map((x) => x.post) };
+    };
     const cols = deckDefs.map((c) => {
       const posts = (columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)));
       return column(c.id, c.byTask ? newestPerTask(posts) : placeFeed(posts), c);
     });
     if (threadTask) cols.splice(threadSlot(threadAfter), 0, column(THREAD, placeThread(threadPosts)));
+    lastDeck.current = new Map(cols.map((c) => [c.id, c]));
     return cols;
   }, [deckDefs, columnPosts, hub.tasks, threadTask, threadPosts, threadAfter]);
 
@@ -316,7 +350,7 @@ export function App() {
   const feedAnchor = useRef(new Map<string, { id: number; top: number }>());
   const markAnchor = (colId: string, feed: HTMLElement) => {
     const feedTop = feed.getBoundingClientRect().top;
-    const el = [...feed.querySelectorAll<HTMLElement>('[data-post]')].find((x) => x.getBoundingClientRect().bottom > feedTop);
+    const el = firstPostBelow(feed, feedTop);
     if (el) feedAnchor.current.set(colId, { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop });
     else feedAnchor.current.delete(colId);
   };
@@ -347,24 +381,8 @@ export function App() {
     }
     setUnseen((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
   }, [deck]);
-  /** Older posts of a feed column, loaded at its bottom by button or by scrolling there. */
-  const olderOf = (colId: string) => {
-    const f = feeds.get(colId);
-    return { more: !!f?.more, loading: !!f?.loading, load: () => loadEarlierColumn(colId) };
-  };
-  // A filtered column may find nothing (or too little to scroll) in the recent events: keep loading
-  // older pages until it fills its height or the history runs out.
-  useEffect(() => {
-    for (const col of deck) {
-      if (col.id === THREAD) continue;
-      const feed = document.querySelector<HTMLElement>(`section[data-col="${col.id}"] .feed`);
-      const older = olderOf(col.id);
-      if (feed && older.more && !older.loading && feed.scrollHeight - feed.clientHeight < 300) { older.load(); return; }
-    }
-  });
+  // Older posts (drawn or loaded as a feed nears its bottom) are FeedColumn's.
   const onFeedScroll = (colId: string, feed: HTMLElement) => {
-    const older = olderOf(colId);
-    if (older.more && !older.loading && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 300) older.load();
     const top = feed.scrollTop < 40;
     atTop.current.set(colId, top);
     if (!top) { markAnchor(colId, feed); return; }
@@ -644,7 +662,7 @@ export function App() {
     if (!feed) return;
     if (!threadPosts.length) return loadEarlier();
     const feedTop = feed.getBoundingClientRect().top;
-    const el = [...feed.querySelectorAll<HTMLElement>('[data-post]')].find((x) => x.getBoundingClientRect().bottom > feedTop);
+    const el = firstPostBelow(feed, feedTop);
     if (el) threadAnchor.current = { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop, first: threadPosts[0].id };
     loadEarlier();
   };
@@ -1118,40 +1136,83 @@ export function App() {
       onOpenThread={inThread ? undefined : () => postActions.current.openThread(p.taskId, { from: colId, post: p.id })} />
   );
 
+  // Per feed column, what it shows of the tasks, approvals and the rest; kept the same object while
+  // that part is unchanged, so a hub update or a move between columns redraws only the columns it touches.
+  const lastCtx = useRef(new Map<string, ColumnCtx>());
+  const columnCtx = useMemo(() => {
+    const out = new Map<string, ColumnCtx>();
+    for (const col of deck) {
+      if (col.id === THREAD) continue;
+      const c: ColumnCtx = { tasks: new Map(), models: new Map(), approvals: new Map(), questions: new Map(), working: new Set(), drafts: new Set() };
+      const addTask = (id: string) => { const t = hub.tasks.get(id); if (t) c.tasks.set(id, t); };
+      for (const id of col.def?.filter.taskIds ?? []) addTask(id);
+      for (const p of col.posts) {
+        addTask(p.taskId);
+        const m = models.get(p.taskId);
+        if (m) c.models.set(p.taskId, m);
+        if (p.kind === 'approval') { const k = p.event.payload.approvalId, a = hub.approvals.get(k); if (a) c.approvals.set(k, a); }
+        if (p.kind === 'question') { const k = p.event.payload.questionId, q = hub.questions.get(k); if (q) c.questions.set(k, q); }
+        if (working.has(p.id)) c.working.add(p.id);
+        if (draftPosts.has(`${col.id}:${p.id}`)) c.drafts.add(p.id);
+      }
+      const old = lastCtx.current.get(col.id);
+      out.set(col.id, old && sameCtx(old, c) ? old : c);
+    }
+    lastCtx.current = out;
+    return out;
+  }, [deck, hub.tasks, models, hub.approvals, hub.questions, working, draftPosts]);
+  // Column handlers go through the latest state, like the posts' (a memoized column keeps old closures).
+  const columnActions = useRef<ColumnActions>(null!);
+  columnActions.current = {
+    press: (colId) => { press(); setActive(deck.findIndex((c) => c.id === colId)); setQueueFocus(null); },
+    select: (colId, postId) => { const k = deck.findIndex((c) => c.id === colId); if (k >= 0) setActive(k); select(colId, postId); },
+    toggle: (postId) => toggleExpanded(postId),
+    allow: (p) => { const a = approvalFor(p); if (a) allow(a); },
+    deny: (p) => { const a = approvalFor(p); if (a) setDenying(a); },
+    openThread: (taskId, from, post) => openThread(taskId, post == null ? { from } : { from, post }),
+    renaming: (colId, on) => setRenaming(on && editable ? colId : null),
+    rename: (colId, title) => setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, title } : c))),
+    menu: (colId, r) => setMenu({ colId, x: r.right, y: r.bottom }),
+    scroll: (colId, el) => onFeedScroll(colId, el),
+    showNewest: (colId) => showNewest(colId),
+    older: (colId) => loadEarlierColumn(colId),
+    resize: (colId, px) => setWidth(colId, px),
+  };
+
   const threadIdx = deck.findIndex((c) => c.id === THREAD);
   /** One deck column; the thread is drawn outside the deck when it floats. */
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
+    if (!isThread) {
+      const f = feeds.get(col.id);
+      return (
+        <FeedColumn key={col.id} col={col} active={i === activeIdx} selected={i === activeIdx ? selection[col.id] : undefined}
+          width={widthOf(col.id)} ctx={columnCtx.get(col.id)!} projects={projectsById} flash={flash} expanded={expanded}
+          tick={tick} unseen={unseen[col.id] ?? 0} more={!!f?.more} loading={!!f?.loading} renaming={renaming === col.id}
+          total={f?.total && (col.def?.byTask ? f.total.tasks : f.total.posts)}
+          empty={col.posts.length ? '' : col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : hub.events.length === 0
+            ? 'i를 눌러 첫 작업을 시작하세요.' : f?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}
+          head={col.id === SEARCH ? (
+            <SearchHead value={search ?? ''} onChange={setSearch} inputRef={searchRef} projects={hub.projects}
+              tasks={taskList} count={f?.total ? `${col.posts.length} / ${Math.max(f.total.posts, col.posts.length)}` : `${col.posts.length}${f?.more ? '+' : ''}`}
+              unknown={parsedSearch.unknown} onDone={searchResults} onClose={closeSearch} onSave={saveSearch} />
+          ) : undefined}
+          onError={setToast} act={columnActions} />
+      );
+    }
     return (
-      <section key={col.id} data-col={col.id}
-        className={`column${i === activeIdx ? ' focused' : ''}${isThread ? ' thread' : ''}`}
+      <section key={col.id} data-col={col.id} className={`column thread${i === activeIdx ? ' focused' : ''}`}
         style={{ '--w': `${widthOf(col.id)}px`,
-          ...(isThread && threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
+          ...(threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
         onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
-        {isThread ? (
-          <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
-            model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
-            onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
-            onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
-        ) : col.id === SEARCH ? (
-          <SearchHead value={search ?? ''} onChange={setSearch} inputRef={searchRef} projects={hub.projects}
-            tasks={[...hub.tasks.values()]} count={`${col.posts.length}${feeds.get(SEARCH)?.more ? '+' : ''}`}
-            unknown={parsedSearch.unknown} onDone={searchResults} onClose={closeSearch} onSave={saveSearch} />
-        ) : (
-          <ColumnHead def={col.def!} count={col.posts.length} projects={projectsById} tasks={hub.tasks}
-            renaming={renaming === col.id} onRenaming={(on) => setRenaming(on && editable ? col.id : null)}
-            onRename={(title) => setColumns((cs) => cs.map((c) => (c.id === col.id ? { ...c, title } : c)))}
-            onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
-        )}
-        <div className={`feed${isThread ? ' thread-feed' : ''}`}
-          onScroll={isThread ? (e) => { const f = e.currentTarget; threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40; }
-            : (e) => onFeedScroll(col.id, e.currentTarget)}>
-          {!isThread && unseen[col.id] ? (
-            <div className="new-posts">
-              <button onClick={() => showNewest(col.id)}>↑ 새 글 {unseen[col.id]}개</button>
-            </div>
-          ) : null}
-          {isThread && threadMore && (
+        <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
+          model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
+          onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
+          handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
+          onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
+        <div className="feed thread-feed"
+          onScroll={(e) => { const f = e.currentTarget; threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40; }}>
+          {threadMore && (
             <div className="older-posts">
               <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
                 {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
@@ -1247,7 +1308,7 @@ export function App() {
 
       <div className="workspace" ref={workspaceRef}>
         {drawer && (
-          <ComposeDrawer projects={hub.projects} tasks={[...hub.tasks.values()]} inputRef={composeRef}
+          <ComposeDrawer projects={hub.projects} tasks={taskList} inputRef={composeRef}
             onClose={() => setDrawer(false)}
             onSent={(task) => {
               setToast('보냈습니다.');
@@ -1359,6 +1420,136 @@ function TerminalBadge() {
   return <span className="badge term" title="터미널에서 실행 중인 세션이 MCP로 붙었습니다. 앱에서는 질문에만 답할 수 있습니다.">터미널</span>;
 }
 
+/** Posts a feed column draws at first, and adds at a time near its bottom. */
+const DRAWN = 40, DRAW_STEP = 60;
+/** How near the bottom (px) a feed draws or loads more. */
+const EXTEND_PX = 600;
+/** How long a feed stays at its top before it draws only its newest posts again. */
+const SHRINK_MS = 20_000;
+/** What a feed column shows besides its posts: only the tasks, models and the rest its posts refer to. */
+interface ColumnCtx {
+  tasks: Map<string, TaskView>; models: Map<string, string>; approvals: Map<string, Approval>; questions: Map<string, Question>;
+  working: Set<number>; drafts: Set<number>;
+}
+const sameMap = <K, V>(a: Map<K, V>, b: Map<K, V>) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+const sameSet = <T,>(a: Set<T>, b: Set<T>) => a.size === b.size && [...a].every((x) => b.has(x));
+function sameCtx(a: ColumnCtx, b: ColumnCtx): boolean {
+  return sameMap(a.tasks, b.tasks) && sameMap(a.models, b.models) && sameMap(a.approvals, b.approvals)
+    && sameMap(a.questions, b.questions) && sameSet(a.working, b.working) && sameSet(a.drafts, b.drafts);
+}
+interface ColumnActions {
+  press(colId: string): void;
+  select(colId: string, postId: number): void;
+  toggle(postId: number): void;
+  allow(p: Post): void;
+  deny(p: Post): void;
+  openThread(taskId: string, from: string, post?: number): void;
+  renaming(colId: string, on: boolean): void;
+  rename(colId: string, title: string): void;
+  menu(colId: string, r: DOMRect): void;
+  scroll(colId: string, feed: HTMLElement): void;
+  showNewest(colId: string): void;
+  older(colId: string): void;
+  resize(colId: string, px: number | null): void;
+}
+
+/**
+ * A feed column. Memoized: it draws again only when its own posts, selection or context change, not
+ * on every hub update or move to another column. `selected`: the selected post, given only while
+ * the column is active. `head`: a header in place of the column's own (the search column's).
+ */
+const FeedColumn = memo(function FeedColumn({ col, active, selected, width, ctx, projects, flash, expanded, tick, unseen, more,
+  loading, total, renaming, empty, head, onError, act }: {
+  col: DeckColumn; active: boolean; selected?: number; width: number; ctx: ColumnCtx; projects: Map<string, Project>;
+  flash: number | null; expanded: Set<number>; tick: number; unseen: number; more: boolean; loading: boolean; total?: number;
+  renaming: boolean; empty: string; head?: ReactNode; onError: (msg: string) => void; act: RefObject<ColumnActions>;
+}) {
+  const now = Date.now();
+  const id = col.id;
+  const placed = col.placed;
+  // Only the newest posts are drawn: those down to `floor` (a post id), or the first DRAWN while it
+  // is unset. Posts arriving above do not push drawn ones out. The rest stay loaded, drawn as the
+  // feed nears its bottom or the selection goes there.
+  const [floor, setFloor] = useState<number | null>(null);
+  const base = floor == null ? Math.min(DRAWN, placed.length) : (() => {
+    const k = placed.findIndex((x) => x.post.id < floor);
+    return k < 0 ? placed.length : k;
+  })();
+  const selectedAt = selected == null ? -1 : placed.findIndex((x) => x.post.id === selected);
+  const count = Math.max(base, selectedAt + 1);
+  const drawn = count < placed.length ? placed.slice(0, count) : placed;
+  // The selection moved past the drawn posts (j, G): they stay drawn when it comes back up.
+  useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
+  const feedRef = useRef<HTMLDivElement>(null);
+  /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
+  const extend = (feed: HTMLElement) => {
+    if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
+    if (count < placed.length) setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
+    if (more && !loading && placed.length - count <= 2 * DRAW_STEP) act.current.older(id);
+  };
+  // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
+  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded]);
+  // Back at the top for a while: draw only the newest posts again (the rest stay loaded).
+  const shrink = useRef(0);
+  useEffect(() => () => clearTimeout(shrink.current), []);
+  const onScroll = (feed: HTMLElement) => {
+    act.current.scroll(id, feed);
+    extend(feed);
+    clearTimeout(shrink.current);
+    if (feed.scrollTop >= 40) { if (floor == null && count) setFloor(placed[count - 1].post.id); return; }
+    if (floor != null) shrink.current = window.setTimeout(() => setFloor(null), SHRINK_MS);
+  };
+  return (
+    <section data-col={id} className={`column${active ? ' focused' : ''}`} style={{ '--w': `${width}px` } as CSSProperties}
+      onMouseDown={() => act.current.press(id)}>
+      {head ?? (
+        <ColumnHead def={col.def!} loaded={col.posts.length} total={total} projects={projects} tasks={ctx.tasks}
+          renaming={renaming} onRenaming={(on) => act.current.renaming(id, on)}
+          onRename={(title) => act.current.rename(id, title)} onMenu={(r) => act.current.menu(id, r)} />
+      )}
+      <div className="feed" ref={feedRef} onScroll={(e) => onScroll(e.currentTarget)}>
+        {unseen ? (
+          <div className="new-posts">
+            <button onClick={() => act.current.showNewest(id)}>↑ 새 글 {unseen}개</button>
+          </div>
+        ) : null}
+        {groupsOf(drawn).map((group) => {
+          const task = ctx.tasks.get(group[0].post.taskId);
+          const pending = group.some(({ post }) => !post.resolution
+            && (post.kind === 'approval' ? ctx.approvals.has(post.event.payload.approvalId)
+              : post.kind === 'question' && ctx.questions.has(post.event.payload.questionId)));
+          return (
+            <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
+              style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
+              {task && <GroupContext task={task} now={now} onOpen={() => act.current.openThread(task.id, id)} />}
+              {group.map(({ post: p, up, down }) => (
+                <PostView key={p.id} post={p} task={ctx.tasks.get(p.taskId)} model={ctx.models.get(p.taskId)} up={up} down={down}
+                  approval={p.kind === 'approval' ? ctx.approvals.get(p.event.payload.approvalId) : undefined}
+                  question={p.kind === 'question' ? ctx.questions.get(p.event.payload.questionId) : undefined} onError={onError}
+                  colId={id} selected={selected === p.id} flash={flash === p.id} expanded={expanded.has(p.id)}
+                  working={ctx.working.has(p.id)} inThread={false} tick={tick} draft={ctx.drafts.has(p.id)}
+                  onSelect={() => act.current.select(id, p.id)} onToggle={() => act.current.toggle(p.id)}
+                  onAllow={() => act.current.allow(p)} onDeny={() => act.current.deny(p)}
+                  onOpenThread={() => act.current.openThread(p.taskId, id, p.id)} />
+              ))}
+            </div>
+          );
+        })}
+        {empty && <p className="empty">{empty}</p>}
+        {(more || count < placed.length) && (
+          <div className="older-posts">
+            <button disabled={loading} onClick={() => (count < placed.length
+              ? setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id) : act.current.older(id))}>
+              {loading ? '불러오는 중…' : <><ArrowDown /> 이전 글 더 보기</>}
+            </button>
+          </div>
+        )}
+      </div>
+      <ResizeHandle width={width} onResize={(px) => act.current.resize(id, px)} />
+    </section>
+  );
+});
+
 function GroupContext({ task, now, onOpen }: { task: TaskView; now: number; onOpen: () => void }) {
   return (
     <div className="ctx" title="스레드 열기 (Enter)" onClick={onOpen}>
@@ -1396,8 +1587,9 @@ function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<
   return def.byTask ? `${text} · 작업별` : text;
 }
 
-function ColumnHead({ def, count, projects, tasks, renaming, onRenaming, onRename, onMenu }: {
-  def: ColumnDef; count: number; projects: Map<string, Project>; tasks: Map<string, TaskView>;
+/** `loaded`: the posts the column has loaded; `total`: all it has in the hub, when counted. */
+function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRenaming, onRename, onMenu }: {
+  def: ColumnDef; loaded: number; total?: number; projects: Map<string, Project>; tasks: Map<string, TaskView>;
   renaming: boolean; onRenaming: (on: boolean) => void; onRename: (title: string) => void; onMenu: (r: DOMRect) => void;
 }) {
   const label = filterLabel(def, projects, tasks);
@@ -1415,7 +1607,11 @@ function ColumnHead({ def, count, projects, tasks, renaming, onRenaming, onRenam
       ) : (
         <h2 title={`${def.title} (더블클릭: 이름 바꾸기)`} onDoubleClick={() => onRenaming(true)}>{def.title}</h2>
       )}
-      <span className="count">{count}</span>
+      {total == null ? <span className="count" title="불러온 글">{loaded}</span> : (
+        <span className="count" title={`불러온 글 ${loaded}개 / 전체 ${Math.max(total, loaded)}개`}>
+          {loaded}<span className="of"> / {Math.max(total, loaded).toLocaleString()}</span>
+        </span>
+      )}
       <span className="filter" title={label}>{label}</span>
       <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
     </header>
@@ -1568,6 +1764,21 @@ function Help({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * The first post in `feed` whose bottom is below `top`. Posts lie top to bottom in document order,
+ * so a binary search reads a handful of positions instead of every post above the view.
+ */
+function firstPostBelow(feed: HTMLElement, top: number): HTMLElement | undefined {
+  const all = feed.querySelectorAll<HTMLElement>('[data-post]');
+  let lo = 0, hi = all.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (all[mid].getBoundingClientRect().bottom > top) hi = mid;
+    else lo = mid + 1;
+  }
+  return all[lo];
+}
+
 /** Drag the split thread's left edge to share the workspace; double-click restores half and half. */
 function SplitHandle({ split, onResize }: { split: number; onResize: (pct: number | null) => void }) {
   const [drag, setDrag] = useState<number | null>(null);
@@ -1587,14 +1798,15 @@ function SplitHandle({ split, onResize }: { split: number; onResize: (pct: numbe
             setDrag(pct);
             onResize(pct);
           };
+          // A cancelled pointer or a lost capture ends the drag as a release does.
           const up = () => {
             setDrag(null);
             document.body.classList.remove('resizing');
             el.removeEventListener('pointermove', move);
-            el.removeEventListener('pointerup', up);
+            for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) el.removeEventListener(t, up);
           };
           el.addEventListener('pointermove', move);
-          el.addEventListener('pointerup', up);
+          for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) el.addEventListener(t, up);
         }} />
     </>
   );
@@ -1621,14 +1833,15 @@ function ResizeHandle({ width, onResize }: { width: number; onResize: (px: numbe
             return WIDTH_PRESETS.find((p) => Math.abs(p.px - raw) <= SNAP)?.px ?? raw;
           };
           const move = (ev: PointerEvent) => { const px = at(ev); setDrag(px); onResize(px); };
+          // A cancelled pointer or a lost capture ends the drag as a release does.
           const up = () => {
             setDrag(null);
             document.body.classList.remove('resizing');
             el.removeEventListener('pointermove', move);
-            el.removeEventListener('pointerup', up);
+            for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) el.removeEventListener(t, up);
           };
           el.addEventListener('pointermove', move);
-          el.addEventListener('pointerup', up);
+          for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) el.addEventListener(t, up);
         }} />
     </>
   );

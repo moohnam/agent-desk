@@ -51,6 +51,35 @@ const TEXT_KINDS = ['user', 'assistant', 'update', 'question', 'approval', 'stat
 /** The text a post shows (web postText), so a search does not match JSON keys or other fields. */
 const POST_TEXT = "coalesce(json_extract(e.payload_json, '$.text'), json_extract(e.payload_json, '$.toolName'), json_extract(e.payload_json, '$.detail.message'), '')";
 
+/** Whether an event starts a post (web postKind): the rest attaches to the post before it. */
+const IS_POST = `(e.kind IN ('user', 'assistant', 'update')
+  OR (e.kind IN ('approval', 'question') AND json_extract(e.payload_json, '$.decision') = 'pending')
+  OR (e.kind = 'status' AND json_extract(e.payload_json, '$.state') IN ('error', 'interrupted', 'queue_dropped')))`;
+
+/** The SQL condition (on `event e JOIN task t`) for a feed column's events, and its arguments. */
+function feedWhere(f: FeedFilter): { where: string; args: string[] } {
+  const where = ['1'];
+  const args: string[] = [];
+  const within = (col: string, vals?: string[]) => {
+    if (!vals?.length) return;
+    where.push(`${col} IN (${vals.map(() => '?').join(',')})`);
+    args.push(...vals);
+  };
+  // Taken-over history belongs in its thread and a column for that task, not in the timeline.
+  if (!f.taskIds?.length) where.push(`e.payload_json NOT LIKE '${IMPORTED}%'`);
+  within('e.task_id', f.taskIds);
+  within('t.project_id', f.projectIds);
+  within('t.status', f.statuses);
+  within('e.kind', f.kinds);
+  if (f.q) {
+    // A task whose title matches brings all its events; otherwise the events whose text does.
+    const like = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    where.push(`(t.title LIKE ? ESCAPE '\\' OR (e.kind IN (${TEXT_KINDS.map(() => '?').join(',')}) AND ${POST_TEXT} LIKE ? ESCAPE '\\'))`);
+    args.push(like, ...TEXT_KINDS, like);
+  }
+  return { where: where.join(' AND '), args };
+}
+
 export interface Event { id: number; session_id: string; task_id: string; ts: string; kind: EventKind; payload: unknown }
 export interface Approval {
   id: string; session_id: string; task_id: string; tool_name: string; input: unknown;
@@ -288,30 +317,23 @@ export class Store {
    * them to a feed column's tasks, projects, task statuses, event kinds, and a text search.
    */
   listFeed(limit = 1000, beforeId = Number.MAX_SAFE_INTEGER, f: FeedFilter = {}): Event[] {
-    const where = ['e.id < ?'];
-    const args: (string | number)[] = [beforeId];
-    const within = (col: string, vals?: string[]) => {
-      if (!vals?.length) return;
-      where.push(`${col} IN (${vals.map(() => '?').join(',')})`);
-      args.push(...vals);
-    };
-    // Taken-over history belongs in its thread and a column for that task, not in the timeline.
-    if (!f.taskIds?.length) where.push(`e.payload_json NOT LIKE '${IMPORTED}%'`);
-    within('e.task_id', f.taskIds);
-    within('t.project_id', f.projectIds);
-    within('t.status', f.statuses);
-    within('e.kind', f.kinds);
-    if (f.q) {
-      // A task whose title matches brings all its events; otherwise the events whose text does.
-      const like = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      where.push(`(t.title LIKE ? ESCAPE '\\' OR (e.kind IN (${TEXT_KINDS.map(() => '?').join(',')}) AND ${POST_TEXT} LIKE ? ESCAPE '\\'))`);
-      args.push(like, ...TEXT_KINDS, like);
-    }
+    const { where, args } = feedWhere(f);
     const rows = this.db.prepare(
-      `SELECT * FROM (SELECT e.* FROM event e JOIN task t ON t.id = e.task_id WHERE ${where.join(' AND ')}
+      `SELECT * FROM (SELECT e.* FROM event e JOIN task t ON t.id = e.task_id WHERE e.id < ? AND ${where}
          ORDER BY e.id DESC LIMIT ?) ORDER BY id`,
-    ).all(...args, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
+    ).all(beforeId, ...args, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
     return rows.map(({ payload_json, ...e }) => ({ ...e, payload: JSON.parse(payload_json) }));
+  }
+  /**
+   * How many posts (web buildPosts) a feed column has in all, and in how many tasks: the events
+   * listFeed gives for `f` that start a post rather than fold into the one before.
+   */
+  countFeed(f: FeedFilter = {}): { posts: number; tasks: number } {
+    const { where, args } = feedWhere(f);
+    return this.db.prepare(
+      `SELECT count(*) AS posts, count(DISTINCT e.task_id) AS tasks FROM event e JOIN task t ON t.id = e.task_id
+         WHERE ${where} AND ${IS_POST}`,
+    ).get(...args) as unknown as { posts: number; tasks: number };
   }
   /**
    * A task's newest event without its payload: the task list only needs when it happened, and a
