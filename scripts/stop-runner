@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stops the runner: every engine session ends (the next message resumes it). While the hub runs it
+# starts a new runner within about 10 seconds; stop-all keeps both down.
+. "$(dirname "$0")/lib.sh"
+if [ -z "$AGENT_DESK_DETACHED" ] && under_runner; then
+  echo "주의: 데스크 세션 안에서 실행 중이라 러너를 멈추면 이 세션도 끝납니다." >&2
+fi
+stop_port 러너 "$RUNNER_PORT"

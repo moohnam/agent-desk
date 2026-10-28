@@ -1,0 +1,8 @@
+#!/bin/sh
+# Starts the hub in the background (log: data/hub.log); it starts the runner too if none is running.
+. "$(dirname "$0")/lib.sh"
+pid=$(listener "$HUB_PORT")
+if [ -n "$pid" ]; then echo "허브: 이미 실행 중입니다 (pid $pid, 포트 $HUB_PORT)"; exit 0; fi
+cd "$ROOT/hub" && detach /bin/sh -c 'exec node src/index.ts >>"$0" 2>&1' "$HUB_LOG"
+if wait_port "$HUB_PORT" 20 up; then echo "허브: 시작했습니다 (pid $(listener "$HUB_PORT"), 포트 $HUB_PORT, 로그 $HUB_LOG)"
+else echo "허브: 시작하지 못했습니다. $HUB_LOG를 확인하세요" >&2; exit 1; fi

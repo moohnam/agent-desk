@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stops the hub. Running engine sessions stay with the runner and resume when the hub is back.
+. "$(dirname "$0")/lib.sh"
+stop_port 허브 "$HUB_PORT"

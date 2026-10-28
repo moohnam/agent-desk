@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stops the hub, then the runner (in that order, so the hub does not start the runner again).
+. "$(dirname "$0")/lib.sh"
+"$ROOT/scripts/stop-hub" && "$ROOT/scripts/stop-runner"

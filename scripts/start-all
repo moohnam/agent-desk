@@ -1,0 +1,4 @@
+#!/bin/sh
+# Starts the runner, then the hub.
+. "$(dirname "$0")/lib.sh"
+"$ROOT/scripts/start-runner" && "$ROOT/scripts/start-hub"

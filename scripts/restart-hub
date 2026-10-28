@@ -1,0 +1,4 @@
+#!/bin/sh
+# Restarts the hub; engine sessions keep running in the runner.
+. "$(dirname "$0")/lib.sh"
+"$ROOT/scripts/stop-hub" && "$ROOT/scripts/start-hub"

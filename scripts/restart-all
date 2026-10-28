@@ -1,0 +1,5 @@
+#!/bin/sh
+# Restarts the hub and the runner. Run from inside a desk session, it carries on detached.
+. "$(dirname "$0")/lib.sh"
+detach_if_under_runner
+"$ROOT/scripts/stop-all" && "$ROOT/scripts/start-all"

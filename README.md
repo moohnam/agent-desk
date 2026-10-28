@@ -74,14 +74,26 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 브라우저로 http://127.0.0.1:4317 을 엽니다. 처음 실행하면 `data/`에 DB와 접속 토큰이 생깁니다.
 
 - 허브는 러너(에이전트 세션을 실행하는 프로세스, `127.0.0.1:4318`)가 없으면 따로 띄웁니다. 러너는 허브와 별개 프로세스라 허브를 꺼도 실행 중인 작업이 계속됩니다.
-- 터미널을 닫아도 허브를 유지하려면 백그라운드로 띄웁니다: `nohup npm start >> data/hub.log 2>&1 &`
+- 터미널을 닫아도 허브를 유지하려면 백그라운드로 띄웁니다: `scripts/start-all` (러너와 허브를 띄우고 로그는 `data/runner.log`, `data/hub.log`)
+
+`scripts/`의 스크립트로 띄우고 끄고 다시 띄웁니다. 모두 백그라운드로 띄우고, 포트가 열리거나 닫힐 때까지 기다린 뒤 결과를 알립니다.
+
+| 스크립트 | 하는 일 |
+| --- | --- |
+| `start-hub`, `stop-hub`, `restart-hub` | 허브만. 실행 중인 작업은 러너에서 계속 돕니다 |
+| `start-runner`, `stop-runner`, `restart-runner` | 러너만. 실행 중인 세션이 모두 끝나고, 다음 메시지에서 이전 대화를 이어갑니다. 허브가 떠 있으면 러너를 멈춰도 허브가 10초 안에 다시 띄웁니다 |
+| `start-all`, `stop-all`, `restart-all` | 둘 다. 끌 때는 허브를 먼저 꺼서 러너가 다시 뜨지 않게 합니다 |
+
+- 데스크 세션 안에서 `restart-runner`나 `restart-all`을 실행하면 러너를 멈출 때 그 세션도 끝나므로, 스크립트가 스스로 백그라운드로 옮겨 마저 진행합니다(로그 `data/restart.log`).
+- `PORT`, `RUNNER_PORT`, `HUB_LOG`, `RUNNER_LOG` 환경 변수로 포트와 로그 위치를 바꿀 수 있습니다.
 
 ### 4. 끄기
 
 | 대상 | 방법 |
 | --- | --- |
-| 허브 | 실행한 터미널에서 `Ctrl+C`, 백그라운드면 `pkill -f "node src/index.ts"` |
-| 러너 | `npm run runner:stop`. 실행 중인 세션도 함께 끝나며, 다시 띄운 뒤 다음 메시지에서 이전 대화를 resume으로 이어감 |
+| 허브 | 실행한 터미널에서 `Ctrl+C`, 백그라운드면 `scripts/stop-hub` |
+| 러너 | `scripts/stop-runner`. 실행 중인 세션도 함께 끝나며, 다시 띄운 뒤 다음 메시지에서 이전 대화를 resume으로 이어감 |
+| 둘 다 | `scripts/stop-all` |
 
 ### 5. 업데이트
 
@@ -99,8 +111,8 @@ git diff --stat HEAD@{1} -- hub web desktop   # 무엇이 바뀌었는지 확인
 | 바뀐 위치 | 할 일 |
 | --- | --- |
 | `web/` | 없음. 허브가 새 `web/dist`를 바로 제공하므로 열린 화면(브라우저·앱)에서 `⌘R`로 새로고침만 합니다 |
-| `hub/src/` (러너 제외) | 허브 재시작. 실행 중인 작업은 러너에서 계속 돕니다 |
-| `hub/src/runner/` | 실행 중인 작업이 없을 때 러너 재시작: `npm run runner:stop` (허브가 몇 초 안에 새 러너를 띄움) |
+| `hub/src/` (러너 제외) | 허브 재시작(`scripts/restart-hub`). 실행 중인 작업은 러너에서 계속 돕니다 |
+| `hub/src/runner/` | 실행 중인 작업이 없을 때 러너 재시작: `scripts/restart-runner` |
 | `desktop/` | 데스크톱 앱 재설치 (아래) |
 | `package.json`, `package-lock.json` | `npm install` 후 허브 재시작 |
 

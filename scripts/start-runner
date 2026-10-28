@@ -1,0 +1,8 @@
+#!/bin/sh
+# Starts the runner daemon in the background (log: data/runner.log).
+. "$(dirname "$0")/lib.sh"
+pid=$(listener "$RUNNER_PORT")
+if [ -n "$pid" ]; then echo "러너: 이미 실행 중입니다 (pid $pid, 포트 $RUNNER_PORT)"; exit 0; fi
+cd "$ROOT" && detach /bin/sh -c 'exec node hub/src/runner/daemon.ts >>"$0" 2>&1' "$RUNNER_LOG"
+if wait_port "$RUNNER_PORT" 20 up; then echo "러너: 시작했습니다 (pid $(listener "$RUNNER_PORT"), 포트 $RUNNER_PORT, 로그 $RUNNER_LOG)"
+else echo "러너: 시작하지 못했습니다. $RUNNER_LOG를 확인하세요" >&2; exit 1; fi

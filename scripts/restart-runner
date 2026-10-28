@@ -1,0 +1,6 @@
+#!/bin/sh
+# Restarts the runner (every engine session ends; the next message resumes it). Run from inside a
+# desk session, it carries on detached, since stopping the runner ends that session too.
+. "$(dirname "$0")/lib.sh"
+detach_if_under_runner
+"$ROOT/scripts/stop-runner" && "$ROOT/scripts/start-runner"
