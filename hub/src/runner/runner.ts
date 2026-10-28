@@ -13,6 +13,7 @@ interface Entry {
   live: LiveSession;
   idleTimer: NodeJS.Timeout | null;
 }
+const idle = (e: Entry) => !e.live.busy && !e.live.approvals.length && !e.live.background?.length;
 
 /** Runs engine sessions on this machine. Talks to the hub only through protocol messages. */
 export class Runner {
@@ -40,17 +41,20 @@ export class Runner {
     return [...this.sessions.values()].map(({ live: s }) => ({ ...s, approvals: [...s.approvals] }));
   }
 
-  /** Arms the idle timer when the session has nothing in progress, disarms it otherwise. */
+  /**
+   * Arms the idle timer when the session has nothing in progress, disarms it otherwise. Work left
+   * running in the background (a subagent) counts: closing would end it.
+   */
   private schedule(sessionId: string, entry: Entry) {
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     entry.idleTimer = null;
-    if (entry.live.busy || entry.live.approvals.length) return;
+    if (!idle(entry)) return;
     entry.idleTimer = setTimeout(() => this.closeIdle(sessionId, entry), this.idleMs);
     entry.idleTimer.unref?.();
   }
 
   private closeIdle(sessionId: string, entry: Entry) {
-    if (this.sessions.get(sessionId) !== entry || entry.live.busy || entry.live.approvals.length) return;
+    if (this.sessions.get(sessionId) !== entry || !idle(entry)) return;
     this.drop(sessionId, entry);
     entry.adapter?.close();
     this.emit({ type: 'closed', sessionId, busy: false, reason: 'idle' });
@@ -69,6 +73,7 @@ export class Runner {
     const s = entry.live;
     switch (m.type) {
       case 'busy': s.busy = m.busy; this.schedule(m.sessionId, entry); break;
+      case 'background': s.background = m.tasks; this.schedule(m.sessionId, entry); break;
       case 'approval_request':
         s.approvals.push({ approvalId: m.approvalId, toolName: m.toolName, input: m.input });
         this.schedule(m.sessionId, entry);

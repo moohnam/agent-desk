@@ -10,6 +10,11 @@ export function statusLabel(t: TaskView): string {
   return STATUS_LABEL[t.status];
 }
 
+/** Work the task's agent left running in the background (subagents, commands) between its turns. */
+export const backgroundCount = (t: TaskView) => t.background?.length ?? 0;
+/** Between turns but with background work going: shown as working, not as finished. */
+export const inBackground = (t: TaskView) => t.status !== 'running' && t.status !== 'waiting' && backgroundCount(t) > 0;
+
 /** An app-run task still "running" with no event for this long is shown as unresponsive. */
 export const STALL_MS = 3 * 60_000;
 

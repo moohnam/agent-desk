@@ -1413,6 +1413,11 @@ function StatusBadge({ task, now }: { task: TaskView; now: number }) {
   if (idle != null) {
     return <span className="badge stalled" title="실행 중인데 3분 넘게 아무 이벤트가 없습니다.">응답 없음 {idle}분</span>;
   }
+  if (inBackground(task)) {
+    const bg = task.background!;
+    return <span className="badge running" title={`백그라운드에서 일하는 중:\n${bg.map((b) => `· ${b.description}`).join('\n')}`}>
+      {bg.some((b) => b.type === 'local_agent') ? '서브 에이전트' : '백그라운드'} {bg.length}</span>;
+  }
   return <span className={`badge ${task.status}`}>{statusLabel(task)}</span>;
 }
 

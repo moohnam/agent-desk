@@ -36,8 +36,12 @@ export interface TaskView extends Task {
   last_event: Event | null;
   pending_approvals: number;
   pending_questions: number;
+  /** A Codex async question waiting for my next message, which answers it; null when none. */
+  pending_ask: { event_id: number; text: string; ts: string } | null;
   /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string }[];
+  queued: { id: string; text: string; created_at: string; kind?: QueuedKind }[];
+  /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
+  background: BackgroundTask[];
 }
 
 /** Desk-wide defaults for new tasks of each engine; null leaves the choice to the engine. */
@@ -70,6 +74,8 @@ export class Hub {
   private runner: RunnerClient;
   /** Sessions with a turn in progress (runner `busy`), set as soon as the hub sends them work. */
   private busy = new Set<string>();
+  /** Per live session, its background work (runner's last list). */
+  private background = new Map<string, BackgroundTask[]>();
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
 
@@ -155,7 +161,9 @@ export class Hub {
       last_event: this.store.lastEvent(task.id) ?? null,
       pending_approvals: this.store.pendingApprovals().filter((a) => a.task_id === task.id).length,
       pending_questions: this.store.pendingQuestions().filter((q) => q.task_id === task.id).length,
-      queued: this.store.queued({ taskId: task.id }).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at })),
+      pending_ask: this.store.openAsyncQuestion(task.id),
+      queued: this.store.queued({ taskId: task.id }).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && { kind: q.kind }) })),
+      background: (session && this.background.get(session.id)) ?? [],
     };
   }
 
@@ -355,8 +363,10 @@ export class Hub {
     if (this.runner.has(sessionId)) {
       this.runner.handle({ type: 'send', sessionId, text: body, skills, steer });
     } else {
+      // A new engine process: whatever ran in the background before went with the old one.
+      this.background.delete(sessionId);
       this.runner.handle({
-        type: 'start', sessionId, engine: session.engine === 'codex' ? 'codex' : 'claude', cwd: session.cwd, prompt: body,
+        type: 'start', sessionId, engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
         resume: session.engine_session_id ?? undefined, permissionMode: session.permission_mode,
         model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home,
       });

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { backgroundCount } from './format.ts';
 import type { ColumnDef, Project, TaskView } from './types.ts';
 
 /**
@@ -72,11 +73,14 @@ export function applyOrder(cols: ColumnDef[], order: string[] | ViewSort | undef
 
 /** A filter no task matches, for a status column that is empty right now. */
 const NONE = ['-'];
-const active = (t: TaskView) => t.status === 'running' || t.status === 'waiting' || t.status === 'error';
-const newest = (a: TaskView, b: TaskView) => b.created_at.localeCompare(a.created_at);
+const active = (t: TaskView) => t.status === 'running' || t.status === 'waiting' || t.status === 'error' || backgroundCount(t) > 0;
+/** When the task last did something: its newest post, else its last update. */
+const lastActive = (t: TaskView) => t.last_event?.ts ?? t.updated_at;
+const recent = (a: TaskView, b: TaskView) => lastActive(b).localeCompare(lastActive(a));
 
+/** `limit`: how many columns F2 and F3 show; going right past the last column raises it to show older ones. */
 export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, TaskView>, projects: Project[],
-  stalled: Set<string>, drafts: Set<string>, byTask: Record<string, boolean>): ColumnDef[] {
+  stalled: Set<string>, drafts: Set<string>, byTask: Record<string, boolean>, limit = VIEW_MAX): ColumnDef[] {
   const all = [...tasks.values()];
   let cols: ColumnDef[];
   if (view === 'project') {
@@ -94,12 +98,12 @@ export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, Ta
     const place = (t: TaskView) => t.status === 'waiting' ? 'wait'
       : t.status === 'error' || stalled.has(t.id) ? 'trouble'
       : drafts.has(t.id) ? 'draft'
-      : t.status === 'running' ? 'run' : 'done';
+      : t.status === 'running' || backgroundCount(t) > 0 ? 'run' : 'done';
     const ids = (where: string) => { const r = all.filter((t) => place(t) === where).map((t) => t.id); return r.length ? r : NONE; };
     // One card per task by default: the board is about which tasks are where.
     cols = [
       { id: 'v:s:wait', title: '응답 대기', note: '승인·질문을 기다리는 작업', filter: { taskIds: ids('wait') } },
-      { id: 'v:s:run', title: '실행 중', note: '실행 중인 작업', filter: { taskIds: ids('run') } },
+      { id: 'v:s:run', title: '실행 중', note: '실행 중이거나 서브 에이전트가 일하는 작업', filter: { taskIds: ids('run') } },
       { id: 'v:s:trouble', title: '멈춤·오류', note: '오류 · 3분 넘게 응답 없음', filter: { taskIds: ids('trouble') } },
       { id: 'v:s:draft', title: '작성 중', note: '보내지 않은 답글이 있는 작업', filter: { taskIds: ids('draft') } },
       { id: 'v:s:done', title: '완료', note: '끝났거나 다음 지시를 기다리는 작업', filter: { taskIds: ids('done') } },

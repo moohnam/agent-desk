@@ -40,10 +40,14 @@ export type RunnerEvent =
   /** 'model_changed': a turn ran on another model than the session last reported (after set_model). */
   | { kind: 'status'; state: 'started' | 'model_changed' | 'turn_done' | 'error' | 'interrupted'; detail?: Record<string, unknown> };
 
+/** Work the agent left running between turns, such as a subagent started in the background. */
+export interface BackgroundTask { id: string; type: string; description: string; agent?: string }
+
 /** A session the runner is still running, reported when the hub (re)connects. */
 export interface LiveSession {
   sessionId: string; busy: boolean;
   approvals: { approvalId: string; toolName: string; input: unknown }[];
+  background?: BackgroundTask[];
 }
 
 export type RunnerToHub =
@@ -51,6 +55,8 @@ export type RunnerToHub =
   | { type: 'engine_session'; sessionId: string; engineSessionId: string }
   | { type: 'event'; sessionId: string; event: RunnerEvent }
   | { type: 'busy'; sessionId: string; busy: boolean }
+  /** Everything the session has running in the background now (replaces the last list). */
+  | { type: 'background'; sessionId: string; tasks: BackgroundTask[] }
   | { type: 'approval_request'; sessionId: string; approvalId: string; toolName: string; input: unknown }
   | { type: 'approval_cancelled'; sessionId: string; approvalId: string }
   /**

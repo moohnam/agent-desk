@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Effort, ModelName, PermissionMode } from '../compose.ts';
-import type { EngineAdapter, RunnerToHub } from './protocol.ts';
+import { DESK_INSTRUCTIONS } from './instructions.ts';
+import type { BackgroundTask, EngineAdapter, RunnerToHub } from './protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */
 const claudeEffort = (e: Effort | undefined) => (e === 'ultra' ? 'max' : e);
-/** Every utterance becomes a post in the feed, so ask for Korean throughout, not only in final answers. */
-const PROMPT_APPEND = '사용자에게 보이는 모든 발화(작업 중간의 짧은 안내 포함)는 한국어로 작성합니다.';
 
 /** Push-based prompt stream so one long-lived query can take follow-up messages. */
 class PromptQueue implements AsyncIterable<SDKUserMessage> {
@@ -72,6 +71,9 @@ export function startClaude(opts: {
   let model: string | undefined;
   // Set by close(): the stream ending (or throwing) afterwards is a requested shutdown, not a failure.
   let closing = false;
+  // A turn is in progress: one we sent, or one the agent started itself (a background subagent finished).
+  let busy = false;
+  const setBusy = (b: boolean) => { if (busy !== b) { busy = b; emit({ type: 'busy', sessionId, busy: b }); } };
 
   const q = query({
     prompt: prompts,
@@ -111,7 +113,13 @@ export function startClaude(opts: {
       model = m.model;
       emit({ type: 'engine_session', sessionId, engineSessionId: m.session_id });
       emit({ type: 'event', sessionId, event: { kind: 'status', state: 'started', detail: { model: m.model, cwd: m.cwd } } });
+    } else if (m.type === 'system' && m.subtype === 'background_tasks_changed') {
+      // The whole list each time; ambient tasks (watchers) are not work the agent is doing.
+      const tasks: BackgroundTask[] = m.tasks.filter((t) => !t.ambient)
+        .map((t) => ({ id: t.task_id, type: t.task_type, description: t.description, ...(t.subagent_type && { agent: t.subagent_type }) }));
+      emit({ type: 'background', sessionId, tasks });
     } else if (m.type === 'assistant' && m.parent_tool_use_id === null) {
+      setBusy(true);
       for (const block of m.message.content) {
         if (block.type === 'text' && block.text.trim()) {
           emit({ type: 'event', sessionId, event: { kind: 'assistant', text: block.text } });
@@ -137,7 +145,7 @@ export function startClaude(opts: {
         kind: 'status', state,
         detail: { subtype: m.subtype, cost_usd: m.total_cost_usd, duration_ms: m.duration_ms, num_turns: m.num_turns },
       } });
-      emit({ type: 'busy', sessionId, busy: false });
+      setBusy(false);
     }
   };
 
@@ -152,6 +160,7 @@ export function startClaude(opts: {
   })();
 
   const send = (text: string, skills?: string[], steer?: boolean) => {
+    busy = true;
     emit({ type: 'busy', sessionId, busy: true });
     prompts.push(withSkills(text, skills), steer ? 'next' : 'later');
   };

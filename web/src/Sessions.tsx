@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
+import { ENGINE_SHORT, engineOf } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
 import { Modal } from './Compose.tsx';
-import { relTime, statusLabel } from './format.ts';
+import { backgroundCount, relTime, statusLabel } from './format.ts';
 import { modelShort, projectColor } from './projects.ts';
 import type { TaskView } from './types.ts';
 
@@ -10,7 +11,7 @@ import type { TaskView } from './types.ts';
 export const openSessions = (tasks: Iterable<TaskView>) => [...tasks].filter((t) => t.live && t.source === 'app');
 
 const lastActive = (t: TaskView) => t.last_event?.ts ?? t.updated_at;
-const busy = (t: TaskView) => t.status === 'running' || t.status === 'waiting';
+const busy = (t: TaskView) => t.status === 'running' || t.status === 'waiting' || backgroundCount(t) > 0;
 
 /**
  * "열린 세션": the engine processes the desk keeps running, newest activity first, each closable.
