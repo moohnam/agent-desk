@@ -426,6 +426,8 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     onSend?.();
     const r = await send(!c.delivery && pick ? `#${pick} ${text}` : text);
     if (!r) return;
+    // The box may be gone by now (another thread opened meanwhile); the draft goes either way.
+    setDraft(draftKey, null, { empty: true });
     setText(''); setPick(null);
     setSent(r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
       : running && delivery !== 'now' && content ? '대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.' : null);

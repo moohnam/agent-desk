@@ -272,6 +272,9 @@ export class Store {
   getSession(id: string): Session | undefined {
     return this.db.prepare('SELECT * FROM session WHERE id = ?').get(id) as unknown as Session | undefined;
   }
+  listSessions(taskId: string): Session[] {
+    return this.db.prepare('SELECT * FROM session WHERE task_id = ?').all(taskId) as unknown as Session[];
+  }
   latestSession(taskId: string): Session | undefined {
     return this.db.prepare('SELECT * FROM session WHERE task_id = ? ORDER BY created_at DESC LIMIT 1')
       .get(taskId) as unknown as Session | undefined;

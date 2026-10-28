@@ -22,7 +22,9 @@ export type HubMessage =
   | { type: 'task'; task: TaskView }
   | { type: 'approval'; approval: Approval }
   | { type: 'question'; question: Question }
-  | { type: 'runner'; connected: boolean };
+  | { type: 'runner'; connected: boolean }
+  /** Tasks and projects deleted, with everything recorded for them. */
+  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
 
 export interface TaskView extends Task {
   project_name: string;

@@ -617,6 +617,24 @@ export function App() {
     if (activeCol?.id === THREAD) setActive(Math.max(threadSlot(threadAfter) - 1, 0));
   };
   const closeThread = () => (history.state?.thread ? history.back() : dropThread());
+  // The thread's task was deleted (here or in another window).
+  useEffect(() => { if (threadTask && hub.gone.has(threadTask)) closeThread(); }, [hub.gone]);
+  /** Deletes a task or a project for good (the menu asks twice first). */
+  const remove = (what: 'task' | 'project', id: string) => {
+    (what === 'task' ? api.deleteTask(id) : api.deleteProject(id))
+      .then(() => setToast(what === 'task' ? '작업을 삭제했습니다' : '프로젝트를 삭제했습니다'))
+      .catch((e) => setToast(`삭제하지 못했습니다: ${e instanceof Error ? e.message : String(e)}`));
+  };
+  /** What the ⋯ menu of a column can delete: the thread's or a task column's task, a project column's project. */
+  const removable = (colId: string): { label: string; onRemove: () => void } | undefined => {
+    const taskId = colId === THREAD ? threadTask : colId.startsWith('v:t:') ? colId.slice(4) : null;
+    const task = taskId ? hub.tasks.get(taskId) : undefined;
+    if (task) return { label: `작업 삭제 (${task.project_name}#${task.seq})`, onRemove: () => remove('task', task.id) };
+    const project = colId.startsWith('v:p:') ? hub.projects.find((p) => p.id === colId.slice(4)) : undefined;
+    if (!project) return undefined;
+    const n = [...hub.tasks.values()].filter((t) => t.project_id === project.id).length;
+    return { label: `프로젝트 삭제 (@${project.name}, 작업 ${n}개)`, onRemove: () => remove('project', project.id) };
+  };
   const dropThreadRef = useRef(dropThread);
   dropThreadRef.current = dropThread;
   useEffect(() => {
@@ -1363,11 +1381,12 @@ export function App() {
           onWidth={(px) => setWidth(menu.colId, px)}
           onEdit={() => { if (menu.colId === SEARCH) openSearch(); else setColumnDialog({ column: deck[menuCol].def }); setMenu(null); }}
           onMove={(dir) => { moveColumn(menuCol, dir); setMenu(null); }}
-          onDelete={() => { if (menu.colId === THREAD) closeThread(); else deleteColumn(menu.colId); setMenu(null); }} />
+          onDelete={() => { if (menu.colId === THREAD) closeThread(); else deleteColumn(menu.colId); setMenu(null); }}
+          remove={removable(menu.colId)} onRemoved={() => setMenu(null)} />
       )}
       {denying && <DenyDialog approval={denying} onClose={() => setDenying(null)} onDone={() => setDenying(null)} />}
       {columnDialog && (
-        <ColumnDialog column={columnDialog.column} projects={hub.projects} tasks={[...hub.tasks.values()]}
+        <ColumnDialog column={columnDialog.column} projects={hub.projects} tasks={taskList}
           onClose={() => setColumnDialog(null)}
           onSave={(c) => {
             setColumns(columnDialog.column ? columns.map((x) => (x.id === c.id ? c : x)) : [...columns, c]);
@@ -1673,7 +1692,10 @@ function ContextHint({ post, task, pending, ask, question }: {
 }
 
 /** The ⋯ menu: width presets plus column actions, anchored under its button. */
-function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable, sort, onSort, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete }: {
+/** What a built view's own column order follows. */
+const AUTO_ORDER: Partial<Record<View, string>> = { project: '최근 만든 작업순' };
+
+function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable, sort, autoOrder, onSort, canLeft, canRight, onClose, onWidth, onRename, addTo, onAddTo, onPin, byTask, onByTask, onSplit, onEdit, onMove, onDelete, remove, onRemoved }: {
   x: number; y: number; width: number; thread: boolean; canLeft: boolean;
   /** Thread: whether it takes the right half beside the deck; `onFloat` toggles that (not on a phone). */
   floating?: boolean; onFloat?: () => void;
@@ -1688,9 +1710,18 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
   byTask?: boolean; onByTask: () => void; onSplit: () => void;
   /** Thread: the columns of tasks this task can join. */
   addTo: ColumnDef[]; onAddTo: (colId: string) => void; onPin: () => void; onWidth: (px: number) => void; onEdit: () => void; onMove: (dir: -1 | 1) => void; onDelete: () => void;
+  /** The task or project this column shows, which can be deleted for good. */
+  remove?: { label: string; onRemove: () => void }; onRemoved: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [confirm, setConfirm] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const removeItem = remove && (
+    <button className="item danger" title="기록까지 모두 지우며 되돌릴 수 없습니다"
+      onClick={() => { if (confirmRemove) { remove.onRemove(); onRemoved(); } else setConfirmRemove(true); }}>
+      {confirmRemove ? '한 번 더 누르면 영구 삭제' : remove.label}
+    </button>
+  );
   useEffect(() => {
     const down = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) onClose(); };
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
@@ -1718,6 +1749,7 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
           {addTo.map((c) => <button key={c.id} className="item" onClick={() => onAddTo(c.id)}><Plus /> {c.title}</button>)}
           <hr />
           <button className="item" onClick={onDelete}>스레드 닫기 <kbd>q</kbd></button>
+          {removeItem}
         </>
       ) : (
         <>
@@ -1736,6 +1768,7 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
               {sort === k ? '✓ ' : ''}{SORT_LABEL[k]} 정렬</button>
           ))}
           </>}
+          {fixed && removeItem && <><hr />{removeItem}</>}
           {fixed ? <div className="lbl"><span>자동 뷰: 편집은 <kbd>F1</kbd> 내 컬럼에서</span></div> : <>
           <hr />
           <button className="item danger" onClick={() => (confirm ? onDelete() : setConfirm(true))}>

@@ -53,7 +53,9 @@ export type HubMessage =
   | { type: 'task'; task: TaskView }
   | { type: 'approval'; approval: Approval }
   | { type: 'question'; question: Question }
-  | { type: 'runner'; connected: boolean };
+  | { type: 'runner'; connected: boolean }
+  /** Tasks and projects deleted, with everything recorded for them. */
+  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
 
 /** A timeline post: one utterance, approval request, question, or alert. Tool calls fold into `activity`. */
 export type PostKind = 'user' | 'assistant' | 'approval' | 'question' | 'alert';

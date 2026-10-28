@@ -26,6 +26,8 @@ export function useHub() {
   const listeners = useRef(new Set<(e: HubEvent) => void>());
   // Counts state reloads (each SSE (re)connect): feed columns reload their newest page with it.
   const [synced, setSynced] = useState(0);
+  // Tasks deleted while this page is open: their events, wherever cached, are no longer shown.
+  const [gone, setGone] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     const [s, feed] = await Promise.all([api.state(), api.feed()]);
@@ -74,8 +76,21 @@ export function useHub() {
           setRunnerConnected(m.connected);
         } else if (m.type === 'event') {
           events.push(m.event);
+        } else if (m.type === 'removed') {
+          const ids = new Set(m.taskIds);
+          const keep = <T extends { task_id: string }>(prev: Map<string, T>) => new Map([...prev].filter(([, x]) => !ids.has(x.task_id)));
+          setGone((prev) => new Set([...prev, ...ids]));
+          setTasks((prev) => new Map([...prev].filter(([id]) => !ids.has(id))));
+          setProjects((prev) => prev.filter((p) => !m.projectIds.includes(p.id)));
+          setApprovals(keep);
+          setQuestions(keep);
+          setEvents((prev) => prev.filter((e) => !ids.has(e.task_id)));
+          // Columns load their newest page and counts again.
+          setSynced((n) => n + 1);
         }
       }
+      // A task's update can come in the same batch as its deletion.
+      for (const m of ms) if (m.type === 'removed') for (const id of m.taskIds) tasks.delete(id);
       if (tasks.size) setTasks((prev) => { const next = new Map(prev); for (const [id, t] of tasks) next.set(id, t); return next; });
       if (events.length) {
         setEvents((prev) => mergeEvents(prev, events, FEED_CAP));
@@ -94,7 +109,7 @@ export function useHub() {
     return () => { listeners.current.delete(fn); };
   }, []);
 
-  return { projects, tasks, approvals, questions, events, connected, runnerConnected, local, synced, refresh, onEvent };
+  return { projects, tasks, approvals, questions, events, connected, runnerConnected, local, synced, gone, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */
@@ -222,10 +237,10 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     const out = new Map<string, ColumnFeed>();
     for (const [id, q] of JSON.parse(sig) as [string, FeedQuery][]) {
       const e = cache.current.get(JSON.stringify(q));
-      if (e) out.set(id, e);
+      if (e) out.set(id, gone.size ? { ...e, events: e.events.filter((x) => !gone.has(x.task_id)) } : e);
     }
     return out;
-  }, [sig, version]);
+  }, [sig, version, gone]);
 
   const loadEarlier = useCallback((id: string) => {
     const key = shown.current.get(id);
