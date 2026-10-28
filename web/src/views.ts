@@ -88,10 +88,11 @@ export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, Ta
     const latest = new Map<string, string>();
     for (const t of all) if ((latest.get(t.project_id) ?? '') < t.created_at) latest.set(t.project_id, t.created_at);
     cols = projects.filter((p) => latest.has(p.id))
-      .sort((a, b) => latest.get(b.id)!.localeCompare(latest.get(a.id)!)).slice(0, VIEW_MAX)
+      .sort((a, b) => latest.get(b.id)!.localeCompare(latest.get(a.id)!)).slice(0, limit)
       .map((p) => ({ id: `v:p:${p.id}`, title: p.name, filter: { projectIds: [p.id] } }));
   } else if (view === 'task') {
-    const pick = [...all.filter(active).sort(newest), ...all.filter((t) => !active(t)).sort(newest)].slice(0, VIEW_MAX);
+    // Working tasks always get a column; the rest go by recent activity. Columns run newest activity first.
+    const pick = [...all.filter(active).sort(recent), ...all.filter((t) => !active(t)).sort(recent)].slice(0, limit).sort(recent);
     cols = pick.map((t) => ({ id: `v:t:${t.id}`, title: `${t.project_name}#${t.seq} ${t.title}`, filter: { taskIds: [t.id] } }));
   } else {
     // Each task in one column: the first of 응답 대기, 멈춤·오류, 작성 중, 실행 중, 완료 that fits.

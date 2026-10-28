@@ -584,7 +584,19 @@ export function App() {
     const skip = (c: DeckColumn) => (view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0)
       || (floatThread && c.id === THREAD);
     for (let i = activeIdx + dir; i >= 0 && i < deck.length; i += dir) if (!skip(deck[i])) return focusColumn(i);
+    // Past F2's or F3's last column: older ones come in, and the focus moves on to the first of them.
+    if (dir === 1 && olderCols > 0) showOlder(activeIdx + 1);
   };
+  const focusAfterMore = useRef<number | null>(null);
+  const showOlder = (focusAt?: number) => {
+    focusAfterMore.current = focusAt ?? null;
+    setViewLimit((n) => n + VIEW_MAX);
+  };
+  useEffect(() => {
+    if (focusAfterMore.current == null) return;
+    focusColumn(focusAfterMore.current);
+    focusAfterMore.current = null;
+  }, [viewLimit]);
   /** t: to the open thread, and from it back to the column focused before. */
   const toggleThreadFocus = () => {
     if (!threadTask) return setToast('열린 스레드가 없습니다.');
@@ -1328,6 +1340,11 @@ export function App() {
               <Plus aria-label="컬럼 추가" /><kbd>c</kbd>
             </button>
           )}
+          {olderCols > 0 && (
+            <button className="add-col more-tasks" title={`더 이전 ${view === 'project' ? '프로젝트' : '작업'} 보기 (마지막 컬럼에서 l)`} onClick={() => showOlder()}>
+              <ArrowRight aria-hidden />이전 {view === 'project' ? '프로젝트' : '작업'}<small>{Math.min(VIEW_MAX, olderCols)}개 더 · 남은 {olderCols}개</small>
+            </button>
+          )}
         </main>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
@@ -1360,6 +1377,7 @@ export function App() {
         <ColumnMenu x={menu.x} y={menu.y} width={widthOf(menu.colId)} thread={menu.colId === THREAD}
           fixed={!editable} reorderable={reorderable}
           sort={editable || !reorderable ? undefined : typeof viewOrder[view] === 'string' ? viewOrder[view] as ViewSort : null}
+          autoOrder={!editable && reorderable && AUTO_ORDER[view] ? { label: AUTO_ORDER[view]!, on: viewOrder[view] === undefined } : undefined}
           onSort={(k) => { sortColumns(k); setMenu(null); }}
           onRename={menuDef >= 0 && editable ? () => { setRenaming(menu.colId); setMenu(null); } : undefined}
           addTo={menu.colId === THREAD && threadTask ? custom.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
@@ -1755,6 +1773,8 @@ function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reorderable
           {reorderable && <>
           <button className="item" disabled={!canLeft} onClick={() => onMove(-1)}>왼쪽으로 <kbd>H</kbd></button>
           <button className="item" disabled={!canRight} onClick={() => onMove(1)}>오른쪽으로 <kbd>L</kbd></button>
+          {autoOrder && <button className="item" role="menuitemradio" aria-checked={autoOrder.on} onClick={() => onSort(null)}
+            title="정렬과 직접 옮긴 순서를 풀고 이 뷰의 자동 순서로">{autoOrder.on ? '✓ ' : ''}자동 순서 ({autoOrder.label})</button>}
           {sort !== undefined && (Object.keys(SORT_LABEL) as ViewSort[]).map((k) => (
             <button key={k} className="item" role="menuitemradio" aria-checked={sort === k} onClick={() => onSort(k)}>
               {sort === k ? '✓ ' : ''}{SORT_LABEL[k]} 정렬</button>
