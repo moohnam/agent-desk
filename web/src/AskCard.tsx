@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ASK_USER, type Answers } from '../../hub/src/runner/protocol.ts';
 import { api } from './api.ts';
-import { getDraft, setDraft } from './drafts.ts';
+import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import type { Approval, Post } from './types.ts';
 
 /** A multiple-choice question an engine session asks (Claude's AskUserQuestion, Codex's request_user_input). */
@@ -53,6 +53,7 @@ export function AskCard({ post, approval, onError }: {
     const empty = !!outcome || kept.every((x) => !x.labels.length && !x.other.trim());
     setDraft(draftKey, kept, { taskId: post.taskId, empty });
   }, [draftKey, picks, outcome, post.taskId]);
+  useDraftSync<Pick[]>(draftKey, (v) => setPicks(v?.length === qs.length ? v : qs.map(() => EMPTY)));
 
   const set = (i: number, f: (p: Pick) => Pick) => setPicks((ps) => ps.map((x, k) => (k === i ? f(x) : x)));
   const choose = (i: number, label: string) => set(i, (x) => qs[i].multiSelect

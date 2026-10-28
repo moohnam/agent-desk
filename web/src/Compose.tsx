@@ -5,7 +5,7 @@ import {
   type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../hub/src/compose.ts';
 import { api } from './api.ts';
-import { getDraft, setDraft } from './drafts.ts';
+import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
 import { useSettings } from './settings.ts';
@@ -294,6 +294,7 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
   // Unsent text stays while the drawer is closed and across reloads (drafts.ts).
   const [text, setText] = useState(() => getDraft<string>('drawer') ?? '');
   useEffect(() => { setDraft('drawer', text, { empty: !text.trim() }); }, [text]);
+  useDraftSync<string>('drawer', (v) => setText(v ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const skills = useSkills();
@@ -306,6 +307,8 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
     setBusy(true); setError(null);
     try {
       const task = await api.compose(text);
+      // onSent closes the drawer in the same render, before the effect would see the empty text.
+      setDraft('drawer', '', { empty: true });
       setText('');
       onSent(task);
     } catch (e) {
@@ -384,8 +387,9 @@ export function ReplyBox({ task, inputRef, onError, onSend }: {
   const [pick, setPick] = useState<Delivery | null>(() => getDraft<{ pick: Delivery | null }>(draftKey)?.pick ?? null);
   const [sent, setSent] = useState<string | null>(null);
   useEffect(() => { setDraft(draftKey, { text, pick }, { taskId: task.id, empty: !text.trim() }); }, [draftKey, text, pick, task.id]);
+  useDraftSync<{ text: string; pick: Delivery | null }>(draftKey, (v) => { setText(v?.text ?? ''); setPick(v?.pick ?? null); });
   const skills = useSkills();
-  const c = parseCompose(text, skillNames(skills));
+  const c = parseCompose(text, skillNames(skills), false);
   const name = engineName(task.engine);
   const delivery = c.delivery ?? pick ?? undefined;
   // #new picks its own engine by tag (else this task's); #fork and plain replies stay on this task's.

@@ -237,6 +237,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   const answer = r?.kind === 'user' ? String(r.payload.text ?? '') : sent;
   const outcome = answer != null ? 'answered' : r ? 'cancelled' : question ? null : 'closed';
   useEffect(() => { setDraft(draftKey, text, { taskId: post.taskId, empty: !!outcome || !text.trim() }); }, [draftKey, text, outcome, post.taskId]);
+  useDraftSync<string>(draftKey, (v) => setText(v ?? ''));
 
   const submit = async () => {
     const body = text.trim();
