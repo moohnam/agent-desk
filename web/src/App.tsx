@@ -426,7 +426,7 @@ export function App() {
   const activeCol = deck[activeIdx] as DeckColumn | undefined;
   const selectedPost = activeCol?.posts.find((p) => p.id === selection[activeCol.id]);
 
-  const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values()), [hub.approvals, hub.questions]);
+  const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values()), [hub.approvals, hub.questions, hub.tasks]);
   // Keep the queue focus on a valid row as approvals are resolved.
   useEffect(() => {
     if (queueFocus == null) return;
@@ -791,7 +791,9 @@ export function App() {
     else api.resolve(a.id, true).catch(fail);
   };
   const openQueueItem = (item: QueueItem) => {
-    if (item.kind === 'question' || isAsk(item.approval.tool_name)) answerQuestion(item.task_id, item.id);
+    // A Codex async question: answered by a reply in its thread.
+    if (item.kind === 'ask') { setQueueFocus(null); replyTo(item.task_id); }
+    else if (item.kind === 'question' || isAsk(item.approval.tool_name)) answerQuestion(item.task_id, item.id);
     else { setQueueFocus(null); openThread(item.task_id); }
   };
   /** The approval a post refers to: its own if it is a request, else its task's oldest pending one. */

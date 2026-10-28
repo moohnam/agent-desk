@@ -11,11 +11,17 @@ export const QUEUE_ROWS = 3;
 /** Something an agent is blocked on: a tool approval, or a question answered in its thread. */
 export type QueueItem =
   | { kind: 'approval'; id: string; task_id: string; created_at: string; approval: Approval }
-  | { kind: 'question'; id: string; task_id: string; created_at: string; question: Question };
+  | { kind: 'question'; id: string; task_id: string; created_at: string; question: Question }
+  /** A Codex async question: its turn goes on, and my next message in the thread answers it. */
+  | { kind: 'ask'; id: string; task_id: string; created_at: string; text: string };
 
-/** Pending approvals and questions, oldest first. */
-export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Question>): QueueItem[] {
+/** Pending approvals and questions, Codex's async ones included, oldest first. */
+export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Question>, tasks: Iterable<TaskView> = []): QueueItem[] {
   const out: QueueItem[] = [];
+  for (const t of tasks) {
+    const q = t.pending_ask;
+    if (q) out.push({ kind: 'ask', id: `ask:${q.event_id}`, task_id: t.id, created_at: q.ts, text: q.text });
+  }
   for (const a of approvals) out.push({ kind: 'approval', id: a.id, task_id: a.task_id, created_at: a.created_at, approval: a });
   for (const q of questions) out.push({ kind: 'question', id: q.id, task_id: q.task_id, created_at: q.created_at, question: q });
   return out.sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -36,7 +42,7 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
       <header className="queue-head">
         <b>응답 대기 {items.length}</b>
         <span className="muted">{focus == null ? 'a 키로 대기열 선택'
-          : cur?.kind === 'question' || (cur && isAsk(cur.approval.tool_name)) ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 나가기'
+          : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name)) ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 나가기'
           : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 나가기'}</span>
       </header>
       {rows.map((item, i) => {
