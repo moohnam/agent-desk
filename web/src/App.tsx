@@ -942,16 +942,6 @@ export function App() {
     setActive(k);
     showNewest(deck[k].id);
   };
-  // Ctrl+`: open or close the compose drawer, even while typing in it.
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      if (!ev.ctrlKey || ev.metaKey || ev.altKey || ev.code !== 'Backquote') return;
-      ev.preventDefault();
-      if (drawer) setDrawer(false); else openDrawer();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
   const openSearch = () => {
     if (phone) { setToast('검색은 PC 화면에서 쓸 수 있습니다.'); return; }
     if (search == null) setSearch('');
@@ -1090,7 +1080,7 @@ export function App() {
           // On the search column it closes the search; focus goes back to the column left of it (all).
           if (activeCol?.id === SEARCH) { closeSearch(); focusColumn(activeIdx - 1); }
           else if (threadTask) closeThread();
-          else if (drawer && isNarrow()) setDrawer(false);
+          else if (drawer) setDrawer(false);
           break;
         case 'o': case ' ': if (selectedPost) toggleExpanded(selectedPost.id); break;
         case 'r': {

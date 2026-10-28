@@ -12,10 +12,28 @@ import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
+/** Close functions of the open dialogs, the topmost last. */
+const openModals: { close: () => void }[] = [];
+// Esc closes the topmost dialog wherever the focus is (it often stays on the button that opened it).
+// On the document, so a field inside that handles Esc itself (stopping it) goes first, and the
+// desk's own keys on the window never see it.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !openModals.length || e.defaultPrevented) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openModals[openModals.length - 1].close();
+});
+
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const entry = { close: () => closeRef.current() };
+    openModals.push(entry);
+    return () => { openModals.splice(openModals.indexOf(entry), 1); };
+  }, []);
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } }}>
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`dialog${wide ? ' wide' : ''}`} role="dialog" aria-label={title}>
         <header><h2>{title}</h2><button className="icon-btn" onClick={onClose} title="닫기 (Esc)" aria-label="닫기"><X /></button></header>
         {children}
@@ -98,13 +116,18 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
   return null;
 }
 
+type Mentions = 'route' | 'refer';
+
 /**
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-function ComposeField({ value, onChange, onSubmit, inputRef, projects, tasks, mentions, placeholder, rows }: {
-  value: string; onChange: (v: string) => void; onSubmit: () => void; inputRef: RefObject<HTMLTextAreaElement | null>;
-  projects: Project[]; tasks: TaskView[]; mentions: boolean; placeholder: string; rows: number;
+function ComposeField({ value, onChange, onSubmit, onEscape, inputRef, projects, tasks, mentions, placeholder, rows }: {
+  value: string; onChange: (v: string) => void; onSubmit: () => void;
+  /** Esc with no list open; without it, Esc leaves the field. */
+  onEscape?: () => void;
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number;
 }) {
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
@@ -165,7 +188,7 @@ function ComposeField({ value, onChange, onSubmit, inputRef, projects, tasks, me
             if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setDismissed(true); return; }
           }
-          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.currentTarget.blur(); }
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (onEscape) onEscape(); else e.currentTarget.blur(); }
         }} />
       {!app && (
         <>
@@ -334,8 +357,8 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
         <button className="icon-btn" title="닫기" aria-label="닫기" onClick={onClose}><X /></button>
       </header>
       <div className="cmp-body">
-        <ComposeField value={text} onChange={setText} onSubmit={submit} inputRef={inputRef} rows={6}
-          projects={projects} tasks={tasks} mentions
+        <ComposeField value={text} onChange={setText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
+          projects={projects} tasks={tasks} mentions="route"
           placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 할 일'} />
         <Preview ok={hint.ok} rows={hint.rows} />
         {error && <p className="error">{error}</p>}
