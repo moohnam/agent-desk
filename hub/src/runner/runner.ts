@@ -1,4 +1,4 @@
-import type { Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
+import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { startClaude } from './claude.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
@@ -36,7 +36,7 @@ export class Runner {
   }
 
   /** `close`: understands the close command (older runners ignore it). */
-  get capabilities() { return { engines: Object.keys(ENGINES), close: true }; }
+  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true }; }
 
   /** Sessions still running, so a reconnecting hub can learn what is busy and awaiting approval. */
   snapshot(): LiveSession[] {

@@ -74,6 +74,7 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 브라우저로 http://127.0.0.1:4317 을 엽니다. 처음 실행하면 `data/`에 DB와 접속 토큰이 생깁니다.
 
 - 허브는 러너(에이전트 세션을 실행하는 프로세스, `127.0.0.1:4318`)가 없으면 따로 띄웁니다. 러너는 허브와 별개 프로세스라 허브를 꺼도 실행 중인 작업이 계속됩니다.
+- 허브는 러너에 붙을 때 `data/runner-token`(처음 쓸 때 만들어지고 본인만 읽을 수 있음)을 보여야 합니다. 토큰이 없는 연결은 러너가 끊으므로, 다른 로컬 프로세스가 러너 포트로 작업을 시킬 수 없습니다. 이 확인이 없던 버전에서 올릴 때는 허브와 러너를 함께 재시작합니다(새 허브는 옛 러너에 붙지만, 새 러너는 옛 허브를 받지 않습니다).
 - 터미널을 닫아도 허브를 유지하려면 백그라운드로 띄웁니다: `scripts/start-all` (러너와 허브를 띄우고 로그는 `data/runner.log`, `data/hub.log`)
 
 `scripts/`의 스크립트로 띄우고 끄고 다시 띄웁니다. 모두 백그라운드로 띄우고, 포트가 열리거나 닫힐 때까지 기다린 뒤 결과를 알립니다.
@@ -152,7 +153,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 - `npm run hub`(파일 변경 시 허브 재시작)와 `npm run web`(Vite, http://127.0.0.1:5173)을 각각 띄웁니다.
 - 타입 검사: `npm run typecheck` (hub, web, test)
 - 테스트: `npm test` (`node --test`로 `test/**/*.test.ts` 실행. 러너·DB는 가짜 어댑터와 메모리 DB를 써서 서버를 띄우지 않음)
-- 실행 데이터(DB, 접속 토큰, 로그, 업로드, 스킬)는 모두 `data/`에 생기며 저장소에는 올리지 않습니다. `data/access-token`은 다른 사람에게 보이지 않게 둡니다.
+- 실행 데이터(DB, 접속 토큰, 로그, 업로드, 스킬)는 모두 `data/`에 생기며 저장소에는 올리지 않습니다. `data/access-token`과 `data/runner-token`은 다른 사람에게 보이지 않게 둡니다.
 
 ### 환경 변수
 
@@ -166,6 +167,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | `RUNNER_PORT` | `4318` | 러너 포트 |
 | `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 resume. 상단바의 열린 세션 목록에서 바로 닫을 수도 있음 |
 | `RUNNER_LOG` / `RUNNER_PID_FILE` | `data/runner.log` / `data/runner.pid` | 러너 로그와 PID 파일 |
+| `RUNNER_TOKEN_FILE` | `data/runner-token` | 허브가 러너에 붙을 때 보이는 토큰 |
 | `CODEX_BIN` | `codex` | Codex 실행 파일 |
 
 ### 다른 기기에서 열기

@@ -249,6 +249,9 @@ export class Hub {
     this.requireRunner();
     if (!c.body && !c.skills.length) throw new HttpError(400, 'prompt is required');
     const engine = wantedEngine(c) ?? engine0 ?? DEFAULT_ENGINE;
+    if (!this.runner.engines.has(engine)) {
+      throw new HttpError(409, `지금 러너는 ${ENGINE_LABEL[engine]} 엔진을 실행하지 못합니다. 러너를 재시작하세요`);
+    }
     const problem = modelProblem(engine, c);
     if (problem) throw new HttpError(400, problem);
     return engine;
@@ -1016,7 +1019,7 @@ export class Hub {
   private onRunnerMessage(m: RunnerToHub) {
     if (m.type === 'hello') {
       this.store.upsertRunner(m.runnerId, m.host, m.capabilities);
-      this.runnerCloses = !!(m.capabilities as { close?: boolean } | null)?.close;
+      this.runnerCloses = !!m.capabilities.close;
       this.reconcile(m.sessions);
       return;
     }
