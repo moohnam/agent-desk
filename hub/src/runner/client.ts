@@ -9,11 +9,27 @@ import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, writeLine } from './w
 const RETRY_MS = 1000;
 const SPAWN_EVERY_MS = 10_000;
 
+/** What the hub needs of its runner connection; tests give the hub a fake one. */
+export interface RunnerPort {
+  /** Connected, and the runner's hello handled. */
+  readonly connected: boolean;
+  readonly id: string | null;
+  /** The engines the runner runs. */
+  readonly engines: ReadonlySet<string>;
+  /** Whether the runner still has the session open. */
+  has(sessionId: string): boolean;
+  /** Sends a command; throws when not connected. */
+  handle(cmd: HubToRunner): void;
+}
+
+/** Makes the hub's runner connection, which reports messages and connection changes back. */
+export type RunnerFactory = (onMessage: (m: RunnerToHub) => void, onConnection: (connected: boolean) => void) => RunnerPort;
+
 /**
  * The hub's side of the runner connection. Starts the runner daemon (detached, so it survives
  * hub restarts) when nothing is listening, and reconnects whenever the connection drops.
  */
-export class RunnerClient {
+export class RunnerClient implements RunnerPort {
   private socket: Socket | null = null;
   private live = new Set<string>();
   private lastSpawn = 0;

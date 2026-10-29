@@ -13,7 +13,7 @@ import { HttpError } from './errors.ts';
 import { Store, feedEvent, now, type AgentRequest, type Event, type Queued, type Session } from './db.ts';
 import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
 import { findSession } from './importer.ts';
-import { RunnerClient } from './runner/client.ts';
+import { RunnerClient, type RunnerFactory, type RunnerPort } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
 import type { Answers, BackgroundTask, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
 
@@ -36,7 +36,7 @@ export class Hub {
   readonly bus = new EventEmitter();
   readonly store: Store;
   readonly skills: SkillStore;
-  private runner: RunnerClient;
+  private runner: RunnerPort;
   /** Sessions with a turn in progress (runner `busy`), set as soon as the hub sends them work. */
   private busy = new Set<string>();
   /** Per live session, its background work (runner's last list). */
@@ -49,14 +49,18 @@ export class Hub {
    */
   private presumedLost = new Set<string>();
 
-  constructor(store: Store, skills = new SkillStore()) {
+  /**
+   * `runner`: makes the runner connection (by default the daemon's, started if need be).
+   * `graceMs`: how long after startup to wait for the runner before showing its sessions as lost.
+   */
+  constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number } = {}) {
     this.store = store;
-    this.skills = skills;
-    this.runner = new RunnerClient(
+    this.skills = opts.skills ?? new SkillStore();
+    this.runner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
       (m) => this.onRunnerMessage(m),
       (connected) => this.publish({ type: 'runner', connected }),
     );
-    setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, RUNNER_GRACE_MS).unref();
+    setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS).unref();
   }
 
   /** Compose syntax with the desk's skills as known #tags; `route`: the compose box's leading @mention. */
