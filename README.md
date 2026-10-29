@@ -112,8 +112,9 @@ git diff --stat HEAD@{1} -- hub web desktop   # 무엇이 바뀌었는지 확인
 | 바뀐 위치 | 할 일 |
 | --- | --- |
 | `web/` | 없음. 허브가 새 `web/dist`를 바로 제공하므로 열린 화면(브라우저·앱)에서 `⌘R`로 새로고침만 합니다 |
-| `hub/src/` (러너 제외) | 허브 재시작(`scripts/restart-hub`). 실행 중인 작업은 러너에서 계속 돕니다 |
+| `hub/src/` (`runner/`, `config.ts` 제외) | 허브 재시작(`scripts/restart-hub`). 실행 중인 작업은 러너에서 계속 돕니다 |
 | `hub/src/runner/` | 실행 중인 작업이 없을 때 러너 재시작: `scripts/restart-runner` |
+| `hub/src/config.ts`, `shared/` | 허브와 러너가 함께 쓰므로 둘 다 재시작(러너는 실행 중인 작업이 없을 때). `shared/`는 웹 화면도 쓰므로 `npm run build` 뒤 새로고침 |
 | `desktop/` | 데스크톱 앱 재설치 (아래) |
 | `package.json`, `package-lock.json` | `npm install` 후 허브 재시작 |
 

@@ -1,9 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { resolve } from 'node:path';
 import { readBody } from './body.ts';
 import type { AgentRequest } from './db.ts';
 import type { TaskView } from '../../shared/api.ts';
 import { ENGINES, HANDOFF_ENGINES } from '../../shared/compose.ts';
 import { HttpError } from './errors.ts';
+import { expandHome } from './paths.ts';
 import type { Hub } from './hub.ts';
 
 /**
@@ -145,38 +147,38 @@ function taskLine(t: TaskView) {
 async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal) {
   switch (name) {
     case 'desk_attach': {
-      const t = hub.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
+      const t = hub.external.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
       return text(`데스크에 붙었습니다. task_id: ${t.id} (프로젝트 @${t.project_name}). 이후 호출에 이 task_id를 쓰세요.`);
     }
     case 'desk_post':
-      hub.postExternal(a.task_id, a.text);
+      hub.external.postExternal(a.task_id, a.text);
       return text('게시했습니다.');
     case 'desk_checkpoint':
-      hub.checkpoint(a.task_id, a.summary, Array.isArray(a.next_steps) ? a.next_steps.map(String) : []);
+      hub.external.checkpoint(a.task_id, a.summary, Array.isArray(a.next_steps) ? a.next_steps.map(String) : []);
       return text('체크포인트를 남겼습니다.');
     case 'desk_ask': {
-      const q = hub.ask(a.task_id, a.question);
-      return answerResult(await hub.waitAnswer(q.id, waitSec(a.timeout_sec) * 1000, signal));
+      const q = hub.external.ask(a.task_id, a.question);
+      return answerResult(await hub.external.waitAnswer(q.id, waitSec(a.timeout_sec) * 1000, signal));
     }
     case 'desk_wait_answer': {
       const ms = waitSec(a.timeout_sec) * 1000;
-      if (hub.store.getRequest(a.question_id)) return requestResult(hub, await hub.waitRequest(a.question_id, ms, signal));
-      return answerResult(await hub.waitAnswer(a.question_id, ms, signal));
+      if (hub.store.getRequest(a.question_id)) return requestResult(hub, await hub.requests.waitRequest(a.question_id, ms, signal));
+      return answerResult(await hub.external.waitAnswer(a.question_id, ms, signal));
     }
     case 'desk_request': {
-      const r = hub.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id });
-      return requestResult(hub, await hub.waitRequest(r.id, waitSec(a.timeout_sec) * 1000, signal));
+      const r = hub.requests.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id });
+      return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec) * 1000, signal));
     }
     case 'desk_finish':
-      hub.finishExternal(a.task_id, a.summary);
+      hub.external.finishExternal(a.task_id, a.summary);
       return text('작업을 종료했습니다.');
     case 'desk_handoff': {
-      const r = hub.handoff({ engine: a.engine, sessionId: a.session_id, cwd: a.cwd, title: a.title, summary: a.summary, taskId: a.task_id });
+      const r = hub.external.handoff({ engine: a.engine, sessionId: a.session_id, cwd: a.cwd, title: a.title, summary: a.summary, taskId: a.task_id });
       if (r.already) return text(`이미 데스크가 이어 가는 세션입니다. task_id: ${r.task.id} (@${r.task.project_name} › ${r.task.title})`);
       return text(`데스크로 넘겼습니다. task_id: ${r.task.id} (@${r.task.project_name} › ${r.task.title}), 세션 ${r.sessionId}, 기록 ${r.imported}건. 이제 데스크에서 이 대화를 이어 갑니다. 사용자에게 이 터미널 세션을 종료하라고 알리고, 더 진행하지 마세요.`);
     }
     case 'desk_list_tasks': {
-      const projects = a.cwd ? new Set(hub.store.projectsContaining(a.cwd).map((p) => p.id)) : null;
+      const projects = a.cwd ? new Set(hub.store.projectsContaining(resolve(expandHome(String(a.cwd)))).map((p) => p.id)) : null;
       const tasks = hub.state().tasks.filter((t) => !projects || projects.has(t.project_id)).slice(0, 50);
       return text(tasks.length ? tasks.map(taskLine).join('\n') : '작업이 없습니다.');
     }

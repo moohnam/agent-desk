@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { extname, isAbsolute, resolve } from 'node:path';
 import { HttpError } from './errors.ts';
+import { expandHome } from './paths.ts';
 
 /** URL schemes handed to the app registered for them (AKB documents open in Lectern). */
 const APP_SCHEMES = /^(akb|lectern):/i;
@@ -24,7 +24,7 @@ export function linkTarget(href: string, cwd: string | undefined): LinkTarget {
   catch { throw new HttpError(400, `열 수 없는 링크입니다: ${href}`); }
   if (/^[a-z][a-z0-9+.-]*:/i.test(path)) throw new HttpError(400, `열 수 없는 링크입니다: ${href}`);
   path = path.replace(/#L\d+(-L?\d+)?$/, '').replace(/:\d+(:\d+)?(-\d+)?$/, '');
-  path = path.replace(/^~(?=\/|$)/, homedir());
+  path = expandHome(path);
   if (!isAbsolute(path)) {
     if (!cwd) throw new HttpError(400, `상대 경로의 기준 폴더를 알 수 없습니다: ${href}`);
     path = resolve(cwd, path);

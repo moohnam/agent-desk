@@ -1,23 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import { mkdirSync, statSync } from 'node:fs';
-import { homedir, hostname } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, HANDOFF_ENGINES, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, mentionsIn, modelProblem, parseCompose, wantedEngine,
-  type Composed, type Effort, type HandoffEngine, type EngineName, type ModelName, type PermissionMode,
+  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
+  type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from '../../shared/compose.ts';
-import type { Approval, HubMessage, QueuedKind, Question, Settings, Task, TaskStatus, TaskView } from '../../shared/api.ts';
-import type { EventKind, EventPayloads } from '../../shared/events.ts';
+import type { Approval, Settings, TaskView } from '../../shared/api.ts';
+import { DeskCore, OWNER } from './core.ts';
 import { HttpError } from './errors.ts';
-import { Store, feedEvent, now, type AgentRequest, type Event, type Queued, type Session } from './db.ts';
+import { ExternalSessions } from './external.ts';
+import { AgentRequests } from './requests.ts';
+import { expandHome } from './paths.ts';
+import { Store, now, type Queued, type Session } from './db.ts';
 import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
-import { findSession } from './importer.ts';
-import { RunnerClient, type RunnerFactory, type RunnerPort } from './runner/client.ts';
+import { RunnerClient, type RunnerFactory } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
-import type { Answers, BackgroundTask, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
+import type { Answers, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
 
-const OWNER = 'local';
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
 const RUNNER_GRACE_MS = 5000;
 
@@ -32,15 +31,11 @@ export function maskSecretAnswers(input: unknown, answers: Answers | undefined):
   return Object.fromEntries(Object.entries(answers).map(([q, a]) => [q, secret.has(q) ? '••••' : a]));
 }
 
-export class Hub {
-  readonly bus = new EventEmitter();
-  readonly store: Store;
-  readonly skills: SkillStore;
-  private runner: RunnerPort;
-  /** Sessions with a turn in progress (runner `busy`), set as soon as the hub sends them work. */
-  private busy = new Set<string>();
-  /** Per live session, its background work (runner's last list). */
-  private background = new Map<string, BackgroundTask[]>();
+export class Hub extends DeskCore {
+  /** Questions between agents (desk_request). */
+  readonly requests: AgentRequests;
+  /** Terminal sessions attached over MCP, and sessions handed over to the desk. */
+  readonly external: ExternalSessions;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
   /**
@@ -54,8 +49,12 @@ export class Hub {
    * `graceMs`: how long after startup to wait for the runner before showing its sessions as lost.
    */
   constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number } = {}) {
-    this.store = store;
-    this.skills = opts.skills ?? new SkillStore();
+    super(store, opts.skills ?? new SkillStore());
+    this.requests = new AgentRequests(this, {
+      dispatch: (sessionId, body, skills) => this.dispatch(sessionId, body, skills),
+      drain: (sessionId) => this.drain(sessionId),
+    });
+    this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
     this.runner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
       (m) => this.onRunnerMessage(m),
       (connected) => this.publish({ type: 'runner', connected }),
@@ -65,10 +64,6 @@ export class Hub {
 
   /** Compose syntax with the desk's skills as known #tags; `route`: the compose box's leading @mention. */
   parse(text: string, route = false) { return parseCompose(text ?? '', this.skills.names(), route); }
-
-  private requireRunner() {
-    if (!this.runner.connected) throw new HttpError(503, 'Runner에 연결되어 있지 않습니다. 잠시 후 다시 시도하세요');
-  }
 
   /**
    * Applies the runner's view of live sessions after a (re)connect. `presumed`: no runner has
@@ -105,12 +100,10 @@ export class Hub {
       }
       this.presumedLost.clear();
     }
-    for (const r of gone) { this.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
+    for (const r of gone) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }
-
-  private publish(m: HubMessage) { this.bus.emit('message', m); }
 
   settings(): Settings {
     const get = (e: EngineName) => ({
@@ -132,57 +125,6 @@ export class Hub {
       if (s[e]!.effort !== undefined) this.store.setSetting(`${e}_effort`, s[e]!.effort);
     }
     return this.settings();
-  }
-
-  taskView(task: Task): TaskView {
-    const session = this.store.latestSession(task.id);
-    return {
-      ...task,
-      project_name: this.store.getProject(task.project_id)?.name ?? '?',
-      engine: session?.engine ?? null,
-      permission_mode: session?.permission_mode ?? null,
-      model: session?.model ?? null,
-      effort: session?.effort ?? null,
-      live: session ? (session.source === 'external' ? task.status !== 'done' : this.runner.has(session.id)) : false,
-      source: session?.source ?? null,
-      last_event: this.store.lastEvent(task.id) ?? null,
-      pending_approvals: this.store.pendingApprovals().filter((a) => a.task_id === task.id).length,
-      pending_questions: this.store.pendingQuestions().filter((q) => q.task_id === task.id).length,
-      pending_ask: this.store.openAsyncQuestion(task.id),
-      queued: this.store.queued({ taskId: task.id }).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && { kind: q.kind }) })),
-      background: (session && this.background.get(session.id)) ?? [],
-    };
-  }
-
-  state() {
-    return {
-      projects: this.store.listProjects(),
-      tasks: this.store.listTasks().map((t) => this.taskView(t)),
-      approvals: this.store.pendingApprovals(),
-      questions: this.store.pendingQuestions(),
-      runner: { connected: this.runner.connected },
-    };
-  }
-
-  private publishTask(taskId: string) {
-    const task = this.store.getTask(taskId);
-    if (task) this.publish({ type: 'task', task: this.taskView(task) });
-  }
-
-  private setStatus(taskId: string, sessionId: string, status: TaskStatus) {
-    this.store.setTaskStatus(taskId, status);
-    this.store.updateSession(sessionId, { status });
-    this.publishTask(taskId);
-  }
-
-  /** Records an event of `kind` with that kind's payload (shared/events.ts) and publishes it. */
-  private addEvent<K extends EventKind>(sessionId: string, taskId: string, kind: K, payload: EventPayloads[K]): Event {
-    const event = this.store.addEvent(sessionId, taskId, kind, payload);
-    this.store.touchTask(taskId);
-    // Live events come cut like the feed's (feedEvent); an open thread fetches clipped ones whole.
-    this.publish({ type: 'event', event: feedEvent(event) });
-    this.publishTask(taskId);
-    return event;
   }
 
   /** With `create`, a missing directory is made (with its parents) instead of refused. */
@@ -213,7 +155,7 @@ export class Hub {
     let project = this.store.findProjectByName(c.mention.name);
     if (c.mention.path) {
       if (c.mention.no) throw new HttpError(400, '작업 번호와 경로는 함께 쓸 수 없습니다');
-      const path = resolve(c.mention.path.replace(/^~(?=\/|$)/, homedir()));
+      const path = resolve(expandHome(c.mention.path));
       if (project && project.root_path !== path) {
         throw new HttpError(409, `@${project.name}은 이미 ${project.root_path}로 등록되어 있습니다`);
       }
@@ -278,7 +220,7 @@ export class Hub {
     const sessionId = randomUUID();
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: project.root_path,
-      source: 'app', status: 'running', runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts, permission_mode: permissionMode,
+      source: 'app', status: 'running', runner_id: this.runnerId, created_at: ts, permission_mode: permissionMode,
       model, effort,
     });
     this.addEvent(sessionId, task.id, 'user', {
@@ -387,7 +329,7 @@ export class Hub {
   /** Records a waiting message as sent; one carrying an agent's request starts that request's answer. */
   private sendQueued(q: Queued, delivery: 'now' | 'later') {
     const r = this.store.openRequests().find((x) => x.queued_id === q.id);
-    if (r) { this.startRequest(r, q.session_id, delivery); return; }
+    if (r) { this.requests.startRequest(r, q.session_id, delivery); return; }
     this.addEvent(q.session_id, q.task_id, 'user', {
       text: q.text, mode: q.mode ?? undefined, skills: q.skills, delivery, queued_at: q.created_at, ...(q.kind === 'handoff' && { handoff: 'request' }),
     });
@@ -403,7 +345,7 @@ export class Hub {
     } });
     const ids = new Set(items.map((q) => q.id));
     for (const r of this.store.openRequests().filter((x) => x.queued_id && ids.has(x.queued_id))) {
-      this.settleRequest(r, 'failed', `대상 작업에서 ${why} 질문을 전달하지 못했습니다.`);
+      this.requests.settleRequest(r, 'failed', `대상 작업에서 ${why} 질문을 전달하지 못했습니다.`);
     }
   }
 
@@ -411,7 +353,7 @@ export class Hub {
     const q = this.store.queued({ taskId }).find((x) => x.id === queuedId);
     if (!q || !this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const r = this.store.openRequests().find((x) => x.queued_id === q.id);
-    if (r) this.settleRequest(r, 'denied', '사용자가 대기 중이던 질문을 취소했습니다.');
+    if (r) this.requests.settleRequest(r, 'denied', '사용자가 대기 중이던 질문을 취소했습니다.');
     this.publishTask(taskId);
   }
 
@@ -459,7 +401,7 @@ export class Hub {
     const engine = engineOf(parent.engine);
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: parent.cwd,
-      source: 'app', status: 'running', runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts, permission_mode: permissionMode,
+      source: 'app', status: 'running', runner_id: this.runnerId, created_at: ts, permission_mode: permissionMode,
       model, effort,
     });
     this.addEvent(sessionId, task.id, 'user', {
@@ -542,7 +484,7 @@ export class Hub {
     const engine = engineOf(old.engine);
     this.store.createSession({
       id: sessionId, task_id: taskId, engine, engine_session_id: null, cwd: old.cwd, source: 'app', status: 'running',
-      runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts, permission_mode: old.permission_mode, model: old.model, effort: old.effort,
+      runner_id: this.runnerId, created_at: ts, permission_mode: old.permission_mode, model: old.model, effort: old.effort,
     });
     // What was waiting behind the reset, and requests to this task, go on in the new session.
     this.store.moveQueued(old.id, sessionId);
@@ -587,14 +529,14 @@ export class Hub {
     }
     const gone = new Set(taskIds);
     for (const r of this.store.openRequests()) {
-      if (gone.has(r.to_task_id) && !gone.has(r.from_task_id)) this.settleRequest(r, 'failed', '대상 작업이 삭제되었습니다.');
+      if (gone.has(r.to_task_id) && !gone.has(r.from_task_id)) this.requests.settleRequest(r, 'failed', '대상 작업이 삭제되었습니다.');
       else if (gone.has(r.from_task_id) && !gone.has(r.to_task_id)) {
         // The asker is gone: its question waiting in the target must not be sent as if from the user.
         if (r.queued_id && this.store.dequeue(r.queued_id)) this.publishTask(r.to_task_id);
-        this.settleRequest(r, 'failed', '질문한 작업이 삭제되었습니다.');
+        this.requests.settleRequest(r, 'failed', '질문한 작업이 삭제되었습니다.');
       }
     }
-    for (const q of this.store.pendingQuestions()) if (gone.has(q.task_id)) this.settleQuestion(q, 'cancelled', null);
+    for (const q of this.store.pendingQuestions()) if (gone.has(q.task_id)) this.external.settleQuestion(q, 'cancelled', null);
     this.store.deleteTasks(taskIds);
     if (projectId) this.store.deleteProject(projectId);
     this.publish({ type: 'removed', taskIds, projectIds: projectId ? [projectId] : [] });
@@ -617,7 +559,7 @@ export class Hub {
   resolveApproval(approvalId: string, allow: boolean, message?: string, answers?: Answers) {
     const approval = this.store.getApproval(approvalId);
     if (!approval || approval.status !== 'pending') throw new HttpError(404, 'no pending approval');
-    if (approval.tool_name === REQUEST_TOOL) { this.resolveRequest(approval, allow, message); return; }
+    if (approval.tool_name === REQUEST_TOOL) { this.requests.resolveRequest(approval, allow, message); return; }
     this.requireRunner();
     this.store.setApprovalStatus(approvalId, allow ? 'allowed' : 'denied');
     this.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
@@ -626,394 +568,8 @@ export class Hub {
         answers: maskSecretAnswers(approval.input, answers) });
     this.runner.handle({ type: 'approval_result', sessionId: approval.session_id, approvalId, allow, message, answers });
     if (this.store.pendingApprovals().every((a) => a.task_id !== approval.task_id)) {
-      this.setStatus(approval.task_id, approval.session_id, 'running');
+      this.transition(approval.task_id, approval.session_id, 'approvals_cleared');
     }
-  }
-
-  // --- Questions between agents (desk_request, see mcp.ts) ---
-
-  /** `@project#N` of a task. */
-  private taskLabel(task: Task) { return `${this.store.getProject(task.project_id)?.name ?? '?'}#${task.seq}`; }
-
-  /**
-   * One agent asks another task's agent. `to`: '@project' (its latest desk-run task), '@project#N' or a
-   * task id. The asker is `fromTaskId` (an attached task) or the engine session `sessionId` (a task the
-   * desk runs). It goes to the target at once when the user named the target with @ in the message the
-   * asker is working on; otherwise the user allows it on a card first. A busy target gets it after its
-   * turn, like a waiting message; the target's last reply in the turn that takes it is the answer.
-   */
-  request(a: { to: string; text: string; fromTaskId?: string; sessionId?: string }): AgentRequest {
-    if (!a.text?.trim()) throw new HttpError(400, 'question이 필요합니다');
-    const from = this.requester(a);
-    const to = this.requestTarget(a.to);
-    if (to.task.id === from.task_id) throw new HttpError(400, '자기 작업에는 물을 수 없습니다');
-    if (this.waitsOn(to.task.id, from.task_id)) {
-      throw new HttpError(409, `@${this.taskLabel(to.task)}가 이 작업의 답을 기다리는 중이라, 물으면 서로 기다리게 됩니다. 그 질문에 먼저 답하세요`);
-    }
-    this.requireRunner();
-    const r: AgentRequest = {
-      id: randomUUID(), from_task_id: from.task_id, from_session_id: from.id, to_task_id: to.task.id, to_session_id: to.session.id,
-      text: a.text.trim(), status: 'approval', answer: null, approval_id: null, queued_id: null, prompt_event_id: null,
-      created_at: now(), answered_at: null,
-    };
-    if (this.allowedByUser(from.task_id, to.task)) {
-      this.store.createRequest(r);
-      this.deliverRequest(r);
-    } else {
-      const approval: Approval = {
-        id: randomUUID(), session_id: from.id, task_id: from.task_id, tool_name: REQUEST_TOOL,
-        input: { to: `@${this.taskLabel(to.task)}`, title: to.task.title, description: r.text }, status: 'pending', created_at: now(),
-      };
-      this.store.createApproval(approval);
-      this.store.createRequest({ ...r, approval_id: approval.id });
-      this.publish({ type: 'approval', approval });
-      this.addEvent(from.id, from.task_id, 'approval',
-        { approvalId: approval.id, toolName: REQUEST_TOOL, input: approval.input, decision: 'pending' });
-      this.setStatus(from.task_id, from.id, 'waiting');
-    }
-    return this.store.getRequest(r.id)!;
-  }
-
-  private requester(a: { fromTaskId?: string; sessionId?: string }): Session {
-    if (!a.fromTaskId?.trim() && !a.sessionId?.trim()) {
-      throw new HttpError(400, 'task_id(데스크에 붙은 작업) 또는 session_id(데스크가 실행한 작업의 세션 ID)가 필요합니다');
-    }
-    const s = a.fromTaskId?.trim() ? this.store.latestSession(a.fromTaskId.trim()) : this.store.sessionByEngineId(a.sessionId!.trim());
-    if (!s) throw new HttpError(404, '묻는 작업을 데스크에서 찾지 못했습니다. 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id를 확인하세요');
-    return s;
-  }
-
-  private requestTarget(to: string): { task: Task; session: Session } {
-    const t = to?.trim() ?? '';
-    let task = this.store.getTask(t);
-    if (!task) {
-      const m = /^@?([^\s:@#]+)(?:#(\d+))?$/.exec(t);
-      if (!m) throw new HttpError(400, 'to에는 @프로젝트, @프로젝트#번호 또는 task_id를 쓰세요');
-      const project = this.store.findProjectByName(m[1]);
-      if (!project) throw new HttpError(404, `등록되지 않은 프로젝트입니다: @${m[1]}`);
-      task = m[2] ? this.store.taskBySeq(project.id, Number(m[2]))
-        : this.store.listTasks().filter((x) => x.project_id === project.id && this.store.latestSession(x.id)?.source === 'app')
-          .sort((x, y) => y.updated_at.localeCompare(x.updated_at))[0];
-      if (!task) {
-        throw new HttpError(404, m[2] ? `@${project.name}#${m[2]} 작업이 없습니다` : `@${project.name}에는 데스크가 실행하는 작업이 없어 물을 곳이 없습니다`);
-      }
-    }
-    const session = this.store.latestSession(task.id);
-    if (!session) throw new HttpError(404, `@${this.taskLabel(task)}에 세션이 없습니다`);
-    if (session.source !== 'app') {
-      throw new HttpError(409, `@${this.taskLabel(task)}는 터미널에서 붙은 작업이라 데스크가 질문을 넣을 수 없습니다. 데스크가 실행하는 작업을 지정하세요`);
-    }
-    return { task, session };
-  }
-
-  /** Whether task `a` waits, through open requests, on an answer from task `b`. */
-  private waitsOn(a: string, b: string): boolean {
-    const open = this.store.openRequests();
-    const seen = new Set<string>();
-    const stack = [a];
-    while (stack.length) {
-      const x = stack.pop()!;
-      if (x === b) return true;
-      if (seen.has(x)) continue;
-      seen.add(x);
-      for (const r of open) if (r.from_task_id === x) stack.push(r.to_task_id);
-    }
-    return false;
-  }
-
-  /**
-   * Whether the user's message the asker is working on names the target: '@project' for a task of
-   * another project, or '@project#N' for that task. '@project' of the asker's own project is where the
-   * message went, not a target.
-   */
-  private allowedByUser(fromTaskId: string, to: Task): boolean {
-    const p = this.store.lastEventOf(fromTaskId, 'user')?.payload as { text?: string; request?: unknown } | undefined;
-    if (!p?.text || p.request) return false;
-    const own = this.store.getTask(fromTaskId)!.project_id;
-    return mentionsIn(p.text).some((m) => {
-      const project = this.store.findProjectByName(m.name);
-      if (!project || project.id !== to.project_id) return false;
-      return m.no ? m.no === to.seq : project.id !== own;
-    });
-  }
-
-  /** What the target agent receives. */
-  private requestPrompt(r: AgentRequest) {
-    const from = this.store.getTask(r.from_task_id)!;
-    const cwd = this.store.getSession(r.from_session_id)?.cwd;
-    return `데스크를 통해 다른 작업(@${this.taskLabel(from)} "${from.title}"${cwd ? `, ${cwd}` : ''})의 에이전트가 질문을 보냈습니다. `
-      + '이번 응답의 마지막 메시지가 그대로 그 에이전트에게 답으로 전달되니, 마지막 메시지에 답을 완결해서 쓰세요. '
-      + `답하는 데 필요한 만큼만 확인하고, 하던 작업의 방향은 바꾸지 마세요.\n\n질문:\n${r.text}`;
-  }
-
-  /** Sends an allowed request to the target: now when it is free, else after the messages waiting there. */
-  private deliverRequest(r: AgentRequest) {
-    const session = this.store.latestSession(r.to_task_id)!;
-    const busy = this.runner.has(session.id) && this.busy.has(session.id);
-    if (busy || this.store.queued({ sessionId: session.id }).length) {
-      const id = randomUUID();
-      this.store.enqueue({
-        id, task_id: r.to_task_id, session_id: session.id, text: `@${this.taskLabel(this.store.getTask(r.from_task_id)!)}의 질문: ${r.text}`,
-        body: this.requestPrompt(r), skills: [], mode: null, created_at: now(),
-      });
-      this.store.updateRequest(r.id, { status: 'queued', queued_id: id, to_session_id: session.id });
-      this.publishTask(r.to_task_id);
-      this.drain(session.id);
-    } else {
-      this.startRequest(r, session.id);
-      this.dispatch(session.id, this.requestPrompt(r), []);
-    }
-  }
-
-  /** Records the request as the target's `user` message; the turn it starts answers it. */
-  private startRequest(r: AgentRequest, sessionId: string, delivery?: 'now' | 'later') {
-    const from = this.store.getTask(r.from_task_id)!;
-    const e = this.addEvent(sessionId, r.to_task_id, 'user', {
-      text: r.text, delivery, request: { id: r.id, task_id: from.id, from: this.taskLabel(from), title: from.title },
-    });
-    this.store.updateRequest(r.id, { status: 'running', prompt_event_id: e.id, to_session_id: sessionId });
-  }
-
-  /**
-   * A turn of `sessionId` ended: the requests it took get its last reply as their answer. `endedWhy`:
-   * the session ended instead, so they get no answer.
-   */
-  private answerRequests(sessionId: string, endedWhy?: string) {
-    for (const r of this.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId)) {
-      if (endedWhy) { this.settleRequest(r, 'failed', `${endedWhy} 답을 받지 못했습니다.`); continue; }
-      const after = this.store.listEvents(r.to_task_id, 0, (r.prompt_event_id ?? 0) + 1);
-      const stopped = after.find((e) => e.kind === 'status' && ['error', 'interrupted'].includes((e.payload as { state?: string }).state ?? ''));
-      const reply = after.filter((e) => e.kind === 'assistant').at(-1)?.payload as { text?: string } | undefined;
-      if (stopped) {
-        this.settleRequest(r, 'failed', `대상 작업이 ${(stopped.payload as { state: string }).state === 'error' ? '오류로 멈춰' : '중단되어'} 답을 받지 못했습니다.`);
-      } else if (reply?.text?.trim()) this.settleRequest(r, 'answered', reply.text.trim());
-      else this.settleRequest(r, 'failed', '대상 에이전트가 답 없이 턴을 마쳤습니다.');
-    }
-  }
-
-  private settleRequest(r: AgentRequest, status: 'answered' | 'denied' | 'failed', answer: string) {
-    this.store.updateRequest(r.id, { status, answer, answered_at: now() });
-    for (const w of [...(this.waiters.get(r.id) ?? [])]) w();
-  }
-
-  /** The user allowed or denied a request's card. */
-  private resolveRequest(approval: Approval, allow: boolean, message?: string) {
-    const r = this.store.openRequests().find((x) => x.approval_id === approval.id);
-    if (allow && r) this.requireRunner();
-    this.store.setApprovalStatus(approval.id, allow ? 'allowed' : 'denied');
-    this.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
-    this.addEvent(approval.session_id, approval.task_id, 'approval',
-      { approvalId: approval.id, toolName: approval.tool_name, decision: allow ? 'allowed' : 'denied', message });
-    if (r && allow) {
-      try { this.deliverRequest(r); }
-      catch (err) { this.settleRequest(r, 'failed', `전달하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`); }
-    } else if (r) this.settleRequest(r, 'denied', message ? `사용자가 거절했습니다: ${message}` : '사용자가 거절했습니다.');
-    if (this.store.pendingApprovals().every((a) => a.task_id !== approval.task_id)) {
-      this.setStatus(approval.task_id, approval.session_id, 'running');
-    }
-  }
-
-  /** Resolves with the request once it is settled, or as it is after `timeoutMs`. */
-  waitRequest(requestId: string, timeoutMs: number, signal?: AbortSignal): Promise<AgentRequest> {
-    return this.waitFor(requestId, () => this.store.getRequest(requestId),
-      (r) => r.status === 'answered' || r.status === 'denied' || r.status === 'failed', timeoutMs, signal);
-  }
-
-  // --- Terminal sessions attached over MCP (see mcp.ts) ---
-
-  /** Waiters of desk_ask / desk_request / desk_wait_answer, by question or request id. */
-  private waiters = new Map<string, Set<() => void>>();
-
-  /** The external session of `taskId`; app tasks cannot be driven over MCP. */
-  private externalSession(taskId: string) {
-    const session = this.store.latestSession(taskId);
-    if (!session) throw new HttpError(404, `작업을 찾을 수 없습니다: ${taskId}`);
-    if (session.source !== 'external') throw new HttpError(409, '앱에서 시작한 작업에는 붙을 수 없습니다');
-    return session;
-  }
-
-  /**
-   * Registers a terminal agent's work as a task: under the deepest project containing `cwd`, or a new
-   * project named after the directory. With `taskId` it re-attaches to that earlier external task.
-   */
-  attachExternal(a: { title: string; summary: string; cwd: string; engine?: string; taskId?: string }): TaskView {
-    if (!a.cwd?.trim() || !a.summary?.trim()) throw new HttpError(400, 'cwd와 summary가 필요합니다');
-    const cwd = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
-    const engine = engineOf(a.engine);
-    if (a.taskId) {
-      const session = this.externalSession(a.taskId);
-      if (a.title?.trim()) this.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
-      this.addEvent(session.id, a.taskId, 'status', { kind: 'status', state: 'started', detail: { source: 'external', engine, cwd } });
-      this.addEvent(session.id, a.taskId, 'assistant', { text: a.summary.trim(), via: 'mcp' });
-      this.setStatus(a.taskId, session.id, 'running');
-      return this.taskView(this.store.getTask(a.taskId)!);
-    }
-    const project = this.store.projectsContaining(cwd)[0] ?? this.createProject(this.freeProjectName(basename(cwd) || 'root'), cwd);
-    const ts = now();
-    const task = this.store.createTask({
-      id: randomUUID(), project_id: project.id, title: (a.title?.trim() || a.summary.trim()).slice(0, 120),
-      status: 'running', checkpoint_md: null, created_by: OWNER, created_at: ts, updated_at: ts,
-    });
-    const sessionId = randomUUID();
-    this.store.createSession({
-      id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd, source: 'external',
-      status: 'running', runner_id: 'mcp', created_at: ts, permission_mode: DEFAULT_MODE,
-      model: null, effort: null,
-    });
-    this.addEvent(sessionId, task.id, 'status', { kind: 'status', state: 'started', detail: { source: 'external', engine, cwd } });
-    this.addEvent(sessionId, task.id, 'assistant', { text: a.summary.trim(), via: 'mcp' });
-    return this.taskView(this.store.getTask(task.id)!);
-  }
-
-  private freeProjectName(base: string) {
-    let name = base;
-    for (let i = 2; this.store.findProjectByName(name); i++) name = `${base}-${i}`;
-    return name;
-  }
-
-  postExternal(taskId: string, text: string) {
-    if (!text?.trim()) throw new HttpError(400, 'text가 필요합니다');
-    const session = this.externalSession(taskId);
-    this.addEvent(session.id, taskId, 'assistant', { text: text.trim(), via: 'mcp' });
-    if (this.store.getTask(taskId)?.status !== 'waiting') this.setStatus(taskId, session.id, 'running');
-  }
-
-  checkpoint(taskId: string, summary: string, nextSteps: string[] = []) {
-    if (!summary?.trim()) throw new HttpError(400, 'summary가 필요합니다');
-    const session = this.externalSession(taskId);
-    const md = [`**체크포인트**`, summary.trim(), ...(nextSteps.length ? ['**다음 단계**', nextSteps.map((s) => `- ${s}`).join('\n')] : [])].join('\n\n');
-    this.store.setCheckpoint(taskId, md);
-    this.addEvent(session.id, taskId, 'assistant', { text: md, via: 'mcp', checkpoint: true });
-  }
-
-  ask(taskId: string, text: string): Question {
-    if (!text?.trim()) throw new HttpError(400, 'question이 필요합니다');
-    const session = this.externalSession(taskId);
-    const question: Question = {
-      id: randomUUID(), session_id: session.id, task_id: taskId, text: text.trim(),
-      status: 'pending', answer: null, created_at: now(), answered_at: null,
-    };
-    this.store.createQuestion(question);
-    this.publish({ type: 'question', question });
-    this.addEvent(session.id, taskId, 'question', { questionId: question.id, text: question.text, decision: 'pending' });
-    this.setStatus(taskId, session.id, 'waiting');
-    return question;
-  }
-
-  /** Resolves with the question once it is no longer pending, or as is after `timeoutMs`. */
-  waitAnswer(questionId: string, timeoutMs: number, signal?: AbortSignal): Promise<Question> {
-    return this.waitFor(questionId, () => this.store.getQuestion(questionId), (q) => q.status !== 'pending', timeoutMs, signal);
-  }
-
-  /** Resolves with `get()` once `done` holds for it (checked when its id's waiters are called), or after `timeoutMs`. */
-  private waitFor<T>(id: string, get: () => T | undefined, done: (t: T) => boolean, timeoutMs: number, signal?: AbortSignal): Promise<T> {
-    const first = get();
-    if (!first) return Promise.reject(new HttpError(404, `질문을 찾을 수 없습니다: ${id}`));
-    if (done(first)) return Promise.resolve(first);
-    // What it last was, if it is deleted meanwhile (its task removed).
-    let last = first;
-    return new Promise((resolve) => {
-      const waiters = this.waiters.get(id) ?? new Set();
-      this.waiters.set(id, waiters);
-      const finish = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', finish);
-        waiters.delete(finish);
-        // Another wait may have started a new set for this id meanwhile; leave that one be.
-        if (!waiters.size && this.waiters.get(id) === waiters) this.waiters.delete(id);
-        resolve((last = get() ?? last));
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      signal?.addEventListener('abort', finish, { once: true });
-      waiters.add(finish);
-    });
-  }
-
-  answerQuestion(questionId: string, answer: string) {
-    const q = this.store.getQuestion(questionId);
-    if (!q || q.status !== 'pending') throw new HttpError(404, '대기 중인 질문이 없습니다');
-    if (!answer?.trim()) throw new HttpError(400, 'answer가 필요합니다');
-    this.settleQuestion(q, 'answered', answer.trim());
-    this.addEvent(q.session_id, q.task_id, 'user', { text: answer.trim(), answers: questionId });
-    if (!this.store.pendingQuestions().some((x) => x.task_id === q.task_id)) this.setStatus(q.task_id, q.session_id, 'running');
-  }
-
-  private settleQuestion(q: Question, status: 'answered' | 'cancelled', answer: string | null) {
-    this.store.setQuestionStatus(q.id, status, answer);
-    const settled = this.store.getQuestion(q.id)!;
-    this.publish({ type: 'question', question: settled });
-    for (const w of [...(this.waiters.get(q.id) ?? [])]) w();
-  }
-
-  /** Ends an attached task; questions still open are cancelled. */
-  finishExternal(taskId: string, summary?: string) {
-    const session = this.externalSession(taskId);
-    for (const q of this.store.pendingQuestions().filter((x) => x.task_id === taskId)) {
-      this.settleQuestion(q, 'cancelled', null);
-      this.addEvent(session.id, taskId, 'question', { questionId: q.id, text: q.text, decision: 'cancelled' });
-    }
-    if (summary?.trim()) this.addEvent(session.id, taskId, 'assistant', { text: summary.trim(), via: 'mcp' });
-    this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'finished', detail: { summary: summary?.trim() } });
-    this.setStatus(taskId, session.id, 'done');
-  }
-
-  /**
-   * Takes over a terminal Claude Code or Codex session: a desk task that resumes the same engine
-   * conversation, with its history (tool calls as names only) in the thread. `id`: the engine's
-   * session id; without it, the newest session that ran in `cwd`. With `taskId` (an attached task)
-   * that task continues as the desk's instead of a new one, keeping its posts and skipping the history.
-   */
-  handoff(a: { engine?: string; sessionId?: string; cwd: string; title?: string; summary?: string; taskId?: string }) {
-    if (!a.cwd?.trim()) throw new HttpError(400, 'cwd가 필요합니다');
-    const engine = (a.engine ?? DEFAULT_ENGINE) as HandoffEngine;
-    if (!HANDOFF_ENGINES.includes(engine)) throw new HttpError(400, `${engine} 세션은 넘겨받을 수 없습니다 (${HANDOFF_ENGINES.join(', ')}만 지원)`);
-    const cwd0 = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
-    let found;
-    try { found = findSession(engine, a.sessionId?.trim() || undefined, cwd0); }
-    catch (err) { throw new HttpError(404, err instanceof Error ? err.message : String(err)); }
-    const existing = this.store.sessionByEngineId(found.id);
-    if (existing?.source === 'app') {
-      return { task: this.taskView(this.store.getTask(existing.task_id)!), sessionId: found.id, imported: 0, already: true };
-    }
-    // The engine resumes a conversation from the directory it ran in.
-    const cwd = found.cwd ?? cwd0;
-    const ts = now();
-    let task: Task;
-    if (a.taskId) {
-      const old = this.externalSession(a.taskId);
-      for (const q of this.store.pendingQuestions().filter((x) => x.task_id === a.taskId)) {
-        this.settleQuestion(q, 'cancelled', null);
-        this.addEvent(old.id, a.taskId, 'question', { questionId: q.id, text: q.text, decision: 'cancelled' });
-      }
-      this.store.updateSession(old.id, { status: 'done' });
-      if (a.title?.trim()) this.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
-      task = this.store.getTask(a.taskId)!;
-    } else {
-      const project = this.store.projectsContaining(cwd)[0] ?? this.createProject(this.freeProjectName(basename(cwd) || 'root'), cwd);
-      const firstUser = found.events.find((e) => e.kind === 'user')?.text ?? '';
-      task = this.store.createTask({
-        id: randomUUID(), project_id: project.id,
-        title: (a.title?.trim() || firstUser.split('\n')[0] || `${ENGINE_LABEL[engine]} 세션`).slice(0, 120),
-        status: 'idle', checkpoint_md: null, created_by: OWNER, created_at: ts, updated_at: ts,
-      });
-    }
-    const sessionId = randomUUID();
-    this.store.createSession({
-      id: sessionId, task_id: task.id, engine, engine_session_id: found.id, cwd,
-      source: 'app', status: 'idle', runner_id: this.runner.id ?? `local-${hostname()}`, created_at: ts,
-      permission_mode: DEFAULT_MODE, model: null, effort: null,
-    });
-    const history = a.taskId ? [] : found.events;
-    this.store.importEvents(sessionId, task.id, history.map((e) => ({
-      ts: e.ts, kind: e.kind, payload: e.kind === 'tool' ? { kind: 'tool', name: e.name } : { text: e.text },
-    })));
-    this.addEvent(sessionId, task.id, 'status', { kind: 'status', state: 'handoff', detail: {
-      engine, engine_session_id: found.id, cwd, imported: history.length,
-    } });
-    const note = `터미널 ${ENGINE_LABEL[engine]} 세션을 넘겨받았습니다${history.length ? ` (기록 ${history.length}건)` : ''}. 답글을 쓰면 같은 대화로 이어집니다.`;
-    this.addEvent(sessionId, task.id, 'assistant', { text: a.summary?.trim() ? `${note}\n\n${a.summary.trim()}` : note, via: 'handoff' });
-    this.setStatus(task.id, sessionId, 'idle');
-    return { task: this.taskView(this.store.getTask(task.id)!), sessionId: found.id, imported: history.length, already: false };
   }
 
   private onRunnerMessage(m: RunnerToHub) {
@@ -1032,20 +588,18 @@ export class Hub {
         break;
       case 'event':
         this.addEvent(session.id, taskId, m.event.kind, m.event);
-        if (m.event.kind === 'status' && m.event.state === 'error') this.setStatus(taskId, session.id, 'error');
-        if (m.event.kind === 'status' && m.event.state === 'interrupted') this.setStatus(taskId, session.id, 'idle');
+        if (m.event.kind === 'status' && m.event.state === 'error') this.transition(taskId, session.id, 'failed');
+        if (m.event.kind === 'status' && m.event.state === 'interrupted') this.transition(taskId, session.id, 'interrupted');
         break;
       case 'busy':
         if (m.busy) {
           this.busy.add(session.id);
-          // A turn the agent started itself, e.g. once a background subagent finished.
-          const status = this.store.getTask(taskId)?.status;
-          if (status !== 'running' && status !== 'waiting') this.setStatus(taskId, session.id, 'running');
+          this.transition(taskId, session.id, 'turn_started');
           break;
         }
         this.busy.delete(session.id);
-        if (this.store.getTask(taskId)?.status === 'running') this.setStatus(taskId, session.id, 'done');
-        this.answerRequests(session.id);
+        this.transition(taskId, session.id, 'turn_ended');
+        this.requests.answerRequests(session.id);
         this.drain(session.id);
         break;
       case 'approval_request': {
@@ -1059,7 +613,7 @@ export class Hub {
         this.publish({ type: 'approval', approval });
         this.addEvent(session.id, taskId, 'approval',
           { approvalId: m.approvalId, toolName: m.toolName, input: m.input, decision: 'pending' });
-        this.setStatus(taskId, session.id, 'waiting');
+        this.transition(taskId, session.id, 'approval_pending');
         break;
       }
       case 'approval_cancelled': {
@@ -1080,7 +634,7 @@ export class Hub {
         this.busy.delete(session.id);
         this.background.delete(session.id);
         if (session.source !== 'app') break;
-        this.answerRequests(session.id, '대상 작업의 세션이 끝나');
+        this.requests.answerRequests(session.id, '대상 작업의 세션이 끝나');
         // Approvals the closed session was waiting on can no longer be answered.
         for (const approval of this.store.pendingApprovals().filter((x) => x.session_id === session.id)) {
           this.store.setApprovalStatus(approval.id, 'denied');
@@ -1093,20 +647,19 @@ export class Hub {
         if (m.reason === 'user') {
           this.dropQueue(session.id, taskId, '세션을 닫아서');
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'closed', detail: { busy: !!m.busy } });
-          if (status === 'running' || status === 'waiting') this.setStatus(taskId, session.id, 'idle');
-          else this.publishTask(taskId);
+          if (!this.transition(taskId, session.id, 'closed_by_user')) this.publishTask(taskId);
           break;
         }
         const midTurn = m.reason !== 'idle' && (m.busy ?? (status === 'running' || status === 'waiting'));
         if (m.error || midTurn) this.dropQueue(session.id, taskId, '세션이 종료되어');
         if (m.error) {
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'error', detail: { message: m.error } });
-          this.setStatus(taskId, session.id, 'error');
+          this.transition(taskId, session.id, 'failed');
         } else if (midTurn) {
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'error', detail: {
             message: '작업 도중 세션이 예기치 않게 종료되었습니다. 답글을 보내면 이어서 재개합니다.', reason: 'closed_mid_turn',
           } });
-          this.setStatus(taskId, session.id, 'error');
+          this.transition(taskId, session.id, 'failed');
         } else {
           // Idle close or a finished session: status stays, the task just stops being live.
           this.publishTask(taskId);

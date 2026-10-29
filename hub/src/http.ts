@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize } from 'node:path';
 import type { Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import { parseFeedParams, type FeedFilter, type HubMessage } from '../../shared/api.ts';
@@ -220,7 +220,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
         }
         case 'POST /questions/:id': {
           const b = await readJson(req);
-          hub.answerQuestion(id, b.answer);
+          hub.external.answerQuestion(id, b.answer);
           return send(res, 200, { ok: true });
         }
         case 'POST /open': {

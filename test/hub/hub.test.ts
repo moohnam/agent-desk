@@ -149,9 +149,9 @@ test('a new task for an engine the runner lacks is refused, and nothing is made'
 
 test('deleting the task that asked settles its request', async () => {
   const { hub, taskId: target, dir } = started();
-  const asker = hub.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
-  const r = hub.request({ to: target, text: '어떻게 됐어요?', fromTaskId: asker.id });
-  const answer = hub.waitRequest(r.id, 5_000);
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '어떻게 됐어요?', fromTaskId: asker.id });
+  const answer = hub.requests.waitRequest(r.id, 5_000);
   hub.deleteTask(asker.id);
   const settled = await answer;
   assert.equal(settled.status, 'failed');

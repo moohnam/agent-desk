@@ -10,7 +10,7 @@
 // skills root. The hub manages the files; the runner only needs the paths.
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, join, normalize, relative, sep } from 'node:path';
 import type { Skill, SkillFile } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { HttpError } from './errors.ts';
