@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api } from './api.ts';
 import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, modelTagsOf, type EngineName } from '../../shared/compose.ts';
-import { Modal } from './Compose.tsx';
+import { Modal } from './Modal.tsx';
 import { saveSettings, useSettings } from './settings.ts';
 import { resetTime } from './format.ts';
 import type { EngineUsage, Settings } from './types.ts';

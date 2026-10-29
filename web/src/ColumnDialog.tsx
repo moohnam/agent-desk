@@ -1,13 +1,10 @@
 import { X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Modal } from './Compose.tsx';
-import { STATUS_LABEL } from './format.ts';
+import { Modal } from './Modal.tsx';
+import { KIND_LABEL, STATUS_LABEL } from './format.ts';
 import { projectColor, projectListLabel, rankProjects } from './projects.ts';
 import type { ColumnDef, PostKind, Project, TaskStatus, TaskView } from './types.ts';
 
-export const KIND_LABEL: Record<PostKind, string> = {
-  user: '내 지시', assistant: '에이전트 발화', approval: '승인 요청', question: '질문', alert: '오류·중단',
-};
 const KINDS = Object.keys(KIND_LABEL) as PostKind[];
 const STATUSES: TaskStatus[] = ['running', 'waiting', 'done', 'idle', 'error'];
 /** Rows rendered in the project list; typing narrows it further. */

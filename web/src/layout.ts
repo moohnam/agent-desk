@@ -1,4 +1,4 @@
-import { KIND_LABEL } from './ColumnDialog.tsx';
+import { KIND_LABEL } from './format.ts';
 import { STATUS_LABEL } from './format.ts';
 import { projectListLabel } from './projects.ts';
 import type { ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Project, TaskView } from './types.ts';

@@ -1,4 +1,4 @@
-import type { HubEvent, TaskStatus, TaskView } from './types.ts';
+import type { HubEvent, PostKind, TaskStatus, TaskView } from './types.ts';
 
 export const STATUS_LABEL: Record<TaskStatus, string> = {
   waiting: '승인 대기', running: '실행 중', done: '완료', idle: '대기', error: '오류',
@@ -73,3 +73,7 @@ export function eventSummary(e: HubEvent): string {
     default: return p.text ?? '';
   }
 }
+
+export const KIND_LABEL: Record<PostKind, string> = {
+  user: '내 지시', assistant: '에이전트 발화', approval: '승인 요청', question: '질문', alert: '오류·중단',
+};

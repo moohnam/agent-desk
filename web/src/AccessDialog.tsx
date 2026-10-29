@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api.ts';
-import { Modal } from './Compose.tsx';
+import { Modal } from './Modal.tsx';
 
 /** "폰에서 열기": the QR code another device on the network scans to open the desk. */
 export function AccessDialog({ onClose }: { onClose: () => void }) {

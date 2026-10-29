@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Modal } from './Compose.tsx';
+import { Modal } from './Modal.tsx';
 
 /** A column the finder can jump to. `sub`: a second line (the column's note), also searched. */
 export interface FinderItem { id: string; title: string; sub?: string }

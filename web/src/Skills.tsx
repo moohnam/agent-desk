@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.ts';
-import { Modal } from './Compose.tsx';
+import { Modal } from './Modal.tsx';
 import { refreshSkills, useSkills } from './skills.ts';
 import type { Skill } from './types.ts';
 

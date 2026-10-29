@@ -1,5 +1,4 @@
-import { KIND_LABEL } from './ColumnDialog.tsx';
-import { STATUS_LABEL } from './format.ts';
+import { KIND_LABEL, STATUS_LABEL } from './format.ts';
 import { projectColor, rankProjects } from './projects.ts';
 import type { ColumnFilter, PostKind, Project, TaskStatus, TaskView } from './types.ts';
 

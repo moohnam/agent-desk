@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { X } from 'lucide-react';
 import { ENGINE_SHORT, engineOf } from '../../shared/compose.ts';
 import { api } from './api.ts';
-import { Modal } from './Compose.tsx';
+import { Modal } from './Modal.tsx';
 import { backgroundCount, relTime, statusLabel } from './format.ts';
 import { modelShort, projectColor } from './projects.ts';
 import type { TaskView } from './types.ts';
