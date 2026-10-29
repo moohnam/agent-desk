@@ -157,6 +157,8 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 
 ### 환경 변수
 
+모두 [hub/src/config.ts](hub/src/config.ts) 한 곳에서 읽습니다. `data/…`로 적은 파일은 DB 파일이 있는 디렉터리를 따라가므로, `AGENT_DESK_DB`만 옮겨도 나머지가 함께 옮겨집니다.
+
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `PORT` / `HOST` | `4317` / `0.0.0.0` | 허브 주소. 네트워크에 열지 않으려면 `HOST=127.0.0.1` |
@@ -168,7 +170,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 resume. 상단바의 열린 세션 목록에서 바로 닫을 수도 있음 |
 | `RUNNER_LOG` / `RUNNER_PID_FILE` | `data/runner.log` / `data/runner.pid` | 러너 로그와 PID 파일 |
 | `RUNNER_TOKEN_FILE` | `data/runner-token` | 허브가 러너에 붙을 때 보이는 토큰 |
-| `CODEX_BIN` | `codex` | Codex 실행 파일 |
+| `CODEX_BIN` / `AGY_BIN` | `codex` / `agy` | Codex, Antigravity 실행 파일 |
 
 ### 다른 기기에서 열기
 

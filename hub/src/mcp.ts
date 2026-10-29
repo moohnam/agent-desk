@@ -3,7 +3,8 @@ import { readBody } from './body.ts';
 import type { AgentRequest } from './db.ts';
 import type { TaskView } from '../../shared/api.ts';
 import { ENGINES, HANDOFF_ENGINES } from '../../shared/compose.ts';
-import { HttpError, type Hub } from './hub.ts';
+import { HttpError } from './errors.ts';
+import type { Hub } from './hub.ts';
 
 /**
  * MCP server (Streamable HTTP, JSON responses only) through which a terminal Claude Code or Codex

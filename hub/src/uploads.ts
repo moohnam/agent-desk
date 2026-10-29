@@ -5,7 +5,7 @@ import type { IncomingMessage } from 'node:http';
 import { basename, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { HttpError } from './hub.ts';
+import { HttpError } from './errors.ts';
 
 /** Largest file a device may upload; it streams to disk, so this bounds the disk, not memory. */
 export const MAX_UPLOAD = 200 * 1024 * 1024;

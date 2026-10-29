@@ -4,16 +4,17 @@ import { extname, join, normalize, resolve } from 'node:path';
 import type { Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import { parseFeedParams, type FeedFilter, type HubMessage } from '../../shared/api.ts';
-import { HttpError, type Hub } from './hub.ts';
+import { config } from './config.ts';
+import { HttpError } from './errors.ts';
+import type { Hub } from './hub.ts';
 import { handleMcp } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
-import { SkillError } from './skills.ts';
 import { feedEvent } from './db.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
 import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
-const WEB_DIST = resolve(import.meta.dirname, '../../web/dist');
+const WEB_DIST = config.webDist;
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json',
@@ -255,7 +256,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           throw new HttpError(404, `no route for ${route}`);
       }
     } catch (err) {
-      const status = err instanceof HttpError || err instanceof SkillError ? err.status : 500;
+      const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) console.error(err);
       send(res, status, { error: err instanceof Error ? err.message : String(err) });
     }

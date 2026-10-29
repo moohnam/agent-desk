@@ -1,10 +1,9 @@
 import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
+import { config } from '../config.ts';
 import { startClaude } from './claude.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 
-/** A session neither busy nor awaiting approval for this long is closed; the hub resumes it on the next message. */
-const DEFAULT_IDLE_MS = 30 * 60_000;
 
 type StartEngine = typeof startClaude;
 const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
@@ -30,8 +29,7 @@ export class Runner {
   constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine } = {}) {
     this.id = id;
     this.emit = emit;
-    const envIdle = Number(process.env.RUNNER_IDLE_MS);
-    this.idleMs = opts.idleMs ?? (envIdle > 0 ? envIdle : DEFAULT_IDLE_MS);
+    this.idleMs = opts.idleMs ?? config.runner.idleMs;
     this.start = opts.start ?? null;
   }
 

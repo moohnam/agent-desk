@@ -1,5 +1,5 @@
 import type { IncomingMessage } from 'node:http';
-import { HttpError } from './hub.ts';
+import { HttpError } from './errors.ts';
 
 /** Largest request body the hub reads; a skill file or a long prompt fits well within it. */
 export const MAX_BODY = 2 * 1024 * 1024;

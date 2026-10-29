@@ -12,21 +12,17 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
 import type { Skill, SkillFile } from '../../shared/api.ts';
+import { config } from './config.ts';
+import { HttpError } from './errors.ts';
 import { RESERVED_TAGS, SKILL_NAME } from '../../shared/compose.ts';
 
-export const SKILLS_HOME = process.env.AGENT_DESK_SKILLS_HOME ?? resolve(import.meta.dirname, '../../data/desk-plugin');
+export const SKILLS_HOME = config.skillsHome;
 export const PLUGIN_NAME = 'desk';
 export const skillsRoot = () => join(SKILLS_HOME, 'skills');
 export const skillFile = (name: string) => join(skillsRoot(), name, 'SKILL.md');
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 200;
-
-
-export class SkillError extends Error {
-  readonly status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
-}
 
 /** Reads `key: value` pairs from a leading `---` block. Values may be quoted; no nesting. */
 export function frontmatter(md: string): Record<string, string> {
@@ -69,8 +65,8 @@ export class SkillStore {
   }
 
   static validName(name: string) {
-    if (!SKILL_NAME.test(name)) throw new SkillError(400, '스킬 이름은 영문 소문자·숫자·하이픈으로 64자 이내여야 합니다');
-    if (RESERVED_TAGS.includes(name)) throw new SkillError(400, `#${name}은 기본 태그라 스킬 이름으로 쓸 수 없습니다`);
+    if (!SKILL_NAME.test(name)) throw new HttpError(400, '스킬 이름은 영문 소문자·숫자·하이픈으로 64자 이내여야 합니다');
+    if (RESERVED_TAGS.includes(name)) throw new HttpError(400, `#${name}은 기본 태그라 스킬 이름으로 쓸 수 없습니다`);
   }
 
   private dir(name: string) {
@@ -83,11 +79,11 @@ export class SkillStore {
     const base = this.dir(name);
     const rel = normalize(String(path ?? '').replace(/^\/+/, ''));
     if (!rel || rel === '.' || rel.startsWith('..') || rel.split(sep).includes('..')) {
-      throw new SkillError(400, `잘못된 파일 경로입니다: ${path}`);
+      throw new HttpError(400, `잘못된 파일 경로입니다: ${path}`);
     }
     const full = join(base, rel);
-    if (!full.startsWith(base + sep)) throw new SkillError(400, `잘못된 파일 경로입니다: ${path}`);
-    if (existsSync(base) && !this.inside(base, full)) throw new SkillError(400, `스킬 밖을 가리키는 경로입니다: ${path}`);
+    if (!full.startsWith(base + sep)) throw new HttpError(400, `잘못된 파일 경로입니다: ${path}`);
+    if (existsSync(base) && !this.inside(base, full)) throw new HttpError(400, `스킬 밖을 가리키는 경로입니다: ${path}`);
     return { base, rel, full };
   }
 
@@ -140,7 +136,7 @@ export class SkillStore {
     const base = this.dir(name);
     const md = join(base, 'SKILL.md');
     // Symlinked SKILL.md or skill directory: not listed by names(), and not read through here either.
-    if (!plainFile(md) || !this.inside(base, md)) throw new SkillError(404, `스킬이 없습니다: ${name}`);
+    if (!plainFile(md) || !this.inside(base, md)) throw new HttpError(404, `스킬이 없습니다: ${name}`);
     const fm = frontmatter(readFileSync(md, 'utf8'));
     const files = this.walk(base);
     const updated = Math.max(...files.map((f) => statSync(join(base, f.path)).mtimeMs), statSync(base).mtimeMs);
@@ -152,7 +148,7 @@ export class SkillStore {
 
   create(name: string, description = ''): Skill {
     const base = this.dir(name);
-    if (existsSync(base)) throw new SkillError(409, `이미 있는 스킬입니다: ${name}`);
+    if (existsSync(base)) throw new HttpError(409, `이미 있는 스킬입니다: ${name}`);
     mkdirSync(join(base, 'scripts'), { recursive: true });
     writeFileSync(join(base, 'SKILL.md'), template(name, description));
     return this.get(name);
@@ -160,28 +156,28 @@ export class SkillStore {
 
   remove(name: string) {
     const base = this.dir(name);
-    if (!existsSync(base)) throw new SkillError(404, `스킬이 없습니다: ${name}`);
+    if (!existsSync(base)) throw new HttpError(404, `스킬이 없습니다: ${name}`);
     rmSync(base, { recursive: true, force: true });
   }
 
   readFile(name: string, path: string): { path: string; content: string; executable: boolean } {
     const { full, rel } = this.filePath(name, path);
-    if (!existsSync(full) || !statSync(full).isFile()) throw new SkillError(404, `파일이 없습니다: ${rel}`);
+    if (!existsSync(full) || !statSync(full).isFile()) throw new HttpError(404, `파일이 없습니다: ${rel}`);
     const st = statSync(full);
-    if (st.size > MAX_FILE_BYTES) throw new SkillError(413, `파일이 너무 커서 열 수 없습니다: ${rel}`);
+    if (st.size > MAX_FILE_BYTES) throw new HttpError(413, `파일이 너무 커서 열 수 없습니다: ${rel}`);
     return { path: rel, content: readFileSync(full, 'utf8'), executable: (st.mode & 0o111) !== 0 };
   }
 
   /** Scripts (under scripts/ or starting with #!) are made executable. */
   writeFile(name: string, path: string, content: string, executable?: boolean): Skill {
     const { base, full, rel } = this.filePath(name, path);
-    if (!existsSync(base)) throw new SkillError(404, `스킬이 없습니다: ${name}`);
-    if (typeof content !== 'string') throw new SkillError(400, 'content는 문자열이어야 합니다');
-    if (Buffer.byteLength(content) > MAX_FILE_BYTES) throw new SkillError(413, '파일은 1MB 이하여야 합니다');
+    if (!existsSync(base)) throw new HttpError(404, `스킬이 없습니다: ${name}`);
+    if (typeof content !== 'string') throw new HttpError(400, 'content는 문자열이어야 합니다');
+    if (Buffer.byteLength(content) > MAX_FILE_BYTES) throw new HttpError(413, '파일은 1MB 이하여야 합니다');
     if (rel === 'SKILL.md') {
       const fm = frontmatter(content);
-      if (!fm.name || !fm.description) throw new SkillError(400, 'SKILL.md 맨 앞 --- 블록에 name과 description이 있어야 합니다');
-      if (fm.name !== name) throw new SkillError(400, `SKILL.md의 name은 디렉터리 이름(${name})과 같아야 합니다`);
+      if (!fm.name || !fm.description) throw new HttpError(400, 'SKILL.md 맨 앞 --- 블록에 name과 description이 있어야 합니다');
+      if (fm.name !== name) throw new HttpError(400, `SKILL.md의 name은 디렉터리 이름(${name})과 같아야 합니다`);
     }
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content);
@@ -192,8 +188,8 @@ export class SkillStore {
 
   deleteFile(name: string, path: string): Skill {
     const { full, rel } = this.filePath(name, path);
-    if (rel === 'SKILL.md') throw new SkillError(400, 'SKILL.md는 지울 수 없습니다. 스킬 전체를 지우세요');
-    if (!existsSync(full)) throw new SkillError(404, `파일이 없습니다: ${rel}`);
+    if (rel === 'SKILL.md') throw new HttpError(400, 'SKILL.md는 지울 수 없습니다. 스킬 전체를 지우세요');
+    if (!existsSync(full)) throw new HttpError(404, `파일이 없습니다: ${rel}`);
     rmSync(full);
     return this.get(name);
   }

@@ -46,6 +46,7 @@ export interface TaskView<E = WireEvent> extends Task {
   live: boolean;
   /** 'external': a terminal session attached over MCP; the app only answers its questions. */
   source: 'app' | 'external' | null;
+  /** The newest event, for its time and kind; its payload is left out (null) to keep the task list light. */
   last_event: E | null;
   pending_approvals: number;
   pending_questions: number;

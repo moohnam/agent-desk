@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { extname, isAbsolute, resolve } from 'node:path';
-import { HttpError } from './hub.ts';
+import { HttpError } from './errors.ts';
 
 /** URL schemes handed to the app registered for them (AKB documents open in Lectern). */
 const APP_SCHEMES = /^(akb|lectern):/i;

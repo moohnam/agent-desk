@@ -1,14 +1,12 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
+import { config } from '../config.ts';
 
-export const RUNNER_HOST = '127.0.0.1';
-export const RUNNER_PORT = Number(process.env.RUNNER_PORT ?? 4318);
-/** The secret a hub shows the runner when it connects; readable by this user only. */
-export const RUNNER_TOKEN_FILE = process.env.RUNNER_TOKEN_FILE ?? resolve(import.meta.dirname, '../../../data/runner-token');
+export const { host: RUNNER_HOST, port: RUNNER_PORT, tokenFile: RUNNER_TOKEN_FILE } = config.runner;
 
-/** The runner token, made on first use. The hub and the runner each call this; whichever comes first writes it. */
+/** The runner token (readable by this user only), made on first use. The hub and the runner each call this; whichever comes first writes it. */
 export function runnerToken(file = RUNNER_TOKEN_FILE): string {
   mkdirSync(dirname(file), { recursive: true });
   try { writeFileSync(file, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 }); }

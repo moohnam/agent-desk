@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { config } from '../config.ts';
 import { PROTOCOL_VERSION, checkRunnerToHub, type HubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, writeLine } from './wire.ts';
 
-const DATA_DIR = resolve(import.meta.dirname, '../../../data');
 const RETRY_MS = 1000;
 const SPAWN_EVERY_MS = 10_000;
 
@@ -84,12 +84,12 @@ export class RunnerClient {
     const now = Date.now();
     if (now - this.lastSpawn < SPAWN_EVERY_MS) return;
     this.lastSpawn = now;
-    mkdirSync(DATA_DIR, { recursive: true });
-    const log = openSync(process.env.RUNNER_LOG ?? resolve(DATA_DIR, 'runner.log'), 'a');
+    mkdirSync(dirname(config.runner.log), { recursive: true });
+    const log = openSync(config.runner.log, 'a');
     const child = spawn(process.execPath, [resolve(import.meta.dirname, 'daemon.ts')], {
       detached: true, stdio: ['ignore', log, log], env: process.env,
     });
     child.unref();
-    console.log(`started runner daemon (pid ${child.pid}, log data/runner.log)`);
+    console.log(`started runner daemon (pid ${child.pid}, log ${config.runner.log})`);
   }
 }

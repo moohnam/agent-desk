@@ -9,6 +9,7 @@ import {
 } from '../../shared/compose.ts';
 import type { Approval, HubMessage, QueuedKind, Question, Settings, Task, TaskStatus, TaskView } from '../../shared/api.ts';
 import type { EventKind, EventPayloads } from '../../shared/events.ts';
+import { HttpError } from './errors.ts';
 import { Store, feedEvent, now, type AgentRequest, type Event, type Queued, type Session } from './db.ts';
 import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
 import { findSession } from './importer.ts';
@@ -29,11 +30,6 @@ export function maskSecretAnswers(input: unknown, answers: Answers | undefined):
   const secret = new Set(qs.filter((q) => q.secret).map((q) => q.question));
   if (!answers || !secret.size) return answers;
   return Object.fromEntries(Object.entries(answers).map(([q, a]) => [q, secret.has(q) ? '••••' : a]));
-}
-
-export class HttpError extends Error {
-  readonly status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
 export class Hub {

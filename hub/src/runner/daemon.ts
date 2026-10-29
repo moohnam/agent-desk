@@ -4,7 +4,7 @@
 import { writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { hostname } from 'node:os';
-import { resolve } from 'node:path';
+import { config } from '../config.ts';
 import { PROTOCOL_VERSION, checkHubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
 import { Runner } from './runner.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, sameToken, writeLine } from './wire.ts';
@@ -12,7 +12,7 @@ import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, sameToken, writeLine 
 const MAX_BUFFER = 20_000;
 /** Size (in characters) of the messages kept while no hub is connected; tool inputs can be large. */
 const MAX_BUFFER_CHARS = 64 * 1024 * 1024;
-const PID_FILE = process.env.RUNNER_PID_FILE ?? resolve(import.meta.dirname, '../../../data/runner.pid');
+const PID_FILE = config.runner.pidFile;
 
 let hub: Socket | null = null;
 /**

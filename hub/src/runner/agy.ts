@@ -17,12 +17,13 @@ import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
-import { latestOfFamily } from './codex.ts';
+import { config } from '../config.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { latestOfFamily } from './models.ts';
 import type { EngineAdapter, RunnerEvent, RunnerToHub } from '../../../shared/protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
-const AGY_BIN = process.env.AGY_BIN || 'agy';
+const AGY_BIN = config.agyBin;
 /** How long an approval may wait for the user; the hook's own timeout in hooks.json is a little longer. */
 const APPROVAL_TIMEOUT_MS = 60 * 60_000;
 /** Without a tag, the middle level (agy's models come in low, medium and high only). */

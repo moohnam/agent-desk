@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { EngineUsage, UsageWindow } from '../../shared/api.ts';
+import { config } from './config.ts';
 import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
 /** One limit window. `usedPercent`: 0–100, null when the engine doesn't say. */
@@ -16,8 +17,7 @@ import { ENGINES, type EngineName } from '../../shared/compose.ts';
 const TIMEOUT_MS = 30_000;
 /** Answers within this long reuse the last reading, unless a refresh is asked for. */
 const CACHE_MS = 60_000;
-const CODEX_BIN = process.env.CODEX_BIN || 'codex';
-const AGY_BIN = process.env.AGY_BIN || 'agy';
+const { codexBin: CODEX_BIN, agyBin: AGY_BIN } = config;
 
 type Json = any;
 

@@ -1,15 +1,10 @@
-import { dirname, join, resolve } from 'node:path';
 import { Access } from './access.ts';
+import { config } from './config.ts';
 import { Store } from './db.ts';
 import { Hub } from './hub.ts';
 import { createHttpServer } from './http.ts';
 
-const PORT = Number(process.env.PORT ?? 4317);
-// Other devices on the network can connect with the access token; HOST=127.0.0.1 keeps it to this Mac.
-const HOST = process.env.HOST ?? '0.0.0.0';
-const DB_PATH = process.env.AGENT_DESK_DB ?? resolve(import.meta.dirname, '../../data/agent-desk.db');
-const UPLOADS_DIR = process.env.AGENT_DESK_UPLOADS ?? join(dirname(DB_PATH), 'uploads');
-const TOKEN_FILE = process.env.AGENT_DESK_TOKEN_FILE ?? join(dirname(DB_PATH), 'access-token');
+const { port: PORT, host: HOST, dbPath: DB_PATH, uploadsDir: UPLOADS_DIR, accessTokenFile: TOKEN_FILE } = config;
 
 const hub = new Hub(new Store(DB_PATH));
 const access = new Access(TOKEN_FILE, PORT);

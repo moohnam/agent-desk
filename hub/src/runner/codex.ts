@@ -8,11 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
+import { config } from '../config.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { latestOfFamily } from './models.ts';
 import { ASK_USER, type Answers, type EngineAdapter, type RunnerEvent, type RunnerToHub } from '../../../shared/protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
-const CODEX_BIN = process.env.CODEX_BIN || 'codex';
+const CODEX_BIN = config.codexBin;
 
 /**
  * #ask: `untrusted` asks before file edits and any command not known to be read-only; the app
@@ -48,19 +50,6 @@ interface Turn { text: string; skills?: string[] }
 
 /** An approval the app answers: the JSON-RPC request to reply to and how to phrase the reply. */
 interface Pending { requestId: Id; reply: (allow: boolean, message?: string, answers?: Answers) => Json }
-
-/**
- * The newest model of a family (#sol → gpt-6.1-sol): ids end in `-<family>`, and the version is the
- * numbers before it, compared part by part. Undefined when the catalog has none.
- */
-export function latestOfFamily(ids: string[], family: string): string | undefined {
-  const version = (id: string) => (id.match(/\d+(?:\.\d+)*/)?.[0] ?? '0').split('.').map(Number);
-  const newer = (a: number[], b: number[]) => {
-    for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
-    return 0;
-  };
-  return ids.filter((id) => id.endsWith(`-${family}`)).sort((a, b) => newer(version(b), version(a)))[0];
-}
 
 export function startCodex(opts: {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
