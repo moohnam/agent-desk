@@ -3,6 +3,11 @@ import { STATUS_LABEL } from './format.ts';
 import { projectListLabel } from './projects.ts';
 import type { ColumnDef, ColumnFilter, HubEvent, PlacedPost, Post, Project, TaskView } from './types.ts';
 
+/** The deck's column id of the open thread. */
+export const THREAD = 'thread';
+/** The temporary search column, right of the column that shows everything; not saved. */
+export const SEARCH = 'search';
+
 /** A column that restricts nothing: "전체". */
 export const isAllFilter = (f: ColumnFilter) =>
   !f.taskIds?.length && !f.projectIds?.length && !f.kinds?.length && !f.statuses?.length && !f.query?.trim();

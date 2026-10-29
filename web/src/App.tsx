@@ -8,7 +8,6 @@ import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './Approva
 import { ColumnFinder } from './ColumnFinder.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
-import { modalOpen } from './Modal.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
 import { ENGINES, effortNote, modelTagsOf } from '../../shared/compose.ts';
@@ -24,9 +23,9 @@ import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch } from './search.ts';
 import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, useView, type View, type ViewSort } from './views.ts';
-import { isAllFilter, modelsOf, newestPerTask, firstPostBelow } from './layout.ts';
+import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
-import { latinKey } from './keys.ts';
+import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
 import { ThreadHead, ContextHint } from './ThreadHead.tsx';
@@ -34,9 +33,6 @@ import { AUTO_ORDER, ColumnMenu } from './ColumnMenu.tsx';
 import { Help } from './Help.tsx';
 import { PANE_DEFAULT, PANE_MAX, PANE_MIN, ResizeHandle, SplitHandle } from './handles.tsx';
 
-const THREAD = 'thread';
-/** The temporary search column, right of the column that shows everything; not saved. */
-const SEARCH = 'search';
 /** Typing pauses this long before the search column asks the hub again. */
 const SEARCH_DEBOUNCE_MS = 250;
 /** "작업별 컬럼으로 나누기" makes at most this many columns at once. */
@@ -44,8 +40,6 @@ const SPLIT_MAX = 6;
 /** On a phone there are no columns: one feed of everything, with the thread laid over it. */
 const PHONE_FEED: ColumnDef = { id: 'phone', title: '전체', filter: {} };
 const THREAD_WIDTH = 460;
-/** `<` and `>` change the active column's width by this much. */
-const WIDTH_STEP = 40;
 /** Idle time after which a feed scrolled away from new posts returns to the top. */
 const IDLE_RETURN_MS = 20_000;
 const DRAWER_KEY = 'agent-desk.composeOpen';
@@ -58,8 +52,6 @@ const SPLIT_KEY = 'agent-desk.threadSplit';
  * deck less than DECK_MIN_PX, the thread covers the whole workspace instead.
  */
 const PANE_MIN_PX = 560, DECK_MIN_PX = 420;
-/** Shown when a built view (F2–F4) is asked to change its columns. */
-const FIXED_NOTE = '자동으로 만든 뷰는 편집할 수 없습니다. F1(내 컬럼)에서 편집하세요.';
 
 export function App() {
   const hub = useHub();
@@ -946,161 +938,17 @@ export function App() {
     setToast('검색을 컬럼으로 저장했습니다.');
   };
 
-  // vim-style navigation. Ignored while typing or while a dialog is open.
+  // The deck's keys (deckKeys.ts). Registered again each render, so the handler sees the current state.
   useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
-      const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
-      // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
-      if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
-      // F1–F4: the deck's views, also while typing.
-      const fv = !ev.ctrlKey && !ev.shiftKey && VIEWS.find((x) => x.key === ev.key);
-      if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }
-      const t = ev.target as HTMLElement;
-      if (t.closest('input, textarea, select')) return;
-      const e = { key: latinKey(ev), preventDefault: () => ev.preventDefault() };
-      if (help && !mine) { if (e.key === 'Escape' || e.key === '?' || e.key === 'q') setHelp(false); return; }
-
-      if (queueFocus != null) {
-        const item = queue[queueFocus];
-        const a = item?.kind === 'approval' ? item.approval : undefined;
-        let used = true;
-        switch (e.key) {
-          case 'j': case 'ArrowDown': setQueueFocus(Math.min(queueFocus + 1, queue.length - 1)); break;
-          case 'k': case 'ArrowUp': setQueueFocus(Math.max(queueFocus - 1, 0)); break;
-          case 'y': case 'n':
-            if (a) { if (e.key === 'y') allow(a); else setDenying(a); }
-            else if (item) setToast('질문은 Enter로 스레드를 열어 답합니다.');
-            break;
-          case 'Enter': if (item) openQueueItem(item); break;
-          case 'Escape': case 'q': case 'a': setQueueFocus(null); break;
-          case '?': setHelp(true); break;
-          default: used = false;
-        }
-        if (used) { e.preventDefault(); return; }
-      }
-
-      const posts = activeCol?.posts ?? [];
-      const cur = selectedPost ? posts.indexOf(selectedPost) : -1;
-      const go = (i: number) => {
-        if (!activeCol || !posts.length) return;
-        select(activeCol.id, posts[Math.max(0, Math.min(i, posts.length - 1))].id);
-      };
-      // J / K: the first post of the next / previous run of another task's posts (`#1`, `#2` of a
-      // project are different tasks).
-      const taskOf = (i: number) => posts[i].taskId;
-      // In a thread every post is the same task, so J / K step between the user's own posts instead.
-      const nextUser = (dir: 1 | -1) => {
-        let i = cur < 0 ? (dir > 0 ? 0 : posts.length - 1) : cur + dir;
-        while (i >= 0 && i < posts.length && posts[i].kind !== 'user') i += dir;
-        if (i >= 0 && i < posts.length) go(i);
-        else setToast(dir > 0 ? '아래에 내 글이 더 없습니다.' : '위에 내 글이 더 없습니다.');
-      };
-      const nextTask = (dir: 1 | -1) => {
-        if (activeCol?.id === THREAD) return nextUser(dir);
-        if (cur < 0) return go(0);
-        let i = cur;
-        while (i + dir >= 0 && i + dir < posts.length && taskOf(i + dir) === taskOf(cur)) i += dir;
-        i += dir;
-        if (i < 0 || i >= posts.length) return go(dir > 0 ? posts.length - 1 : 0);
-        if (dir < 0) while (i > 0 && taskOf(i - 1) === taskOf(i)) i--;
-        go(i);
-      };
-      // Ctrl+Shift+J / K: the next / previous task run's topmost instruction (a post the user wrote);
-      // a run's later instructions and runs without one are skipped.
-      const landing = (i: number) => {
-        if (posts[i].kind !== 'user') return false;
-        for (let j = i - 1; j >= 0 && taskOf(j) === taskOf(i); j--) if (posts[j].kind === 'user') return false;
-        return true;
-      };
-      const nextMine = (dir: 1 | -1) => {
-        let i = cur < 0 ? (dir > 0 ? 0 : posts.length - 1) : cur + dir;
-        while (i >= 0 && i < posts.length && !landing(i)) i += dir;
-        if (i >= 0 && i < posts.length) go(i);
-        else setToast(dir > 0 ? '아래에 지시한 글이 더 없습니다.' : '위에 지시한 글이 더 없습니다.');
-      };
-      if (mine) {
-        if (help || queueFocus != null) return;
-        nextMine(ev.code === 'KeyJ' ? 1 : -1);
-        e.preventDefault();
-        return;
-      }
-      const now = Date.now();
-      let handled = true;
-      // `gr`: back to the column showing everything, at its newest post.
-      if (e.key === 'r' && now - pendingG.current < 600) {
-        pendingG.current = 0;
-        goRecent();
-        e.preventDefault();
-        return;
-      }
-
-      switch (e.key) {
-        case 'j': case 'ArrowDown': go(cur + 1); break;
-        case 'k': case 'ArrowUp': go(cur < 0 ? 0 : cur - 1); break;
-        case 'h': case 'ArrowLeft': stepColumn(-1); break;
-        case 'l': case 'ArrowRight': stepColumn(1); break;
-        case 'J': nextTask(1); break;
-        case 'K': nextTask(-1); break;
-        case 'G': go(posts.length - 1); break;
-        case 'g':
-          if (now - pendingG.current < 600) { go(0); pendingG.current = 0; } else pendingG.current = now;
-          break;
-        case 'H': moveColumn(activeIdx, -1); break;
-        case 'L': moveColumn(activeIdx, 1); break;
-        case 'Enter': if (selectedPost && activeCol?.id !== THREAD) openThread(selectedPost.taskId, { from: activeCol?.id, post: selectedPost.id }); break;
-        case 'Escape': case 'q':
-          // On the search column it closes the search; focus goes back to the column left of it (all).
-          if (activeCol?.id === SEARCH) { closeSearch(); focusColumn(activeIdx - 1); }
-          else if (threadTask) closeThread();
-          else if (drawer) setDrawer(false);
-          break;
-        case 'o': case ' ': if (selectedPost) toggleExpanded(selectedPost.id); break;
-        case 'r': {
-          const taskId = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null);
-          if (taskId) replyTo(taskId, activeCol?.id);
-          break;
-        }
-        case 'i': openDrawer(); break;
-        case 'y': { const a = approvalFor(selectedPost); if (a) allow(a); break; }
-        case 'n': { const a = approvalFor(selectedPost); if (a) setDenying(a); break; }
-        case 's': {
-          const taskId = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null);
-          if (taskId) api.interrupt(taskId).then(() => setToast('중단을 요청했습니다.'), fail);
-          break;
-        }
-        case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
-        case 'f': if (threadTask && !phone) toggleFloat(); break;
-        case 't': toggleThreadFocus(); break;
-        case 'X':
-          if (threadTask && hub.tasks.get(threadTask)?.source === 'app') toggleHandoff(threadTask);
-          else setToast(threadTask ? '터미널 작업은 컨텍스트를 재구성할 수 없습니다.' : '열린 스레드가 없습니다.');
-          break;
-        case 'x':
-          if (handoff?.open && activeCol?.id === THREAD && selectedPost && pickable(selectedPost.event)) togglePick(selectedPost.taskId, selectedPost.event.id);
-          break;
-        case 'p': { const id = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null); if (id) pinTask(id); break; }
-        case 'v': if (activeCol?.def && activeCol.id !== SEARCH) toggleByTask(activeCol.id); break;
-        case 'e':
-          if (activeCol?.id === SEARCH) openSearch();
-          else if (activeCol?.def) { if (editable) setColumnDialog({ column: activeCol.def }); else setToast(FIXED_NOTE); }
-          break;
-        case '/': openSearch(); break;
-        case ';': setFinder(true); break;
-        case 'D':
-          if (!activeCol?.def) break;
-          if (now - pendingDelete.current < 1500) { deleteColumn(activeCol.def.id); pendingDelete.current = 0; }
-          else { pendingDelete.current = now; setToast(`D를 한 번 더 누르면 “${activeCol.def.title}” 컬럼을 삭제합니다.`); }
-          break;
-        case 'a': if (queue.length) setQueueFocus(0); else setToast('응답 대기가 없습니다.'); break;
-        case '<': case '>':
-          if (activeCol) setWidth(activeCol.id, widthOf(activeCol.id) + (e.key === '>' ? WIDTH_STEP : -WIDTH_STEP));
-          break;
-        case '?': setHelp(true); break;
-        default: handled = false;
-      }
-      if (handled) e.preventDefault();
+    const keys: DeckKeyContext = {
+      help, menu, phone, drawer, editable, queue, queueFocus, activeCol, activeIdx, selectedPost, threadTask, tasks: hub.tasks,
+      handoff, pendingG, pendingDelete,
+      switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn,
+      moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
+      openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
+      setWidth, widthOf,
     };
+    const onKey = (ev: KeyboardEvent) => onDeckKey(ev, keys);
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
