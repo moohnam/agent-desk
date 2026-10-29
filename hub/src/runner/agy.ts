@@ -16,13 +16,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
+import type { Effort, ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
-import type { EngineAdapter, RunnerEvent, RunnerToHub } from '../../../shared/protocol.ts';
+import type { RunnerEvent } from '../../../shared/protocol.ts';
 
-const MAX_RESULT_TEXT = 4000;
 const AGY_BIN = config.agyBin;
 /** How long an approval may wait for the user; the hook's own timeout in hooks.json is a little longer. */
 const APPROVAL_TIMEOUT_MS = 60 * 60_000;
@@ -41,10 +41,6 @@ const READ_ONLY = new Set([
 ]);
 
 type Json = any;
-
-function clip(text: string): string {
-  return text.length > MAX_RESULT_TEXT ? text.slice(0, MAX_RESULT_TEXT) + '\n…(truncated)' : text;
-}
 
 /** agy's model level for a desk effort: #xhigh and #max run as high. */
 const level = (e?: Effort) => (!e ? DEFAULT_LEVEL : e === 'low' || e === 'medium' ? e : 'high');
@@ -112,11 +108,7 @@ interface Turn { text: string; skills?: string[] }
 /** An approval the user answers: the hook's held HTTP response. */
 interface Pending { res: ServerResponse; timer: NodeJS.Timeout }
 
-export function startAgy(opts: {
-  sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
-  model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string;
-  emit: (m: RunnerToHub) => void;
-}): EngineAdapter {
+export const startAgy: StartEngine = (opts) => {
   const { sessionId, emit } = opts;
   const event = (e: RunnerEvent) => emit({ type: 'event', sessionId, event: e });
   let mode = opts.permissionMode;
@@ -128,11 +120,13 @@ export function startAgy(opts: {
   let reported: string | undefined;
   let conversationId: string | null = opts.fork ? null : opts.resume ?? null;
   let child: ChildProcess | null = null;
-  let turnActive = false;
   let closing = false;
-  const queue: Turn[] = [];
+  /** agy can't add to a running turn, so every message waits for the turn before it. */
+  const turns = new TurnQueue<Turn>((turn) => void startTurn(turn), (busy) => emit({ type: 'busy', sessionId, busy }));
   const pending = new Map<string, Pending>();
-  const stderrTail: string[] = [];
+  const stderrTail = new StderrTail();
+  /** The last stderr lines, to add to a message about the process ending. */
+  const tail = () => stderrTail.last(3).map((l) => `\n${l}`).join('');
   /** Text of the agent message being streamed, by step. */
   const texts = new Map<number, string>();
   /** Tool steps already shown, by step index (a step reports ACTIVE and then DONE). */
@@ -215,23 +209,21 @@ export function startAgy(opts: {
         const info = s.tool_info ?? {};
         const isError = s.state === 'ERROR' || !!info.error;
         event({ kind: 'tool_result', toolUseId: toolIds.get(s.step_index)!, isError,
-          text: clip(String(info.error?.message ?? info.output ?? '')) });
+          text: clipResult(String(info.error?.message ?? info.output ?? '')) });
         toolIds.delete(s.step_index);
       }
     }
   };
 
   const turnEnded = (state: 'turn_done' | 'error' | 'interrupted', detail: Record<string, unknown>) => {
-    if (!turnActive) return;
-    turnActive = false;
+    if (!turns.active) return;
     // Text cut off mid-stream still reaches the feed.
     for (const text of texts.values()) if (text.trim()) event({ kind: 'assistant', text: text.trim() });
     texts.clear();
     for (const id of toolIds.values()) event({ kind: 'tool_result', toolUseId: id, isError: true, text: state === 'interrupted' ? '중단됨' : '끝나지 않음' });
     toolIds.clear();
     event({ kind: 'status', state, detail });
-    if (queue.length) void startTurn(queue.shift()!);
-    else emit({ type: 'busy', sessionId, busy: false });
+    turns.ended();
   };
 
   const onLine = (line: string) => {
@@ -278,12 +270,9 @@ export function startAgy(opts: {
     });
     child = proc;
     running = model;
-    stderrTail.length = 0;
+    stderrTail.clear();
     proc.stdin!.on('error', () => {}); // EPIPE after the process went; 'exit' reports it
-    proc.stderr!.on('data', (chunk: Buffer) => {
-      for (const line of chunk.toString().split('\n')) if (line.trim()) stderrTail.push(line);
-      stderrTail.splice(0, Math.max(0, stderrTail.length - 20));
-    });
+    proc.stderr!.on('data', (chunk: Buffer) => stderrTail.push(chunk));
     createInterface({ input: proc.stdout! }).on('line', (line) => { if (child === proc) onLine(line); });
     const gone = (message?: string) => {
       if (child !== proc) return;
@@ -291,10 +280,10 @@ export function startAgy(opts: {
       running = null;
       if (closing) return;
       cancelApprovals();
-      turnEnded('error', { message: message ?? `agy 종료${stderrTail.length ? `\n${stderrTail.slice(-3).join('\n')}` : ''}` });
+      turnEnded('error', { message: message ?? `agy 종료${tail()}` });
     };
     proc.on('error', (err) => gone(`agy 실행 실패 (${AGY_BIN}): ${err.message}`));
-    proc.on('exit', (code, signal) => gone(code === 0 && !turnActive ? undefined : `agy 종료 (code ${code ?? signal})${stderrTail.length ? `\n${stderrTail.slice(-3).join('\n')}` : ''}`));
+    proc.on('exit', (code, signal) => gone(code === 0 && !turns.active ? undefined : `agy 종료 (code ${code ?? signal})${tail()}`));
     return proc;
   };
 
@@ -310,10 +299,10 @@ export function startAgy(opts: {
 
   // Bumped per turn, so a turn interrupted while still looking up its model doesn't go on to run.
   let turnSeq = 0;
+  /** Runs a turn; the queue calls it when the one before has ended. */
   const startTurn = async (turn: Turn) => {
-    turnActive = true;
     const seq = ++turnSeq;
-    const current = () => !closing && turnActive && seq === turnSeq;
+    const current = () => !closing && turns.active && seq === turnSeq;
     try {
       const ids = await listModels();
       if (!current()) return;
@@ -335,9 +324,8 @@ export function startAgy(opts: {
   const send = (text: string, skills?: string[]) => {
     if (closing) return;
     emit({ type: 'busy', sessionId, busy: true });
-    // agy can't add to a running turn, so #now waits like #later.
-    if (turnActive) queue.push({ text, skills });
-    else void startTurn({ text, skills });
+    // #now waits like #later (see turns).
+    turns.push({ text, skills });
   };
   listening.catch((err: Error) => {
     if (closing) return;
@@ -350,10 +338,10 @@ export function startAgy(opts: {
   return {
     send,
     interrupt: async () => {
-      queue.length = 0;
+      turns.clear();
       cancelApprovals();
       // The process goes (its later output is dropped); the next message resumes the conversation.
-      if (!turnActive) return;
+      if (!turns.active) return;
       if (child) {
         const proc = child;
         child = null;
@@ -395,4 +383,4 @@ export function startAgy(opts: {
       child = null;
     },
   };
-}
+};

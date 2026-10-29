@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
+import type { Effort } from '../../../shared/compose.ts';
+import { clipResult, type StartEngine } from './engine.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
-import type { BackgroundTask, EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
+import type { BackgroundTask } from '../../../shared/protocol.ts';
 
-const MAX_RESULT_TEXT = 4000;
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */
 const claudeEffort = (e: Effort | undefined) => (e === 'ultra' ? 'max' : e);
 
@@ -53,14 +53,10 @@ function resultText(content: unknown): string {
   const text = typeof content === 'string' ? content
     : Array.isArray(content) ? content.map((c) => (c?.type === 'text' ? c.text : `[${c?.type}]`)).join('\n')
     : '';
-  return text.length > MAX_RESULT_TEXT ? text.slice(0, MAX_RESULT_TEXT) + '\n…(truncated)' : text;
+  return clipResult(text);
 }
 
-export function startClaude(opts: {
-  sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
-  model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string;
-  emit: (m: RunnerToHub) => void;
-}): EngineAdapter {
+export const startClaude: StartEngine = (opts) => {
   const { sessionId, emit } = opts;
   const prompts = new PromptQueue();
   const pending = new Map<string, { resolve: (r: PermissionResult) => void; input: Record<string, unknown> }>();
@@ -197,4 +193,4 @@ export function startClaude(opts: {
       q.close();
     },
   };
-}
+};

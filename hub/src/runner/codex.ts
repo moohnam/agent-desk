@@ -7,13 +7,13 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
+import type { ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
-import { ASK_USER, type Answers, type EngineAdapter, type RunnerEvent, type RunnerToHub } from '../../../shared/protocol.ts';
+import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
 
-const MAX_RESULT_TEXT = 4000;
 const CODEX_BIN = config.codexBin;
 
 /**
@@ -36,10 +36,6 @@ const SANDBOX_POLICY = {
 type Json = any;
 type Id = number | string;
 
-function clip(text: string): string {
-  return text.length > MAX_RESULT_TEXT ? text.slice(0, MAX_RESULT_TEXT) + '\n…(truncated)' : text;
-}
-
 function mcpText(result: Json): string {
   const content = Array.isArray(result?.content) ? result.content : [];
   return content.map((c: Json) => (c?.type === 'text' ? c.text : `[${c?.type}]`)).join('\n');
@@ -51,11 +47,7 @@ interface Turn { text: string; skills?: string[] }
 /** An approval the app answers: the JSON-RPC request to reply to and how to phrase the reply. */
 interface Pending { requestId: Id; reply: (allow: boolean, message?: string, answers?: Answers) => Json }
 
-export function startCodex(opts: {
-  sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
-  model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string;
-  emit: (m: RunnerToHub) => void;
-}): EngineAdapter {
+export const startCodex: StartEngine = (opts) => {
   const { sessionId, emit } = opts;
   const event = (e: RunnerEvent) => emit({ type: 'event', sessionId, event: e });
   let mode = opts.permissionMode;
@@ -66,9 +58,8 @@ export function startCodex(opts: {
   let reported: string | undefined;
   let threadId: string | null = null;
   let turnId: string | null = null;
-  /** Messages sent while a turn runs; each starts the next turn (as the Claude SDK queues them). */
-  const queue: Turn[] = [];
-  let turnActive = false;
+  /** Messages sent while a turn runs, or before the thread starts, each start the next turn (as the Claude SDK queues them). */
+  const turns = new TurnQueue<Turn>((turn) => startTurn(turn), (busy) => emit({ type: 'busy', sessionId, busy }), false);
   /** An interrupt came while turn/start was in flight; sent once the turn id is known. */
   let stopAsked = false;
   const noteTurn = (id: string | undefined) => {
@@ -85,7 +76,7 @@ export function startCodex(opts: {
   const byRequest = new Map<string, string>();
   /** File changes seen in item/started, shown with the fileChange approval that follows. */
   const fileChanges = new Map<string, Json>();
-  const stderrTail: string[] = [];
+  const stderrTail = new StderrTail();
 
   const child = spawn(CODEX_BIN, ['app-server'], { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
 
@@ -113,10 +104,7 @@ export function startCodex(opts: {
 
   // Writing after the process went raises EPIPE here; 'exit' reports the end.
   child.stdin.on('error', () => {});
-  child.stderr.on('data', (chunk: Buffer) => {
-    for (const line of chunk.toString().split('\n')) if (line.trim()) stderrTail.push(line);
-    stderrTail.splice(0, Math.max(0, stderrTail.length - 20));
-  });
+  child.stderr.on('data', (chunk: Buffer) => stderrTail.push(chunk));
   child.on('error', (err) => {
     for (const c of calls.values()) c.reject(err);
     calls.clear();
@@ -125,7 +113,7 @@ export function startCodex(opts: {
   child.on('exit', (code, signal) => {
     for (const c of calls.values()) c.reject(new Error('codex app-server exited'));
     calls.clear();
-    const tail = stderrTail.filter((l) => /error/i.test(l)).slice(-3).join('\n');
+    const tail = stderrTail.last(3, (l) => /error/i.test(l)).join('\n');
     closed(code === 0 ? undefined : `codex app-server 종료 (code ${code ?? signal})${tail ? `\n${tail}` : ''}`);
   });
 
@@ -165,7 +153,7 @@ export function startCodex(opts: {
         const changes = fileChanges.get(p.itemId) ?? [];
         ask(id, 'Edit', {
           file_path: changes.map((c: Json) => c.path).join(', ') || p.grantRoot || '',
-          changes: changes.map((c: Json) => ({ path: c.path, kind: c.kind?.type ?? c.kind, diff: clip(c.diff ?? '') })),
+          changes: changes.map((c: Json) => ({ path: c.path, kind: c.kind?.type ?? c.kind, diff: clipResult(c.diff ?? '') })),
           description: p.reason ?? undefined,
         }, (allow) => ({ decision: allow ? 'accept' : 'decline' }));
         return;
@@ -244,22 +232,22 @@ export function startCodex(opts: {
       case 'commandExecution': {
         const isError = item.status !== 'completed' || (item.exitCode ?? 0) !== 0;
         const text = item.status === 'declined' ? '사용자가 거절함' : (item.aggregatedOutput ?? '');
-        event({ kind: 'tool_result', toolUseId: item.id, isError, text: clip(text) });
+        event({ kind: 'tool_result', toolUseId: item.id, isError, text: clipResult(text) });
         break;
       }
       case 'fileChange': {
         fileChanges.delete(item.id);
         const text = (item.changes ?? []).map((c: Json) => c.diff ? `${c.path}\n${c.diff}` : c.path).join('\n');
-        event({ kind: 'tool_result', toolUseId: item.id, isError: item.status !== 'completed', text: clip(text) });
+        event({ kind: 'tool_result', toolUseId: item.id, isError: item.status !== 'completed', text: clipResult(text) });
         break;
       }
       case 'mcpToolCall':
         event({ kind: 'tool_result', toolUseId: item.id, isError: !!item.error || item.status === 'failed',
-          text: clip(item.error?.message ?? mcpText(item.result)) });
+          text: clipResult(item.error?.message ?? mcpText(item.result)) });
         break;
       case 'dynamicToolCall':
         event({ kind: 'tool_result', toolUseId: item.id, isError: item.success === false,
-          text: clip((item.contentItems ?? []).map((c: Json) => c.text ?? `[${c.type}]`).join('\n')) });
+          text: clipResult((item.contentItems ?? []).map((c: Json) => c.text ?? `[${c.type}]`).join('\n')) });
         break;
       case 'webSearch':
         event({ kind: 'tool_result', toolUseId: item.id, isError: false, text: '' });
@@ -281,7 +269,6 @@ export function startCodex(opts: {
       }
       case 'turn/completed': {
         const turn = p.turn ?? {};
-        turnActive = false;
         turnId = null;
         stopAsked = false;
         const state = turn.status === 'completed' ? 'turn_done' : turn.status === 'interrupted' ? 'interrupted' : 'error';
@@ -289,8 +276,7 @@ export function startCodex(opts: {
           subtype: turn.status, duration_ms: turn.durationMs ?? undefined,
           ...(turn.error?.message ? { message: turn.error.message } : {}),
         } });
-        if (queue.length) startTurn(queue.shift()!);
-        else emit({ type: 'busy', sessionId, busy: false });
+        turns.ended();
         break;
       }
     }
@@ -319,9 +305,8 @@ export function startCodex(opts: {
     return id;
   };
 
+  /** Runs a turn; the queue calls it once the thread has started. */
   const startTurn = (turn: Turn) => {
-    if (!threadId) { queue.unshift(turn); return; }
-    turnActive = true;
     const input = turnInput(turn);
     if (model && model !== reported) {
       reported = model;
@@ -333,10 +318,9 @@ export function startCodex(opts: {
       ...(model && { model }), ...(effort && { effort }),
     }).then((r) => noteTurn(r?.turn?.id)).catch((err: Error) => {
       if (closing) return;
-      turnActive = false;
       stopAsked = false;
       event({ kind: 'status', state: 'error', detail: { message: `Codex 턴 시작 실패: ${err.message}` } });
-      emit({ type: 'busy', sessionId, busy: false });
+      turns.ended();
     });
   };
 
@@ -377,7 +361,7 @@ export function startCodex(opts: {
         model: r.model, cwd: r.cwd, reasoning_effort: effort ?? r.reasoningEffort ?? undefined,
         ...(opts.resume ? (opts.fork ? { forked: true } : lockedBy ? { resumed: true, writer_busy: opts.resume } : { resumed: true }) : {}),
       } });
-      if (queue.length) startTurn(queue.shift()!);
+      turns.open();
     } catch (err) {
       if (closing || closedEmitted) return;
       const message = err instanceof Error ? err.message : String(err);
@@ -397,25 +381,23 @@ export function startCodex(opts: {
   };
   const deliver = (text: string, skills?: string[], steer?: boolean) => {
     if (closing) return;
-    if (steer && turnActive && threadId && turnId) {
+    if (steer && turns.active && threadId && turnId) {
       // Adds the input to the running turn; if that turn ended meanwhile, run it as the next turn.
       const turn = { text, skills };
       request('turn/steer', { threadId, input: turnInput(turn), expectedTurnId: turnId }).catch(() => {
         if (closing) return;
-        if (turnActive || !threadId) queue.push(turn); else startTurn(turn);
+        turns.push(turn);
       });
-    } else if (turnActive || !threadId) queue.push({ text, skills });
-    else startTurn({ text, skills });
+    } else turns.push({ text, skills });
   };
   send(opts.prompt, opts.skills);
 
   return {
     send,
     interrupt: async () => {
-      const dropped = queue.length > 0;
-      queue.length = 0;
+      const dropped = turns.clear();
       if (threadId && turnId) await request('turn/interrupt', { threadId, turnId });
-      else if (turnActive) stopAsked = true;
+      else if (turns.active) stopAsked = true;
       else if (dropped) {
         // Still starting: the only work was the queued message, now dropped, so the session is idle.
         event({ kind: 'status', state: 'interrupted', detail: { subtype: 'interrupted' } });
@@ -447,7 +429,7 @@ export function startCodex(opts: {
       child.kill();
     },
   };
-}
+};
 
 function stripNulls(o: Json): Json {
   if (!o || typeof o !== 'object') return o;

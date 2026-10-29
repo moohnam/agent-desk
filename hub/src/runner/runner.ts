@@ -1,11 +1,11 @@
 import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { config } from '../config.ts';
 import { startClaude } from './claude.ts';
+import type { StartEngine } from './engine.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 
 
-type StartEngine = typeof startClaude;
 const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
 
 interface Entry {
