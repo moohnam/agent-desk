@@ -531,13 +531,20 @@ export function App() {
    * h/l: the next column that way; on the status board (F4), empty columns are passed over. The
    * split thread is beside the deck, not in it: h/l pass it over, and from it they go back to the deck.
    */
+  /** Columns h/l pass over: empty status columns, and the thread while it sits beside the deck. */
+  const skipColumn = (c: DeckColumn) => (view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0)
+    || (floatThread && c.id === THREAD);
   const stepColumn = (dir: -1 | 1) => {
     if (floatThread && activeCol?.id === THREAD) return backToDeck();
-    const skip = (c: DeckColumn) => (view === 'status' && c.id.startsWith('v:s:') && c.posts.length === 0)
-      || (floatThread && c.id === THREAD);
-    for (let i = activeIdx + dir; i >= 0 && i < deck.length; i += dir) if (!skip(deck[i])) return focusColumn(i);
+    for (let i = activeIdx + dir; i >= 0 && i < deck.length; i += dir) if (!skipColumn(deck[i])) return focusColumn(i);
     // Past F2's or F3's last column: older ones come in, and the focus moves on to the first of them.
     if (dir === 1 && olderCols > 0) showOlder(activeIdx + 1);
+  };
+  /** gh / gl: the deck's first or last column (the columns shown; F2/F3 load no older ones). */
+  const edgeColumn = (dir: -1 | 1) => {
+    const order = deck.map((_, i) => (dir === -1 ? i : deck.length - 1 - i));
+    const i = order.find((k) => !skipColumn(deck[k]));
+    if (i != null) focusColumn(i);
   };
   const focusAfterMore = useRef<number | null>(null);
   const showOlder = (focusAt?: number) => {
@@ -943,7 +950,7 @@ export function App() {
     const keys: DeckKeyContext = {
       help, menu, phone, drawer, editable, queue, queueFocus, activeCol, activeIdx, selectedPost, threadTask, tasks: hub.tasks,
       handoff, pendingG, pendingDelete,
-      switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn,
+      switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
       setWidth, widthOf,

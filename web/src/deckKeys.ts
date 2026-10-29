@@ -19,7 +19,7 @@ export const FIXED_NOTE = '자동으로 만든 뷰는 편집할 수 없습니다
 
 /** The help (?): each key and what it does. Keep it in step with onDeckKey below. */
 export const KEYS: [string, string][] = [
-  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업. 스레드에서는 다음 / 이전 내 글)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'],
+  ['j / k', '아래 / 위 글'], ['J / K', '다음 / 이전 작업의 글로 (같은 작업의 연속 글 건너뛰기, 프로젝트가 같아도 #번호가 다르면 다른 작업. 스레드에서는 다음 / 이전 내 글)'], ['Ctrl Shift J / K', '다음 / 이전 작업의 내 지시 글로 (같은 작업의 연속 글에서는 맨 위 지시 하나만)'], ['h / l', '왼쪽 / 오른쪽 컬럼'], ['gg / G', '맨 위 / 맨 아래'], ['gr', '전체 컬럼의 가장 최근 글로'], ['gh / gl', '맨 왼쪽 / 맨 오른쪽 컬럼으로'],
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기 · 그다음 작성 서랍 닫기 · 열린 창은 Esc로 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍, Esc로 닫기, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
@@ -65,6 +65,7 @@ export interface DeckKeyContext {
   select: (colId: string, postId: number) => void;
   goRecent: () => void;
   stepColumn: (dir: 1 | -1) => void;
+  edgeColumn: (dir: 1 | -1) => void;
   moveColumn: (from: number, dir: 1 | -1) => void;
   focusColumn: (i: number) => void;
   openThread: (taskId: string, at?: { from?: string; post?: number }) => void;
@@ -93,7 +94,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       help, menu, phone, drawer, editable, queue, queueFocus, activeCol,
       activeIdx, selectedPost, threadTask, tasks, handoff, pendingG, pendingDelete, switchView,
       setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select,
-      goRecent, stepColumn, moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat,
+      goRecent, stepColumn, edgeColumn, moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat,
       openSearch, closeSearch, setDrawer, openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog,
       pinTask, toggleByTask, setFinder, deleteColumn, setWidth, widthOf,
     } = c;
@@ -158,6 +159,13 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     if (e.key === 'r' && now - pendingG.current < 600) {
       pendingG.current = 0;
       goRecent();
+      e.preventDefault();
+      return;
+    }
+    // `gh` / `gl`: the leftmost / rightmost column.
+    if ((e.key === 'h' || e.key === 'l') && now - pendingG.current < 600) {
+      pendingG.current = 0;
+      edgeColumn(e.key === 'h' ? -1 : 1);
       e.preventDefault();
       return;
     }
