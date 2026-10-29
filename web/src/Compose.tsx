@@ -24,6 +24,9 @@ document.addEventListener('keydown', (e) => {
   openModals[openModals.length - 1].close();
 });
 
+/** Whether any dialog is open; the desk's keys stay off while one is. */
+export const modalOpen = () => openModals.length > 0;
+
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const closeRef = useRef(onClose);
   closeRef.current = onClose;

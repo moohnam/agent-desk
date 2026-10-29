@@ -6,7 +6,7 @@ import { AccessDialog } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnDialog, KIND_LABEL } from './ColumnDialog.tsx';
-import { ComposeDrawer, DenyDialog, Modal, ReplyBox } from './Compose.tsx';
+import { ComposeDrawer, DenyDialog, Modal, ReplyBox, modalOpen } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
 import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../hub/src/compose.ts';
@@ -131,7 +131,13 @@ export function App() {
   const [threadAfter, setThreadAfter] = useState<string | null>(null);
   /** The post a thread opens at (top of the view); null opens at the newest post. */
   const [threadFocus, setThreadFocus] = useState<number | null>(null);
-  const [active, setActive] = useState(0);
+  // A new object per call, so choosing the same index again still re-renders and counts as a choice.
+  const [activeState, setActiveState] = useState({ i: 0 });
+  const active = activeState.i;
+  /** Set when the focus is chosen; otherwise a reorder of the deck (F3 by activity) keeps it on its column. */
+  const chosen = useRef(true);
+  const setActive = (i: number) => { chosen.current = true; setActiveState({ i }); };
+  const activeId = useRef<string | undefined>(undefined);
   const [selection, setSelection] = useState<Record<string, number>>({});
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [flash, setFlash] = useState<number | null>(null);
@@ -424,6 +430,15 @@ export function App() {
 
   const activeIdx = Math.min(active, deck.length - 1);
   const activeCol = deck[activeIdx] as DeckColumn | undefined;
+  // The focus follows its column when the columns move under it; a choice of column takes its place.
+  useLayoutEffect(() => {
+    if (!chosen.current) {
+      const at = deck.findIndex((c) => c.id === activeId.current);
+      if (at >= 0 && at !== activeIdx) { setActiveState({ i: at }); return; }
+    }
+    chosen.current = false;
+    activeId.current = deck[activeIdx]?.id;
+  }, [deck, activeState]);
   const selectedPost = activeCol?.posts.find((p) => p.id === selection[activeCol.id]);
 
   const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values()), [hub.approvals, hub.questions, hub.tasks]);
@@ -991,7 +1006,8 @@ export function App() {
     const onKey = (ev: KeyboardEvent) => {
       // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
       const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
-      if (denying || columnDialog || menu || skillsOpen || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
+      // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
+      if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
       // F1–F4: the deck's views, also while typing.
       const fv = !ev.ctrlKey && !ev.shiftKey && VIEWS.find((x) => x.key === ev.key);
       if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }

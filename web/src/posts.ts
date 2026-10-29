@@ -23,7 +23,7 @@ function postKind(e: HubEvent): PostKind | null {
     case 'assistant': case 'update': return 'assistant';
     case 'approval': return e.payload.decision === 'pending' ? 'approval' : null;
     case 'question': return e.payload.decision === 'pending' ? 'question' : null;
-    case 'status': return ['error', 'interrupted', 'queue_dropped'].includes(e.payload.state) ? 'alert' : null;
+    case 'status': return ['warning', 'error', 'interrupted', 'queue_dropped'].includes(e.payload.state) ? 'alert' : null;
     default: return null;
   }
 }

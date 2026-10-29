@@ -37,8 +37,12 @@ export type RunnerEvent =
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; toolUseId: string; name: string; input: unknown }
   | { kind: 'tool_result'; toolUseId: string; isError: boolean; text: string }
-  /** 'model_changed': a turn ran on another model than the session last reported (after set_model). */
-  | { kind: 'status'; state: 'started' | 'model_changed' | 'turn_done' | 'error' | 'interrupted'; detail?: Record<string, unknown> };
+  /**
+   * 'model_changed': a turn ran on another model than the session last reported (after set_model).
+   * 'warning': something the user should see that doesn't stop the turn (the task status is left alone);
+   * 'error' is for a turn or session that failed.
+   */
+  | { kind: 'status'; state: 'started' | 'model_changed' | 'turn_done' | 'warning' | 'error' | 'interrupted'; detail?: Record<string, unknown> };
 
 /** Work the agent left running between turns, such as a subagent started in the background. */
 export interface BackgroundTask { id: string; type: string; description: string; agent?: string }

@@ -278,6 +278,7 @@ export function startAgy(opts: {
     child = proc;
     running = model;
     stderrTail.length = 0;
+    proc.stdin!.on('error', () => {}); // EPIPE after the process went; 'exit' reports it
     proc.stderr!.on('data', (chunk: Buffer) => {
       for (const line of chunk.toString().split('\n')) if (line.trim()) stderrTail.push(line);
       stderrTail.splice(0, Math.max(0, stderrTail.length - 20));
@@ -306,23 +307,28 @@ export function startAgy(opts: {
     return text;
   };
 
+  // Bumped per turn, so a turn interrupted while still looking up its model doesn't go on to run.
+  let turnSeq = 0;
   const startTurn = async (turn: Turn) => {
     turnActive = true;
+    const seq = ++turnSeq;
+    const current = () => !closing && turnActive && seq === turnSeq;
     try {
       const ids = await listModels();
+      if (!current()) return;
       const model = agyModelId(ids, family, level(effort));
       if (!model) throw new Error(`agy 모델 목록에 #${family} (${level(effort)})이 없습니다`);
       const proc = await processFor(model);
-      if (closing) return;
+      if (!current()) return;
       proc.stdin!.write(JSON.stringify({ event: 'user', message: { content: turnText(turn) } }) + '\n');
     } catch (err) {
-      if (closing) return;
+      if (!current()) return;
       turnEnded('error', { message: `agy 턴 시작 실패: ${err instanceof Error ? err.message : String(err)}` });
     }
   };
 
   if (opts.fork) {
-    event({ kind: 'status', state: 'error', detail: { message: 'agy는 대화 복제(#fork)를 지원하지 않아 새 대화로 시작합니다' } });
+    event({ kind: 'status', state: 'warning', detail: { message: 'agy는 대화 복제(#fork)를 지원하지 않아 새 대화로 시작합니다' } });
   }
 
   const send = (text: string, skills?: string[]) => {
@@ -346,13 +352,15 @@ export function startAgy(opts: {
       queue.length = 0;
       cancelApprovals();
       // The process goes (its later output is dropped); the next message resumes the conversation.
-      if (child && turnActive) {
+      if (!turnActive) return;
+      if (child) {
         const proc = child;
         child = null;
         running = null;
         stopTree(proc, 'SIGINT');
-        turnEnded('interrupted', { subtype: 'interrupted' });
       }
+      // Without a process the turn was still starting; startTurn sees it ended and stops there.
+      turnEnded('interrupted', { subtype: 'interrupted' });
     },
     // #auto also answers the approvals waiting now.
     setMode: async (m) => {

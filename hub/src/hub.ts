@@ -80,6 +80,11 @@ export class Hub {
   private background = new Map<string, BackgroundTask[]>();
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
+  /**
+   * Sessions shown as lost because no runner connected in time after startup. Their queued messages
+   * and open requests wait for the runner's actual report: it may still have them.
+   */
+  private presumedLost = new Set<string>();
 
   constructor(store: Store, skills = new SkillStore()) {
     this.store = store;
@@ -88,7 +93,7 @@ export class Hub {
       (m) => this.onRunnerMessage(m),
       (connected) => this.publish({ type: 'runner', connected }),
     );
-    setTimeout(() => { if (!this.runner.connected) this.reconcile([]); }, RUNNER_GRACE_MS).unref();
+    setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, RUNNER_GRACE_MS).unref();
   }
 
   /** Compose syntax with the desk's skills as known #tags; `route`: the compose box's leading @mention. */
@@ -98,8 +103,11 @@ export class Hub {
     if (!this.runner.connected) throw new HttpError(503, 'Runner에 연결되어 있지 않습니다. 잠시 후 다시 시도하세요');
   }
 
-  /** Applies the runner's view of live sessions after a (re)connect. */
-  private reconcile(sessions: LiveSession[]) {
+  /**
+   * Applies the runner's view of live sessions after a (re)connect. `presumed`: no runner has
+   * reported yet; sessions are only marked lost, and what waits on them is settled on the report.
+   */
+  private reconcile(sessions: LiveSession[], presumed = false) {
     const approvals = sessions.flatMap((s) => s.approvals.map((a) => ({ ...a, sessionId: s.sessionId })));
     const { lost, touched } = this.store.reconcile(
       new Set(sessions.map((s) => s.sessionId)), new Set(approvals.map((a) => a.approvalId)));
@@ -120,7 +128,17 @@ export class Hub {
     this.background = new Map(sessions.filter((s) => s.background?.length).map((s) => [s.sessionId, s.background!]));
     for (const s of sessions) if (s.background?.length) { const t = this.store.getSession(s.sessionId)?.task_id; if (t) touched.push(t); }
     // Messages that waited for a session the runner no longer has will not be sent.
-    for (const r of lost) { this.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
+    const live = new Set(sessions.map((s) => s.sessionId));
+    const gone = lost.map((r) => ({ id: r.id, task_id: r.task_id }));
+    if (presumed) { for (const r of gone) this.presumedLost.add(r.id); gone.length = 0; }
+    else {
+      for (const id of this.presumedLost) {
+        const s = this.store.getSession(id);
+        if (s && !live.has(id)) gone.push({ id, task_id: s.task_id });
+      }
+      this.presumedLost.clear();
+    }
+    for (const r of gone) { this.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }
@@ -231,6 +249,8 @@ export class Hub {
       if (project && project.root_path !== path) {
         throw new HttpError(409, `@${project.name}은 이미 ${project.root_path}로 등록되어 있습니다`);
       }
+      // Checked before the directory and project are made, so a request that fails leaves nothing behind.
+      this.checkNewTask(c);
       // Naming a new directory there is how a new project starts: it is made, and the thread says so.
       let made = false;
       if (!project) { try { statSync(path); } catch { made = true; } }
@@ -256,6 +276,16 @@ export class Hub {
     return this.taskView(this.store.getTask(target)!);
   }
 
+  /** Throws what would stop a new task from starting; returns its engine. */
+  private checkNewTask(c: Composed, engine0?: EngineName): EngineName {
+    this.requireRunner();
+    if (!c.body && !c.skills.length) throw new HttpError(400, 'prompt is required');
+    const engine = wantedEngine(c) ?? engine0 ?? DEFAULT_ENGINE;
+    const problem = modelProblem(engine, c);
+    if (problem) throw new HttpError(400, problem);
+    return engine;
+  }
+
   /**
    * `text` may carry compose syntax; the agent receives it with the mention and mode tag removed.
    * `engine`: the engine when no tag picks one (else the default). `routed`: the compose box's text.
@@ -263,14 +293,10 @@ export class Hub {
   createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false) {
     const project = this.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'project not found');
-    this.requireRunner();
     const c = this.parse(text, routed);
+    const engine = this.checkNewTask(c, engine0);
     const prompt = c.body;
-    if (!prompt && !c.skills.length) throw new HttpError(400, 'prompt is required');
     const permissionMode = c.mode ?? mode;
-    const engine = wantedEngine(c) ?? engine0 ?? DEFAULT_ENGINE;
-    const problem = modelProblem(engine, c);
-    if (problem) throw new HttpError(400, problem);
     const d = this.settings()[engine];
     const model = c.model ?? d.model, effort = c.effort ?? d.effort;
     const ts = now();
@@ -591,6 +617,11 @@ export class Hub {
     const gone = new Set(taskIds);
     for (const r of this.store.openRequests()) {
       if (gone.has(r.to_task_id) && !gone.has(r.from_task_id)) this.settleRequest(r, 'failed', '대상 작업이 삭제되었습니다.');
+      else if (gone.has(r.from_task_id) && !gone.has(r.to_task_id)) {
+        // The asker is gone: its question waiting in the target must not be sent as if from the user.
+        if (r.queued_id && this.store.dequeue(r.queued_id)) this.publishTask(r.to_task_id);
+        this.settleRequest(r, 'failed', '질문한 작업이 삭제되었습니다.');
+      }
     }
     for (const q of this.store.pendingQuestions()) if (gone.has(q.task_id)) this.settleQuestion(q, 'cancelled', null);
     this.store.deleteTasks(taskIds);
@@ -908,6 +939,8 @@ export class Hub {
     const first = get();
     if (!first) return Promise.reject(new HttpError(404, `질문을 찾을 수 없습니다: ${id}`));
     if (done(first)) return Promise.resolve(first);
+    // What it last was, if it is deleted meanwhile (its task removed).
+    let last = first;
     return new Promise((resolve) => {
       const waiters = this.waiters.get(id) ?? new Set();
       this.waiters.set(id, waiters);
@@ -917,7 +950,7 @@ export class Hub {
         waiters.delete(finish);
         // Another wait may have started a new set for this id meanwhile; leave that one be.
         if (!waiters.size && this.waiters.get(id) === waiters) this.waiters.delete(id);
-        resolve(get()!);
+        resolve((last = get() ?? last));
       };
       const timer = setTimeout(finish, timeoutMs);
       signal?.addEventListener('abort', finish, { once: true });
@@ -961,7 +994,8 @@ export class Hub {
    */
   handoff(a: { engine?: string; sessionId?: string; cwd: string; title?: string; summary?: string; taskId?: string }) {
     if (!a.cwd?.trim()) throw new HttpError(400, 'cwd가 필요합니다');
-    const engine = a.engine === 'codex' ? 'codex' : 'claude';
+    const engine = a.engine ?? 'claude';
+    if (engine !== 'claude' && engine !== 'codex') throw new HttpError(400, `${engine} 세션은 넘겨받을 수 없습니다 (claude, codex만 지원)`);
     const cwd0 = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
     let found;
     try { found = findSession(engine, a.sessionId?.trim() || undefined, cwd0); }

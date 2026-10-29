@@ -14,7 +14,9 @@ export function readLines(socket: Socket, onMessage: (m: any) => void) {
       const line = buf.slice(0, i);
       buf = buf.slice(i + 1);
       if (!line.trim()) continue;
-      try { onMessage(JSON.parse(line)); } catch (err) { console.error('bad message', err); }
+      let m: unknown;
+      try { m = JSON.parse(line); } catch (err) { console.error('bad message', err); continue; }
+      try { onMessage(m); } catch (err) { console.error('message handling failed', err); }
     }
   });
 }

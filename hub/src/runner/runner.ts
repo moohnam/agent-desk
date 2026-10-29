@@ -14,6 +14,7 @@ interface Entry {
   live: LiveSession;
   idleTimer: NodeJS.Timeout | null;
 }
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const idle = (e: Entry) => !e.live.busy && !e.live.approvals.length && !e.live.background?.length;
 
 /** Runs engine sessions on this machine. Talks to the hub only through protocol messages. */
@@ -92,6 +93,19 @@ export class Runner {
     return true;
   }
 
+  /**
+   * Runs an adapter call whose failure belongs to that session: reported as a warning on it
+   * instead of rejecting unhandled, which would take every session of the daemon down.
+   */
+  private attempt(sessionId: string, what: string, call: (a: EngineAdapter) => Promise<void>) {
+    const adapter = this.sessions.get(sessionId)?.adapter;
+    if (!adapter) return;
+    const report = (err: unknown) => this.emit({
+      type: 'event', sessionId, event: { kind: 'status', state: 'warning', detail: { message: `${what}: ${errorText(err)}` } },
+    });
+    try { call(adapter).catch(report); } catch (err) { report(err); }
+  }
+
   handle(cmd: HubToRunner) {
     switch (cmd.type) {
       case 'start': {
@@ -99,11 +113,20 @@ export class Runner {
         if (old) { this.drop(cmd.sessionId, old); old.adapter?.close(); }
         const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null };
         this.sessions.set(cmd.sessionId, entry);
-        entry.adapter = (this.start ?? ENGINES[cmd.engine] ?? startClaude)({
-          sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-          model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome,
-          emit: (m) => { if (this.track(entry, m)) this.emit(m); },
-        });
+        // An engine this runner doesn't know (a newer hub talking to an older daemon) must not run as another engine.
+        const start = this.start ?? (Object.hasOwn(ENGINES, cmd.engine) ? ENGINES[cmd.engine] : null);
+        try {
+          if (!start) throw new Error(`이 러너는 ${cmd.engine} 엔진을 모릅니다. 러너를 다시 시작하세요`);
+          entry.adapter = start({
+            sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
+            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome,
+            emit: (m) => { if (this.track(entry, m)) this.emit(m); },
+          });
+        } catch (err) {
+          if (this.sessions.get(cmd.sessionId) === entry) this.drop(cmd.sessionId, entry);
+          this.emit({ type: 'closed', sessionId: cmd.sessionId, busy: false, error: errorText(err) });
+          break;
+        }
         if (this.sessions.get(cmd.sessionId) === entry) this.schedule(cmd.sessionId, entry);
         break;
       }
@@ -111,19 +134,13 @@ export class Runner {
         this.sessions.get(cmd.sessionId)?.adapter?.send(cmd.text, cmd.skills, cmd.steer);
         break;
       case 'set_mode':
-        this.sessions.get(cmd.sessionId)?.adapter?.setMode(cmd.permissionMode).catch((err) => this.emit({
-          type: 'event', sessionId: cmd.sessionId,
-          event: { kind: 'status', state: 'error', detail: { message: `모드 변경 실패: ${err?.message ?? err}` } },
-        }));
+        this.attempt(cmd.sessionId, '모드 변경 실패', (a) => a.setMode(cmd.permissionMode));
         break;
       case 'set_model':
-        this.sessions.get(cmd.sessionId)?.adapter?.setModel(cmd.model, cmd.effort).catch((err) => this.emit({
-          type: 'event', sessionId: cmd.sessionId,
-          event: { kind: 'status', state: 'error', detail: { message: `모델 변경 실패: ${err?.message ?? err}` } },
-        }));
+        this.attempt(cmd.sessionId, '모델 변경 실패', (a) => a.setModel(cmd.model, cmd.effort));
         break;
       case 'interrupt':
-        void this.sessions.get(cmd.sessionId)?.adapter?.interrupt();
+        this.attempt(cmd.sessionId, '중단 실패', (a) => a.interrupt());
         break;
       case 'close': {
         const entry = this.sessions.get(cmd.sessionId);

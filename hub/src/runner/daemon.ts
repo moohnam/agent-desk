@@ -33,6 +33,9 @@ const runner = new Runner(`local-${hostname()}`, (m) => {
   }
 });
 
+// A failure in one session's adapter must not end the daemon and every other session with it.
+process.on('unhandledRejection', (err) => console.error('runner: unhandled rejection', err));
+
 const server = createServer((socket) => {
   // One hub at a time; a new connection replaces a stale one.
   hub?.destroy();

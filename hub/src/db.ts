@@ -54,7 +54,7 @@ const POST_TEXT = "coalesce(json_extract(e.payload_json, '$.text'), json_extract
 /** Whether an event starts a post (web postKind): the rest attaches to the post before it. */
 const IS_POST = `(e.kind IN ('user', 'assistant', 'update')
   OR (e.kind IN ('approval', 'question') AND json_extract(e.payload_json, '$.decision') = 'pending')
-  OR (e.kind = 'status' AND json_extract(e.payload_json, '$.state') IN ('error', 'interrupted', 'queue_dropped')))`;
+  OR (e.kind = 'status' AND json_extract(e.payload_json, '$.state') IN ('warning', 'error', 'interrupted', 'queue_dropped')))`;
 
 /** The SQL condition (on `event e JOIN task t`) for a feed column's events, and its arguments. */
 function feedWhere(f: FeedFilter): { where: string; args: string[] } {

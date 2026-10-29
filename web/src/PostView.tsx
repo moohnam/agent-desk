@@ -75,7 +75,9 @@ function samePost(a: Props, b: Props): boolean {
   if (x !== y && (x.id !== y.id || x.kind !== y.kind || x.event !== y.event || x.resolution !== y.resolution
     || x.parent?.kind !== y.parent?.kind || x.activity.length !== y.activity.length
     || x.activity.some((e, i) => e !== y.activity[i]))) return false;
+  // Only what the post reads from its task; keep in step with the uses below.
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
+  if ((a.task?.status === 'running') !== (b.task?.status === 'running')) return false;
   for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick', 'draft', 'picked'] as const) {
     if (a[k] !== b[k]) return false;
   }
@@ -101,7 +103,8 @@ function PostViewInner(props: Props) {
   const tag = post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>
     : post.kind === 'question' ? <span className="tag">질문</span>
     : post.kind === 'alert' ? (p.state === 'interrupted' ? <span className="tag stop">중단됨</span>
-      : p.state === 'queue_dropped' ? <span className="tag stop">대기 취소</span> : <span className="tag err">오류</span>)
+      : p.state === 'queue_dropped' ? <span className="tag stop">대기 취소</span>
+      : p.state === 'warning' ? <span className="tag stop">경고</span> : <span className="tag err">오류</span>)
     : post.kind === 'user' && p.handoff === 'request' ? <span className="tag via" title="컨텍스트 재구성: 새 세션에 넘길 정리본을 에이전트에게 요청">정리본 요청</span>
     : post.kind === 'user' && p.handoff === 'reset' ? <span className="tag via" title="이전 대화를 비우고 이 메시지 하나로 새 세션을 시작함">컨텍스트 재구성</span>
     : post.kind === 'user' && p.request ? <span className="tag via" title="다른 작업의 에이전트가 데스크를 통해 물음. 이번 턴의 마지막 응답이 답으로 전달됩니다">에이전트 질문</span>

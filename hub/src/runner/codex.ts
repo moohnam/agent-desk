@@ -80,6 +80,14 @@ export function startCodex(opts: {
   /** Messages sent while a turn runs; each starts the next turn (as the Claude SDK queues them). */
   const queue: Turn[] = [];
   let turnActive = false;
+  /** An interrupt came while turn/start was in flight; sent once the turn id is known. */
+  let stopAsked = false;
+  const noteTurn = (id: string | undefined) => {
+    turnId = id ?? turnId;
+    if (!stopAsked || !threadId || !turnId) return;
+    stopAsked = false;
+    request('turn/interrupt', { threadId, turnId }).catch(() => {});
+  };
   /** Set by close(): the process exiting afterwards is a requested shutdown, not a failure. */
   let closing = false;
   let closedEmitted = false;
@@ -114,6 +122,8 @@ export function startCodex(opts: {
   });
   const respond = (id: Id, result: Json) => write({ id, result });
 
+  // Writing after the process went raises EPIPE here; 'exit' reports the end.
+  child.stdin.on('error', () => {});
   child.stderr.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split('\n')) if (line.trim()) stderrTail.push(line);
     stderrTail.splice(0, Math.max(0, stderrTail.length - 20));
@@ -271,7 +281,7 @@ export function startCodex(opts: {
   const onNotification = (method: string, p: Json) => {
     if (p.threadId && threadId && p.threadId !== threadId) return; // sub-agent threads
     switch (method) {
-      case 'turn/started': turnId = p.turn?.id ?? turnId; break;
+      case 'turn/started': noteTurn(p.turn?.id); break;
       case 'item/started': toolStart(p.item); break;
       case 'item/completed': itemDone(p.item); break;
       case 'serverRequest/resolved': {
@@ -284,6 +294,7 @@ export function startCodex(opts: {
         const turn = p.turn ?? {};
         turnActive = false;
         turnId = null;
+        stopAsked = false;
         const state = turn.status === 'completed' ? 'turn_done' : turn.status === 'interrupted' ? 'interrupted' : 'error';
         event({ kind: 'status', state, detail: {
           subtype: turn.status, duration_ms: turn.durationMs ?? undefined,
@@ -331,9 +342,10 @@ export function startCodex(opts: {
       threadId, input,
       approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandboxPolicy: SANDBOX_POLICY,
       ...(model && { model }), ...(effort && { effort }),
-    }).then((r) => { turnId = r?.turn?.id ?? turnId; }).catch((err: Error) => {
+    }).then((r) => noteTurn(r?.turn?.id)).catch((err: Error) => {
       if (closing) return;
       turnActive = false;
+      stopAsked = false;
       event({ kind: 'status', state: 'error', detail: { message: `Codex 턴 시작 실패: ${err.message}` } });
       emit({ type: 'busy', sessionId, busy: false });
     });
@@ -349,11 +361,11 @@ export function startCodex(opts: {
       write({ method: 'initialized' });
       if (opts.skillsHome) {
         await request('skills/extraRoots/set', { extraRoots: [join(opts.skillsHome, 'skills')] }).catch((err: Error) => {
-          event({ kind: 'status', state: 'error', detail: { message: `데스크 스킬 등록 실패: ${err.message}` } });
+          event({ kind: 'status', state: 'warning', detail: { message: `데스크 스킬 등록 실패: ${err.message}` } });
         });
       }
       if (opts.model) model = await resolveModel(opts.model).catch((err: Error) => {
-        event({ kind: 'status', state: 'error', detail: { message: `${err.message}. Codex 기본 모델로 진행합니다` } });
+        event({ kind: 'status', state: 'warning', detail: { message: `${err.message}. Codex 기본 모델로 진행합니다` } });
         return undefined;
       });
       const common = {
@@ -411,8 +423,15 @@ export function startCodex(opts: {
   return {
     send,
     interrupt: async () => {
+      const dropped = queue.length > 0;
       queue.length = 0;
       if (threadId && turnId) await request('turn/interrupt', { threadId, turnId });
+      else if (turnActive) stopAsked = true;
+      else if (dropped) {
+        // Still starting: the only work was the queued message, now dropped, so the session is idle.
+        event({ kind: 'status', state: 'interrupted', detail: { subtype: 'interrupted' } });
+        emit({ type: 'busy', sessionId, busy: false });
+      }
     },
     // Applies from the next turn (turn/start carries the policy); within the running turn, switching
     // to #auto answers further approval requests automatically.

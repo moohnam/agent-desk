@@ -169,6 +169,8 @@ export function startClaude(opts: {
   return {
     send,
     interrupt: async () => {
+      // With no turn running the flag would stick and mislabel the next turn's failure as an interrupt.
+      if (!busy) return;
       interrupting = true;
       await q.interrupt();
     },
