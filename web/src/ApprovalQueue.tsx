@@ -1,5 +1,5 @@
 import { ArrowUpRight, ChevronDown } from 'lucide-react';
-import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../hub/src/compose.ts';
+import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
 import { projectColor } from './projects.ts';

@@ -5,11 +5,12 @@ import { isAsk } from './AskCard.tsx';
 import { AccessDialog } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
+import { ColumnFinder } from './ColumnFinder.tsx';
 import { ColumnDialog, KIND_LABEL } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, Modal, ReplyBox, modalOpen } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
-import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../hub/src/compose.ts';
+import { ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { inBackground, STATUS_LABEL, stalledMinutes, statusLabel } from './format.ts';
 import { HandoffPanel, pickable, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { PostView } from './PostView.tsx';
@@ -151,6 +152,8 @@ export function App() {
   /** The column whose name is being edited in its header. */
   const [renaming, setRenaming] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
+  /** `;`: the column finder. */
+  const [finder, setFinder] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -1141,6 +1144,7 @@ export function App() {
           else if (activeCol?.def) { if (editable) setColumnDialog({ column: activeCol.def }); else setToast(FIXED_NOTE); }
           break;
         case '/': openSearch(); break;
+        case ';': setFinder(true); break;
         case 'D':
           if (!activeCol?.def) break;
           if (now - pendingDelete.current < 1500) { deleteColumn(activeCol.def.id); pendingDelete.current = 0; }
@@ -1324,7 +1328,7 @@ export function App() {
           <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
             onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
           <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
-          <button className="btn" title="새 작업의 엔진별 기본 모델과 effort: 작업마다 #opus #sonnet #haiku · #sol #astra #terra #luna · #argon #flash · #low … #max (#ultra는 Codex)" aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
+          <button className="btn" title={`새 작업의 엔진별 기본 모델과 effort: 작업마다 ${ENGINES.map(modelTagsOf).join(' · ')} · #low … #max (${effortNote()})`} aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
@@ -1422,6 +1426,11 @@ export function App() {
           onDelete={columnDialog.column ? () => { deleteColumn(columnDialog.column!.id); setColumnDialog(null); } : undefined} />
       )}
       {help && <Help onClose={() => setHelp(false)} />}
+      {finder && (
+        <ColumnFinder onClose={() => setFinder(false)}
+          items={deck.filter((c) => c.def && c.id !== THREAD && c.id !== SEARCH).map((c) => ({ id: c.id, title: c.def!.title, sub: c.def!.note }))}
+          onPick={(id) => focusColumn(deck.findIndex((c) => c.id === id))} />
+      )}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
@@ -1689,7 +1698,7 @@ function ThreadHead({ task, project, model, events, now, draft, handoff, onClose
         <div className="meta">
           <span title={project?.root_path}><span className="pdot" style={{ background: projectColor(task.project_id) }} />{task.project_name}
             <span className="seq" title={`@${task.project_name}#${task.seq}로 이 작업에 보낼 수 있습니다`}>#{task.seq}</span></span>
-          <span title="모델은 #opus #sonnet #haiku(Claude), #sol #astra #terra #luna(Codex), #argon #flash(agy), effort는 #low … #max(#ultra는 Codex) 태그로 바꿉니다">
+          <span title={`모델은 ${ENGINES.map((e) => `${modelTagsOf(e)}(${ENGINE_LABEL[e]})`).join(', ')}, effort는 #low … #max(${effortNote()}) 태그로 바꿉니다`}>
             {ENGINE_LABEL[engineOf(task.engine)]}{model ? ` · ${modelShort(model)}` : ''}
             {/* Switched by a tag, but no turn has run on it yet. */}
             {task.model && !new RegExp(`-${task.model}(-|$)`).test(model ?? '') ? ` → ${MODEL_LABEL[task.model]} (다음 턴)` : ''}
@@ -1814,7 +1823,7 @@ const KEYS: [string, string][] = [
   ['Enter', '선택한 글의 스레드 열기'], ['q / Esc', '스레드 닫기 · 검색 컬럼에서는 검색 닫기 · 그다음 작성 서랍 닫기 · 열린 창은 Esc로 닫기'], ['o / Space', '본문·도구 기록 펼치기'],
   ['r', '스레드를 열고 답글 쓰기 (터미널 작업은 질문에 답하기)'], ['i', '새 작업 (작성 서랍, Esc로 닫기, 쓰던 내용은 유지)'], ['y / n', '승인 / 거절 (선택한 작업)'], ['s', '작업 중단'],
   ['a', '응답 대기열 (j/k · y/n · Enter: 스레드·질문에 답하기 · Esc)'], ['< / >', '컬럼 폭 줄이기 / 늘리기'],
-  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['f', '스레드를 오른쪽 절반 / 컬럼으로 보기 (절반일 때 경계선을 끌어 폭 조절)'], ['t', '스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 h/l은 스레드를 건너뜀)'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기 (F2에서는 옮긴 순서를 기억, 컬럼 메뉴에서 이름순·만든 순 정렬·자동 순서. F3은 늘 최근 활동순)'],
+  ['F1 – F4', '뷰: 내 컬럼 / 프로젝트별 / 작업별 / 상태 보드 (F2–F4는 자동 구성, 편집은 F1에서)'], [';', '컬럼 찾기: 지금 뷰의 컬럼을 이름 일부로 찾아 이동 (↑↓·Ctrl N/P로 고르고 Enter)'], ['/', '검색 컬럼 열기 (#project: #status: #kind: #task: 필터, Enter: 결과로, 빈 칸에서 Esc: 닫기)'], ['c', '컬럼 추가'], ['p', '선택한 글의 작업을 컬럼으로 고정'], ['f', '스레드를 오른쪽 절반 / 컬럼으로 보기 (절반일 때 경계선을 끌어 폭 조절)'], ['t', '스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 h/l은 스레드를 건너뜀)'], ['e', '컬럼 편집: 이름·작업·프로젝트·종류·상태·검색어 (이름은 더블클릭으로도)'], ['v', '작업별로 묶어 보기 (작업마다 최근 글 하나) / 모든 글 보기'], ['D D', '컬럼 삭제'], ['H / L', '컬럼 왼쪽 / 오른쪽으로 옮기기 (F2에서는 옮긴 순서를 기억, 컬럼 메뉴에서 이름순·만든 순 정렬·자동 순서. F3은 늘 최근 활동순)'],
   ['⌘ Enter', '작성창·답 입력란에서 보내기'], ['Tab', '@프로젝트 · #태그 완성'], ['#auto / #ask', '이제부터 자동 승인 / 매번 확인'],
   ['#스킬이름', '그 메시지에만 데스크 스킬 적용 (상단 스킬 버튼에서 관리)'],
   ['#later / #now', '실행 중에 보낸 메시지: 턴이 끝난 뒤 (기본) / 지금 턴에 끼워넣기'],

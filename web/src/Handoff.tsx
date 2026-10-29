@@ -1,7 +1,7 @@
 import { X } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../hub/src/compose.ts';
-import { extractHandoff, handoffMessage, HANDOFF_SECTIONS, quoteEvent, type Quoted } from '../../hub/src/handoff.ts';
+import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../shared/compose.ts';
+import { extractHandoff, handoffMessage, HANDOFF_SECTIONS, quoteEvent, type Quoted } from '../../shared/handoff.ts';
 import { api } from './api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { modelShort } from './projects.ts';
@@ -10,7 +10,7 @@ import type { HubEvent, TaskView } from './types.ts';
 /**
  * 컨텍스트 재구성, per task: pick thread posts, have the agent write a handoff summary that keeps their
  * key facts (or write it by hand), revise it, check the whole first message, and continue the task in
- * a fresh engine session (hub/src/handoff.ts). Kept as a draft on this device (`handoff:<taskId>`), so
+ * a fresh engine session (shared/handoff.ts). Kept as a draft on this device (`handoff:<taskId>`), so
  * closing the panel or reloading loses nothing.
  */
 export interface HandoffState {

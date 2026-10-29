@@ -1,9 +1,9 @@
 import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, modelEngine, modelProblem, parseCompose, wantedEngine,
-  type Delivery, type Effort, type EngineName, type ModelName,
-} from '../../hub/src/compose.ts';
+  DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, TAG_HELP, effortNote, modelEngine,
+  modelHelpOf, modelProblem, modelTagsOf, parseCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
+} from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
@@ -51,32 +51,7 @@ interface Option { key: string; insert: string; label: string; desc?: string; co
 /** Rows rendered in the @ list; typing narrows it further. */
 const MAX_OPTIONS = 50;
 
-const TAG_OPTIONS: Option[] = [
-  { key: 'auto', insert: 'auto', label: '#auto', desc: '이제부터 자동 승인', space: true },
-  { key: 'ask', insert: 'ask', label: '#ask', desc: '이제부터 매번 확인 (기본)', space: true },
-  { key: 'claude', insert: 'claude', label: '#claude', desc: '새 작업을 Claude로 (기본)', space: true },
-  { key: 'codex', insert: 'codex', label: '#codex', desc: '새 작업을 Codex로', space: true },
-  { key: 'agy', insert: 'agy', label: '#agy', desc: '새 작업을 Antigravity(agy)로', space: true },
-  { key: 'opus', insert: 'opus', label: '#opus', desc: 'Claude 모델을 Opus로 (작업에 유지)', space: true },
-  { key: 'sonnet', insert: 'sonnet', label: '#sonnet', desc: 'Claude 모델을 Sonnet으로 (작업에 유지)', space: true },
-  { key: 'haiku', insert: 'haiku', label: '#haiku', desc: 'Claude 모델을 Haiku로 (작업에 유지)', space: true },
-  { key: 'sol', insert: 'sol', label: '#sol', desc: 'Codex 모델을 Sol 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'astra', insert: 'astra', label: '#astra', desc: 'Codex 모델을 Astra 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'terra', insert: 'terra', label: '#terra', desc: 'Codex 모델을 Terra 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'luna', insert: 'luna', label: '#luna', desc: 'Codex 모델을 Luna 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'argon', insert: 'argon', label: '#argon', desc: 'agy 모델을 Gemini Argon 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'flash', insert: 'flash', label: '#flash', desc: 'agy 모델을 Gemini Flash 계열 최신으로 (작업에 유지)', space: true },
-  { key: 'low', insert: 'low', label: '#low', desc: 'effort 낮게 (작업에 유지)', space: true },
-  { key: 'medium', insert: 'medium', label: '#medium', desc: 'effort 보통 (작업에 유지)', space: true },
-  { key: 'high', insert: 'high', label: '#high', desc: 'effort 높게 (작업에 유지)', space: true },
-  { key: 'xhigh', insert: 'xhigh', label: '#xhigh', desc: 'effort 매우 높게 (작업에 유지)', space: true },
-  { key: 'max', insert: 'max', label: '#max', desc: 'effort 최대, 지원하지 않는 모델은 high (작업에 유지)', space: true },
-  { key: 'ultra', insert: 'ultra', label: '#ultra', desc: 'Codex 전용 effort 최상 (작업에 유지)', space: true },
-  { key: 'later', insert: 'later', label: '#later', desc: '실행 중이면 지금 턴이 끝난 뒤 보내기 (기본)', space: true },
-  { key: 'now', insert: 'now', label: '#now', desc: '실행 중인 턴에 바로 끼워넣기', space: true },
-  { key: 'new', insert: 'new', label: '#new', desc: '같은 프로젝트에서 새 작업 시작 (이전 대화 없이)', space: true },
-  { key: 'fork', insert: 'fork', label: '#fork', desc: '이 작업의 대화를 이어받은 새 작업으로 동시에 진행', space: true },
-];
+const TAG_OPTIONS: Option[] = TAG_HELP.map(({ tag, help }) => ({ key: tag, insert: tag, label: `#${tag}`, desc: help, space: true }));
 
 /**
  * Options for the @mention or #tag being typed just before the caret. `mentions`: 'route' where a
@@ -384,13 +359,9 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
           <code>@이름:/경로</code><span>프로젝트를 만들고 새 작업 시작</span>
           <code>#auto</code><span>이제부터 자동 승인</span>
           <code>#ask</code><span>이제부터 매번 확인 (기본)</span>
-          <code>#claude</code><span>새 작업을 Claude로 (기본)</span>
-          <code>#codex</code><span>새 작업을 Codex로</span>
-          <code>#agy</code><span>새 작업을 Antigravity(agy)로</span>
-          <code>#opus #sonnet #haiku</code><span>Claude 모델 고르기 (작업에 유지)</span>
-          <code>#sol #astra #terra #luna</code><span>Codex 모델 계열 고르기, 최신 버전 (작업에 유지)</span>
-          <code>#argon #flash</code><span>agy(Gemini) 모델 계열 고르기, 최신 버전 (작업에 유지)</span>
-          <code>#low … #max</code><span>effort 고르기 (작업에 유지, #ultra는 Codex만)</span>
+          {ENGINES.map((e) => <Fragment key={e}><code>#{e}</code><span>새 작업을 {ENGINE_INFO[e].tagLabel}로{e === DEFAULT_ENGINE ? ' (기본)' : ''}</span></Fragment>)}
+          {ENGINES.map((e) => <Fragment key={e}><code>{modelTagsOf(e)}</code><span>{modelHelpOf(e)} (작업에 유지)</span></Fragment>)}
+          <code>#low … #max</code><span>effort 고르기 (작업에 유지, {effortNote()})</span>
           <code>#스킬이름</code><span>데스크 스킬을 이 메시지에만 사용</span>
           <code>#later</code><span>실행 중이면 지금 턴이 끝난 뒤 보내기 (기본)</span>
           <code>#now</code><span>실행 중인 턴에 바로 끼워넣기</span>

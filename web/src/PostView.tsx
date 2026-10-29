@@ -1,6 +1,6 @@
 import { ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../hub/src/compose.ts';
+import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';

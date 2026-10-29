@@ -1,4 +1,4 @@
-import type { Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from './protocol.ts';
+import type { Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { startClaude } from './claude.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';

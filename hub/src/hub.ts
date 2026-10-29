@@ -4,50 +4,17 @@ import { mkdirSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, mentionsIn, modelProblem, parseCompose, wantedEngine,
-  type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
-} from './compose.ts';
-import {
-  Store, feedEvent, now, type AgentRequest, type Approval, type Event, type Queued, type QueuedKind, type Question, type Session,
-  type Task, type TaskStatus,
-} from './db.ts';
-import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from './handoff.ts';
+  DEFAULT_ENGINE, DEFAULT_MODE, HANDOFF_ENGINES, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, mentionsIn, modelProblem, parseCompose, wantedEngine,
+  type Composed, type Effort, type HandoffEngine, type EngineName, type ModelName, type PermissionMode,
+} from '../../shared/compose.ts';
+import type { Approval, HubMessage, QueuedKind, Question, Settings, Task, TaskStatus, TaskView } from '../../shared/api.ts';
+import type { EventKind, EventPayloads } from '../../shared/events.ts';
+import { Store, feedEvent, now, type AgentRequest, type Event, type Queued, type Session } from './db.ts';
+import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
 import { findSession } from './importer.ts';
 import { RunnerClient } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
-import type { Answers, BackgroundTask, LiveSession, RunnerToHub } from './runner/protocol.ts';
-
-export type HubMessage =
-  | { type: 'event'; event: Event }
-  | { type: 'task'; task: TaskView }
-  | { type: 'approval'; approval: Approval }
-  | { type: 'question'; question: Question }
-  | { type: 'runner'; connected: boolean }
-  /** Tasks and projects deleted, with everything recorded for them. */
-  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
-
-export interface TaskView extends Task {
-  project_name: string;
-  engine: string | null;
-  permission_mode: PermissionMode | null;
-  model: ModelName | null;
-  effort: Effort | null;
-  live: boolean;
-  /** 'external': a terminal session attached over MCP; the app only answers its questions. */
-  source: 'app' | 'external' | null;
-  last_event: Event | null;
-  pending_approvals: number;
-  pending_questions: number;
-  /** A Codex async question waiting for my next message, which answers it; null when none. */
-  pending_ask: { event_id: number; text: string; ts: string } | null;
-  /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string; kind?: QueuedKind }[];
-  /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
-  background: BackgroundTask[];
-}
-
-/** Desk-wide defaults for new tasks of each engine; null leaves the choice to the engine. */
-export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
+import type { Answers, BackgroundTask, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
 
 const OWNER = 'local';
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
@@ -208,7 +175,8 @@ export class Hub {
     this.publishTask(taskId);
   }
 
-  private addEvent(sessionId: string, taskId: string, kind: Event['kind'], payload: unknown): Event {
+  /** Records an event of `kind` with that kind's payload (shared/events.ts) and publishes it. */
+  private addEvent<K extends EventKind>(sessionId: string, taskId: string, kind: K, payload: EventPayloads[K]): Event {
     const event = this.store.addEvent(sessionId, taskId, kind, payload);
     this.store.touchTask(taskId);
     // Live events come cut like the feed's (feedEvent); an open thread fetches clipped ones whole.
@@ -994,8 +962,8 @@ export class Hub {
    */
   handoff(a: { engine?: string; sessionId?: string; cwd: string; title?: string; summary?: string; taskId?: string }) {
     if (!a.cwd?.trim()) throw new HttpError(400, 'cwd가 필요합니다');
-    const engine = a.engine ?? 'claude';
-    if (engine !== 'claude' && engine !== 'codex') throw new HttpError(400, `${engine} 세션은 넘겨받을 수 없습니다 (claude, codex만 지원)`);
+    const engine = (a.engine ?? DEFAULT_ENGINE) as HandoffEngine;
+    if (!HANDOFF_ENGINES.includes(engine)) throw new HttpError(400, `${engine} 세션은 넘겨받을 수 없습니다 (${HANDOFF_ENGINES.join(', ')}만 지원)`);
     const cwd0 = resolve(a.cwd.replace(/^~(?=\/|$)/, homedir()));
     let found;
     try { found = findSession(engine, a.sessionId?.trim() || undefined, cwd0); }

@@ -7,9 +7,9 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { Effort, ModelName, PermissionMode } from '../compose.ts';
+import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
-import { ASK_USER, type Answers, type EngineAdapter, type RunnerEvent, type RunnerToHub } from './protocol.ts';
+import { ASK_USER, type Answers, type EngineAdapter, type RunnerEvent, type RunnerToHub } from '../../../shared/protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';

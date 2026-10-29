@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { EngineAdapter, HubToRunner, RunnerToHub } from '../../hub/src/runner/protocol.ts';
+import type { EngineAdapter, HubToRunner, RunnerToHub } from '../../shared/protocol.ts';
 import { Runner } from '../../hub/src/runner/runner.ts';
 
 type Start = NonNullable<ConstructorParameters<typeof Runner>[2]>['start'];

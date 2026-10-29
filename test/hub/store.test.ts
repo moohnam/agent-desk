@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Store, type EventKind } from '../../hub/src/db.ts';
+import type { EventKind } from '../../shared/events.ts';
+import { Store } from '../../hub/src/db.ts';
 import { buildPosts } from '../../web/src/posts.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { Effort, ModelName, PermissionMode } from '../compose.ts';
+import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
-import type { BackgroundTask, EngineAdapter, RunnerToHub } from './protocol.ts';
+import type { BackgroundTask, EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */

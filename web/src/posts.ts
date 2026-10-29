@@ -1,3 +1,4 @@
+import { ALERT_STATES } from '../../shared/events.ts';
 import type { ColumnFilter, HubEvent, PlacedPost, Post, PostKind, TaskView } from './types.ts';
 
 /** Merges two id-ordered event lists, dropping duplicates and keeping at most `cap` newest. */
@@ -23,7 +24,7 @@ function postKind(e: HubEvent): PostKind | null {
     case 'assistant': case 'update': return 'assistant';
     case 'approval': return e.payload.decision === 'pending' ? 'approval' : null;
     case 'question': return e.payload.decision === 'pending' ? 'question' : null;
-    case 'status': return ['warning', 'error', 'interrupted', 'queue_dropped'].includes(e.payload.state) ? 'alert' : null;
+    case 'status': return ALERT_STATES.includes(e.payload.state) ? 'alert' : null;
     default: return null;
   }
 }

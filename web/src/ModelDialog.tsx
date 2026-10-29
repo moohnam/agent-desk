@@ -1,17 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api } from './api.ts';
-import { ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, type EngineName } from '../../hub/src/compose.ts';
+import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, modelTagsOf, type EngineName } from '../../shared/compose.ts';
 import { Modal } from './Compose.tsx';
 import { saveSettings, useSettings } from './settings.ts';
 import { resetTime } from './format.ts';
 import type { EngineUsage, Settings } from './types.ts';
 
-const TAG_HINT: Record<EngineName, string> = {
-  claude: '#opus #sonnet #haiku',
-  codex: '#sol #astra #terra #luna (계열의 최신 버전)',
-  agy: '#argon #flash (Gemini 계열의 최신 버전, effort는 low·medium·high)',
-};
 
 /** From this share used on, a window shows as running low. */
 const LOW_AT = 80;
@@ -69,7 +64,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
           {' '}태그로 바꿀 수 있고, 바꾼 값은 그 작업에 유지됩니다. <code>#ultra</code>는 Codex에서만 씁니다.</p>
         {ENGINES.map((e) => (
           <fieldset key={e} className="field-group">
-            <legend>{ENGINE_LABEL[e]} <small className="muted">{TAG_HINT[e]}</small></legend>
+            <legend>{ENGINE_LABEL[e]} <small className="muted">{modelTagsOf(e)}{ENGINE_INFO[e].family ? ' (계열의 최신 버전)' : ''}</small></legend>
             <div className="field">
               <span className="lbl">사용량{usage[e]?.plan ? ` (${usage[e]!.plan})` : ''}
                 <small>계정 전체 기준, 사용 비율과 초기화 시각</small></span>

@@ -3,14 +3,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join, normalize, resolve } from 'node:path';
 import type { Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
-import { HttpError, type Hub, type HubMessage } from './hub.ts';
+import { parseFeedParams, type FeedFilter, type HubMessage } from '../../shared/api.ts';
+import { HttpError, type Hub } from './hub.ts';
 import { handleMcp } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { SkillError } from './skills.ts';
-import { feedEvent, type FeedFilter } from './db.ts';
+import { feedEvent } from './db.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
-import { ENGINES, type EngineName } from './compose.ts';
+import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
 const WEB_DIST = resolve(import.meta.dirname, '../../web/dist');
 const MIME: Record<string, string> = {
@@ -56,9 +57,7 @@ function intParam(url: URL, name: string, fallback: number | undefined, max = Nu
 
 /** A feed column's filter from `/feed` parameters: comma lists of tasks, projects, statuses, kinds; `q` a search. */
 function feedFilter(url: URL): FeedFilter {
-  const list = (name: string) => url.searchParams.get(name)?.split(',').filter(Boolean);
-  return { taskIds: list('task'), projectIds: list('project'), statuses: list('status'), kinds: list('kind'),
-    q: url.searchParams.get('q')?.trim() || undefined };
+  return parseFeedParams((name) => url.searchParams.get(name));
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {

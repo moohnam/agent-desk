@@ -2,7 +2,8 @@
 // restarting the hub does not kill running sessions; the two exchange these shapes as
 // newline-delimited JSON over a loopback TCP socket.
 
-import type { Effort, ModelName, PermissionMode } from '../compose.ts';
+import type { Effort, EngineName, ModelName, PermissionMode } from './compose.ts';
+import type { RunnerStatusState } from './events.ts';
 
 /**
  * Answers to an ASK_USER approval (a multiple-choice question from the agent), keyed by question
@@ -12,14 +13,17 @@ export type Answers = Record<string, string>;
 /** The tool name of an agent's multiple-choice question; its input is Claude's AskUserQuestion input. */
 export const ASK_USER = 'AskUserQuestion';
 
-export type Engine = 'claude' | 'codex' | 'agy';
+export type Engine = EngineName;
+
+/** A Codex question asked in passing (delivery 'async'): the user's next message answers it. */
+export interface AsyncQuestion { title: string; options: string[] }
 
 export type HubToRunner =
   /**
    * `skills`: desk skills (#tags) to apply to this message only. `skillsHome`: the desk plugin
    * directory (skills.ts) the session loads skills from; both engines read the same files.
    * `fork`: start a new conversation from a copy of `resume` instead of continuing it (#fork).
-   * `model`/`effort`: Claude only; absent leaves Claude Code's default.
+   * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
   | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean;
       permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string }
@@ -34,7 +38,7 @@ export type HubToRunner =
   | { type: 'approval_result'; sessionId: string; approvalId: string; allow: boolean; message?: string; answers?: Answers };
 
 export type RunnerEvent =
-  | { kind: 'assistant'; text: string }
+  | { kind: 'assistant'; text: string; questions?: AsyncQuestion[] }
   | { kind: 'tool'; toolUseId: string; name: string; input: unknown }
   | { kind: 'tool_result'; toolUseId: string; isError: boolean; text: string }
   /**
@@ -42,7 +46,7 @@ export type RunnerEvent =
    * 'warning': something the user should see that doesn't stop the turn (the task status is left alone);
    * 'error' is for a turn or session that failed.
    */
-  | { kind: 'status'; state: 'started' | 'model_changed' | 'turn_done' | 'warning' | 'error' | 'interrupted'; detail?: Record<string, unknown> };
+  | { kind: 'status'; state: RunnerStatusState; detail?: Record<string, unknown> };
 
 /** Work the agent left running between turns, such as a subagent started in the background. */
 export interface BackgroundTask { id: string; type: string; description: string; agent?: string }

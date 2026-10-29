@@ -11,7 +11,8 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
-import { RESERVED_TAGS, SKILL_NAME } from './compose.ts';
+import type { Skill, SkillFile } from '../../shared/api.ts';
+import { RESERVED_TAGS, SKILL_NAME } from '../../shared/compose.ts';
 
 export const SKILLS_HOME = process.env.AGENT_DESK_SKILLS_HOME ?? resolve(import.meta.dirname, '../../data/desk-plugin');
 export const PLUGIN_NAME = 'desk';
@@ -21,8 +22,6 @@ export const skillFile = (name: string) => join(skillsRoot(), name, 'SKILL.md');
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 200;
 
-export interface SkillFile { path: string; size: number; executable: boolean }
-export interface Skill { name: string; description: string; files: SkillFile[]; updated_at: string; error?: string }
 
 export class SkillError extends Error {
   readonly status: number;

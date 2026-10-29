@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ASK_USER, type Answers } from '../../hub/src/runner/protocol.ts';
+import { ASK_USER, type Answers } from '../../shared/protocol.ts';
 import { api } from './api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import type { Approval, Post } from './types.ts';

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HANDOFF_END, HANDOFF_START, extractHandoff, quoteEvent } from '../../hub/src/handoff.ts';
+import { HANDOFF_END, HANDOFF_START, extractHandoff, quoteEvent } from '../../shared/handoff.ts';
 
 test('the summary is the text between the markers', () => {
   assert.equal(extractHandoff(`앞말\n${HANDOFF_START}\n# 목표\n정리\n${HANDOFF_END}\n뒷말`)?.trim(), '# 목표\n정리');

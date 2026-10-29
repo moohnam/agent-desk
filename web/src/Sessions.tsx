@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
-import { ENGINE_SHORT, engineOf } from '../../hub/src/compose.ts';
+import { ENGINE_SHORT, engineOf } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { Modal } from './Compose.tsx';
 import { backgroundCount, relTime, statusLabel } from './format.ts';

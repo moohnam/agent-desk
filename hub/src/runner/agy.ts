@@ -16,10 +16,10 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { Effort, ModelName, PermissionMode } from '../compose.ts';
+import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { latestOfFamily } from './codex.ts';
 import { DESK_INSTRUCTIONS } from './instructions.ts';
-import type { EngineAdapter, RunnerEvent, RunnerToHub } from './protocol.ts';
+import type { EngineAdapter, RunnerEvent, RunnerToHub } from '../../../shared/protocol.ts';
 
 const MAX_RESULT_TEXT = 4000;
 const AGY_BIN = process.env.AGY_BIN || 'agy';

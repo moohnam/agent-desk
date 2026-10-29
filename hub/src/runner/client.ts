@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { resolve } from 'node:path';
-import type { HubToRunner, RunnerToHub } from './protocol.ts';
+import type { HubToRunner, RunnerToHub } from '../../../shared/protocol.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, writeLine } from './wire.ts';
 
 const DATA_DIR = resolve(import.meta.dirname, '../../../data');

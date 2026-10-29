@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import type { HubToRunner, RunnerToHub } from './protocol.ts';
+import type { HubToRunner, RunnerToHub } from '../../../shared/protocol.ts';
 import { Runner } from './runner.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, writeLine } from './wire.ts';
 

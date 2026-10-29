@@ -1,6 +1,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { HandoffEngine } from '../../shared/compose.ts';
 
 /**
  * Reads a terminal Claude Code or Codex session from its local session file, so the desk can take
@@ -8,7 +9,7 @@ import { join } from 'node:path';
  * History keeps what the user and the agent said; tool calls come down to their names.
  */
 
-export type Engine = 'claude' | 'codex';
+export type Engine = HandoffEngine;
 export interface ImportedEvent { ts: string; kind: 'user' | 'assistant' | 'tool'; text?: string; name?: string }
 export interface ImportedSession { engine: Engine; id: string; cwd: string | null; file: string; events: ImportedEvent[] }
 

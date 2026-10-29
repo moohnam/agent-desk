@@ -1,0 +1,18 @@
+{
+  // Code both the hub (Node) and the web UI (browser) import: no Node or DOM types, so a Node
+  // import here fails the typecheck instead of the web build.
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["."]
+}

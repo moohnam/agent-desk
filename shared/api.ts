@@ -1,0 +1,103 @@
+// The hub's HTTP and SSE contract with the web UI: what /api/state, /api/feed and the event
+// stream carry. Event payloads are a type parameter: the hub keeps them `unknown` until read, the
+// web UI reads them loosely.
+
+import type { Effort, EngineName, ModelName, PermissionMode } from './compose.ts';
+import type { EventKind } from './events.ts';
+import type { BackgroundTask } from './protocol.ts';
+
+export type TaskStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
+
+export interface Project { id: string; name: string; root_path: string; created_at: string }
+
+export interface Task {
+  id: string; project_id: string; title: string; status: TaskStatus;
+  checkpoint_md: string | null; created_by: string; created_at: string; updated_at: string;
+  /** The task's number within its project (1, 2, …); `@project#seq` names it. */
+  seq: number;
+}
+
+export interface WireEvent<P = unknown> { id: number; session_id: string; task_id: string; ts: string; kind: EventKind; payload: P }
+
+export interface Approval<I = unknown> {
+  id: string; session_id: string; task_id: string; tool_name: string; input: I;
+  status: 'pending' | 'allowed' | 'denied'; created_at: string;
+}
+
+/** A question an attached (MCP) agent asked the user; it waits for the answer. */
+export interface Question {
+  id: string; session_id: string; task_id: string; text: string;
+  status: 'pending' | 'answered' | 'cancelled'; answer: string | null; created_at: string; answered_at: string | null;
+}
+
+/**
+ * A waiting message's kind: 'handoff', the desk's request for a handoff summary, sent as is;
+ * 'reset', the first message of a fresh session that replaces this one (컨텍스트 재구성).
+ */
+export type QueuedKind = 'handoff' | 'reset';
+
+export interface TaskView<E = WireEvent> extends Task {
+  project_name: string;
+  engine: string | null;
+  permission_mode: PermissionMode | null;
+  /** Model alias (Claude) or family (Codex, agy) and effort; null: the engine's default. */
+  model: ModelName | null;
+  effort: Effort | null;
+  live: boolean;
+  /** 'external': a terminal session attached over MCP; the app only answers its questions. */
+  source: 'app' | 'external' | null;
+  last_event: E | null;
+  pending_approvals: number;
+  pending_questions: number;
+  /** A Codex async question waiting for my next message, which answers it; null when none. */
+  pending_ask: { event_id: number; text: string; ts: string } | null;
+  /** Messages waiting for the running turn to end (#later), oldest first. */
+  queued: { id: string; text: string; created_at: string; kind?: QueuedKind }[];
+  /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
+  background: BackgroundTask[];
+}
+
+/** Desk-wide defaults for new tasks of each engine; null leaves the choice to the engine. */
+export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
+
+export type HubMessage<E = WireEvent, A = Approval> =
+  | { type: 'event'; event: E }
+  | { type: 'task'; task: TaskView<E> }
+  | { type: 'approval'; approval: A }
+  | { type: 'question'; question: Question }
+  | { type: 'runner'; connected: boolean }
+  /** Tasks and projects deleted, with everything recorded for them. */
+  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
+
+/** GET /api/state. `client.local`: the request came from this machine (no access token needed). */
+export interface DeskState<E = WireEvent, A = Approval> {
+  projects: Project[]; tasks: TaskView<E>[]; approvals: A[]; questions: Question[];
+  runner: { connected: boolean }; client?: { local: boolean };
+}
+
+/** What a feed column shows; empty or missing fields mean no restriction. */
+export interface FeedFilter { taskIds?: string[]; projectIds?: string[]; statuses?: string[]; kinds?: string[]; q?: string }
+
+/** A feed filter as /api/feed query parameters: comma lists, and `q` a search. */
+export function feedParams(f: FeedFilter): Record<string, string> {
+  const p: Record<string, string> = {};
+  if (f.taskIds) p.task = f.taskIds.join(',');
+  if (f.projectIds) p.project = f.projectIds.join(',');
+  if (f.statuses) p.status = f.statuses.join(',');
+  if (f.kinds) p.kind = f.kinds.join(',');
+  if (f.q) p.q = f.q;
+  return p;
+}
+
+/** The feed filter in query parameters (feedParams), read through `get`. */
+export function parseFeedParams(get: (name: string) => string | null): FeedFilter {
+  const list = (name: string) => get(name)?.split(',').filter(Boolean);
+  return { taskIds: list('task'), projectIds: list('project'), statuses: list('status'), kinds: list('kind'), q: get('q')?.trim() || undefined };
+}
+
+/** A desk skill: skills/<name>/SKILL.md plus optional scripts, which every engine reads. */
+export interface SkillFile { path: string; size: number; executable: boolean }
+export interface Skill { name: string; description: string; files: SkillFile[]; updated_at: string; error?: string }
+
+export interface UsageWindow { label: string; usedPercent: number | null; resetsAt: string | null }
+export interface EngineUsage { engine: EngineName; plan: string | null; windows: UsageWindow[]; error?: string; fetchedAt: string }

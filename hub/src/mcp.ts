@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readBody } from './body.ts';
 import type { AgentRequest } from './db.ts';
-import { HttpError, type Hub, type TaskView } from './hub.ts';
+import type { TaskView } from '../../shared/api.ts';
+import { ENGINES, HANDOFF_ENGINES } from '../../shared/compose.ts';
+import { HttpError, type Hub } from './hub.ts';
 
 /**
  * MCP server (Streamable HTTP, JSON responses only) through which a terminal Claude Code or Codex
@@ -38,7 +40,7 @@ const TOOLS = [
         title: str('작업 제목 (짧게)'),
         summary: str('지금까지 한 일과 현재 하려는 일 요약 (마크다운)'),
         cwd: str('작업 디렉터리 절대 경로'),
-        engine: { type: 'string', enum: ['claude', 'codex'], description: '이 세션의 에이전트 종류' },
+        engine: { type: 'string', enum: ENGINES, description: '이 세션의 에이전트 종류' },
         task_id: str('이전에 받은 task_id로 다시 붙을 때'),
       },
     },
@@ -103,7 +105,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object', required: ['engine', 'cwd'],
       properties: {
-        engine: { type: 'string', enum: ['claude', 'codex'], description: '이 세션의 에이전트 종류' },
+        engine: { type: 'string', enum: [...HANDOFF_ENGINES], description: '이 세션의 에이전트 종류' },
         session_id: str('이 세션의 ID. Claude Code: $CLAUDE_CODE_SESSION_ID, Codex: $CODEX_THREAD_ID. 없으면 cwd에서 가장 최근 세션을 씁니다'),
         cwd: str('작업 디렉터리 절대 경로'),
         title: str('작업 제목 (짧게)'),

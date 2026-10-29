@@ -1,61 +1,19 @@
-import type { Effort, EngineName, ModelName, PermissionMode } from '../../hub/src/compose.ts';
+// The hub's contract (shared/api.ts) as the web UI uses it, and the UI's own types. Payloads are
+// read loosely here: `Record<string, any>` until the reads narrow on shared/events.ts.
+import type {
+  Approval as WireApproval, DeskState as WireDeskState, HubMessage as WireHubMessage, TaskStatus, TaskView as WireTaskView, WireEvent,
+} from '../../shared/api.ts';
 
-export type TaskStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
-export type EventKind = 'user' | 'assistant' | 'tool' | 'tool_result' | 'approval' | 'status' | 'update' | 'question';
+export type {
+  EngineUsage, Project, Question, QueuedKind, Settings, Skill, SkillFile, TaskStatus, UsageWindow,
+} from '../../shared/api.ts';
+export type { EventKind } from '../../shared/events.ts';
 
-export interface Project { id: string; name: string; root_path: string; created_at: string }
-
-export interface HubEvent {
-  id: number; session_id: string; task_id: string; ts: string; kind: EventKind;
-  payload: Record<string, any>;
-}
-
-export interface TaskView {
-  id: string; project_id: string; title: string; status: TaskStatus; checkpoint_md: string | null;
-  created_by: string; created_at: string; updated_at: string;
-  /** The task's number within its project; `@project#seq` names it. */
-  seq: number;
-  project_name: string; engine: string | null; permission_mode: PermissionMode | null; live: boolean;
-  /** Model alias (Claude) or family (Codex) and effort; null: the engine's default. */
-  model: ModelName | null; effort: Effort | null;
-  /** 'external': a terminal session attached over MCP; the app only answers its questions. */
-  source: 'app' | 'external' | null;
-  last_event: HubEvent | null; pending_approvals: number; pending_questions: number;
-  /** A Codex async question waiting for my next message, which answers it. Older hubs omit it. */
-  pending_ask?: { event_id: number; text: string; ts: string } | null;
-  /**
-   * Messages waiting for the running turn to end (#later), oldest first. `kind`: a handoff summary
-   * request, or the context reset itself (컨텍스트 재구성).
-   */
-  queued: { id: string; text: string; created_at: string; kind?: 'handoff' | 'reset' }[];
-  /** What the agent left running between turns (subagents, background commands). Older hubs omit it. */
-  background?: { id: string; type: string; description: string; agent?: string }[];
-}
-
-export interface Approval {
-  id: string; session_id: string; task_id: string; tool_name: string;
-  input: Record<string, any>; status: 'pending' | 'allowed' | 'denied'; created_at: string;
-}
-
-/** A question an attached (MCP) agent asked; it waits until answered in the app. */
-export interface Question {
-  id: string; session_id: string; task_id: string; text: string;
-  status: 'pending' | 'answered' | 'cancelled'; answer: string | null; created_at: string; answered_at: string | null;
-}
-
-export type { EngineUsage, UsageWindow } from '../../hub/src/usage.ts';
-
-/** Desk-wide defaults for new tasks of each engine; null: the engine's default. */
-export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
-
-export type HubMessage =
-  | { type: 'event'; event: HubEvent }
-  | { type: 'task'; task: TaskView }
-  | { type: 'approval'; approval: Approval }
-  | { type: 'question'; question: Question }
-  | { type: 'runner'; connected: boolean }
-  /** Tasks and projects deleted, with everything recorded for them. */
-  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
+export type HubEvent = WireEvent<Record<string, any>>;
+export type Approval = WireApproval<Record<string, any>>;
+export type TaskView = WireTaskView<HubEvent>;
+export type HubMessage = WireHubMessage<HubEvent, Approval>;
+export type DeskState = WireDeskState<HubEvent, Approval>;
 
 /** A timeline post: one utterance, approval request, question, or alert. Tool calls fold into `activity`. */
 export type PostKind = 'user' | 'assistant' | 'approval' | 'question' | 'alert';
@@ -77,7 +35,3 @@ export interface ColumnFilter { taskIds?: string[]; projectIds?: string[]; kinds
  * column (F2–F4) says what it holds in place of its filter.
  */
 export interface ColumnDef { id: string; title: string; filter: ColumnFilter; byTask?: boolean; note?: string }
-
-/** A desk skill: skills/<name>/SKILL.md plus optional scripts, shared by Claude and Codex. */
-export interface SkillFile { path: string; size: number; executable: boolean }
-export interface Skill { name: string; description: string; files: SkillFile[]; updated_at: string; error?: string }

@@ -1,4 +1,5 @@
-import type { Approval, EngineUsage, HubEvent, Project, Question, Settings, Skill, TaskView } from './types.ts';
+import { feedParams, type FeedFilter } from '../../shared/api.ts';
+import type { DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -11,37 +12,28 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
-/** A feed column's filter as the hub applies it (see feedQuery in useHub.ts). */
-export interface FeedQuery { taskIds?: string[]; projectIds?: string[]; statuses?: string[]; kinds?: string[]; q?: string; members?: string[] }
+/** A feed column's filter as the hub applies it (see feedQuery in useHub.ts); `members` stays on the client. */
+export interface FeedQuery extends FeedFilter { members?: string[] }
 
-/** A feed query as `/feed` parameters (`members` stays on the client). */
-function feedParams(q: FeedQuery): URLSearchParams {
-  const p = new URLSearchParams();
-  if (q.taskIds) p.set('task', q.taskIds.join(','));
-  if (q.projectIds) p.set('project', q.projectIds.join(','));
-  if (q.statuses) p.set('status', q.statuses.join(','));
-  if (q.kinds) p.set('kind', q.kinds.join(','));
-  if (q.q) p.set('q', q.q);
-  return p;
-}
+const feedSearch = (q: FeedQuery) => new URLSearchParams(feedParams(q));
 
 /** Events per feed page: a full page means older ones may exist. */
 export const FEED_PAGE = 1000;
 
 export const api = {
-  state: () => call<{ projects: Project[]; tasks: TaskView[]; approvals: Approval[]; questions: Question[]; runner: { connected: boolean }; client?: { local: boolean } }>('GET', '/state'),
+  state: () => call<DeskState>('GET', '/state'),
   /**
    * The newest `limit` events, oldest first; `before`: those before that event id; `q`: only those a
    * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
    */
   feed: (limit = FEED_PAGE, before?: number, q: FeedQuery = {}) => {
-    const p = feedParams(q);
+    const p = feedSearch(q);
     p.set('limit', String(limit));
     if (before) p.set('before', String(before));
     return call<HubEvent[]>('GET', `/feed?${p}`);
   },
   /** How many posts a column's query has in the hub in all, and in how many tasks (for "loaded / total"). */
-  feedCount: (q: FeedQuery) => call<{ posts: number; tasks: number }>('GET', `/feed/count?${feedParams(q)}`),
+  feedCount: (q: FeedQuery) => call<{ posts: number; tasks: number }>('GET', `/feed/count?${feedSearch(q)}`),
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
    * every event from `since` on. `more`: older events exist before the page.

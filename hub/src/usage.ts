@@ -8,11 +8,10 @@ import { execFile, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { ENGINES, type EngineName } from './compose.ts';
+import type { EngineUsage, UsageWindow } from '../../shared/api.ts';
+import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
 /** One limit window. `usedPercent`: 0–100, null when the engine doesn't say. */
-export interface UsageWindow { label: string; usedPercent: number | null; resetsAt: string | null }
-export interface EngineUsage { engine: EngineName; plan: string | null; windows: UsageWindow[]; error?: string; fetchedAt: string }
 
 const TIMEOUT_MS = 30_000;
 /** Answers within this long reuse the last reading, unless a refresh is asked for. */

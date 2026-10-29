@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mentionsIn, modelProblem, parseCompose, wantedEngine } from '../../hub/src/compose.ts';
+import { mentionsIn, modelProblem, parseCompose, wantedEngine } from '../../shared/compose.ts';
 
 /** The parse with unset fields left out, as they would be in JSON. */
 const parse = (text: string) => JSON.parse(JSON.stringify(parseCompose(text, ['review'], true)));

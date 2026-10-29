@@ -1,18 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from './compose.ts';
+import type { Approval, FeedFilter, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
+import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from '../../shared/compose.ts';
+import { ALERT_STATES, type EventKind } from '../../shared/events.ts';
 
-export type TaskStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
-export type EventKind = 'user' | 'assistant' | 'tool' | 'tool_result' | 'approval' | 'status' | 'update' | 'question';
+/** An event as stored; its payload is checked where it is read. */
+export type Event = WireEvent;
 
-export interface Project { id: string; name: string; root_path: string; created_at: string }
-export interface Task {
-  id: string; project_id: string; title: string; status: TaskStatus;
-  checkpoint_md: string | null; created_by: string; created_at: string; updated_at: string;
-  /** The task's number within its project (1, 2, …); `@project#seq` names it. */
-  seq: number;
-}
 export interface Session {
   id: string; task_id: string; engine: string; engine_session_id: string | null; cwd: string;
   source: 'app' | 'external'; status: TaskStatus; runner_id: string; created_at: string;
@@ -42,8 +37,6 @@ export function feedEvent(e: Event): Event {
   return e;
 }
 
-/** What a feed column shows; see listFeed. */
-export interface FeedFilter { taskIds?: string[]; projectIds?: string[]; statuses?: string[]; kinds?: string[]; q?: string }
 /** Event kinds whose payload holds text a search should look at (not tool input or output). */
 /** How an imported event's payload starts (importEvents). */
 const IMPORTED = '{"imported":true';
@@ -54,7 +47,7 @@ const POST_TEXT = "coalesce(json_extract(e.payload_json, '$.text'), json_extract
 /** Whether an event starts a post (web postKind): the rest attaches to the post before it. */
 const IS_POST = `(e.kind IN ('user', 'assistant', 'update')
   OR (e.kind IN ('approval', 'question') AND json_extract(e.payload_json, '$.decision') = 'pending')
-  OR (e.kind = 'status' AND json_extract(e.payload_json, '$.state') IN ('warning', 'error', 'interrupted', 'queue_dropped')))`;
+  OR (e.kind = 'status' AND json_extract(e.payload_json, '$.state') IN (${ALERT_STATES.map((s) => `'${s}'`).join(', ')})))`;
 
 /** The SQL condition (on `event e JOIN task t`) for a feed column's events, and its arguments. */
 function feedWhere(f: FeedFilter): { where: string; args: string[] } {
@@ -80,29 +73,14 @@ function feedWhere(f: FeedFilter): { where: string; args: string[] } {
   return { where: where.join(' AND '), args };
 }
 
-export interface Event { id: number; session_id: string; task_id: string; ts: string; kind: EventKind; payload: unknown }
-export interface Approval {
-  id: string; session_id: string; task_id: string; tool_name: string; input: unknown;
-  status: 'pending' | 'allowed' | 'denied'; created_at: string;
-}
 /**
  * A message sent while its task was busy (#later): it waits here, not in the event log, until the
  * running turn ends; then it is sent and recorded as a `user` event. `text` is what the user wrote,
- * `body`/`skills` what the agent receives.
+ * `body`/`skills` what the agent receives; `kind` see QueuedKind.
  */
-/**
- * A waiting message. `kind` 'handoff': the desk's request for a handoff summary, sent as is;
- * 'reset': the first message of a fresh session that replaces this one (handoff.ts).
- */
-export type QueuedKind = 'handoff' | 'reset';
 export interface Queued {
   id: string; task_id: string; session_id: string; text: string; body: string; skills: string[];
   mode: PermissionMode | null; created_at: string; kind?: QueuedKind | null;
-}
-/** A question an attached (MCP) agent asked the user; it waits for the answer. */
-export interface Question {
-  id: string; session_id: string; task_id: string; text: string;
-  status: 'pending' | 'answered' | 'cancelled'; answer: string | null; created_at: string; answered_at: string | null;
 }
 /**
  * A question one agent asks another task's agent through the desk. `approval_id`: the card the user
