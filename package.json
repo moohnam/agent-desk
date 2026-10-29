@@ -10,8 +10,12 @@
     "web": "npm --workspace web run dev",
     "build": "npm --workspace web run build",
     "start": "npm --workspace hub run start",
-    "typecheck": "npm --workspace hub run typecheck && npm --workspace web run typecheck",
+    "typecheck": "npm --workspace hub run typecheck && npm --workspace web run typecheck && tsc -p test",
+    "test": "node --test 'test/**/*.test.ts'",
     "runner": "node hub/src/runner/daemon.ts",
     "runner:stop": "kill $(cat data/runner.pid)"
+  },
+  "engines": {
+    "node": ">=26"
   }
 }

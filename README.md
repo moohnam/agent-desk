@@ -150,7 +150,8 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 ### 개발
 
 - `npm run hub`(파일 변경 시 허브 재시작)와 `npm run web`(Vite, http://127.0.0.1:5173)을 각각 띄웁니다.
-- 타입 검사: `npm run typecheck`
+- 타입 검사: `npm run typecheck` (hub, web, test)
+- 테스트: `npm test` (`node --test`로 `test/**/*.test.ts` 실행. 러너·DB는 가짜 어댑터와 메모리 DB를 써서 서버를 띄우지 않음)
 - 실행 데이터(DB, 접속 토큰, 로그, 업로드, 스킬)는 모두 `data/`에 생기며 저장소에는 올리지 않습니다. `data/access-token`은 다른 사람에게 보이지 않게 둡니다.
 
 ### 환경 변수
