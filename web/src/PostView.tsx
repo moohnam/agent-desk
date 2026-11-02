@@ -1,7 +1,9 @@
 import { ChevronRight, PenLine } from 'lucide-react';
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
+import { asyncAnswerText } from './asyncAnswers.ts';
+import type { AsyncQuestion } from '../../shared/protocol.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
@@ -211,33 +213,54 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
 
 /**
  * A Codex async question (request_user_input_async): its turn goes on, and the answer is just the
- * next message. An option click sends that message, into the running turn when there is one.
+ * next message. Collect a batch's answers before sending; a single option still sends at once.
  */
 function AsyncChoices({ post, running, onError }: { post: Post; running: boolean; onError?: (msg: string) => void }) {
-  const questions = post.event.payload.questions as { title: string; options: string[] }[];
+  const questions = post.event.payload.questions as AsyncQuestion[];
+  const [picks, setPicks] = useState<string[]>(() => questions.map(() => ''));
   const [sent, setSent] = useState<string>();
+  const sending = useRef(false);
   const answer = post.resolution?.payload.text as string | undefined;
   const done = sent ?? answer;
-  const send = (option: string) => {
-    if (done) return;
-    setSent(option);
-    api.send(post.taskId, running ? `${option} #now` : option)
-      .catch((err) => { setSent(undefined); onError?.(`답을 보내지 못했습니다: ${err instanceof Error ? err.message : err}`); });
+  const send = (text: string) => {
+    if (done || sending.current) return;
+    sending.current = true;
+    setSent(text);
+    api.send(post.taskId, running ? `${text} #now` : text)
+      .catch((err) => { setSent(undefined); onError?.(`답을 보내지 못했습니다: ${err instanceof Error ? err.message : err}`); })
+      .finally(() => { sending.current = false; });
   };
+  const pick = (i: number, text: string) => setPicks((prev) => prev.map((p, k) => k === i ? text : p));
+  const text = asyncAnswerText(questions, picks);
+  const submit = () => { if (text) send(text); };
   return (
-    <div className={`ask-card async${done ? ' resolved' : ''}`}>
-      {questions.filter((q) => q.options.length).map((q, i) => (
-        <div className="ask-opts" key={i}>
+    <div className={`ask-card async${done ? ' resolved' : ''}`} onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}>
+      {questions.map((q, i) => (
+        <div className="ask-q" key={i}>
           {questions.length > 1 && <div className="ask-q">{q.title}</div>}
-          {q.options.map((o) => (
-            <button key={o} className={`ask-opt${done === o ? ' on' : ''}`} disabled={!!done}
-              onClick={(e) => { e.stopPropagation(); send(o); }}>
-              <span className="mark">{done === o ? '●' : '○'}</span><span>{o}</span>
-            </button>
-          ))}
+          <div className="ask-opts" role="radiogroup" aria-label={q.title}>
+            {q.options.map((o) => (
+              <button key={o} type="button" role="radio" aria-checked={picks[i] === o}
+                className={`ask-opt${picks[i] === o ? ' on' : ''}`} disabled={!!done}
+                onClick={() => { pick(i, o); if (questions.length === 1) send(o); }}>
+                <span className="mark">{picks[i] === o ? '●' : '○'}</span><span>{o}</span>
+              </button>
+            ))}
+          </div>
+          {!q.options.length && (
+            <textarea className="input" rows={2} aria-label={q.title} placeholder="답 입력…" value={picks[i]} disabled={!!done}
+              onChange={(e) => pick(i, e.target.value)} />
+          )}
         </div>
       ))}
-      {done && <div className="resolution muted">{sent ? `“${sent}” 보냄` : '답함'}</div>}
+      {!done && (questions.length > 1 || !questions[0]?.options.length) && (
+        <div className="approve-actions">
+          <span className="muted small">질문마다 답한 뒤 한 번에 보냅니다</span><span className="spacer" />
+          <button className="yes" disabled={!text} onClick={submit}>답하기</button>
+        </div>
+      )}
+      {done && <div className="resolution muted">{sent ? (questions.length > 1 ? '답변을 모두 보냈습니다' : `“${sent}” 보냄`) : '답함'}</div>}
     </div>
   );
 }

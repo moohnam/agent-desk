@@ -37,6 +37,17 @@ test('posts of different tasks do not take each other\'s activity', () => {
   assert.deepEqual(posts.map((p) => [p.taskId, p.activity.length]), [['t1', 1], ['t2', 0]]);
 });
 
+test('one reply resolves the whole async question batch without changing another task', () => {
+  const questions = [{ title: '환경?', options: ['개발'] }, { title: '시점?', options: ['내일'] }];
+  const other = ev('assistant', { text: '다른 질문', questions }, 't2');
+  const ask = ev('assistant', { text: '두 질문', questions });
+  const reply = ev('user', { text: '1. 개발\n\n2. 내일' });
+  const posts = buildPosts([other, ask, reply]);
+  assert.equal(posts[0].resolution, undefined);
+  assert.equal(posts[1].resolution, reply);
+  assert.equal(posts[1].event.payload.questions.length, 2);
+});
+
 test('merging keeps id order, drops duplicates and caps to the newest', () => {
   const [a, b, c, d] = [1, 2, 3, 4].map((id) => ({ ...ev('user', { text: String(id) }), id }));
   assert.deepEqual(mergeEvents([a, b], [c, d]).map((e) => e.id), [1, 2, 3, 4]);
