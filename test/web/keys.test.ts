@@ -1,12 +1,29 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nextMineIndex, nextTaskIndex, nextUserIndex } from '../../web/src/keys.ts';
+import { nextMineIndex, nextTaskIndex, nextUserIndex, replyTaskId } from '../../web/src/keys.ts';
 import type { Post } from '../../web/src/types.ts';
 
 /** Posts from a spec like 'a:u a:x b:x b:u': task letter and kind (u: the user's, else the agent's). */
 const posts = (spec: string) => spec.split(' ').map((s, id) => {
   const [taskId, k] = s.split(':');
   return { id, taskId, kind: k === 'u' ? 'user' : 'assistant' } as Post;
+});
+
+test('r can target a thread or single-task column without selecting a post', () => {
+  assert.equal(replyTaskId(undefined, null, ['task-1']), 'task-1');
+  assert.equal(replyTaskId(undefined, 'thread-task'), 'thread-task');
+  assert.equal(replyTaskId(posts('picked:u')[0], null, ['task-1']), 'picked');
+  assert.equal(replyTaskId(undefined, null, ['task-1', 'task-2']), null);
+  assert.equal(replyTaskId(undefined, null), null);
+});
+
+test('r on a mixed column uses its newest post unless a post is selected', () => {
+  const [newest, selected] = posts('newest:x selected:u');
+  assert.equal(replyTaskId(undefined, null, undefined, newest), 'newest');
+  assert.equal(replyTaskId(undefined, null, ['a', 'b'], newest), 'newest');
+  assert.equal(replyTaskId(selected, null, undefined, newest), 'selected');
+  assert.equal(replyTaskId(undefined, 'thread-task', undefined, newest), 'thread-task');
+  assert.equal(replyTaskId(undefined, null, ['column-task'], newest), 'column-task');
 });
 
 test('J / K go to the first post of the next / previous run of another task', () => {

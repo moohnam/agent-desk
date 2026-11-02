@@ -1,5 +1,10 @@
 import type { Post } from './types.ts';
 
+/** Without a selected post, reply to the column's task or its newest post (feed order). */
+export function replyTaskId(selected: Post | undefined, threadTask: string | null, columnTaskIds?: string[], newest?: Post): string | null {
+  return selected?.taskId ?? threadTask ?? (columnTaskIds?.length === 1 ? columnTaskIds[0] : null) ?? newest?.taskId ?? null;
+}
+
 /**
  * The key pressed as on a US layout, for shortcuts: a letter key under another input source (ㅏ on
  * a Korean one, or an IME's 'Process') counts as its Latin letter (k), uppercase with Shift.
