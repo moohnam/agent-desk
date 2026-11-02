@@ -266,6 +266,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
   const [{ events, more }, setHistory] = useState<{ events: HubEvent[]; more: boolean }>({ events: [], more: false });
   const [loaded, setLoaded] = useState<string | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const earlierRequest = useRef(false);
   const shown = useRef<string | null>(null);
   /** Bumped on every (re)load, so an earlier page asked for meanwhile is dropped. */
   const gen = useRef(0);
@@ -275,6 +276,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     shown.current = taskId;
     setLoaded(null);
     setLoadingEarlier(false);
+    earlierRequest.current = false;
     gen.current++;
     if (!taskId) return;
     let alive = true;
@@ -311,13 +313,16 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
   }, [taskId, since, onEvent]);
   const loadEarlier = useCallback(() => {
     const oldest = events[0];
-    if (!taskId || !more || !oldest || loadingEarlier) return;
+    if (!taskId || !more || !oldest || earlierRequest.current) return;
     const g = gen.current;
+    earlierRequest.current = true;
     setLoadingEarlier(true);
     api.events(taskId, { before: oldest.id }).then((page) => {
       if (gen.current !== g) return;
       setHistory((prev) => ({ events: mergeEvents(page.events, prev.events), more: page.more }));
-    }).catch(() => {}).finally(() => { if (gen.current === g) setLoadingEarlier(false); });
+    }).catch(() => {}).finally(() => {
+      if (gen.current === g) { earlierRequest.current = false; setLoadingEarlier(false); }
+    });
   }, [taskId, events, more, loadingEarlier]);
   return { events, more, loadingEarlier, loadEarlier, loaded: taskId != null && loaded === `${taskId}:${since ?? ''}` };
 }

@@ -1073,7 +1073,11 @@ export function App() {
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
         <div className="feed thread-feed"
-          onScroll={(e) => { const f = e.currentTarget; threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40; }}>
+          onScroll={(e) => {
+            const f = e.currentTarget;
+            threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
+            if (f.scrollTop < 80 && !threadAtBottom.current && threadLoaded && threadMore && !threadLoadingEarlier) loadEarlierThread();
+          }}>
           {threadMore && (
             <div className="older-posts">
               <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>

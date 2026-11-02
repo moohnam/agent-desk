@@ -59,6 +59,26 @@ test('feed filters narrow by task and by search text', () => {
   assert.deepEqual({ ...s.countFeed({ q: 'alpha' }) }, { posts: 2, tasks: 2 });
 });
 
+test('thread history pages through all dates without dropping records at the 500-event boundary', () => {
+  const s = store();
+  s.importEvents('s-t1', 't1', Array.from({ length: 1200 }, (_, i) => ({
+    ts: i < 600 ? '2026-10-22T10:00:00Z' : '2026-11-02T10:00:00Z', kind: 'assistant', payload: { text: `post-${i}` },
+  })));
+  const ids: number[] = [];
+  let before: number | undefined;
+  const sizes: number[] = [];
+  do {
+    const page = s.listEvents('t1', 500, undefined, before);
+    sizes.push(page.length);
+    ids.unshift(...page.map((e) => e.id));
+    before = page[0].id;
+  } while (s.hasEventsBefore('t1', before));
+  assert.deepEqual(sizes, [500, 500, 200]);
+  assert.equal(new Set(ids).size, 1200);
+  assert.deepEqual(ids, s.listEvents('t1', 1200).map((e) => e.id));
+  assert.equal(s.listEvents('t1', 1200)[0].ts, '2026-10-22T10:00:00Z');
+});
+
 test('deleting a task removes its events, sessions and the requests it asked', () => {
   const s = store(['t1', 't2']);
   s.addEvent('s-t1', 't1', 'user', { text: 'x' });
