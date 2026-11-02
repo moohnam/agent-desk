@@ -113,3 +113,17 @@ export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, Ta
   }
   return cols.map((c) => (byTask[c.id] ? { ...c, byTask: true } : c));
 }
+
+/** Smallest shown prefix containing a finder target. F3's membership order differs from its display order. */
+export function viewColumnLimit(view: View, id: string, tasks: Map<string, TaskView>, projects: Project[], limit: number): number | null {
+  if (view !== 'project' && view !== 'task') return null;
+  const contains = (n: number) => viewColumns(view, tasks, projects, new Set(), new Set(), {}, n).some((c) => c.id === id);
+  let low = limit, high = view === 'task' ? tasks.size : projects.length;
+  if (!contains(high)) return null;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (contains(mid)) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}

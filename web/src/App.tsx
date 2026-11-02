@@ -22,7 +22,7 @@ import type { Approval, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskV
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch } from './search.ts';
-import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, useView, type View, type ViewSort } from './views.ts';
+import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
 import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
@@ -181,6 +181,14 @@ export function App() {
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
   const phone = useMedia(PHONE);
+  // Search metadata for every column, without fetching the hidden columns' feeds.
+  const finderColumns = useMemo(() => {
+    if (phone) return [PHONE_FEED];
+    if (!finder || (view !== 'project' && view !== 'task')) return columns;
+    const shown = new Set(columns.map((c) => c.id));
+    return [...columns, ...viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask, Infinity)
+      .filter((c) => !shown.has(c.id))];
+  }, [finder, phone, columns, view, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
   /** One list per hub update, so the boxes given it keep their memoized suggestions between renders. */
   const taskList = useMemo(() => [...hub.tasks.values()], [hub.tasks]);
   // The thread as a panel on the right half of the workspace, next to a narrower deck, instead of a column.
@@ -1225,8 +1233,15 @@ export function App() {
       {help && <Help onClose={() => setHelp(false)} />}
       {finder && (
         <ColumnFinder onClose={() => setFinder(false)}
-          items={deck.filter((c) => c.def && c.id !== THREAD && c.id !== SEARCH).map((c) => ({ id: c.id, title: c.def!.title, sub: c.def!.note }))}
-          onPick={(id) => focusColumn(deck.findIndex((c) => c.id === id))} />
+          items={finderColumns.map((c) => ({ id: c.id, title: c.title, sub: c.note }))}
+          onPick={(id) => {
+            const at = deck.findIndex((c) => c.id === id);
+            if (at >= 0) { focusColumn(at); return; }
+            const limit = viewColumnLimit(view, id, hub.tasks, hub.projects, viewLimit);
+            if (limit == null) return;
+            setViewLimit(limit);
+            setFocusCol(id);
+          }} />
       )}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog onClose={() => setAccessOpen(false)} />}
