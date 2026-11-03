@@ -1,8 +1,8 @@
 import { ArrowLeft, Ellipsis, ListRestart, Pin } from 'lucide-react';
-import { type CSSProperties, type ReactNode } from 'react';
+import { type CSSProperties } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { modelShort, projectColor } from './projects.ts';
-import type { HubEvent, Post, Project, TaskView } from './types.ts';
+import type { HubEvent, Project, TaskView } from './types.ts';
 import { DraftBadge, StatusBadge, TerminalBadge } from './badges.tsx';
 
 export function ThreadHead({ task, project, model, events, now, draft, handoff, onClose, onPin, onHandoff, onMenu }: {
@@ -45,18 +45,4 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
       )}
     </header>
   );
-}
-
-/** `ask`: the pending approval is an agent's question, answered rather than approved. */
-export function ContextHint({ post, task, pending, ask, question }: {
-  post: Post | undefined; task: TaskView | undefined; pending: boolean; ask?: boolean; question: boolean;
-}) {
-  if (!post) return null;
-  let text: ReactNode = <>이 글: <kbd>Enter</kbd> 스레드 · <kbd>r</kbd> 답글</>;
-  if (task?.source === 'external') {
-    text = question ? <>이 작업: <kbd>r</kbd> 질문에 답하기</> : <>터미널 작업: <kbd>Enter</kbd> 스레드</>;
-  } else if (pending && ask) text = <>{post.kind === 'approval' ? '이 글' : '이 작업'}: <kbd>y</kbd> 질문에 답하기 · <kbd>n</kbd> 답하지 않기</>;
-  else if (pending) text = <>{post.kind === 'approval' ? '이 글' : '이 작업'}: <kbd>y</kbd> 승인 · <kbd>n</kbd> 거절</>;
-  else if (task?.status === 'running') text = <>이 작업: <kbd>s</kbd> 중단 · <kbd>r</kbd> 답글</>;
-  return <span className="ctx-hint">{text}</span>;
 }

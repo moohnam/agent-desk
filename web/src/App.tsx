@@ -28,7 +28,7 @@ import { PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
-import { ThreadHead, ContextHint } from './ThreadHead.tsx';
+import { ThreadHead } from './ThreadHead.tsx';
 import { AUTO_ORDER, ColumnMenu } from './ColumnMenu.tsx';
 import { Help } from './Help.tsx';
 import { PANE_DEFAULT, PANE_MAX, PANE_MIN, ResizeHandle, SplitHandle } from './handles.tsx';
@@ -1126,7 +1126,7 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand"><span className="logo">AD</span><span className="word">Agent Desk</span></div>
+        <div className="brand"><img className="logo" src="/favicon.png" alt="" /><span className="word">Agent Desk</span></div>
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
@@ -1204,21 +1204,6 @@ export function App() {
         )}
       </div>
 
-      <footer className="hints">
-        <span><kbd>j</kbd><kbd>k</kbd> 글 이동</span>
-        <span><kbd>h</kbd><kbd>l</kbd> 컬럼</span>
-        <span><kbd>Enter</kbd> 스레드</span>
-        <span className="opt"><kbd>o</kbd> 펼치기</span>
-        <span><kbd>y</kbd><kbd>n</kbd> 승인·거절</span>
-        <span className="opt"><kbd>r</kbd> 답글·답하기</span>
-        <span className="opt"><kbd>i</kbd> 새 작업</span>
-        <span className="opt"><kbd>a</kbd> 응답 대기열</span>
-        <span className="opt"><kbd>/</kbd> 검색</span>
-        <span><kbd>?</kbd> 전체 단축키</span>
-        <ContextHint post={selectedPost} task={selectedPost && hub.tasks.get(selectedPost.taskId)}
-          pending={!!approvalFor(selectedPost)} ask={isAsk(approvalFor(selectedPost)?.tool_name)}
-          question={!!selectedPost && !!questionOf(selectedPost.taskId)} />
-      </footer>
       {toast && <div className="toast" role="status">{toast}</div>}
 
       {menu && menuCol >= 0 && (
