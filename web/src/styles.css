@@ -277,6 +277,14 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .md code { background: var(--code); border-radius: 4px; padding: 1px 4px; }
 .md pre { background: var(--code); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; white-space: pre; }
 .md pre code { background: none; padding: 0; }
+.mermaid-block { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.mermaid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+.mermaid-canvas { background: #fff; padding: 10px; border-radius: 4px; overflow: auto; }
+.mermaid-canvas img { display: block; width: 100%; height: auto; }
+.mermaid-block > details { margin-top: 6px; }
+.mermaid-block > details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.mermaid-block > details > pre { margin-top: 6px; }
+.mermaid-large { margin: 12px; min-height: 0; }
 .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 13px; }
 .md th, .md td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; }

@@ -1,6 +1,8 @@
-import { memo, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import { memo, useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { MermaidBlock } from './MermaidBlock.tsx';
+import { mermaidSource } from './mermaid.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
@@ -9,6 +11,11 @@ const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm
 
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
+
+function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraProps) {
+  const source = mermaidSource(node);
+  return source == null ? <pre {...props}>{children}</pre> : <MermaidBlock source={source} />;
+}
 
 /**
  * Agent replies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
@@ -19,6 +26,7 @@ export const Markdown = memo(function Markdown({ text, onLocalLink }: { text: st
     <ReactMarkdown remarkPlugins={REMARK_PLUGINS}
       urlTransform={(url) => (APP_LINK.test(url) ? url : defaultUrlTransform(url))}
       components={{
+        pre: CodeBlock,
         a: ({ node: _, ...props }) => onLocalLink && isLocalLink(props.href)
           ? <a {...props} className="local-link" title={`로컬 앱으로 열기: ${props.href}`}
               onClick={(e) => { e.preventDefault(); onLocalLink(props.href!); }} />
