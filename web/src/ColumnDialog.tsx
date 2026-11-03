@@ -60,6 +60,7 @@ export function ColumnDialog({ column, projects, tasks, channels = [], onManageC
             {channels.map((channel) => <option key={channel.id} value={channel.id}>읽기 전용 · {channel.name}</option>)}
             {channelId && !channels.some((channel) => channel.id === channelId) && <option value={channelId}>삭제된 채널</option>}
           </select>
+          <p className="muted small">작업 컬럼은 아래 필터로 구성합니다. RSS·봇 컬럼은 먼저 채널 관리에서 등록한 뒤 위 목록에서 고르세요.</p>
           {onManageChannels && <button className="link" type="button" onClick={onManageChannels}>읽기 전용 채널 관리 · 봇 알림 / RSS·Atom</button>}
         </div>
         <label className="field"><span className="lbl">제목</span>
