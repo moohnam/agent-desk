@@ -21,7 +21,7 @@ import { projectColor } from './projects.ts';
 import type { Approval, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskView } from './types.ts';
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
-import { parseSearch } from './search.ts';
+import { parseSearch, taskSearchQuery } from './search.ts';
 import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
 import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
@@ -923,7 +923,13 @@ export function App() {
   };
   const openSearch = () => {
     if (phone) { setToast('검색은 PC 화면에서 쓸 수 있습니다.'); return; }
-    if (search == null) setSearch('');
+    const task = activeCol?.id === THREAD && threadTask ? hub.tasks.get(threadTask) : undefined;
+    if (task) {
+      const query = taskSearchQuery(task);
+      setSearch(query);
+      // Scope immediately, so an already open global search does not flash unrelated results.
+      setSearchApplied(query);
+    } else if (search == null) setSearch('');
     setFocusCol(SEARCH);
     requestAnimationFrame(() => searchRef.current?.focus());
   };

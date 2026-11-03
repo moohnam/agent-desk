@@ -59,6 +59,21 @@ test('feed filters narrow by task and by search text', () => {
   assert.deepEqual({ ...s.countFeed({ q: 'alpha' }) }, { posts: 2, tasks: 2 });
 });
 
+test('a task-scoped search finds unloaded imported history and excludes the same phrase in another task', () => {
+  const s = store(['t1', 't2']);
+  s.importEvents('s-t1', 't1', Array.from({ length: 600 }, (_, i) => ({
+    ts: TS, kind: 'assistant', payload: { text: i === 0 ? '과거 검색 표식' : `최근 대화 ${i}` },
+  })));
+  s.addEvent('s-t2', 't2', 'assistant', { text: '과거 검색 표식' });
+  assert.ok(!s.listEvents('t1').some((e) => (e.payload as { text: string }).text === '과거 검색 표식'));
+  const filter = { taskIds: ['t1'], q: '과거 검색 표식' };
+  const results = s.listFeed(1000, undefined, filter);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].task_id, 't1');
+  assert.equal((results[0].payload as { text: string }).text, '과거 검색 표식');
+  assert.deepEqual({ ...s.countFeed(filter) }, { posts: 1, tasks: 1 });
+});
+
 test('thread history pages through all dates without dropping records at the 500-event boundary', () => {
   const s = store();
   s.importEvents('s-t1', 't1', Array.from({ length: 1200 }, (_, i) => ({

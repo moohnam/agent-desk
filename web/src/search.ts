@@ -25,8 +25,11 @@ function keyOf(name: string): FilterKey | undefined {
 
 /** Splits a query into words, keeping a quoted value (`#project:"my app"`) whole. */
 function tokens(text: string): string[] {
-  return text.match(/#[^\s:]+:"[^"]*"?|"[^"]*"?|\S+/g) ?? [];
+  return text.match(/#[^\s:]+:"(?:\\.|[^"\\])*"?|"(?:\\.|[^"\\])*"?|\S+/g) ?? [];
 }
+
+const unquote = (value: string) => value.startsWith('"')
+  ? value.replace(/^"|"$/g, '').replace(/\\(["\\])/g, '$1') : value;
 
 export interface ParsedSearch { filter: ColumnFilter; unknown: string[] }
 
@@ -39,8 +42,8 @@ export function parseSearch(text: string, projects: Project[], tasks: Iterable<T
   for (const tok of tokens(text)) {
     const m = /^#([^\s:]+):(.*)$/.exec(tok);
     const key = m && keyOf(m[1]);
-    if (!m || !key) { words.push(tok.replace(/^"|"$/g, '')); continue; }
-    const value = m[2].replace(/^"|"$/g, '');
+    if (!m || !key) { words.push(unquote(tok)); continue; }
+    const value = unquote(m[2]);
     if (!value) continue;
     let ok = true;
     if (key === 'project') {
@@ -70,7 +73,11 @@ export function parseSearch(text: string, projects: Project[], tasks: Iterable<T
 export interface SearchOption { key: string; insert: string; label: string; desc?: string; color?: string; more?: boolean }
 export interface Suggestions { start: number; end: number; items: SearchOption[] }
 
-const quote = (v: string) => (/[\s"]/.test(v) ? `"${v.replace(/"/g, '')}"` : v);
+const quote = (v: string) => (/[\s"\\]/.test(v) ? `"${v.replace(/["\\]/g, '\\$&')}"` : v);
+
+/** A visible, editable task filter for the thread's `/` search. */
+export const taskSearchQuery = (task: Pick<TaskView, 'project_name' | 'seq'>) =>
+  `#task:${quote(`${task.project_name}#${task.seq}`)} `;
 const MAX = 30;
 
 /** Completions for the `#key:value` being typed at the caret. `more`: picking it keeps completing. */
