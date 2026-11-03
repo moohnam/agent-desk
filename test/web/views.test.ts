@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyOrder, viewColumnLimit, viewColumns, VIEW_MAX } from '../../web/src/views.ts';
+import { applyOrder, defaultColumn, viewColumnLimit, viewColumns, VIEW_MAX } from '../../web/src/views.ts';
 import type { Project, TaskView } from '../../web/src/types.ts';
 
 const date = (day: number) => `2026-10-${String(day).padStart(2, '0')}T00:00:00Z`;
@@ -47,4 +47,15 @@ test('finding an already included column never shrinks the limit; missing target
   assert.equal(viewColumnLimit('project', 'v:p:p1', new Map(), [], 12), null);
   assert.equal(viewColumnLimit('custom', 'all', tasks, projects, 12), null);
   assert.equal(viewColumnLimit('status', 'v:s:run', tasks, projects, 12), null);
+});
+
+test('every view defaults to its first populated column, waiting for earlier feeds to finish', () => {
+  for (const prefix of ['custom', 'v:p', 'v:t', 'v:s']) {
+    const cols = [{ id: `${prefix}:empty`, posts: [] }, { id: `${prefix}:first`, posts: [{}] }, { id: `${prefix}:later`, posts: [{}] }];
+    assert.equal(defaultColumn(cols, () => true), `${prefix}:first`);
+    assert.equal(defaultColumn(cols, (id) => id !== `${prefix}:empty`), undefined);
+    assert.equal(defaultColumn(cols.slice(1), () => false), `${prefix}:first`, 'cached content needs no extra wait');
+  }
+  assert.equal(defaultColumn([], () => true), null);
+  assert.equal(defaultColumn([{ id: 'empty', posts: [] }], () => true), null);
 });

@@ -22,7 +22,7 @@ import type { Approval, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskV
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch, taskSearchQuery } from './search.ts';
-import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
+import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, defaultColumn, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
 import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
@@ -71,7 +71,8 @@ export function App() {
   const active = activeState.i;
   /** Set when the focus is chosen; otherwise a reorder of the deck (F3 by activity) keeps it on its column. */
   const chosen = useRef(true);
-  const setActive = (i: number) => { chosen.current = true; setActiveState({ i }); };
+  const defaultFocusPending = useRef(true);
+  const setActive = (i: number) => { defaultFocusPending.current = false; chosen.current = true; setActiveState({ i }); };
   const activeId = useRef<string | undefined>(undefined);
   const [selection, setSelection] = useState<Record<string, number>>({});
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -149,6 +150,7 @@ export function App() {
     // So did the search column.
     setSearch(null); setSearchApplied('');
     setActive(0);
+    defaultFocusPending.current = true;
     // A view opens at its top: no selection or kept scroll position carries over from the last visit.
     setSelection({});
     atTop.current.clear(); feedAnchor.current.clear(); seenTop.current.clear();
@@ -384,6 +386,17 @@ export function App() {
     chosen.current = false;
     activeId.current = deck[activeIdx]?.id;
   }, [deck, activeState]);
+  useLayoutEffect(() => {
+    if (!defaultFocusPending.current || !hub.synced) return;
+    const id = defaultColumn(deck.filter((column) => column.def && column.id !== SEARCH), (id) => {
+      const feed = feeds.get(id);
+      return !!feed && !feed.loading && !feed.more;
+    });
+    if (id === undefined) return;
+    defaultFocusPending.current = false;
+    const at = deck.findIndex((column) => column.id === id);
+    if (at >= 0) setActive(at);
+  }, [hub.synced, deck, feeds]);
   const selectedPost = activeCol?.posts.find((p) => p.id === selection[activeCol.id]);
 
   const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values()), [hub.approvals, hub.questions, hub.tasks]);

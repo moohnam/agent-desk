@@ -78,6 +78,15 @@ const active = (t: TaskView) => t.status === 'running' || t.status === 'waiting'
 const lastActive = (t: TaskView) => t.last_event?.ts ?? t.updated_at;
 const recent = (a: TaskView, b: TaskView) => lastActive(b).localeCompare(lastActive(a));
 
+/** First populated column; undefined waits for an earlier feed, null means all are empty. */
+export function defaultColumn(columns: { id: string; posts: unknown[] }[], loaded: (id: string) => boolean): string | null | undefined {
+  for (const column of columns) {
+    if (column.posts.length) return column.id;
+    if (!loaded(column.id)) return undefined;
+  }
+  return null;
+}
+
 /** `limit`: how many columns F2 and F3 show; going right past the last column raises it to show older ones. */
 export function viewColumns(view: Exclude<View, 'custom'>, tasks: Map<string, TaskView>, projects: Project[],
   stalled: Set<string>, drafts: Set<string>, byTask: Record<string, boolean>, limit = VIEW_MAX): ColumnDef[] {
