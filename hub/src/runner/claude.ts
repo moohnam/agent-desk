@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Effort } from '../../../shared/compose.ts';
 import { clipResult, type StartEngine } from './engine.ts';
-import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { deskInstructions } from './instructions.ts';
 import type { BackgroundTask } from '../../../shared/protocol.ts';
 
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */
@@ -81,7 +81,7 @@ export const startClaude: StartEngine = (opts) => {
       model: opts.model,
       effort: claudeEffort(opts.effort),
       plugins: opts.skillsHome ? [{ type: 'local', path: opts.skillsHome }] : undefined,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: DESK_INSTRUCTIONS },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: deskInstructions(opts.skillsHome) },
       canUseTool: (toolName, input, { signal }) => new Promise<PermissionResult>((resolve) => {
         const approvalId = randomUUID();
         pending.set(approvalId, { resolve, input });

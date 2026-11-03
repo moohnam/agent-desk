@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Effort, ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
-import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { deskInstructions } from './instructions.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
@@ -131,7 +131,8 @@ export const startAgy: StartEngine = (opts) => {
   const texts = new Map<number, string>();
   /** Tool steps already shown, by step index (a step reports ACTIVE and then DONE). */
   const toolIds = new Map<number, string>();
-  let first = !conversationId;
+  // A resumed conversation also needs the current runner instructions, once per adapter.
+  let first = true;
 
   // --- Approvals: the hook's requests ---
   const token = randomBytes(24).toString('hex');
@@ -293,7 +294,7 @@ export const startAgy: StartEngine = (opts) => {
       const files = turn.skills.map((s) => join(opts.skillsHome!, 'skills', s, 'SKILL.md')).join(', ');
       text = `[데스크 스킬] 이 메시지에는 먼저 다음 스킬 파일을 읽고 그 지침을 따르세요: ${files}\n\n${text}`;
     }
-    if (first) { first = false; text = `[데스크 지침]\n${DESK_INSTRUCTIONS}\n\n${text}`; }
+    if (first) { first = false; text = `[데스크 지침]\n${deskInstructions(opts.skillsHome)}\n\n${text}`; }
     return text;
   };
 

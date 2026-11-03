@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
-import { DESK_INSTRUCTIONS } from './instructions.ts';
+import { deskInstructions } from './instructions.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
@@ -342,7 +342,7 @@ export const startCodex: StartEngine = (opts) => {
         return undefined;
       });
       const common = {
-        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: DESK_INSTRUCTIONS,
+        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: deskInstructions(opts.skillsHome),
       };
       // Codex lets one process write a thread. Another client holding it (the Codex app with the
       // conversation open) makes resuming fail; a fork carries the history over to a new thread.
