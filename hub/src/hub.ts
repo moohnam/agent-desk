@@ -5,10 +5,11 @@ import {
   DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
   type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from '../../shared/compose.ts';
-import type { Approval, Settings, TaskView } from '../../shared/api.ts';
+import type { Approval, MessageReceipt, Settings, TaskView } from '../../shared/api.ts';
 import { DeskCore, OWNER } from './core.ts';
 import { HttpError } from './errors.ts';
 import { ExternalSessions } from './external.ts';
+import { Channels, type ChannelOptions } from './channels.ts';
 import { AgentRequests } from './requests.ts';
 import { expandHome } from './paths.ts';
 import { Store, now, type Queued, type Session } from './db.ts';
@@ -36,6 +37,8 @@ export class Hub extends DeskCore {
   readonly requests: AgentRequests;
   /** Terminal sessions attached over MCP, and sessions handed over to the desk. */
   readonly external: ExternalSessions;
+  /** Read-only sources, independent of the runner. */
+  readonly channels: Channels;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
   /**
@@ -48,13 +51,14 @@ export class Hub extends DeskCore {
    * `runner`: makes the runner connection (by default the daemon's, started if need be).
    * `graceMs`: how long after startup to wait for the runner before showing its sessions as lost.
    */
-  constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number } = {}) {
+  constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number; channelOptions?: ChannelOptions } = {}) {
     super(store, opts.skills ?? new SkillStore());
     this.requests = new AgentRequests(this, {
       dispatch: (sessionId, body, skills) => this.dispatch(sessionId, body, skills),
       drain: (sessionId) => this.drain(sessionId),
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
+    this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
     this.runner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
       (m) => this.onRunnerMessage(m),
       (connected) => this.publish({ type: 'runner', connected }),
@@ -241,7 +245,7 @@ export class Hub extends DeskCore {
    * or one that continues from a copy of this task's conversation.
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
-  sendMessage(taskId: string, text: string, routed = false): string {
+  sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt): string {
     const c = this.parse(text, routed);
     if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     const session = this.store.latestSession(taskId);
@@ -286,10 +290,12 @@ export class Hub extends DeskCore {
     if (!content) return taskId;
 
     if (wait) {
+      const id = randomUUID();
       this.store.enqueue({
-        id: randomUUID(), task_id: taskId, session_id: session.id, text: text.trim(), body: c.body,
+        id, task_id: taskId, session_id: session.id, text: text.trim(), body: c.body,
         skills: c.skills, mode: c.mode ?? null, created_at: now(),
       });
+      if (receipt) receipt.queued_id = id;
       this.publishTask(taskId);
       this.drain(session.id);
     } else {

@@ -1,4 +1,4 @@
-import { PenLine } from 'lucide-react';
+import { CircleAlert, LoaderCircle, MessageCircleQuestion, Pause, PenLine } from 'lucide-react';
 import { inBackground, stalledMinutes, statusLabel } from './format.ts';
 import type { TaskView } from './types.ts';
 
@@ -7,12 +7,16 @@ export function DraftBadge() {
   return <span className="draft-badge" title="보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>;
 }
 
+const STATUS_ICON = { wait: MessageCircleQuestion, run: LoaderCircle, stall: Pause, draft: PenLine, err: CircleAlert };
+
 export function Chip({ kind, n, label, hint, title, onClick }: {
-  kind: string; n: number; label: string; hint?: string; title: string; onClick: () => void;
+  kind: keyof typeof STATUS_ICON; n: number; label: string; hint?: string; title: string; onClick: () => void;
 }) {
+  const Icon = STATUS_ICON[kind];
   return (
-    <button className={`chip ${kind}${n ? '' : ' zero'}`} disabled={!n} title={title} onClick={onClick}>
-      <span className="dot" /><span className="lbl-long">{label}</span><b>{n}</b>{hint && n > 0 && <kbd>{hint}</kbd>}
+    <button className={`chip ${kind}${n ? '' : ' zero'}`} disabled={!n} title={`${label} ${n}개 · ${title}`}
+      aria-label={`${label} ${n}개`} aria-keyshortcuts={hint} onClick={onClick}>
+      <Icon aria-hidden="true" />{n > 0 && <b aria-hidden="true">{n}</b>}
     </button>
   );
 }

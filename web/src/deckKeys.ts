@@ -57,7 +57,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['DD', '컬럼 삭제', 'D를 두 번 눌러 확인합니다.'],
   ] },
   { title: '입력·도움말', keys: [
-    ['⌘ Enter / Ctrl Enter', '작성창·답 입력란에서 보내기'],
+    ['⌘ Enter / Ctrl Enter', '작성창·답 입력란에서 보내기', '스레드 답글을 대기열에 넣은 뒤 입력을 수정하지 않고 같은 입력란에서 다시 누르면, 방금 넣은 메시지 하나만 지금 보냅니다.'],
     ['Tab / Enter', '@프로젝트·#태그 제안 선택', '제안 목록이 열려 있을 때 사용합니다. ↑↓로 이동하고 Esc로 제안을 닫습니다.'],
     ['?', '단축키 도움말 열기 / 닫기', '상단 키보드 버튼으로도 열 수 있습니다.'],
   ] },
@@ -167,6 +167,11 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       if (used) { e.preventDefault(); return; }
     }
 
+    if (activeCol?.def?.channelId && ['r', 'y', 'n', 's', 'X', 'x', 'p', 'v'].includes(e.key)) {
+      setToast('읽기 전용 채널입니다. 답글·승인·작업 명령은 사용할 수 없습니다.');
+      e.preventDefault();
+      return;
+    }
     const posts = activeCol?.posts ?? [];
     const cur = selectedPost ? posts.indexOf(selectedPost) : -1;
     const go = (i: number) => {

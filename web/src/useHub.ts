@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { mergeEvents } from './posts.ts';
 import { assignProjectColors } from './projects.ts';
-import type { Approval, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
+import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
 
 const FEED_CAP = 3000;
 /** How long an open thread gathers cut live events before fetching them whole. */
@@ -13,6 +13,9 @@ const SSE_BATCH_MS = 50;
 /** Hub state and the recent cross-task event feed, kept live over SSE. */
 export function useHub() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [channels, setChannels] = useState<Map<string, Channel>>(new Map());
+  const channelListeners = useRef(new Set<(entry: ChannelEntry) => void>());
+  const channelRefresh = useRef<Map<string, Channel | null> | null>(null);
   const [tasks, setTasks] = useState<Map<string, TaskView>>(new Map());
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   // Only unanswered questions are kept, like approvals.
@@ -30,16 +33,25 @@ export function useHub() {
   const [gone, setGone] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
+    const channelUpdates = new Map<string, Channel | null>();
+    channelRefresh.current = channelUpdates;
+    try {
     const [s, feed] = await Promise.all([api.state(), api.feed()]);
     setEvents((prev) => mergeEvents(prev, feed, FEED_CAP));
     assignProjectColors(s.projects);
     setProjects(s.projects);
+    if (channelRefresh.current === channelUpdates) {
+      const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
+      for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
+      setChannels(next);
+    }
     setTasks(new Map(s.tasks.map((t) => [t.id, t])));
     setApprovals(new Map(s.approvals.map((a) => [a.id, a])));
     setQuestions(new Map((s.questions ?? []).filter((q) => q.status === 'pending').map((q) => [q.id, q])));
     if (s.runner) setRunnerConnected(s.runner.connected);
     if (s.client) setLocal(s.client.local);
     setSynced((n) => n + 1);
+    } finally { if (channelRefresh.current === channelUpdates) channelRefresh.current = null; }
   }, []);
 
   useEffect(() => {
@@ -56,8 +68,12 @@ export function useHub() {
       batch = [];
       const tasks = new Map<string, TaskView>();
       const events: HubEvent[] = [];
+      const channelEntries: ChannelEntry[] = [];
       for (const m of ms) {
-        if (m.type === 'task') tasks.set(m.task.id, m.task);
+        if (m.type === 'channel') { channelRefresh.current?.set(m.channel.id, m.channel); setChannels((prev) => new Map(prev).set(m.channel.id, m.channel)); }
+        else if (m.type === 'channel_entry') channelEntries.push(m.entry);
+        else if (m.type === 'channel_removed') { channelRefresh.current?.set(m.channel_id, null); setChannels((prev) => { const next = new Map(prev); next.delete(m.channel_id); return next; }); }
+        else if (m.type === 'task') tasks.set(m.task.id, m.task);
         else if (m.type === 'approval') {
           setApprovals((prev) => {
             const next = new Map(prev);
@@ -96,6 +112,7 @@ export function useHub() {
         setEvents((prev) => mergeEvents(prev, events, FEED_CAP));
         for (const e of events) listeners.current.forEach((fn) => fn(e));
       }
+      for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
     es.onmessage = (msg) => {
       batch.push(JSON.parse(msg.data) as HubMessage);
@@ -109,7 +126,11 @@ export function useHub() {
     return () => { listeners.current.delete(fn); };
   }, []);
 
-  return { projects, tasks, approvals, questions, events, connected, runnerConnected, local, synced, gone, refresh, onEvent };
+  const onChannelEntry = useCallback((fn: (entry: ChannelEntry) => void) => {
+    channelListeners.current.add(fn);
+    return () => { channelListeners.current.delete(fn); };
+  }, []);
+  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, synced, gone, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */
@@ -166,7 +187,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   onEvent: (fn: (e: HubEvent) => void) => () => void, synced: number, gone: Set<string> = new Set()) {
   const cache = useRef(new Map<string, FeedEntry>());
   const [version, bump] = useReducer((n: number) => n + 1, 0);
-  const queries = new Map(defs.map((d) => [d.id, feedQuery(d.filter, tasks)]));
+  const queries = new Map(defs.filter((d) => !d.channelId).map((d) => [d.id, feedQuery(d.filter, tasks)]));
   const sig = JSON.stringify([...queries]);
   const current = useRef({ tasks, kept });
   current.current = { tasks, kept };
@@ -216,7 +237,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       }), () => set(key, (e) => ({ ...e, loading: false })));
     }
     for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) shown.current.delete(id);
-    const used = new Set(current.current.kept().map((d) => JSON.stringify(feedQuery(d.filter, current.current.tasks))));
+    const used = new Set(current.current.kept().filter((d) => !d.channelId).map((d) => JSON.stringify(feedQuery(d.filter, current.current.tasks))));
     for (const [k, e] of c) if (!e.live && !used.has(k)) c.delete(k);
     bump();
   }, [sig, synced]);

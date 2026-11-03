@@ -1,5 +1,6 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
-import type { DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
+import type { MessageReceipt } from '../../shared/api.ts';
+import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -21,6 +22,19 @@ const feedSearch = (q: FeedQuery) => new URLSearchParams(feedParams(q));
 export const FEED_PAGE = 1000;
 
 export const api = {
+  channels: () => call<Channel[]>('GET', '/channels'),
+  createChannel: (input: ChannelInput) => call<ChannelTokenReceipt>('POST', '/channels', input),
+  updateChannel: (id: string, input: Partial<Pick<ChannelInput, 'name' | 'feed_url' | 'enabled'>>) => call<Channel>('PATCH', `/channels/${encodeURIComponent(id)}`, input),
+  deleteChannel: (id: string) => call('DELETE', `/channels/${encodeURIComponent(id)}`),
+  rotateChannelToken: (id: string) => call<ChannelTokenReceipt>('POST', `/channels/${encodeURIComponent(id)}/token`),
+  refreshChannel: (id: string) => call<Channel>('POST', `/channels/${encodeURIComponent(id)}/refresh`),
+  readChannel: (id: string, through_id: number) => call<Channel>('POST', `/channels/${encodeURIComponent(id)}/read`, { through_id }),
+  channelEntries: (id: string, at: { before?: number; q?: string } = {}) => {
+    const query = new URLSearchParams({ limit: '100' });
+    if (at.before != null) query.set('before', String(at.before));
+    if (at.q?.trim()) query.set('q', at.q.trim());
+    return call<ChannelEntryPage>('GET', `/channels/${encodeURIComponent(id)}/entries?${query}`);
+  },
   state: () => call<DeskState>('GET', '/state'),
   /**
    * The newest `limit` events, oldest first; `before`: those before that event id; `q`: only those a
@@ -64,7 +78,7 @@ export const api = {
   createTask: (project_id: string, title: string, prompt: string) =>
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
-  send: (taskId: string, text: string) => call<{ task_id: string }>('POST', `/tasks/${taskId}/messages`, { text }),
+  send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
   cancelQueued: (taskId: string, queuedId: string) => call('DELETE', `/tasks/${taskId}/queue/${queuedId}`),
   /** Sends a waiting message at once: into the running turn, like #now. */
   sendQueuedNow: (taskId: string, queuedId: string) => call('POST', `/tasks/${taskId}/queue/${queuedId}/send`),

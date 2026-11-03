@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Approval, FeedFilter, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
+import type { Approval, Channel, ChannelEntry, ChannelEntryInput, ChannelIngestReceipt, FeedFilter, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
 import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { ALERT_STATES, type EventKind } from '../../shared/events.ts';
 
@@ -14,6 +14,13 @@ export interface Session {
   permission_mode: PermissionMode;
   /** Claude model alias and reasoning effort; null leaves the choice to Claude Code. */
   model: ModelName | null; effort: Effort | null;
+}
+export interface ChannelRecord {
+  id: string; name: string; source: 'push' | 'feed'; feed_url: string | null; enabled: number;
+  token_hash: string | null; created_at: string; updated_at: string;
+  last_checked_at: string | null; last_success_at: string | null; last_error: string | null;
+  next_poll_at: string | null; etag: string | null; last_modified: string | null;
+  failure_count: number; read_through_id: number;
 }
 /** A value with long strings, long lists, and deep nesting cut: enough for a one-line summary. */
 function clip(v: unknown, depth = 0): unknown {
@@ -126,6 +133,16 @@ CREATE TABLE IF NOT EXISTS request (
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runner (
   id TEXT PRIMARY KEY, host TEXT NOT NULL, capabilities_json TEXT NOT NULL, last_seen TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS channel (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, feed_url TEXT, enabled INTEGER NOT NULL,
+  token_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  last_checked_at TEXT, last_success_at TEXT, last_error TEXT, next_poll_at TEXT,
+  etag TEXT, last_modified TEXT, failure_count INTEGER NOT NULL DEFAULT 0, read_through_id INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS channel_entry (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
+  external_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, url TEXT, author TEXT, published_at TEXT,
+  received_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(channel_id, external_id));
+CREATE INDEX IF NOT EXISTS channel_entry_page ON channel_entry(channel_id, id);
 `;
 
 export const now = () => new Date().toISOString();
@@ -169,6 +186,75 @@ export class Store {
       DROP INDEX IF EXISTS queued_task;
       CREATE INDEX IF NOT EXISTS queued_session_ord ON queued(session_id, ord);
       CREATE INDEX IF NOT EXISTS queued_task_ord ON queued(task_id, ord);`);
+  }
+  channelRecord(id: string): ChannelRecord | undefined {
+    return this.db.prepare('SELECT * FROM channel WHERE id = ?').get(id) as unknown as ChannelRecord | undefined;
+  }
+  createChannel(c: ChannelRecord) {
+    const keys = Object.keys(c);
+    this.db.prepare(`INSERT INTO channel (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`).run(...Object.values(c));
+  }
+  updateChannel(id: string, patch: Partial<Omit<ChannelRecord, 'id'>>) {
+    const keys = Object.keys(patch) as (keyof typeof patch)[];
+    if (!keys.length) return;
+    this.db.prepare(`UPDATE channel SET ${keys.map((k) => `${k} = ?`).join(',')} WHERE id = ?`).run(...keys.map((k) => patch[k]!), id);
+  }
+  private channelView(c: ChannelRecord): Channel {
+    // Keep read history out of the unread scan; both queries use (channel_id, id).
+    const { latest } = this.db.prepare('SELECT coalesce(max(id), 0) AS latest FROM channel_entry WHERE channel_id = ?')
+      .get(c.id) as { latest: number };
+    const { unread } = this.db.prepare('SELECT count(*) AS unread FROM channel_entry WHERE channel_id = ? AND id > ?')
+      .get(c.id, c.read_through_id) as { unread: number };
+    // Explicit projection: never leak producer hashes or HTTP cache validators to clients.
+    return { id: c.id, name: c.name, source: c.source, feed_url: c.feed_url, enabled: !!c.enabled,
+      created_at: c.created_at, updated_at: c.updated_at, last_checked_at: c.last_checked_at,
+      last_success_at: c.last_success_at, last_error: c.last_error, next_poll_at: c.next_poll_at,
+      read_through_id: c.read_through_id, latest_entry_id: latest, unread_count: unread };
+  }
+  getChannel(id: string): Channel | undefined {
+    const c = this.channelRecord(id);
+    return c && this.channelView(c);
+  }
+  listChannels(): Channel[] {
+    return (this.db.prepare('SELECT * FROM channel ORDER BY created_at, id').all() as unknown as ChannelRecord[]).map((c) => this.channelView(c));
+  }
+  deleteChannel(id: string) { this.db.prepare('DELETE FROM channel WHERE id = ?').run(id); }
+  readChannel(id: string, throughId: number) {
+    this.db.prepare(`UPDATE channel SET read_through_id = max(read_through_id,
+      min(?, coalesce((SELECT max(id) FROM channel_entry WHERE channel_id = ?), 0))) WHERE id = ?`).run(throughId, id, id);
+  }
+  channelEntries(id: string, limit: number, before: number, q = ''): { entries: ChannelEntry[]; more: boolean; total: number } {
+    const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const filter = "channel_id = ?" + (q ? " AND (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')" : '');
+    const args = q ? [id, like, like] : [id];
+    const rows = this.db.prepare(`SELECT * FROM channel_entry WHERE ${filter} AND id < ? ORDER BY id DESC LIMIT ?`)
+      .all(...args, before, limit + 1) as unknown as ChannelEntry[];
+    const { n } = this.db.prepare(`SELECT count(*) AS n FROM channel_entry WHERE ${filter}`).get(...args) as { n: number };
+    return { entries: rows.slice(0, limit), more: rows.length > limit, total: n };
+  }
+  ingestChannelEntries(id: string, inputs: ChannelEntryInput[]): { receipt: ChannelIngestReceipt; changed: ChannelEntry[] } {
+    const receipt = { created: 0, updated: 0, unchanged: 0 }, changed: ChannelEntry[] = [];
+    this.db.exec('BEGIN');
+    try {
+      for (const input of inputs) {
+        const prev = this.db.prepare('SELECT * FROM channel_entry WHERE channel_id = ? AND external_id = ?').get(id, input.external_id) as unknown as ChannelEntry | undefined;
+        const fields = { external_id: input.external_id, title: input.title ?? '', body: input.body, url: input.url ?? null,
+          author: input.author ?? null, published_at: input.published_at ?? null };
+        if (prev && Object.entries(fields).every(([k, v]) => prev[k as keyof ChannelEntry] === v)) { receipt.unchanged++; continue; }
+        const ts = now();
+        if (prev) {
+          this.db.prepare('UPDATE channel_entry SET title = ?, body = ?, url = ?, author = ?, published_at = ?, updated_at = ? WHERE id = ?')
+            .run(fields.title, fields.body, fields.url, fields.author, fields.published_at, ts, prev.id);
+          changed.push({ ...prev, ...fields, updated_at: ts }); receipt.updated++;
+        } else {
+          const row = this.db.prepare(`INSERT INTO channel_entry (channel_id, external_id, title, body, url, author, published_at, received_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, fields.external_id, fields.title, fields.body, fields.url, fields.author, fields.published_at, ts, ts);
+          changed.push({ id: Number(row.lastInsertRowid), channel_id: id, ...fields, received_at: ts, updated_at: ts }); receipt.created++;
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    return { receipt, changed };
   }
   findProjectByName(name: string): Project | undefined {
     return this.db.prepare('SELECT * FROM project WHERE lower(name) = lower(?)').get(name) as unknown as Project | undefined;

@@ -1,0 +1,22 @@
+.channel-tools, .channel-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.channel-tools { padding: 6px 15px 10px; border-bottom: 1px solid var(--border); justify-content: space-between; }
+.channel-tools .link { display: inline-flex; align-items: center; gap: 4px; }
+.channel-error { margin: 0; padding: 6px 15px; color: var(--warn); background: var(--warn-bg); font-size: 12px; overflow-wrap: anywhere; }
+.channel-entry { position: relative; padding: 14px 15px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.channel-entry.unread::before { content: ''; position: absolute; left: 5px; top: 20px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.channel-entry.selected { background: var(--bg); box-shadow: inset 0 0 0 1px var(--accent); }
+.channel-entry h3 { margin: 6px 0; font-size: 14px; }
+.channel-entry-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; color: var(--muted); font-size: 11px; }
+.channel-entry-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px; font-size: 12px; }
+.channel-entry-actions a { color: var(--accent); }
+.channel-new { position: sticky; top: 4px; z-index: 4; margin: 4px 12px; border: 1px solid var(--border); background: var(--col); color: var(--accent); border-radius: 5px; padding: 5px 10px; }
+.channel-manager { padding: 0 16px 16px; overflow: auto; }
+.channel-form { display: grid; gap: 10px; padding: 12px 0 16px; border-bottom: 1px solid var(--border); }
+.channel-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.channel-list { list-style: none; padding: 0; margin: 0; }
+.channel-list > li { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.channel-list p { margin: 5px 0; }
+.channel-token { background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 12px; border-radius: 6px; overflow-wrap: anywhere; }
+.channel-url { overflow-wrap: anywhere; }
+.channel-phone-back { flex: none; padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--col); display: flex; justify-content: space-between; }
+.channel-choice { padding: 8px 0; border-bottom: 1px solid var(--border); }

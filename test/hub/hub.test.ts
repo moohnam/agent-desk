@@ -107,6 +107,42 @@ test('#now joins the running turn instead of waiting', () => {
   assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '이것도 같이', skills: [], steer: true });
 });
 
+test('a queue receipt promotes exactly its message once, leaving identical and older messages queued', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  hub.sendMessage(taskId, '먼저 대기한 메시지');
+  hub.sendMessage(taskId, '같은 내용');
+  const receipt: { queued_id?: string } = {};
+  assert.equal(hub.sendMessage(taskId, '같은 내용', false, receipt), taskId);
+  const queued = hub.taskView(hub.store.getTask(taskId)!).queued;
+  assert.equal(receipt.queued_id, queued[2].id);
+  hub.sendQueuedNow(taskId, receipt.queued_id!);
+  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '같은 내용', skills: [], steer: true });
+  assert.deepEqual(hub.taskView(hub.store.getTask(taskId)!).queued.map(q => q.id), queued.slice(0, 2).map(q => q.id));
+  const count = runner.sent.length;
+  assert.throws(() => hub.sendQueuedNow(taskId, receipt.queued_id!), /이미 보냈을 수 있습니다/);
+  assert.equal(runner.sent.length, count);
+});
+
+test('a cancelled or already drained receipt never promotes another waiting message', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  const cancelled: { queued_id?: string } = {};
+  hub.sendMessage(taskId, '취소할 메시지', false, cancelled);
+  hub.cancelQueued(taskId, cancelled.queued_id!);
+  hub.sendMessage(taskId, '다른 메시지');
+  assert.throws(() => hub.sendQueuedNow(taskId, cancelled.queued_id!), /이미 보냈을 수 있습니다/);
+  assert.equal(runner.last('send'), undefined);
+  const drained: { queued_id?: string } = {};
+  hub.sendMessage(taskId, '끝나면 보낼 메시지', false, drained);
+  runner.say({ type: 'busy', sessionId, busy: false });
+  runner.say({ type: 'busy', sessionId, busy: false });
+  const count = runner.sent.length;
+  assert.throws(() => hub.sendQueuedNow(taskId, drained.queued_id!), /이미 보냈을 수 있습니다/);
+  assert.equal(runner.sent.length, count);
+  const direct: { queued_id?: string } = {};
+  hub.sendMessage(taskId, '#now 즉시 전송', false, direct);
+  assert.equal(direct.queued_id, undefined);
+});
+
 test('an approval makes the task wait until the user answers it', () => {
   const { hub, runner, taskId, sessionId } = started();
   runner.say({ type: 'approval_request', sessionId, approvalId: 'a1', toolName: 'Bash', input: { command: 'rm -rf build' } });

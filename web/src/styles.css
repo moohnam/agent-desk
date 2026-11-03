@@ -25,8 +25,6 @@
     --proj-5: #8bd93c; --proj-6: #bb962e; --proj-7: #cfaffe; --proj-8: #0a8c48;
     color-scheme: dark;
   }
-  .av.codex { background: #e5e7eb; color: #111827; }
-  .av.agy { background: #dbeafe; color: #1e3a8a; }
 }
 
 * { box-sizing: border-box; }
@@ -54,17 +52,17 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
 .error { color: var(--bad); margin: 0; font-size: 13px; }
 @keyframes pulse { 50% { opacity: .3; } }
 
-.app { display: flex; flex-direction: column; height: 100%; }
+.app { display: flex; flex-direction: column; height: 100%; background: var(--col); }
 /* Icons (lucide): sized by the text around them, one stroke weight everywhere. */
 svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: -0.2em; flex: none; }
 .btn:has(> svg.lucide:only-child), .btn.stop-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; }
 .btn > svg.lucide:only-child { width: 16px; height: 16px; }
-/* The top bar's buttons carry only an icon: a size up and a firmer line, so each reads at a glance. */
-.topbar .btn > svg.lucide:only-child { width: 18px; height: 18px; stroke-width: 2; }
+/* Header icons share one size and stroke; labels remain on the view switcher. */
+.topbar .btn > svg.lucide:only-child { width: 17px; height: 17px; }
 .icon-btn, .thread-head .back { display: inline-flex; align-items: center; justify-content: center; }
 .add-col svg.lucide { width: 20px; height: 20px; }
 .topbar .sessions-btn { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; font-variant-numeric: tabular-nums; }
-.topbar .sessions-btn svg.lucide { width: 18px; height: 18px; stroke-width: 2; }
+.topbar .sessions-btn svg.lucide { width: 17px; height: 17px; }
 
 /* 열린 세션 목록 */
 .sessions { padding: 12px 16px 16px; display: grid; gap: 10px; max-height: 70vh; overflow: auto; }
@@ -81,7 +79,7 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .session-row .acts { grid-column: 3 / -1; display: flex; gap: 6px; justify-content: flex-end; }
 /* A filled square reads as stop; an outline one looks like a checkbox. */
 .stop-btn svg.lucide { width: 11px; height: 11px; fill: currentColor; }
-.btn { border: 1px solid var(--border); background: var(--col); border-radius: 7px; padding: 4px 10px; font-size: 13px; white-space: nowrap; }
+.btn { border: 1px solid var(--border); background: var(--col); border-radius: 6px; padding: 4px 10px; font-size: 13px; white-space: nowrap; }
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
@@ -94,9 +92,9 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .link:hover { text-decoration: underline; }
 
 /* ── 상단 주의 바 ── */
-.topbar { display: flex; align-items: center; gap: 10px; padding: 0 14px; height: 44px; flex: none;
-  background: var(--col); border-bottom: 1px solid var(--border); }
-.brand { font-weight: 700; letter-spacing: -.01em; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 44px; flex: none;
+  background: var(--col); border-bottom: 1px solid var(--line); }
+.brand { font-weight: 600; letter-spacing: -.03em; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .brand .logo { width: 24px; height: 24px; display: block; flex: none; }
 .conn { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); flex: none; }
 .conn.on { background: var(--good); }
@@ -105,23 +103,24 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 /* 러너 끊김 경고 띠 */
 .runner-warn { flex: none; padding: 3px 14px; font-size: 12.5px; color: var(--bad); background: var(--bad-bg);
   border-bottom: 1px solid var(--bad-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.attn { display: flex; gap: 6px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.attn { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  padding-left: 12px; border-left: 1px solid var(--border); }
 .attn::-webkit-scrollbar { display: none; }
-.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--col);
-  border-radius: 999px; padding: 3px 10px 3px 8px; font-size: 12.5px; white-space: nowrap; color: var(--muted); }
-.chip b { font-variant-numeric: tabular-nums; color: var(--text); }
-.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.chip.wait { color: var(--warn); border-color: var(--warn-border); background: var(--warn-bg); }
-.chip.wait b { color: var(--warn); }
+.chip { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 30px; min-height: 28px;
+  border: 0; background: transparent; border-radius: 4px; padding: 3px 7px; font-size: 12px; white-space: nowrap; color: var(--muted); }
+.chip > svg.lucide { width: 16px; height: 16px; }
+.chip b { font-size: 11.5px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.chip.wait { color: var(--warn); }
 .chip.run { color: var(--run); }
-.chip.run .dot { animation: pulse 1.4s ease-in-out infinite; }
 .chip.stall { color: var(--warn); }
-.chip.err { color: var(--bad); border-color: var(--bad-border); background: var(--bad-bg); }
-.chip.err b { color: var(--bad); }
-.chip.zero { opacity: .45; background: transparent; border-color: var(--border); color: var(--muted); cursor: default; }
-.chip:hover:not(.zero) { filter: brightness(.97); border-color: currentColor; }
-.chip kbd { font-size: 10.5px; }
-.top-actions { display: flex; gap: 6px; }
+.chip.err { color: var(--bad); }
+.chip.zero { opacity: .45; color: var(--muted); cursor: default; }
+.chip:hover:not(.zero) { background: var(--hover); }
+.top-actions { display: flex; align-items: center; gap: 4px; padding-left: 10px; border-left: 1px solid var(--border); }
+.top-actions .btn { border-color: transparent; background: transparent; color: var(--muted); border-radius: 4px; }
+.top-actions .btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.top-actions .btn.primary { background: var(--text); color: var(--col); }
+.top-actions .btn.primary:hover:not(:disabled) { background: var(--text); color: var(--col); }
 
 /* ── 승인 대기열 ── */
 .queue { flex: none; margin: 8px 8px 0; border: 1px solid var(--warn-border); border-left: 4px solid var(--warn-strong);
@@ -151,7 +150,7 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 /* The thread on the right part of the workspace beside a narrower deck (f toggles it back to a column). */
 .thread-split { position: relative; flex: 0 0 50%; min-width: 0; display: flex; padding: 8px 8px 8px 0; }
 /* Too small to split: the thread covers the workspace while it has the focus (t / h / l go back to the deck). */
-.thread-split.cover { position: absolute; inset: 0; z-index: 15; padding: 8px; background: var(--bg); }
+.thread-split.cover { position: absolute; inset: 0; z-index: 15; padding: 8px; background: var(--col); }
 .thread-split.cover.away { visibility: hidden; pointer-events: none; }
 .thread-split .column { flex: 1; width: auto; min-width: 0; }
 .thread-split .col-resize { display: none; }
@@ -166,12 +165,12 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .deck { position: relative; flex: 1; min-width: 0; display: flex; gap: 8px; padding: 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
 
 .column { position: relative; flex: 0 0 var(--w, 380px); width: var(--w, 380px); display: flex; flex-direction: column; min-height: 0;
-  background: var(--col); border: 1px solid var(--border); border-radius: 10px; scroll-snap-align: start; }
-.column.focused { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
-.col-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--border);
-  background: var(--col-head); border-radius: 10px 10px 0 0; }
-.col-head h2 { font-size: 14px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
-.col-head .count { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+  background: transparent; border: 1px solid transparent; border-right-color: var(--border); border-radius: 0; scroll-snap-align: start; }
+.column.focused .col-head h2, .column.focused .thread-head h2 {
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.col-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 18px 15px; border-bottom: 0; background: transparent; }
+.col-head h2 { font-size: 18px; font-weight: 550; letter-spacing: -.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+.col-head .count { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
 .col-head .count .of { opacity: 0.7; }
 .col-head .filter { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .feed { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; overflow-anchor: none; }
@@ -183,7 +182,7 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
   font-size: 12px; cursor: pointer; }
 .older-posts button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .older-posts button:disabled { cursor: default; }
-.add-col { flex: 0 0 120px; border: 1.5px dashed var(--line); border-radius: 10px; background: transparent; color: var(--muted);
+.add-col { flex: 0 0 120px; border: 1px solid transparent; border-radius: 0; background: transparent; color: var(--muted);
   display: grid; place-items: center; align-content: center; gap: 4px; font-size: 13px; scroll-snap-align: start; }
 .add-col:hover { color: var(--accent); border-color: var(--accent); }
 
@@ -210,49 +209,46 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
 
 /* ── 글 묶음과 글 ── */
-.group { position: relative; border-bottom: 1px solid var(--border); }
+.group { position: relative; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
 /* The color bar sits above the posts: a hovered or selected post's background would paint over a shadow. */
 .group::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 6px; pointer-events: none; z-index: 3;
   background: linear-gradient(90deg, var(--pc, transparent) 3px, var(--tc, transparent) 3px); }
-.ctx { display: flex; align-items: center; gap: 6px; padding: 9px 12px 0; font-size: 12px; color: var(--muted); min-width: 0; cursor: pointer; }
+.ctx { display: flex; align-items: center; gap: 6px; padding: 9px 15px 0; font-size: 12px; color: var(--muted); min-width: 0; cursor: pointer; }
 .ctx:hover .ttl { color: var(--text); }
 .pdot { width: 8px; height: 8px; border-radius: 2px; flex: none; display: inline-block; }
 .ctx .pname { font-weight: 600; color: var(--text); white-space: nowrap; }
 .seq { font-weight: 500; color: var(--muted); margin-left: 1px; font-variant-numeric: tabular-nums; }
 .ctx .ttl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
-.badge { flex: none; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; line-height: 18px; white-space: nowrap;
-  background: var(--hover); color: var(--muted); }
-.badge.waiting { background: var(--warn-bg); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn-border); }
-.badge.running { background: var(--run-bg); color: var(--run); }
-.badge.error { background: var(--bad-bg); color: var(--bad); }
-.badge.done { background: var(--good-bg); color: var(--good); }
-.badge.stalled { background: var(--warn-bg); color: var(--warn); }
+.badge { flex: none; font-size: 11px; font-weight: 500; padding: 0; border-radius: 0; line-height: 18px; white-space: nowrap;
+  background: transparent; color: var(--muted); }
+.badge.waiting, .badge.stalled { color: var(--warn); }
+.badge.running { color: var(--run); }
+.badge.error { color: var(--bad); }
+.badge.done { color: var(--good); }
 .badge.term { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); font-family: var(--mono); font-weight: 500; }
 
-.post { position: relative; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 10px; padding: 8px 12px 10px; cursor: default; }
+.post { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 12px; padding: 13px 15px 18px; cursor: default; }
 .post:hover { background: var(--hover); }
-/* 선택: 진한 배경과 테두리. 왼쪽 6px는 묶음의 색 막대(프로젝트·작업)이니 비워 둡니다. */
-.post.selected { background: color-mix(in srgb, var(--accent) 11%, var(--col)); }
-.post.selected::before { content: ""; position: absolute; inset: 1px 1px 1px 7px; border: 2px solid var(--accent); border-radius: 6px;
+/* Selection stays separate from the conversation rail and the group's project/task stripe. */
+.post.selected { background: var(--bg); border-radius: 7px; }
+.post.selected::before { content: ""; position: absolute; inset: 2px 3px 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: 5px;
   pointer-events: none; z-index: 2; }
+.post.selected .av { background: var(--col); }
 .av-wrap { position: relative; display: flex; justify-content: center; }
-.av { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700;
-  position: relative; z-index: 1; flex: none; }
-.av.user { background: var(--accent-soft); color: var(--accent); }
-.av.claude { background: #d97757; color: #fff; }
-.av.codex { background: #111827; color: #fff; }
-.av.agy { background: #1a73e8; color: #fff; }
+.av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 500;
+  position: relative; z-index: 1; flex: none; background: var(--bg); color: var(--text); }
 .av.alert { background: var(--bad-bg); color: var(--bad); box-shadow: inset 0 0 0 1.5px var(--bad-border); }
 .post.question .av { box-shadow: 0 0 0 2px var(--col), 0 0 0 4px var(--accent); }
 .post.approval .av { box-shadow: 0 0 0 2px var(--col), 0 0 0 4px var(--warn-strong); }
 /* 같은 작업 연속 글을 잇는 세로선 */
-.post.chain-down .av-wrap::after { content: ""; position: absolute; top: 36px; bottom: -14px; left: 50%; width: 2px; margin-left: -1px; background: var(--line); }
-.post.chain-up .av-wrap::before { content: ""; position: absolute; top: -8px; height: 8px; left: 50%; width: 2px; margin-left: -1px; background: var(--line); }
+.post.chain-down .av-wrap::after { content: ""; position: absolute; top: 28px; bottom: -18px; left: 50%; width: 2px; margin-left: -1px; background: var(--line); }
+.post.chain-up .av-wrap::before { content: ""; position: absolute; top: -13px; height: 13px; left: 50%; width: 2px; margin-left: -1px; background: var(--line); }
 .main { min-width: 0; }
 
 .ph { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; }
-.ph .name { font-weight: 650; white-space: nowrap; }
-.ph .handle, .ph .time { color: var(--faint); white-space: nowrap; }
+.ph .name { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ph .handle, .ph .time { color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ph .handle { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ph .tag { flex: none; font-size: 11px; font-weight: 700; color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-border);
   border-radius: 4px; padding: 0 5px; line-height: 17px; white-space: nowrap; }
@@ -260,7 +256,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .ph .tag.stop { color: var(--muted); background: var(--hover); border-color: var(--border); }
 .replying { font-size: 12px; color: var(--faint); margin-top: 1px; }
 .replying b { color: var(--accent); font-weight: 500; }
-.body { white-space: pre-wrap; word-break: break-word; margin-top: 2px; font-size: 14px; line-height: 1.55; }
+.body { white-space: pre-wrap; word-break: break-word; margin-top: 2px; font-size: 14px; line-height: 1.75; }
 .body.clamp { max-height: 16em; overflow: hidden;
   mask-image: linear-gradient(to bottom, #000 70%, transparent); -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); }
 .post.alert .body { color: var(--bad); }
@@ -360,11 +356,12 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 @keyframes flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } }
 
 /* ── 스레드 컬럼 ── */
-.column.thread { border-top: 3px solid var(--pc, var(--border)); }
+.column.thread { background: var(--col); border-color: var(--line); border-top: 3px solid var(--pc, var(--line)); }
+.column.thread > .thread-head, .column.thread > .reply-box { background: var(--col-head); }
 .clip-note { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
 .thread-chip { flex: none; padding: 1px 7px; border-radius: 5px; color: var(--text); font-size: 11.5px; font-weight: 650; white-space: nowrap;
   background: color-mix(in srgb, var(--pc) 20%, var(--col)); box-shadow: inset 0 0 0 1px var(--pc); }
-.thread-head { flex: none; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--col-head); border-radius: 10px 10px 0 0; }
+.thread-head { flex: none; padding: 14px 15px; border-bottom: 1px solid var(--border); background: transparent; }
 .thread-head .row1 { display: flex; align-items: center; gap: 8px; }
 .thread-head .back { border: 0; background: transparent; color: var(--muted); font-size: 15px; padding: 0 4px; border-radius: 6px; }
 .thread-head .back:hover { background: var(--hover); color: var(--text); }
@@ -372,7 +369,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .thread-head .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); margin-top: 4px; padding-left: 28px; }
 .thread-head .meta .pdot { margin-right: 4px; }
 .thread-feed .post:not(.chain-down) { border-bottom: 1px solid var(--border); }
-.reply-box { flex: none; border-top: 1px solid var(--border); padding: 8px 10px 10px; background: var(--col-head); border-radius: 0 0 10px 10px; }
+.reply-box { flex: none; border-top: 1px solid var(--border); padding: 10px 15px 12px; background: transparent; }
 .reply-box .to { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .reply-box .to b { color: var(--accent); font-weight: 500; }
 textarea.input, input.input { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; background: var(--col);
@@ -487,7 +484,7 @@ textarea.input { resize: none; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(10px); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .chip.run .dot, .working .dots span, .flash, .toast { animation: none; }
+  .working .dots span, .flash, .toast { animation: none; }
 }
 
 /* ── 좁은 화면 ── */
@@ -495,7 +492,7 @@ textarea.input { resize: none; }
   .compose { position: fixed; left: 0; top: 44px; bottom: 0; z-index: 30; width: min(340px, 92vw); box-shadow: var(--shadow); }
   .column { max-width: calc(100vw - 32px); }
   .deck { scroll-snap-type: x mandatory; }
-  .chip .lbl-long, .brand .word { display: none; }
+  .brand .word { display: none; }
   .queue-row { grid-template-columns: minmax(0, 1fr) auto; }
   .queue-row .av, .queue-row .where, .queue-row time { display: none; }
 }
@@ -509,7 +506,10 @@ textarea.input { resize: none; }
 @media (max-width: 760px) {
   .app { height: 100dvh; }
   .topbar { gap: 8px; padding: 0 10px; }
-  .topbar .btn kbd, .help-btn { display: none; }
+  .attn, .top-actions { padding-left: 0; border-left: 0; }
+  .topbar .btn kbd, .topbar .top-actions > button.help-btn { display: none; }
+  .topbar .top-actions > button.btn { padding: 4px 5px; }
+  .chip { min-width: 24px; padding-inline: 3px; }
   .compose { top: 44px; bottom: 0; width: 100vw; }
   /* Above the reply box and its buttons. */
   .toast { top: 52px; bottom: auto; max-width: calc(100vw - 24px); white-space: normal; text-align: center; }
@@ -586,13 +586,13 @@ textarea.input { resize: none; }
   background: color-mix(in srgb, var(--tc) 28%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 60%, transparent); }
 
 /* ── 뷰 전환 (F1–F4) ── */
-.views { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-.views button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; padding: 3px 9px;
-  font-size: 12.5px; color: var(--muted); white-space: nowrap; cursor: pointer; }
-.views button + button { border-left: 1px solid var(--border); }
-.views button kbd { font-size: 10px; opacity: .7; }
-.views button:hover { color: var(--text); }
-.views button[aria-pressed="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font-weight: 600; }
+.views { display: inline-flex; flex: none; padding: 2px; background: var(--bg); border-radius: 5px; }
+.views button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 3px;
+  background: transparent; padding: 4px 9px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+.views button > svg.lucide { width: 15px; height: 15px; }
+.views button:hover { color: var(--text); background: var(--hover); }
+.views button[aria-pressed="true"] { color: var(--text); background: var(--col); box-shadow: 0 1px 2px rgb(0 0 0 / .08); font-weight: 600; }
+@media (max-width: 900px) { .views button { padding-inline: 6px; gap: 4px; } }
 
 /* 컨텍스트 재구성: the panel in place of the reply box, picked posts, and the new session's first post. */
 .icon-btn[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal.tsx';
 
 /** A column the finder can jump to. `sub`: a second line (the column's note), also searched. */
@@ -45,6 +45,8 @@ function Highlight({ text, hits }: { text: string; hits: number[] }) {
 export function ColumnFinder({ items, onPick, onClose }: { items: FinderItem[]; onPick: (id: string) => void; onClose: () => void }) {
   const [query, setQuery] = useState('');
   const [cur, setCur] = useState(0);
+  // macOS WebKit dispatches both Ctrl+N/P and a translated arrow before keyup, in either order.
+  const navigationKey = useRef<{ arrow: string; source: 'control' | 'arrow' } | null>(null);
   const found = useMemo(() => {
     if (!query.trim()) return items.map((item) => ({ item, hits: [] as number[] }));
     return items.map((item, order) => ({ item, order, m: fuzzy(query, item.title) ?? (item.sub ? fuzzy(query, item.sub) && { score: 0, hits: [] } : null) }))
@@ -59,10 +61,22 @@ export function ColumnFinder({ items, onPick, onClose }: { items: FinderItem[]; 
       <div className="finder">
         <input className="input" autoFocus value={query} placeholder="컬럼 이름 (글자 일부만 써도 됩니다)"
           onChange={(e) => { setQuery(e.target.value); setCur(0); }}
+          onKeyUp={() => { navigationKey.current = null; }}
+          onBlur={() => { navigationKey.current = null; }}
           onKeyDown={(e) => {
             const down = e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'n' || e.key === 'j'));
             const up = e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'p' || e.key === 'k'));
-            if (down || up) { e.preventDefault(); setCur(Math.max(0, Math.min(found.length - 1, at + (down ? 1 : -1)))); }
+            if (down || up) {
+              const source = e.ctrlKey && (e.key === 'n' || e.key === 'p') ? 'control'
+                : !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.startsWith('Arrow') ? 'arrow' : null;
+              if (source) {
+                const arrow = down ? 'ArrowDown' : 'ArrowUp';
+                const previous = navigationKey.current;
+                if (previous?.arrow === arrow && previous.source !== source) { e.preventDefault(); return; }
+                navigationKey.current = { arrow, source };
+              }
+              e.preventDefault(); setCur(Math.max(0, Math.min(found.length - 1, at + (down ? 1 : -1))));
+            }
             else if (e.key === 'Enter') { e.preventDefault(); pick(at); }
           }} />
         <ul className="finder-list" role="listbox">

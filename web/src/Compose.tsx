@@ -11,6 +11,7 @@ import { projectColor, rankProjects } from './projects.ts';
 import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
 import { Modal } from './Modal.tsx';
+import { QueuedShortcut, type QueuedTarget } from './queuedShortcut.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
 // ── 자동 완성 ──
@@ -68,10 +69,11 @@ type Mentions = 'route' | 'refer';
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-function ComposeField({ value, onChange, onSubmit, onEscape, inputRef, projects, tasks, mentions, placeholder, rows }: {
+function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; without it, Esc leaves the field. */
   onEscape?: () => void;
+  onBlur?: () => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number;
 }) {
@@ -125,9 +127,9 @@ function ComposeField({ value, onChange, onSubmit, onEscape, inputRef, projects,
       <textarea ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder}
         onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); setDismissed(false); }}
         onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-        onBlur={() => setDismissed(true)} onFocus={() => setDismissed(false)}
+        onBlur={() => { setDismissed(true); onBlur?.(); }} onFocus={() => setDismissed(false)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSubmit(); return; }
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!e.repeat) onSubmit(); return; }
           if (open && sug) {
             if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
             if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((cur - 1 + sug.items.length) % sug.items.length); return; }
@@ -362,8 +364,16 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const [busy, setBusy] = useState(false);
   const [pick, setPick] = useState<Delivery | null>(() => getDraft<{ pick: Delivery | null }>(draftKey)?.pick ?? null);
   const [sent, setSent] = useState<string | null>(null);
+  const shortcut = useRef(new QueuedShortcut());
+  const revision = useRef(0);
+  const mounted = useRef(true);
+  const edited = () => { revision.current++; shortcut.current.reset(); };
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; shortcut.current.reset(); };
+  }, []);
   useEffect(() => { setDraft(draftKey, { text, pick }, { taskId: task.id, empty: !text.trim() }); }, [draftKey, text, pick, task.id]);
-  useDraftSync<{ text: string; pick: Delivery | null }>(draftKey, (v) => { setText(v?.text ?? ''); setPick(v?.pick ?? null); });
+  useDraftSync<{ text: string; pick: Delivery | null }>(draftKey, (v) => { edited(); setText(v?.text ?? ''); setPick(v?.pick ?? null); });
   const skills = useSkills();
   const c = parseCompose(text, skillNames(skills), false);
   const name = engineName(task.engine);
@@ -386,20 +396,39 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     catch (e) { onError(e instanceof Error ? e.message : String(e)); return null; }
     finally { setBusy(false); }
   };
-  const submit = async () => {
+  const promote = async (target: QueuedTarget | null) => {
+    if (!target) return;
+    setBusy(true);
+    try {
+      await api.sendQueuedNow(target.taskId, target.queuedId);
+      setSent('방금 대기열에 넣은 메시지를 바로 보냈습니다.');
+    } catch (e) { onError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  const submit = async (fromShortcut = false) => {
+    if (fromShortcut && shortcut.current.active) { await promote(shortcut.current.repeat()); return; }
     if (!ok || busy) return;
+    shortcut.current.reset();
+    const request = fromShortcut && content && !branch && delivery !== 'now' ? shortcut.current.begin(task.id) : null;
+    const unchanged = revision.current;
+    const submittedDraft = getDraft(draftKey);
     onSend?.();
     const r = await send(!c.delivery && pick ? `#${pick} ${text}` : text);
-    if (!r) return;
-    // The box may be gone by now (another thread opened meanwhile); the draft goes either way.
-    setDraft(draftKey, null, { empty: true });
-    setText(''); setPick(null);
+    if (!r) { if (request !== null) shortcut.current.finish(request); return; }
+    // A closed box can clear its own draft, but must not erase one written after re-entering it.
+    if (revision.current === unchanged && (mounted.current || getDraft(draftKey) === submittedDraft)) {
+      setDraft(draftKey, null, { empty: true });
+      setText(''); setPick(null);
+    }
     setSent(r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
+      : r.queued_id ? `대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.${fromShortcut ? ' 입력을 바꾸지 않고 ⌘Enter를 한 번 더 누르면 지금 보냅니다.' : ''}`
       : running && delivery !== 'now' && content ? '대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.' : null);
+    if (request !== null) await promote(shortcut.current.finish(request, r.task_id === task.id ? r.queued_id : undefined));
   };
 
   /** Takes a queued message out of the queue into the box, above anything already typed there. */
   const editQueued = async (q: { id: string; text: string }) => {
+    edited();
     try { await api.cancelQueued(task.id, q.id); }
     catch (e) { onError(e instanceof Error ? e.message : String(e)); return; }
     const next = text.trim() ? `${q.text}\n${text}` : q.text;
@@ -437,33 +466,33 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
                   aria-label="나중에 보내기" onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}><ArrowDown /></button>
                 {!q.kind && <>
                   <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
-                    onClick={() => api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message))}>지금 보내기</button>
+                    onClick={() => { shortcut.current.reset(); api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message)); }}>지금 보내기</button>
                   <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>
                 </>}
-                <button className="link" onClick={() => api.cancelQueued(task.id, q.id).catch((e) => onError(e.message))}>취소</button>
+                <button className="link" onClick={() => { shortcut.current.reset(); api.cancelQueued(task.id, q.id).catch((e) => onError(e.message)); }}>취소</button>
               </span>
             </li>
           ))}
         </ol>
       )}
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
-      <ComposeField value={text} onChange={(v) => { setText(v); setSent(null); }} onSubmit={submit} inputRef={inputRef} rows={2}
+      <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2}
         projects={projects} tasks={tasks} mentions="refer"
         placeholder={running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">
         <button className="toggle" aria-pressed={auto} disabled={busy}
           title={auto ? '누르면 #ask: 매번 확인' : '누르면 #auto: 자동 승인'}
-          onClick={() => void send(auto ? '#ask' : '#auto')}>#auto</button>
+          onClick={() => { shortcut.current.reset(); void send(auto ? '#ask' : '#auto'); }}>#auto</button>
         {choices.map((d) => (
           <button key={d} className="toggle" aria-pressed={delivery === d} disabled={!!c.delivery}
             title={c.delivery ? '본문의 태그를 따릅니다' : `이 답글을 #${d}: ${DELIVERY_LABEL[d]}`}
-            onClick={() => setPick(pick === d ? null : d)}>#{d}</button>
+            onClick={() => { edited(); setPick(pick === d ? null : d); }}>#{d}</button>
         ))}
         {running && <button className="btn stop-btn" title="중단 (s) · 대기 중인 메시지도 취소" aria-label="중단" onClick={() => api.interrupt(task.id).catch((e) => onError(e.message))}><Square /> <kbd>s</kbd></button>}
         <span className="spacer" />
         <span><kbd>⌘</kbd><kbd>↵</kbd></span>
-        <button className="btn primary" disabled={!ok || busy} onClick={submit}>{branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
+        <button className="btn primary" disabled={!ok || busy} onClick={() => void submit()}>{branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
       </div>
     </div>
   );

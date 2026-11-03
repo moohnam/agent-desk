@@ -7,17 +7,17 @@ import type { Project, TaskView } from './types.ts';
  * The search column's head: a query field with `#key:value` completion, the match count, and
  * buttons to keep the search as a column or close it.
  */
-export function SearchHead({ value, onChange, inputRef, projects, tasks, count, unknown, onDone, onClose, onSave }: {
+export function SearchHead({ value, onChange, inputRef, projects, tasks, count, unknown, onDone, onClose, onSave, plain }: {
   value: string; onChange: (v: string) => void; inputRef: RefObject<HTMLInputElement | null>;
   projects: Project[]; tasks: TaskView[]; count: string; unknown: string[];
   /** Enter with no completion open: leave the field for the results. */
-  onDone: () => void; onClose: () => void; onSave: () => void;
+  onDone: () => void; onClose: () => void; onSave?: () => void; plain?: boolean;
 }) {
   const [caret, setCaret] = useState(value.length);
   const [index, setIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const list = useRef<HTMLDivElement>(null);
-  const sug = useMemo(() => suggestSearch(value, caret, projects, tasks), [value, caret, projects, tasks]);
+  const sug = useMemo(() => plain ? null : suggestSearch(value, caret, projects, tasks), [value, caret, projects, tasks, plain]);
   const open = !dismissed && !!sug?.items.length;
   const cur = Math.min(index, (sug?.items.length ?? 1) - 1);
 
@@ -42,7 +42,7 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
         <span className="search-icon" aria-hidden>⌕</span>
         <div className="search-field">
           <input ref={inputRef} className="input" value={value} spellCheck={false} autoComplete="off"
-            placeholder="검색어 · #project: #status: #kind: #task:"
+            placeholder={plain ? '이 채널의 제목·본문 검색' : '검색어 · #project: #status: #kind: #task:'}
             onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); setDismissed(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onBlur={() => setDismissed(true)} onFocus={() => setDismissed(false)}
@@ -73,7 +73,7 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
             </div>
           )}
         </div>
-        <button className="icon-btn" title="이 검색을 컬럼으로 저장" disabled={!value.trim()} aria-label="검색을 컬럼으로 저장" onClick={onSave}><Save /></button>
+        {onSave && <button className="icon-btn" title="이 검색을 컬럼으로 저장" disabled={!value.trim()} aria-label="검색을 컬럼으로 저장" onClick={onSave}><Save /></button>}
         <button className="icon-btn" title="검색 닫기 (결과에서 q · 빈 검색창에서 Esc)" aria-label="검색 닫기" onClick={onClose}><X /></button>
       </div>
       <div className="search-meta">

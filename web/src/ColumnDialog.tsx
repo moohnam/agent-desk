@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Modal } from './Modal.tsx';
 import { KIND_LABEL, STATUS_LABEL } from './format.ts';
 import { projectColor, projectListLabel, rankProjects } from './projects.ts';
-import type { ColumnDef, PostKind, Project, TaskStatus, TaskView } from './types.ts';
+import type { Channel, ColumnDef, PostKind, Project, TaskStatus, TaskView } from './types.ts';
 
 const KINDS = Object.keys(KIND_LABEL) as PostKind[];
 const STATUSES: TaskStatus[] = ['running', 'waiting', 'done', 'idle', 'error'];
@@ -13,12 +13,14 @@ const MAX_ROWS = 100;
 function toggle<T>(list: T[], v: T) { return list.includes(v) ? list.filter((x) => x !== v) : [...list, v]; }
 
 /** Adds a column, or edits/deletes an existing one. Empty selections mean "all". */
-export function ColumnDialog({ column, projects, tasks, onClose, onSave, onDelete }: {
+export function ColumnDialog({ column, projects, tasks, channels = [], onManageChannels, onClose, onSave, onDelete }: {
   column?: ColumnDef; projects: Project[]; tasks: TaskView[]; onClose: () => void;
   onSave: (c: ColumnDef) => void; onDelete?: () => void;
+  channels?: Channel[]; onManageChannels?: () => void;
 }) {
   const f = column?.filter ?? {};
   const [title, setTitle] = useState(column?.title ?? '');
+  const [channelId, setChannelId] = useState(column?.channelId ?? '');
   const [taskIds, setTaskIds] = useState<string[]>(f.taskIds ?? []);
   const [projectIds, setProjectIds] = useState<string[]>(f.projectIds ?? []);
   const [kinds, setKinds] = useState<PostKind[]>(f.kinds ?? []);
@@ -29,15 +31,17 @@ export function ColumnDialog({ column, projects, tasks, onClose, onSave, onDelet
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    const fallback = taskIds.length === 1 ? tasks.find((t) => t.id === taskIds[0])?.title ?? '작업'
+    const fallback = channelId ? channels.find((channel) => channel.id === channelId)?.name ?? '채널'
+      : taskIds.length === 1 ? tasks.find((t) => t.id === taskIds[0])?.title ?? '작업'
       : projectIds.length
       ? projectListLabel(projectIds.map((id) => projects.find((p) => p.id === id)?.name ?? '?'))
       : kinds.length ? kinds.map((k) => KIND_LABEL[k]).join('·') : '전체';
     onSave({
-      ...(column?.byTask ? { byTask: true } : {}),
+      ...(column?.byTask && !channelId ? { byTask: true } : {}),
+      ...(channelId ? { channelId } : {}),
       id: column?.id ?? crypto.randomUUID(),
       title: title.trim() || fallback,
-      filter: {
+      filter: channelId ? {} : {
         taskIds: taskIds.length ? taskIds : undefined,
         projectIds: projectIds.length ? projectIds : undefined,
         kinds: kinds.length ? kinds : undefined,
@@ -50,10 +54,18 @@ export function ColumnDialog({ column, projects, tasks, onClose, onSave, onDelet
   return (
     <Modal title={column ? '컬럼 편집' : '컬럼 추가'} onClose={onClose}>
       <form onSubmit={submit} className="form">
+        <div className="field"><label className="lbl" htmlFor="column-content">내용</label>
+          <select id="column-content" className="input" value={channelId} onChange={(event) => setChannelId(event.target.value)}>
+            <option value="">에이전트 작업</option>
+            {channels.map((channel) => <option key={channel.id} value={channel.id}>읽기 전용 · {channel.name}</option>)}
+            {channelId && !channels.some((channel) => channel.id === channelId) && <option value={channelId}>삭제된 채널</option>}
+          </select>
+          {onManageChannels && <button className="link" type="button" onClick={onManageChannels}>읽기 전용 채널 관리 · 봇 알림 / RSS·Atom</button>}
+        </div>
         <label className="field"><span className="lbl">제목</span>
           <input ref={first} className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="비우면 필터로 정함" />
         </label>
-        <div className="field">
+        {!channelId && <><div className="field">
           <span className="lbl">작업<small>{taskIds.length ? `${taskIds.length}개 선택` : '선택 없으면 전체'} · 스레드의 ⋯ 메뉴나 <kbd>p</kbd>로도 추가</small></span>
           <TaskPicker tasks={tasks} value={taskIds} onChange={setTaskIds} />
         </div>
@@ -82,6 +94,7 @@ export function ColumnDialog({ column, projects, tasks, onClose, onSave, onDelet
         <label className="field"><span className="lbl">검색어<small>본문·작업 제목</small></span>
           <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} />
         </label>
+        </>}
         <div className="form-actions">
           {onDelete && <button type="button" className="btn danger" onClick={onDelete}>컬럼 삭제</button>}
           <span className="spacer" />

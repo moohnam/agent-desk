@@ -65,6 +65,7 @@ export class DeskCore {
       tasks: this.store.listTasks().map((t) => this.taskView(t)),
       approvals: this.store.pendingApprovals(),
       questions: this.store.pendingQuestions(),
+      channels: this.store.listChannels(),
       runner: { connected: this.runner.connected },
     };
   }

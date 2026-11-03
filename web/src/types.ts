@@ -5,7 +5,7 @@ import type {
 } from '../../shared/api.ts';
 
 export type {
-  EngineUsage, Project, Question, QueuedKind, Settings, Skill, SkillFile, TaskStatus, UsageWindow,
+  Channel, ChannelEntry, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, EngineUsage, Project, Question, QueuedKind, Settings, Skill, SkillFile, TaskStatus, UsageWindow,
 } from '../../shared/api.ts';
 export type { EventKind } from '../../shared/events.ts';
 
@@ -34,4 +34,4 @@ export interface ColumnFilter { taskIds?: string[]; projectIds?: string[]; kinds
  * `byTask`: one card per task (its newest post) instead of every post. `note`: a built view's
  * column (F2–F4) says what it holds in place of its filter.
  */
-export interface ColumnDef { id: string; title: string; filter: ColumnFilter; byTask?: boolean; note?: string }
+export interface ColumnDef { id: string; title: string; filter: ColumnFilter; byTask?: boolean; note?: string; channelId?: string }

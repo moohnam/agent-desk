@@ -36,6 +36,32 @@ export interface Question {
  */
 export type QueuedKind = 'handoff' | 'reset';
 
+/** Optional queue receipt for the message just sent, absent when it was delivered directly. */
+export interface MessageReceipt { queued_id?: string }
+
+/** Independent, read-only content; never an agent task or session. */
+export interface Channel {
+  id: string; name: string; source: 'push' | 'feed'; feed_url: string | null; enabled: boolean;
+  created_at: string; updated_at: string; last_checked_at: string | null; last_success_at: string | null;
+  last_error: string | null; next_poll_at: string | null;
+  /** Shared by every client of this hub; monotonic, in hub receipt order. */
+  read_through_id: number; latest_entry_id: number; unread_count: number;
+}
+export interface ChannelEntry {
+  id: number; channel_id: string; external_id: string; title: string; body: string;
+  url: string | null; author: string | null; published_at: string | null;
+  received_at: string; updated_at: string;
+}
+export interface ChannelEntryInput {
+  external_id: string; title?: string; body: string; url?: string | null;
+  author?: string | null; published_at?: string | null;
+}
+export interface ChannelInput { name: string; source: 'push' | 'feed'; feed_url?: string; enabled?: boolean }
+/** Only create/rotate returns the producer token, once. */
+export interface ChannelTokenReceipt { channel: Channel; token: string | null }
+export interface ChannelEntryPage { entries: ChannelEntry[]; more: boolean; total: number }
+export interface ChannelIngestReceipt { created: number; updated: number; unchanged: number }
+
 export interface TaskView<E = WireEvent> extends Task {
   project_name: string;
   engine: string | null;
@@ -67,12 +93,16 @@ export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'approval'; approval: A }
   | { type: 'question'; question: Question }
   | { type: 'runner'; connected: boolean }
+  | { type: 'channel'; channel: Channel }
+  | { type: 'channel_entry'; entry: ChannelEntry }
+  | { type: 'channel_removed'; channel_id: string }
   /** Tasks and projects deleted, with everything recorded for them. */
   | { type: 'removed'; taskIds: string[]; projectIds: string[] };
 
 /** GET /api/state. `client.local`: the request came from this machine (no access token needed). */
 export interface DeskState<E = WireEvent, A = Approval> {
   projects: Project[]; tasks: TaskView<E>[]; approvals: A[]; questions: Question[];
+  channels?: Channel[];
   runner: { connected: boolean }; client?: { local: boolean };
 }
 

@@ -1,4 +1,4 @@
-import { ArrowRight, ArrowUp, Cpu, Keyboard, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -6,6 +6,8 @@ import { AccessDialog } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
+import { ChannelsDialog } from './Channels.tsx';
+import { ChannelColumn } from './ChannelColumn.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
@@ -18,7 +20,7 @@ import { pruneDrafts, useDraftTasks } from './drafts.ts';
 import { DEFAULT_WIDTH, SAVE_DELAY, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
 import { projectColor } from './projects.ts';
-import type { Approval, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskView } from './types.ts';
+import type { Approval, Channel, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskView } from './types.ts';
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch, taskSearchQuery } from './search.ts';
@@ -35,6 +37,7 @@ import { PANE_DEFAULT, PANE_MAX, PANE_MIN, ResizeHandle, SplitHandle } from './h
 
 /** Typing pauses this long before the search column asks the hub again. */
 const SEARCH_DEBOUNCE_MS = 250;
+const VIEW_ICON = { custom: Columns3, project: Folder, task: ListTodo, status: LayoutDashboard };
 /** "작업별 컬럼으로 나누기" makes at most this many columns at once. */
 const SPLIT_MAX = 6;
 /** On a phone there are no columns: one feed of everything, with the thread laid over it. */
@@ -93,6 +96,8 @@ export function App() {
   const [accessOpen, setAccessOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [channelsOpen, setChannelsOpen] = useState(false);
+  const [phoneChannel, setPhoneChannel] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const composeRef = useRef<HTMLTextAreaElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
@@ -185,12 +190,12 @@ export function App() {
   const phone = useMedia(PHONE);
   // Search metadata for every column, without fetching the hidden columns' feeds.
   const finderColumns = useMemo(() => {
-    if (phone) return [PHONE_FEED];
+    if (phone) return phoneChannel ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
     if (!finder || (view !== 'project' && view !== 'task')) return columns;
     const shown = new Set(columns.map((c) => c.id));
     return [...columns, ...viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask, Infinity)
       .filter((c) => !shown.has(c.id))];
-  }, [finder, phone, columns, view, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
+  }, [finder, phone, phoneChannel, hub.channels, columns, view, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
   /** One list per hub update, so the boxes given it keep their memoized suggestions between renders. */
   const taskList = useMemo(() => [...hub.tasks.values()], [hub.tasks]);
   // The thread as a panel on the right half of the workspace, next to a narrower deck, instead of a column.
@@ -225,13 +230,13 @@ export function App() {
   const parsedSearch = useMemo(() => parseSearch(searchApplied, hub.projects, hub.tasks.values()),
     [searchApplied, hub.projects, hub.tasks]);
   const deckDefs = useMemo(() => {
-    if (phone) return [PHONE_FEED];
+    if (phone) return phoneChannel ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
     if (search == null) return columns;
-    const k = columns.findIndex((c) => isAllFilter(c.filter));
+    const k = columns.findIndex((c) => !c.channelId && isAllFilter(c.filter));
     const next = [...columns];
     next.splice(k + 1, 0, { id: SEARCH, title: '검색', filter: parsedSearch.filter });
     return next;
-  }, [phone, columns, search != null, parsedSearch]);
+  }, [phone, phoneChannel, hub.channels, columns, search != null, parsedSearch]);
   // Each feed column loads its own events, filtered by the hub, so older history is a page away.
   // An empty search shows a hint, not a second copy of everything.
   const searching = !!searchApplied.trim();
@@ -286,7 +291,7 @@ export function App() {
       return { id, def, placed, posts: placed.map((x) => x.post) };
     };
     const cols = deckDefs.map((c) => {
-      const posts = (columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)));
+      const posts = (c.channelId ? [] : columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)));
       return column(c.id, c.byTask ? newestPerTask(posts) : placeFeed(posts), c);
     });
     if (threadTask) cols.splice(threadSlot(threadAfter), 0, column(THREAD, placeThread(threadPosts)));
@@ -388,7 +393,9 @@ export function App() {
   }, [deck, activeState]);
   useLayoutEffect(() => {
     if (!defaultFocusPending.current || !hub.synced) return;
-    const id = defaultColumn(deck.filter((column) => column.def && column.id !== SEARCH), (id) => {
+    const id = defaultColumn(deck.filter((column) => column.def && column.id !== SEARCH).map((column) => column.def?.channelId
+      ? { id: column.id, posts: hub.channels.get(column.def.channelId)?.latest_entry_id ? [{}] : [] } : column), (id) => {
+      if (deck.find((column) => column.id === id)?.def?.channelId) return true;
       const feed = feeds.get(id);
       return !!feed && !feed.loading && !feed.more;
     });
@@ -396,7 +403,7 @@ export function App() {
     defaultFocusPending.current = false;
     const at = deck.findIndex((column) => column.id === id);
     if (at >= 0) setActive(at);
-  }, [hub.synced, deck, feeds]);
+  }, [hub.synced, deck, feeds, hub.channels]);
   const selectedPost = activeCol?.posts.find((p) => p.id === selection[activeCol.id]);
 
   const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values()), [hub.approvals, hub.questions, hub.tasks]);
@@ -865,10 +872,27 @@ export function App() {
     const k = deck.findIndex((c) => c.id === focusCol);
     if (k >= 0) { setActive(k); setFocusCol(null); }
   }, [deck, focusCol]);
+  const openChannel = (channel: Channel) => {
+    setChannelsOpen(false);
+    setThreadTask(null);
+    if (phone) { setPhoneChannel(channel.id); setActive(0); return; }
+    switchView('custom');
+    const existing = custom.find((column) => column.channelId === channel.id);
+    if (existing) { setFocusCol(existing.id); return; }
+    const def: ColumnDef = { id: crypto.randomUUID(), title: channel.name, channelId: channel.id, filter: {} };
+    setCustom((columns) => [...columns, def]);
+    setFocusCol(def.id);
+  };
+  useEffect(() => {
+    if (!hub.synced) return;
+    setCustom((columns) => columns.some((column) => column.channelId && !hub.channels.has(column.channelId))
+      ? columns.filter((column) => !column.channelId || hub.channels.has(column.channelId)) : columns);
+    if (phoneChannel && !hub.channels.has(phoneChannel)) setPhoneChannel(null);
+  }, [hub.synced, hub.channels, phoneChannel]);
   /** Toggles "작업별로 묶기" on a user column. */
   const toggleByTask = (colId: string) => {
     const col = columns.find((c) => c.id === colId);
-    if (!col) return;
+    if (!col || col.channelId) return;
     if (editable) setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, byTask: !c.byTask } : c)));
     else setViewByTask((b) => ({ ...b, [colId]: !col.byTask }));
     setToast(col.byTask ? `“${col.title}”: 글을 모두 봅니다.` : `“${col.title}”: 작업마다 최근 글 하나만 봅니다.`);
@@ -929,7 +953,7 @@ export function App() {
 
   const goRecent = () => {
     if (phone && threadTask) closeThread();
-    const k = deck.findIndex((c) => c.id !== SEARCH && !!c.def && isAllFilter(c.def.filter));
+    const k = deck.findIndex((c) => c.id !== SEARCH && !!c.def && !c.def.channelId && isAllFilter(c.def.filter));
     if (k < 0) { setToast('전체 컬럼이 없습니다.'); return; }
     setActive(k);
     showNewest(deck[k].id);
@@ -961,7 +985,7 @@ export function App() {
     const text = (search ?? '').trim();
     if (!text) return;
     const def: ColumnDef = { id: crypto.randomUUID(), title: text, filter: parseSearch(text, hub.projects, hub.tasks.values()).filter };
-    const k = custom.findIndex((c) => isAllFilter(c.filter));
+    const k = custom.findIndex((c) => !c.channelId && isAllFilter(c.filter));
     const next = [...custom];
     next.splice(k + 1, 0, def);
     setCustom(next);
@@ -1023,7 +1047,7 @@ export function App() {
   const columnCtx = useMemo(() => {
     const out = new Map<string, ColumnCtx>();
     for (const col of deck) {
-      if (col.id === THREAD) continue;
+      if (col.id === THREAD || col.def?.channelId) continue;
       const c: ColumnCtx = { tasks: new Map(), models: new Map(), approvals: new Map(), questions: new Map(), working: new Set(), drafts: new Set() };
       const addTask = (id: string) => { const t = hub.tasks.get(id); if (t) c.tasks.set(id, t); };
       for (const id of col.def?.filter.taskIds ?? []) addTask(id);
@@ -1064,6 +1088,11 @@ export function App() {
   /** One deck column; the thread is drawn outside the deck when it floats. */
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
+    if (col.def?.channelId) return <ChannelColumn key={col.id} def={col.def} channel={hub.channels.get(col.def.channelId)}
+      active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
+      onPress={() => { setActive(i); setQueueFocus(null); }} onResize={(px) => setWidth(col.id, px)} onManage={() => setChannelsOpen(true)}
+      onClose={() => phone ? setPhoneChannel(null) : deleteColumn(col.id)} onError={setToast} onRead={() => {}}
+      onEdge={edgeColumn} onRecent={goRecent} onBack={phone ? () => setPhoneChannel(null) : undefined} />;
     if (!isThread) {
       const f = feeds.get(col.id);
       return (
@@ -1126,7 +1155,7 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand"><img className="logo" src="/favicon.png" alt="" /><span className="word">Agent Desk</span></div>
+        <div className="brand"><img className="logo" src="/favicon.png?v=sage-20261103" alt="" /><span className="word">Agent Desk</span></div>
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
@@ -1134,11 +1163,13 @@ export function App() {
         </span>
         {!phone && (
           <nav className="views" aria-label="뷰">
-            {VIEWS.map((v) => (
-              <button key={v.id} aria-pressed={view === v.id} title={v.title} onClick={() => switchView(v.id)}>
-                <kbd>{v.key}</kbd>{v.label}
-              </button>
-            ))}
+            {VIEWS.map((v) => {
+              const Icon = VIEW_ICON[v.id];
+              return <button key={v.id} aria-pressed={view === v.id} title={`${v.title} (${v.key})`}
+                aria-label={`${v.label} (${v.key})`} aria-keyshortcuts={v.key} onClick={() => switchView(v.id)}>
+                <Icon aria-hidden="true" /><span>{v.label}</span>
+              </button>;
+            })}
           </nav>
         )}
         <nav className="attn" aria-label="주의가 필요한 작업">
@@ -1178,7 +1209,7 @@ export function App() {
               void hub.refresh();
               // The drawer has done its job; the thread opens beside the column that shows everything.
               setDrawer(false);
-              openThread(task.id, { from: columns.find((c) => isAllFilter(c.filter))?.id });
+              openThread(task.id, { from: columns.find((c) => !c.channelId && isAllFilter(c.filter))?.id });
             }} />
         )}
         <main className={`deck${phone ? ' phone' : ''}`} ref={deckRef}>
@@ -1217,7 +1248,7 @@ export function App() {
           onAddTo={(colId) => { if (threadTask) addToColumn(colId, threadTask); setMenu(null); }}
           onPin={() => { if (threadTask) pinTask(threadTask); setMenu(null); }}
           floating={floatThread} onFloat={phone ? undefined : () => { toggleFloat(); setMenu(null); }}
-          byTask={menuDef >= 0 ? !!columns[menuDef].byTask : undefined}
+          byTask={menuDef >= 0 && !columns[menuDef].channelId ? !!columns[menuDef].byTask : undefined}
           onByTask={() => { toggleByTask(menu.colId); setMenu(null); }}
           onSplit={() => { splitColumn(menu.colId); setMenu(null); }}
           canLeft={menuDef > 0} canRight={menuDef >= 0 && menuDef < columns.length - 1} onClose={() => setMenu(null)}
@@ -1229,7 +1260,8 @@ export function App() {
       )}
       {denying && <DenyDialog approval={denying} onClose={() => setDenying(null)} onDone={() => setDenying(null)} />}
       {columnDialog && (
-        <ColumnDialog column={columnDialog.column} projects={hub.projects} tasks={taskList}
+        <ColumnDialog column={columnDialog.column} projects={hub.projects} tasks={taskList} channels={[...hub.channels.values()]}
+          onManageChannels={() => { setColumnDialog(null); setChannelsOpen(true); }}
           onClose={() => setColumnDialog(null)}
           onSave={(c) => {
             setColumns(columnDialog.column ? columns.map((x) => (x.id === c.id ? c : x)) : [...columns, c]);
@@ -1254,7 +1286,8 @@ export function App() {
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
-      {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
+      {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} onChannels={() => { setModelOpen(false); setChannelsOpen(true); }} />}
+      {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}
     </div>
   );
 }

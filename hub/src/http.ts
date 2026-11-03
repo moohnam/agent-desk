@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join, normalize } from 'node:path';
 import type { Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
-import { parseFeedParams, type FeedFilter, type HubMessage } from '../../shared/api.ts';
+import { parseFeedParams, type FeedFilter, type HubMessage, type MessageReceipt } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Hub } from './hub.ts';
@@ -74,11 +74,25 @@ const DENIED_PAGE = `<!doctype html><html lang="ko"><meta charset="utf-8">
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
 export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
     const route = `${req.method} /${parts.slice(1).map((p, i) => (i % 2 === 1 ? ':id' : p)).join('/')}`;
     const id = parts[2];
+
+    // Producers can only write their own push channel. Even loopback/admin callers need its token;
+    // this exception never grants a producer access to any other hub route.
+    if (req.method === 'POST' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'channels' && parts[3] === 'entries') {
+      try {
+        if (!sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+        const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+        if (!hub.channels.acceptsToken(id, token)) throw new HttpError(401, '이 채널의 입력 토큰이 필요합니다');
+        const b = await readJson(req);
+        return send(res, 200, hub.channels.ingest(id, b.entries === undefined ? b : b.entries));
+      } catch (error) {
+        return send(res, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
 
     // The QR link: remember the device, then drop the token from the address bar.
     if (access.matches(url.searchParams.get('token'))) {
@@ -98,6 +112,23 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       if (url.pathname === '/mcp') return await handleMcp(hub, req, res);
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
       switch (route) {
+        case 'GET /channels':
+          return send(res, 200, hub.channels.list());
+        case 'POST /channels':
+          return send(res, 201, hub.channels.create(await readJson(req) as any));
+        case 'PATCH /channels/:id':
+          return send(res, 200, hub.channels.update(id, await readJson(req)));
+        case 'DELETE /channels/:id':
+          hub.channels.remove(id);
+          return send(res, 200, { ok: true });
+        case 'POST /channels/:id/token':
+          return send(res, 200, hub.channels.rotateToken(id));
+        case 'GET /channels/:id/entries':
+          return send(res, 200, hub.channels.entries(id, intParam(url, 'limit', 60, 200), intParam(url, 'before', undefined), url.searchParams.get('q') ?? ''));
+        case 'POST /channels/:id/read':
+          return send(res, 200, hub.channels.read(id, (await readJson(req)).through_id));
+        case 'POST /channels/:id/refresh':
+          return send(res, 200, await hub.channels.refresh(id));
         case 'GET /state':
           return send(res, 200, { ...hub.state(), client: { local } });
         case 'GET /access': {
@@ -176,7 +207,9 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
         }
         case 'POST /tasks/:id/messages': {
           const b = await readJson(req);
-          return send(res, 202, { ok: true, task_id: hub.sendMessage(id, b.text) });
+          const receipt: MessageReceipt = {};
+          const task_id = hub.sendMessage(id, b.text, false, receipt);
+          return send(res, 202, { ok: true, task_id, ...receipt });
         }
         case 'DELETE /tasks/:id/queue/:id':
           hub.cancelQueued(id, parts[4]);
@@ -261,4 +294,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       send(res, status, { error: err instanceof Error ? err.message : String(err) });
     }
   });
+  server.on('listening', () => hub.channels.start());
+  server.on('close', () => hub.channels.stop());
+  return server;
 }

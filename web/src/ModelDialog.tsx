@@ -34,7 +34,7 @@ function UsageRows({ usage }: { usage: EngineUsage | undefined | null }) {
  * "모델": the model and effort new tasks of each engine start with when the message names none,
  * with how much of each engine's plan limits is used (account-wide, terminal use included).
  */
-export function ModelDialog({ onClose }: { onClose: () => void }) {
+export function ModelDialog({ onClose, onChannels }: { onClose: () => void; onChannels?: () => void }) {
   const cur = useSettings();
   /** Per engine, read separately so each shows as it arrives: missing while loading, null when the hub couldn't answer. */
   const [usage, setUsage] = useState<Partial<Record<EngineName, EngineUsage | null>>>({});
@@ -60,6 +60,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="기본 모델" onClose={onClose}>
       <form onSubmit={submit} className="form">
+        {onChannels && <button type="button" className="btn" onClick={onChannels}>읽기 전용 채널 관리 · 봇 알림 / RSS·Atom</button>}
         <p className="muted small">태그 없이 시작하는 새 작업에 씁니다. 작업마다 모델 태그와 <code>#low</code> … <code>#max</code>
           {' '}태그로 바꿀 수 있고, 바꾼 값은 그 작업에 유지됩니다. <code>#ultra</code>는 Codex에서만 씁니다.</p>
         {ENGINES.map((e) => (
