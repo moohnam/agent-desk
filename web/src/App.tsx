@@ -425,7 +425,8 @@ export function App() {
     pruneDrafts((k, d) => (!d.taskId || hub.tasks.has(d.taskId))
       && (!k.startsWith('question:') || hub.questions.has(k.slice('question:'.length)))
       && (!k.startsWith('ask:') || hub.approvals.has(k.slice('ask:'.length))));
-  }, [hub.synced, hub.tasks, hub.questions, hub.approvals]);
+    pruneDrafts((k) => !k.startsWith('channel-chat:') && !k.startsWith('channel-sources:') || hub.channels.has(k.slice(k.indexOf(':') + 1)));
+  }, [hub.synced, hub.tasks, hub.questions, hub.approvals, hub.channels]);
 
   const widthOf = (id: string) => widths[id] ?? (id === THREAD ? THREAD_WIDTH : DEFAULT_WIDTH);
 
@@ -1090,6 +1091,8 @@ export function App() {
       active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
       onPress={() => { setActive(i); setQueueFocus(null); }} onResize={(px) => setWidth(col.id, px)} onManage={() => setChannelsOpen(true)}
       onClose={() => phone ? setPhoneChannel(null) : deleteColumn(col.id)} onError={setToast} onRead={() => {}}
+      chat={{ projects: hub.projects, tasks: hub.tasks, approvals: hub.approvals, questions: hub.questions, onEvent: hub.onEvent,
+        onOpenTask: (taskId) => openThread(taskId, { from: col.id }), onApproval: (approval, yes) => yes ? allow(approval) : setDenying(approval) }}
       onEdge={edgeColumn} onRecent={goRecent} onBack={phone ? () => setPhoneChannel(null) : undefined} />;
     if (!isThread) {
       const f = feeds.get(col.id);

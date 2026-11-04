@@ -26,3 +26,9 @@ export function safeChannelUrl(value: string | null): string | undefined {
     return ['http:', 'https:'].includes(url.protocol) ? url.href : undefined;
   } catch { return undefined; }
 }
+
+/** A copyable example never contains the once-only producer secret. */
+export function botIngestExample(origin: string, channelId: string): string {
+  const url = new URL(`/api/channels/${encodeURIComponent(channelId).replace(/'/g, '%27')}/entries`, origin).href;
+  return `curl --fail-with-body -X POST '${url}' \\\n  -H "Authorization: Bearer $CHANNEL_TOKEN" \\\n  -H 'Content-Type: application/json' \\\n  --data '{"external_id":"build-42","title":"빌드 완료","body":"테스트를 통과했습니다.","url":"https://example.com/build/42"}'`;
+}

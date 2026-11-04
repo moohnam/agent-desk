@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyChannelUpdates, CHANNEL_ENTRY_CAP, mergeChannelEntries, safeChannelUrl } from '../../web/src/channelEntries.ts';
+import { applyChannelUpdates, botIngestExample, CHANNEL_ENTRY_CAP, mergeChannelEntries, safeChannelUrl } from '../../web/src/channelEntries.ts';
 import type { ChannelEntry } from '../../web/src/types.ts';
 
 const entry = (id: number) => ({ id, channel_id: 'channel', external_id: String(id), title: `entry-${id}`, body: '<T> 2 < 3' } as ChannelEntry);
+test('bot examples use the actual hub/channel endpoint and a secret-free environment placeholder', () => {
+  const example = botIngestExample('https://desk.example.com', 'channel-123');
+  assert.match(example, /https:\/\/desk.example.com\/api\/channels\/channel-123\/entries/);
+  assert.ok(example.includes('Authorization: Bearer $CHANNEL_TOKEN'));
+  assert.ok(example.includes('\\\n'));
+  assert.match(example, /external_id/);
+  assert.doesNotMatch(example, /127\.0\.0\.1/);
+});
 test('channel windows are bounded, deduplicate updates, and can page arbitrarily far back', () => {
   const current = Array.from({ length: CHANNEL_ENTRY_CAP }, (_, index) => entry(1000 - index));
   const live = mergeChannelEntries(current, [entry(1001), { ...entry(999), body: 'updated' }]);

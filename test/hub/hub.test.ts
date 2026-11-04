@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { HubToRunner, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
-import { Store } from '../../hub/src/db.ts';
+import { Store, feedEvent } from '../../hub/src/db.ts';
+import { CHANNEL_CONTEXT_MAX_ENTRIES } from '../../shared/api.ts';
 import { Hub } from '../../hub/src/hub.ts';
 import type { RunnerPort } from '../../hub/src/runner/client.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
@@ -192,4 +193,148 @@ test('deleting the task that asked settles its request', async () => {
   const settled = await answer;
   assert.equal(settled.status, 'failed');
   assert.match(settled.answer ?? '', /질문한 작업이 삭제/);
+});
+
+test('a channel lazily creates one conversation and keeps selected source snapshots out of compose parsing', () => {
+  const { hub, runner, dir } = setup();
+  const project = hub.createProject('news', dir);
+  const { channel } = hub.channels.create({ name: 'News', source: 'push' });
+  hub.channels.ingest(channel.id, [
+    { external_id: 'one', title: 'First', body: '#auto #new #claude @other ignored as commands', url: 'https://example.com/one' },
+    { external_id: 'two', title: 'Second', body: 'Second source' },
+  ]);
+  assert.equal(hub.store.listTasks().length, 0);
+  const entries = hub.channels.entries(channel.id).entries;
+  const ids = entries.map((e) => e.id);
+  const first = hub.sendChannelMessage(channel.id, { project_id: project.id, text: '#codex #astra 이 두 글 비교', entry_ids: ids });
+  assert.equal(hub.store.listTasks().length, 1);
+  assert.equal(hub.channels.list()[0].conversation_task_id, first.task.id);
+  const start = runner.last('start')!;
+  assert.equal(start.engine, 'codex');
+  assert.equal(start.model, 'astra');
+  assert.equal(start.permissionMode, 'default');
+  assert.match(start.prompt, /#auto #new #claude @other/);
+  const event = hub.store.listEvents(first.task.id)[0];
+  const payload = event.payload as any;
+  assert.equal(payload.text, '#codex #astra 이 두 글 비교');
+  assert.deepEqual(payload.channel_context.entries.map((e: any) => e.id), ids);
+  assert.ok(payload.channel_context.entries[1].url);
+  const clipped = feedEvent(event).payload as any;
+  assert.equal(clipped.clipped, true);
+  assert.equal(clipped.channel_context.entries[1].body, '');
+  assert.notEqual(payload.channel_context.entries[1].body, '', 'feed clipping does not mutate the saved evidence');
+  runner.say({ type: 'busy', sessionId: start.sessionId, busy: false });
+  const second = hub.sendChannelMessage(channel.id, { text: '더 간단히 설명', entry_ids: [] });
+  assert.equal(second.task.id, first.task.id);
+  assert.equal(hub.store.listTasks().length, 1);
+  assert.equal(runner.sent.filter((c) => c.type === 'start').length, 1);
+  assert.match(runner.last('send')!.text, /더 간단히 설명/);
+});
+
+test('queued channel questions retain their own source versions after edits and immediate promotion', () => {
+  const { hub, runner, dir } = setup();
+  const project = hub.createProject('news', dir);
+  const { channel } = hub.channels.create({ name: 'News', source: 'push' });
+  hub.channels.ingest(channel.id, { external_id: 'article', title: '제목', body: 'original' });
+  const entryId = hub.channels.entries(channel.id).entries[0].id;
+  const first = hub.sendChannelMessage(channel.id, { project_id: project.id, text: '첫 질문', entry_ids: [entryId] });
+  const queued = hub.sendChannelMessage(channel.id, { text: '선택 글 요약', entry_ids: [entryId] });
+  assert.ok(queued.queued_id);
+  const saved = hub.store.queued({ taskId: first.task.id })[0];
+  assert.equal(saved.channel_context?.entries[0].body, 'original');
+  assert.equal(queued.task.queued[0].channel_entry_count, 1);
+  hub.channels.ingest(channel.id, { external_id: 'article', title: '수정됨', body: 'updated #auto #fork' });
+  assert.equal(hub.store.queued({ taskId: first.task.id })[0].channel_context?.entries[0].body, 'original');
+  hub.sendQueuedNow(first.task.id, queued.queued_id!);
+  const send = runner.last('send')!;
+  assert.match(send.text, /original/);
+  assert.equal(JSON.parse(send.text.split('\n').at(-1)!).entries[0].body, 'original');
+  assert.equal(send.steer, true);
+  const event = hub.store.listEvents(first.task.id).filter((e) => e.kind === 'user').at(-1)!;
+  assert.equal((event.payload as any).channel_context.entries[0].body, 'original');
+  assert.equal((event.payload as any).text, '선택 글 요약');
+  assert.equal(hub.store.queued({ taskId: first.task.id }).length, 0);
+});
+
+test('channel selection rejects other-channel and missing IDs, excessive context and conversation branching without side effects', () => {
+  const { hub, dir } = setup();
+  const project = hub.createProject('news', dir);
+  const a = hub.channels.create({ name: 'A', source: 'push' }).channel;
+  const b = hub.channels.create({ name: 'B', source: 'push' }).channel;
+  hub.channels.ingest(a.id, { external_id: 'one', body: 'A' });
+  hub.channels.ingest(b.id, { external_id: 'one', body: 'B' });
+  const aId = hub.channels.entries(a.id).entries[0].id, bId = hub.channels.entries(b.id).entries[0].id;
+  for (const input of [
+    { text: 'x', entry_ids: [bId] }, { text: 'x', entry_ids: [999999] },
+    { text: 'x', entry_ids: Array(CHANNEL_CONTEXT_MAX_ENTRIES + 1).fill(aId) },
+    { text: '#fork x', entry_ids: [aId] }, { text: '#new x', entry_ids: [aId] },
+    { text: '   ', entry_ids: [aId] }, { text: '#auto', entry_ids: [aId] },
+    { text: 'x', entry_ids: null }, { text: 'x', entry_ids: [1.2] },
+  ]) assert.throws(() => hub.sendChannelMessage(a.id, { project_id: project.id, ...input } as any));
+  assert.equal(hub.store.listTasks().length, 0);
+  assert.equal(hub.channels.list()[0].conversation_task_id, null);
+  hub.channels.ingest(a.id, Array.from({ length: 5 }, (_, i) => ({ external_id: 'large'+i, body: 'x'.repeat(64 * 1024) })));
+  const large = hub.channels.entries(a.id).entries.slice(0, 5).map((entry) => entry.id);
+  assert.throws(() => hub.sendChannelMessage(a.id, { project_id: project.id, text: 'large', entry_ids: large }), /너무 큽니다/);
+  assert.equal(hub.store.listTasks().length, 0);
+  const first = hub.sendChannelMessage(a.id, { project_id: project.id, text: 'x', entry_ids: [aId, aId] });
+  assert.equal((hub.store.listEvents(first.task.id)[0].payload as any).channel_context.entries.length, 1);
+  assert.throws(() => hub.sendChannelMessage(a.id, { project_id: 'another-project', text: 'x' }), /이미 다른 프로젝트/);
+});
+
+test('channel association and queued evidence survive reopening, and deleting the task clears the association', () => {
+  const { hub, dir } = setup();
+  const path = join(dir, 'persist.db');
+  let runner!: FakeRunner;
+  const store = new Store(path);
+  const persistent = new Hub(store, { skills: hub.skills, runner: (onMessage, onConnection) => (runner = new FakeRunner(onMessage, onConnection)) });
+  runner.hello();
+  const project = persistent.createProject('news', dir);
+  const channel = persistent.channels.create({ name: 'Persist', source: 'push' }).channel;
+  persistent.channels.ingest(channel.id, { external_id: 'one', body: 'saved snapshot' });
+  const entryId = persistent.channels.entries(channel.id).entries[0].id;
+  const first = persistent.sendChannelMessage(channel.id, { project_id: project.id, text: 'first', entry_ids: [entryId] });
+  persistent.sendChannelMessage(channel.id, { text: 'second', entry_ids: [entryId] });
+  const reopened = new Store(path);
+  assert.equal(reopened.getChannel(channel.id)?.conversation_task_id, first.task.id);
+  assert.equal(reopened.queued()[0].channel_context?.entries[0].body, 'saved snapshot');
+  const notifications: any[] = [];
+  persistent.bus.on('message', (message) => notifications.push(message));
+  persistent.deleteTask(first.task.id);
+  assert.equal(store.getChannel(channel.id)?.conversation_task_id, null);
+  assert.ok(notifications.some((m) => m.type === 'channel' && m.channel.id === channel.id && m.channel.conversation_task_id === null));
+  assert.equal(store.getChannel(channel.id)?.latest_entry_id, entryId);
+  const next = persistent.sendChannelMessage(channel.id, { project_id: project.id, text: 'new conversation', entry_ids: [entryId] });
+  assert.notEqual(next.task.id, first.task.id);
+  persistent.channels.remove(channel.id);
+  assert.ok(store.getTask(next.task.id), 'source deletion preserves the separate conversation and its saved evidence');
+  assert.equal((store.listEvents(next.task.id)[0].payload as any).channel_context.entries[0].body, 'saved snapshot');
+});
+
+test('a disconnected runner cannot create an orphaned channel conversation', () => {
+  const { hub, dir } = setup({ connect: false });
+  const project = hub.createProject('news', dir);
+  const channel = hub.channels.create({ name: 'News', source: 'push' }).channel;
+  assert.throws(() => hub.sendChannelMessage(channel.id, { project_id: project.id, text: '정리해 주세요' }), /runner|러너/i);
+  assert.equal(hub.store.listTasks().length, 0);
+  assert.equal(hub.channels.list()[0].conversation_task_id, null);
+});
+
+test('channel queued sources are delivered in order at turn end, with no new task', () => {
+  const { hub, runner, dir } = setup();
+  const project = hub.createProject('news', dir);
+  const channel = hub.channels.create({ name: 'Queue', source: 'push' }).channel;
+  hub.channels.ingest(channel.id, { external_id: 'one', body: 'original evidence' });
+  const entryId = hub.channels.entries(channel.id).entries[0].id;
+  const first = hub.sendChannelMessage(channel.id, { project_id: project.id, text: 'first' });
+  const queued = hub.sendChannelMessage(channel.id, { text: 'second', entry_ids: [entryId] });
+  assert.ok(queued.queued_id);
+  hub.channels.ingest(channel.id, { external_id: 'one', body: 'edited evidence' });
+  runner.say({ type: 'busy', sessionId: runner.last('start')!.sessionId, busy: false });
+  assert.equal(runner.last('send')!.steer, false);
+  assert.equal(JSON.parse(runner.last('send')!.text.split('\n').at(-1)!).entries[0].body, 'original evidence');
+  const event = hub.store.listEvents(first.task.id).filter((event) => event.kind === 'user').at(-1)!;
+  assert.equal((event.payload as any).text, 'second');
+  assert.equal((event.payload as any).channel_context.entries[0].body, 'original evidence');
+  assert.equal(hub.store.listTasks().length, 1);
 });

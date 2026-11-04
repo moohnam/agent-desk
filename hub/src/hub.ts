@@ -5,7 +5,8 @@ import {
   DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
   type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from '../../shared/compose.ts';
-import type { Approval, MessageReceipt, Settings, TaskView } from '../../shared/api.ts';
+import type { Approval, ChannelContext, ChannelMessageInput, MessageReceipt, Settings, TaskView } from '../../shared/api.ts';
+import { channelContext, channelPrompt } from './channel-context.ts';
 import { DeskCore, OWNER } from './core.ts';
 import { HttpError } from './errors.ts';
 import { ExternalSessions } from './external.ts';
@@ -207,12 +208,12 @@ export class Hub extends DeskCore {
    * `text` may carry compose syntax; the agent receives it with the mention and mode tag removed.
    * `engine`: the engine when no tag picks one (else the default). `routed`: the compose box's text.
    */
-  createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false) {
+  createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false, context?: ChannelContext) {
     const project = this.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'project not found');
     const c = this.parse(text, routed);
     const engine = this.checkNewTask(c, engine0);
-    const prompt = c.body;
+    const prompt = channelPrompt(c.body, context);
     const permissionMode = c.mode ?? mode;
     const d = this.settings()[engine];
     const model = c.model ?? d.model, effort = c.effort ?? d.effort;
@@ -229,6 +230,7 @@ export class Hub extends DeskCore {
     });
     this.addEvent(sessionId, task.id, 'user', {
       text: text.trim(), mode: permissionMode, skills: c.skills, delivery: c.delivery === 'new' ? 'new' : undefined,
+      ...(context && { channel_context: context }),
     });
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: project.root_path, prompt, permissionMode,
@@ -245,7 +247,7 @@ export class Hub extends DeskCore {
    * or one that continues from a copy of this task's conversation.
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
-  sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt): string {
+  sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context?: ChannelContext): string {
     const c = this.parse(text, routed);
     if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     const session = this.store.latestSession(taskId);
@@ -263,12 +265,13 @@ export class Hub extends DeskCore {
     if (problem) throw new HttpError(400, problem);
     this.requireRunner();
     if (c.delivery === 'fork') return this.fork(taskId, session, c, text);
+    if (c.body || c.skills.length) c.body = channelPrompt(c.body, context);
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
     const content = !!(c.body || c.skills.length);
     // Behind messages already waiting too, so they keep their order.
     const wait = content && c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0);
-    if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery });
+    if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...(context && { channel_context: context }) });
 
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
     // model and the change applies from the next turn.
@@ -294,6 +297,7 @@ export class Hub extends DeskCore {
       this.store.enqueue({
         id, task_id: taskId, session_id: session.id, text: text.trim(), body: c.body,
         skills: c.skills, mode: c.mode ?? null, created_at: now(),
+        ...(context && { channel_context: context }),
       });
       if (receipt) receipt.queued_id = id;
       this.publishTask(taskId);
@@ -302,6 +306,29 @@ export class Hub extends DeskCore {
       this.dispatch(session.id, c.body, c.skills, busy && c.delivery === 'now');
     }
     return taskId;
+  }
+
+  /** One conversation per channel; source snapshots never go through compose/tag parsing. */
+  sendChannelMessage(channelId: string, input: ChannelMessageInput) {
+    if (!input || typeof input.text !== 'string' || !input.text.trim() || Buffer.byteLength(input.text) > 32 * 1024)
+      throw new HttpError(400, '질문을 입력해 주세요 (최대 32 KiB)');
+    const context = channelContext(this.store, channelId, input.entry_ids);
+    const c = this.parse(input.text);
+    if (c.delivery === 'new' || c.delivery === 'fork') throw new HttpError(400, '채널 대화는 하나로 이어집니다. 별도 작업은 일반 작성창에서 시작해 주세요');
+    if (!c.body && !c.skills.length) throw new HttpError(400, '자료에 대해 질문할 내용을 입력해 주세요');
+    const channel = this.store.getChannel(channelId)!;
+    const existing = channel.conversation_task_id && this.store.getTask(channel.conversation_task_id);
+    const receipt: MessageReceipt = {};
+    if (existing) {
+      if (input.project_id && input.project_id !== existing.project_id) throw new HttpError(409, '이 채널의 대화는 이미 다른 프로젝트에 연결되어 있습니다');
+      this.sendMessage(existing.id, input.text, false, receipt, context);
+      return { task: this.taskView(this.store.getTask(existing.id)!), ...receipt };
+    }
+    if (typeof input.project_id !== 'string' || !input.project_id) throw new HttpError(400, '처음 대화할 프로젝트를 선택해 주세요');
+    const task = this.createTask(input.project_id, `${channel.name} · 채널 대화`, input.text, DEFAULT_MODE, undefined, false, context);
+    this.store.updateChannel(channelId, { conversation_task_id: task.id, updated_at: now() });
+    this.publish({ type: 'channel', channel: this.store.getChannel(channelId)! });
+    return { task };
   }
 
   /** Hands a message to the session: to the live one, or by resuming the conversation. */
@@ -338,6 +365,7 @@ export class Hub extends DeskCore {
     if (r) { this.requests.startRequest(r, q.session_id, delivery); return; }
     this.addEvent(q.session_id, q.task_id, 'user', {
       text: q.text, mode: q.mode ?? undefined, skills: q.skills, delivery, queued_at: q.created_at, ...(q.kind === 'handoff' && { handoff: 'request' }),
+      ...(q.channel_context && { channel_context: q.channel_context }),
     });
   }
 
@@ -534,6 +562,7 @@ export class Hub extends DeskCore {
       }
     }
     const gone = new Set(taskIds);
+    const linkedChannels = this.channels.list().filter((channel) => channel.conversation_task_id && gone.has(channel.conversation_task_id));
     for (const r of this.store.openRequests()) {
       if (gone.has(r.to_task_id) && !gone.has(r.from_task_id)) this.requests.settleRequest(r, 'failed', '대상 작업이 삭제되었습니다.');
       else if (gone.has(r.from_task_id) && !gone.has(r.to_task_id)) {
@@ -546,6 +575,7 @@ export class Hub extends DeskCore {
     this.store.deleteTasks(taskIds);
     if (projectId) this.store.deleteProject(projectId);
     this.publish({ type: 'removed', taskIds, projectIds: projectId ? [projectId] : [] });
+    for (const channel of linkedChannels) this.publish({ type: 'channel', channel: this.store.getChannel(channel.id)! });
   }
 
   deleteTask(taskId: string) {

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { api } from './api.ts';
 import { Modal } from './Modal.tsx';
 import { safeChannelUrl } from './channelEntries.ts';
+import { BotGuide } from './BotGuide.tsx';
 import type { Channel, ChannelTokenReceipt } from './types.ts';
 import './channels.css';
 
@@ -51,6 +52,7 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
           <li><strong>채널 추가</strong>를 누른 뒤, 아래 목록에서 해당 채널의 <strong>컬럼에서 열기</strong>를 누릅니다.</li>
         </ol>
         <p>구독 글은 자동으로 수집합니다. 바로 확인하려면 <strong>지금 갱신</strong>을 누르세요. 글이 안 보이면 구독 URL과 최근 수집 오류를 확인하세요.</p>
+        <p>처음에는 RSS가 현재 제공하는 글부터 가져옵니다. 제공처가 최근 30개만 보내면 최초 수집도 30개이며, 사이트의 과거 글 전체를 뜻하지 않습니다. 이후 들어온 글은 계속 누적합니다.</p>
         <h3>봇 알림</h3>
         <p>종류를 <strong>봇 알림 (API)</strong>으로 골라 추가하고, 한 번 표시되는 발행 토큰과 입력 경로를 봇에 연결합니다. 이후 <strong>컬럼에서 열기</strong>로 봇이 보낸 글을 읽습니다.</p>
         <p className="muted">컬럼을 닫아도 구독과 글은 남습니다. F1에서 <kbd>c</kbd>를 눌러 이미 등록한 채널을 다시 고를 수 있습니다. 휴대폰에서는 채널 목록의 <strong>컬럼에서 열기</strong>를 사용하세요.</p>
@@ -63,6 +65,7 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
         <div className="channel-row-actions"><button className="btn" disabled={!navigator.clipboard?.writeText} onClick={() => {
           void navigator.clipboard.writeText(receipt.token!).then(() => setCopied(true), () => setError('복사하지 못했습니다. 토큰을 직접 선택해 복사해 주세요.'));
         }}>{copied ? '복사했습니다' : '토큰 복사'}</button><button className="btn" onClick={() => setReceipt(null)}>보관했습니다</button></div>
+        <BotGuide channelId={receipt.channel.id} />
       </section>}
       {error && <p className="error" role="alert">{error}</p>}
       <form className="channel-form" onSubmit={save}>
@@ -78,6 +81,7 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
         {channel.feed_url && <p className="small channel-url">{channel.feed_url}</p>}
         {channel.last_error && <p className="error">{channel.last_error}</p>}
         {channel.last_checked_at && <p className="muted small">최근 확인 {new Date(channel.last_checked_at).toLocaleString('ko-KR')}</p>}
+        {channel.source === 'push' && <BotGuide channelId={channel.id} />}
         <div className="channel-row-actions">
           <button className="btn" onClick={() => onOpen(channel)}>컬럼에서 열기</button>
           <button className="btn" disabled={busy} onClick={() => { setEditing(channel); setName(channel.name); setSource(channel.source); setUrl(channel.feed_url ?? ''); }}>편집</button>

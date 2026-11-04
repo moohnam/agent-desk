@@ -129,6 +129,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           return send(res, 200, hub.channels.read(id, (await readJson(req)).through_id));
         case 'POST /channels/:id/refresh':
           return send(res, 200, await hub.channels.refresh(id));
+        case 'POST /channels/:id/messages':
+          return send(res, 200, hub.sendChannelMessage(id, await readJson(req) as any));
         case 'GET /state':
           return send(res, 200, { ...hub.state(), client: { local } });
         case 'GET /access': {

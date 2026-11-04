@@ -8,6 +8,7 @@ import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
 import { LongText, Markdown } from './Markdown.tsx';
+import { ChannelSources } from './ChannelSources.tsx';
 import { modelShort } from './projects.ts';
 import type { Approval, HubEvent, Post, Question, TaskView } from './types.ts';
 
@@ -167,6 +168,7 @@ function PostViewInner(props: Props) {
           </LongText>
         )}
 
+        {post.kind === 'user' && p.channel_context && <ChannelSources context={p.channel_context} clipped={!!p.clipped} />}
         {post.kind === 'assistant' && p.questions?.length > 0 && (
           <AsyncChoices post={post} running={task?.status === 'running'} onError={props.onError} />
         )}

@@ -69,7 +69,7 @@ type Mentions = 'route' | 'refer';
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows }: {
+export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; without it, Esc leaves the field. */
   onEscape?: () => void;
@@ -467,7 +467,8 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
                 {!q.kind && <>
                   <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
                     onClick={() => { shortcut.current.reset(); api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message)); }}>지금 보내기</button>
-                  <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>
+                  {q.channel_entry_count === undefined && <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>}
+                  {q.channel_entry_count !== undefined && <span className="muted small">채널 자료 {q.channel_entry_count}개</span>}
                 </>}
                 <button className="link" onClick={() => { shortcut.current.reset(); api.cancelQueued(task.id, q.id).catch((e) => onError(e.message)); }}>취소</button>
               </span>

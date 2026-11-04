@@ -46,6 +46,8 @@ export interface Channel {
   last_error: string | null; next_poll_at: string | null;
   /** Shared by every client of this hub; monotonic, in hub receipt order. */
   read_through_id: number; latest_entry_id: number; unread_count: number;
+  /** One persistent agent conversation, created only when the user first asks. */
+  conversation_task_id?: string | null;
 }
 export interface ChannelEntry {
   id: number; channel_id: string; external_id: string; title: string; body: string;
@@ -56,6 +58,10 @@ export interface ChannelEntryInput {
   external_id: string; title?: string; body: string; url?: string | null;
   author?: string | null; published_at?: string | null;
 }
+export const CHANNEL_CONTEXT_MAX_ENTRIES = 20;
+/** Immutable source snapshots attached to a user message, separate from compose commands. */
+export interface ChannelContext { channel_id: string; channel_name: string; entries: ChannelEntry[] }
+export interface ChannelMessageInput { text: string; entry_ids?: number[]; project_id?: string }
 export interface ChannelInput { name: string; source: 'push' | 'feed'; feed_url?: string; enabled?: boolean }
 /** Only create/rotate returns the producer token, once. */
 export interface ChannelTokenReceipt { channel: Channel; token: string | null }
@@ -79,7 +85,7 @@ export interface TaskView<E = WireEvent> extends Task {
   /** A Codex async question waiting for my next message, which answers it; null when none. */
   pending_ask: { event_id: number; text: string; ts: string } | null;
   /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string; kind?: QueuedKind }[];
+  queued: { id: string; text: string; created_at: string; kind?: QueuedKind; channel_entry_count?: number }[];
   /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
   background: BackgroundTask[];
 }

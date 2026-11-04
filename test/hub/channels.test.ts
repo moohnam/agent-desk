@@ -232,6 +232,7 @@ test('HTTP producer route is isolated from management, including rotation and lo
   assert.equal((await request(`/channels/${b.body.channel.id}/entries`, 'POST', token, entry('no'))).status, 401);
   for (const path of ['/state', '/channels', `/channels/${id}/entries`]) assert.equal((await request(path, 'GET', token)).status, 401, path);
   assert.equal((await request(`/channels/${id}/read`, 'POST', token, { through_id: 1 })).status, 401);
+  assert.equal((await request(`/channels/${id}/messages`, 'POST', token, { text: '에이전트 실행' })).status, 401);
   assert.equal((await request(`/channels/${id}`, 'PATCH', token, { name: 'Hacked' })).status, 401);
   const page = await request(`/channels/${id}/entries?limit=1`, 'GET', 'test-admin');
   assert.equal(page.body.total, 1);

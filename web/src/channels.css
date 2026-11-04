@@ -25,3 +25,21 @@
 .channel-url { overflow-wrap: anywhere; }
 .channel-phone-back { flex: none; padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--col); display: flex; justify-content: space-between; }
 .channel-choice { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.channel-column > .feed[hidden] { display: none; }
+.channel-tabs { display: flex; align-items: center; gap: 12px; flex: none; padding: 0 15px; border-bottom: 1px solid var(--border); }
+.channel-tabs > [role=tab] { appearance: none; padding: 9px 0; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; }
+.channel-tabs > [aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
+.channel-pick { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; color: var(--muted); font-size: 11px; cursor: pointer; }
+.channel-end { margin: 0; padding: 16px; line-height: 1.7; }
+.channel-chat-meta { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 8px; padding: 8px 15px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--border); }
+.channel-chat-feed { min-height: 80px; }
+.channel-project { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+.channel-project select { flex: 1; min-width: 0; }
+.channel-source-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; max-height: 100px; overflow-y: auto; margin-bottom: 8px; }
+.channel-source-chip { appearance: none; background: var(--col-head); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; border: 1px solid var(--line); border-radius: 3px; font-size: 11px; }
+.channel-chat-compose .queued { max-height: 110px; overflow-y: auto; }
+.channel-sources { margin: 8px 0; font-size: 12px; }
+.channel-sources > summary { color: var(--muted); cursor: pointer; }
+.channel-source { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.channel-source > a { margin-left: 8px; color: var(--accent); }
+.channel-source > pre, .bot-guide > pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }

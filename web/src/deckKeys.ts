@@ -39,7 +39,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
   ] },
   { title: '작업·응답', keys: [
     ['i', '새 작업 작성', 'Esc로 닫아도 쓰던 내용은 유지됩니다.'],
-    ['r', '답글 쓰기·질문에 답하기', '글을 선택하지 않으면 컬럼의 작업 또는 최신 글 기준입니다. 터미널 작업은 질문에 답합니다.'],
+    ['r', '답글 쓰기·질문에 답하기', '작업 컬럼은 선택한 글 또는 최신 글 기준입니다. RSS·봇 컬럼은 선택 자료로 채널 대화를 엽니다. 터미널 작업은 질문에 답합니다.'],
     ['y / n', '선택한 글의 작업 승인 / 거절', '질문형 승인 요청에서 y는 답변 화면을 엽니다.'],
     ['s', '선택한 글·스레드의 작업 중단'],
     ['a', '좌측 하단 응답 패널 열기 / 접기', 'j/k로 이동, y/n으로 승인·거절, Enter로 스레드·답변 열기, Esc로 접기.'],
@@ -167,8 +167,8 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       if (used) { e.preventDefault(); return; }
     }
 
-    if (activeCol?.def?.channelId && ['r', 'y', 'n', 's', 'X', 'x', 'p', 'v'].includes(e.key)) {
-      setToast('읽기 전용 채널입니다. 답글·승인·작업 명령은 사용할 수 없습니다.');
+    if (activeCol?.def?.channelId && ['y', 'n', 's', 'X', 'x', 'p', 'v'].includes(e.key)) {
+      setToast('알림 원본에는 작업 명령을 사용할 수 없습니다. 채널 대화는 r로 엽니다.');
       e.preventDefault();
       return;
     }

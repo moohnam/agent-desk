@@ -283,7 +283,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
  * post). `loaded`: the history has arrived; live events alone may show up before it. `more`: older
  * events exist before the shown ones; `loadEarlier` adds the next page of them.
  */
-export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number) {
+export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0) {
   const [{ events, more }, setHistory] = useState<{ events: HubEvent[]; more: boolean }>({ events: [], more: false });
   const [loaded, setLoaded] = useState<string | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
@@ -331,7 +331,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       }
     });
     return () => { alive = false; off(); clearTimeout(timer); gen.current++; };
-  }, [taskId, since, onEvent]);
+  }, [taskId, since, onEvent, reload]);
   const loadEarlier = useCallback(() => {
     const oldest = events[0];
     if (!taskId || !more || !oldest || earlierRequest.current) return;

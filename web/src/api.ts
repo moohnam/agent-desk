@@ -1,5 +1,5 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
-import type { MessageReceipt } from '../../shared/api.ts';
+import type { ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -29,6 +29,7 @@ export const api = {
   rotateChannelToken: (id: string) => call<ChannelTokenReceipt>('POST', `/channels/${encodeURIComponent(id)}/token`),
   refreshChannel: (id: string) => call<Channel>('POST', `/channels/${encodeURIComponent(id)}/refresh`),
   readChannel: (id: string, through_id: number) => call<Channel>('POST', `/channels/${encodeURIComponent(id)}/read`, { through_id }),
+  sendChannel: (id: string, input: ChannelMessageInput) => call<{ task: TaskView } & MessageReceipt>('POST', `/channels/${encodeURIComponent(id)}/messages`, input),
   channelEntries: (id: string, at: { before?: number; q?: string } = {}) => {
     const query = new URLSearchParams({ limit: '100' });
     if (at.before != null) query.set('before', String(at.before));

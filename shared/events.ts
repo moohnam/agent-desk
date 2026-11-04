@@ -3,6 +3,7 @@
 // reads payloads loosely (web/src/types.ts HubEvent).
 
 import type { Delivery, PermissionMode } from './compose.ts';
+import type { ChannelContext } from './api.ts';
 import type { Answers, AsyncQuestion, RunnerEvent } from './protocol.ts';
 
 export type EventKind = 'user' | 'assistant' | 'tool' | 'tool_result' | 'approval' | 'status' | 'update' | 'question';
@@ -26,6 +27,7 @@ export interface StatusPayload { kind: 'status'; state: StatusState; detail?: Re
 
 export interface UserPayload {
   text: string;
+  channel_context?: ChannelContext;
   mode?: PermissionMode;
   skills?: string[];
   delivery?: Delivery;
