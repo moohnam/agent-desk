@@ -1,4 +1,5 @@
-import { ArrowUpRight, ChevronDown } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, MessageCircleQuestion } from 'lucide-react';
+import { useEffect, useId, useRef } from 'react';
 import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
@@ -27,29 +28,44 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
   return out.sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-/** Everything waiting on me, pinned above the deck; hidden when there is nothing. */
+/** A compact bottom-left launcher opens the pending responses without resizing the deck. */
 export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
   items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null; showAll: boolean;
   onShowAll: (v: boolean) => void; onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
-  onOpen: (item: QueueItem) => void; onFocus: (i: number) => void;
+  onOpen: (item: QueueItem) => void; onFocus: (i: number | null) => void;
 }) {
+  const panelId = useId();
+  const list = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const row = focus != null ? list.current?.querySelector<HTMLElement>(`[data-queue-index="${focus}"]`) : null;
+    if (row && !document.activeElement?.closest('[role="dialog"]')) {
+      if (!row.contains(document.activeElement)) row.focus({ preventScroll: true });
+      row.scrollIntoView({ block: 'nearest' });
+    }
+  }, [focus, showAll, items.length]);
   if (!items.length) return null;
   const rows = showAll ? items : items.slice(0, QUEUE_ROWS);
   const rest = items.length - rows.length;
   const cur = focus != null ? items[focus] : undefined;
   return (
-    <section className={`queue${focus != null ? ' focused' : ''}`} aria-label="응답 대기">
+    <aside className="queue-dock" aria-label="응답 대기"
+      onKeyDown={(e) => {
+        // Let native button activation reach the button, rather than the deck's Enter/Space keys.
+        if ((e.key === 'Enter' || e.key === ' ') && (e.target as HTMLElement).closest('button')) e.stopPropagation();
+      }}>
+      {focus != null && <section id={panelId} className="queue focused" aria-label="승인·질문 목록">
       <header className="queue-head">
-        <b>응답 대기 {items.length}</b>
-        <span className="muted">{focus == null ? 'a 키로 대기열 선택'
-          : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name)) ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 나가기'
-          : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 나가기'}</span>
+        <MessageCircleQuestion aria-hidden="true" /><b>응답 대기</b><span className="count">{items.length}</span>
+        <span className="spacer" />
+        <button className="icon-btn" aria-label="응답 대기 접기" title="접기 (Esc)" onClick={() => onFocus(null)}><ChevronDown /></button>
       </header>
+      <div className="queue-list" ref={list}>
       {rows.map((item, i) => {
         const task = tasks.get(item.task_id);
         const engine = task?.engine ?? 'claude';
         return (
-          <div key={item.id} className={`queue-row ${item.kind}${focus === i ? ' selected' : ''}`} onClick={() => onFocus(i)}
+          <div key={item.id} data-queue-index={i} tabIndex={0}
+            className={`queue-row ${item.kind}${focus === i ? ' selected' : ''}`} onClick={() => onFocus(i)} onFocus={() => onFocus(i)}
             onDoubleClick={() => onOpen(item)}>
             <span className={`av mini ${engine}`}>{ENGINE_SHORT[engineOf(engine)]}</span>
             <span className="where" title={task?.title}>
@@ -82,11 +98,20 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
           </div>
         );
       })}
+      </div>
       {(rest > 0 || (showAll && items.length > QUEUE_ROWS)) && (
         <button className="link queue-more" onClick={() => onShowAll(!showAll)}>
           {showAll ? '접기' : <>외 {rest}건 <ChevronDown /></>}
         </button>
       )}
-    </section>
+      <p className="queue-hint">{cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
+        ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 접기'
+        : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 접기'}</p>
+      </section>}
+      <button className="queue-launcher" aria-expanded={focus != null} aria-controls={focus != null ? panelId : undefined}
+        title="승인·질문 목록 열기 / 접기 (a)" onClick={() => onFocus(focus == null ? 0 : null)}>
+        <MessageCircleQuestion aria-hidden="true" /><span>응답 대기</span><b>{items.length}</b>
+      </button>
+    </aside>
   );
 }
