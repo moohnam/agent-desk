@@ -272,6 +272,12 @@ export class Store {
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     return { receipt, changed };
   }
+  /** Deletes all but the channel's `keep` newest entries; returns how many went. */
+  pruneChannelEntries(id: string, keep: number): number {
+    const cut = this.db.prepare('SELECT id FROM channel_entry WHERE channel_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?').get(id, keep - 1) as { id: number } | undefined;
+    if (!cut) return 0;
+    return Number(this.db.prepare('DELETE FROM channel_entry WHERE channel_id = ? AND id < ?').run(id, cut.id).changes);
+  }
   findProjectByName(name: string): Project | undefined {
     return this.db.prepare('SELECT * FROM project WHERE lower(name) = lower(?)').get(name) as unknown as Project | undefined;
   }

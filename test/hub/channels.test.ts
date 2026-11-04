@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AddressInfo } from 'node:net';
 import type { ChannelEntryInput, HubMessage } from '../../shared/api.ts';
-import { Channels, feedUrl, isPublicAddress, MAX_ENTRY_BYTES, MAX_FEED_BYTES, parseFeed, type ChannelOptions, type FeedResponse } from '../../hub/src/channels.ts';
+import { Channels, feedUrl, isPublicAddress, MAX_ENTRY_BYTES, MAX_FEED_BYTES, MAX_FEED_KEPT, parseFeed, stripHtml, type ChannelOptions, type FeedResponse } from '../../hub/src/channels.ts';
 import { Store } from '../../hub/src/db.ts';
 import { Hub } from '../../hub/src/hub.ts';
 import { createHttpServer } from '../../hub/src/http.ts';
@@ -249,4 +249,55 @@ test('HTTP producer route is isolated from management, including rotation and lo
   assert.equal((await request(`/channels/${id}/entries`, 'POST', rotated.body.token, entry('new-token'))).status, 200);
   assert.equal((await request(`/channels/${id}`, 'DELETE')).status, 200);
   assert.equal((await request(`/channels/${id}/entries`, 'POST', rotated.body.token, entry('deleted'))).status, 401);
+});
+
+test('HTML stripping stays linear on hostile feeds and matches the plain cases', () => {
+  // Each of these made the old lazy regexes scan to the end at every opener (quadratic).
+  const desc = (unit: string) => `<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item><guid>x</guid><title>x</title><description>${unit.repeat(Math.floor((MAX_FEED_BYTES - 400) / unit.length))}</description></item></channel></rss>`;
+  for (const unit of ['&lt;a', '&lt;!--', '&lt;script&gt;', '&lt;![CDATA[', '<![CDATA[<a]]>', ' \t']) {
+    const t0 = performance.now();
+    parseFeed(desc(unit), 'https://example.com/feed');
+    assert.ok(performance.now() - t0 < 1500, `${JSON.stringify(unit)} took ${Math.round(performance.now() - t0)} ms`);
+  }
+  assert.equal(stripHtml('<p>a</p><script x>b</script>c<!-- d -->e<br/>f<STYLE>g</style>h'), 'a\nce\nfh');
+  assert.equal(stripHtml('2 < 3 and <b>bold</b> <!-- open'), '2 < 3 and bold <!-- open');
+  assert.equal(stripHtml('x <a href="y" and no end'), 'x <a href="y" and no end');
+  assert.equal(stripHtml('<h2>T</h2><div>a</div><li>b</li>'), 'T\na\nb\n');
+});
+
+test('items with nothing to show are skipped, a link-only item shows its link', () => {
+  const xml = RSS.replace('<item><guid>one</guid>', '<item><guid>empty</guid></item><item><guid>link</guid><link>https://example.com/only</link></item><item><guid>one</guid>');
+  const items = parseFeed(xml, 'https://example.com/feed');
+  assert.deepEqual(items.map((x) => x.external_id), ['one', 'link', 'two']);
+  assert.equal(items[1].title, 'https://example.com/only');
+});
+
+test('a feed channel keeps its newest MAX_FEED_KEPT entries, and long feeds do not churn', async () => {
+  let n = 0;
+  const feed = (from: number, to: number) => `<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>${
+    Array.from({ length: to - from }, (_, i) => `<item><guid>${to - 1 - i}</guid><title>e${to - 1 - i}</title></item>`).join('')}</channel></rss>`;
+  const docs = [feed(0, 1500), feed(0, 1500), feed(0, 1510)];
+  const { channels, events } = setup({ fetchFeed: async () => response(docs[n++]) });
+  const { channel } = channels.create({ name: 'Long', source: 'feed', feed_url: 'https://example.com/long' });
+  await channels.refresh(channel.id);
+  let page = channels.entries(channel.id, 1);
+  assert.equal(page.total, MAX_FEED_KEPT);
+  assert.equal(page.entries[0].external_id, '1499');
+  const before = events.filter((e) => e.type === 'channel_entry').length;
+  await channels.refresh(channel.id);
+  assert.equal(events.filter((e) => e.type === 'channel_entry').length, before, 'the same document adds nothing');
+  await channels.refresh(channel.id);
+  page = channels.entries(channel.id, 1);
+  assert.equal(page.total, MAX_FEED_KEPT);
+  assert.equal(page.entries[0].external_id, '1509');
+});
+
+test('creating a feed while every collection slot is busy still succeeds', () => {
+  const { channels } = setup({ maxConcurrent: 1, tickMs: 60_000, fetchFeed: () => new Promise<FeedResponse>(() => {}) });
+  channels.start();
+  try {
+    channels.create({ name: 'A', source: 'feed', feed_url: 'https://example.com/a' });
+    assert.doesNotThrow(() => channels.create({ name: 'B', source: 'feed', feed_url: 'https://example.com/b' }));
+    assert.equal(channels.list().length, 2);
+  } finally { channels.stop(); }
 });

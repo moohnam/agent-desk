@@ -11,6 +11,8 @@ import { HttpError } from './errors.ts';
 
 export const MAX_FEED_BYTES = 2 * 1024 * 1024;
 export const MAX_ENTRY_BYTES = 64 * 1024;
+/** Entries a feed channel keeps, newest first; older ones are deleted as new ones arrive. */
+export const MAX_FEED_KEPT = 1000;
 export const MAX_FEED_ENTRIES = 2000;
 const POLL_MS = 5 * 60_000, FETCH_MS = 15_000, MAX_CHANNELS = 100;
 const CANCELLED = Symbol('channel collection cancelled');
@@ -125,18 +127,84 @@ function decodeEntities(text: string): string {
       return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : '';
     });
 }
+/**
+ * Text read from one feed field at most: an entry keeps MAX_ENTRY_BYTES, and markup rarely more
+ * than triples text, so the rest of a larger field could not reach the entry anyway.
+ */
+const MAX_FIELD_CHARS = 4 * MAX_ENTRY_BYTES;
+
+// The helpers below scan forward once. Lazy regexes (`<!--[\s\S]*?-->` and the like) restart at every
+// unclosed opener and read to the end of the text each time, which a hostile feed turns into minutes
+// of blocked hub on a 2 MiB document.
+
+/** CDATA sections unwrapped; an unclosed marker stays as text. */
+function unwrapCdata(s: string): string {
+  let out = '', i = 0;
+  for (;;) {
+    const open = s.indexOf('<![CDATA[', i);
+    const close = open < 0 ? -1 : s.indexOf(']]>', open + 9);
+    if (close < 0) return out + s.slice(i);
+    out += s.slice(i, open) + s.slice(open + 9, close);
+    i = close + 3;
+  }
+}
+
+/** Tags that end a line of text. */
+const LINE_END = new Set(['br', '/p', '/div', '/li', '/h1', '/h2', '/h3', '/h4', '/h5', '/h6']);
+
+/**
+ * HTML as text: script and style elements and comments dropped, line-ending tags as newlines, other
+ * tags removed. Text that only looks like a tag (`a < b`, an unclosed `<!--`) stays.
+ */
+export function stripHtml(s: string): string {
+  const lower = s.toLowerCase();
+  let out = '', i = 0;
+  // Once a search finds nothing, a later one from further on cannot either.
+  let noGt = false, noCommentEnd = false;
+  const noCloser = new Set<string>();
+  while (i < s.length) {
+    const lt = s.indexOf('<', i);
+    if (lt < 0) break;
+    out += s.slice(i, lt);
+    if (s.startsWith('<!--', lt)) {
+      const end = noCommentEnd ? -1 : s.indexOf('-->', lt + 4);
+      if (end >= 0) { i = end + 3; continue; }
+      noCommentEnd = true;
+      out += '<'; i = lt + 1; continue;
+    }
+    const m = /^<(\/?)([a-z][a-z0-9-]*)/i.exec(s.slice(lt, lt + 40));
+    if (!m) { out += '<'; i = lt + 1; continue; }
+    const gt = noGt ? -1 : s.indexOf('>', lt + m[0].length);
+    // No `>` left: nothing further on can be a tag.
+    if (gt < 0) { noGt = true; out += s.slice(lt); i = s.length; break; }
+    const name = m[2].toLowerCase();
+    if (!m[1] && (name === 'script' || name === 'style') && !noCloser.has(name)) {
+      const closer = lower.indexOf(`</${name}`, gt + 1);
+      const end = closer < 0 ? -1 : s.indexOf('>', closer);
+      if (end >= 0) { i = end + 1; continue; }
+      noCloser.add(name);
+    }
+    if (LINE_END.has(m[1] + name)) out += '\n';
+    i = gt + 1;
+  }
+  return out + s.slice(i);
+}
+
+/** Trailing spaces off each line, at most one blank line in a row. */
+function tidyLines(s: string): string {
+  return s.replace(/\r/g, '').split('\n').map((line) => line.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function htmlText(v: unknown): string {
-  const raw = stringValue(v);
+  const raw = stringValue(v).slice(0, MAX_FIELD_CHARS);
   // CDATA already contains HTML; encoded Atom/RSS content first needs its XML layer decoded.
   // Decode HTML entities only after removing tags, preserving literal comparisons such as &lt; 3.
-  const text = raw.includes('<![CDATA[') ? raw.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1') : decodeEntities(raw);
-  return decodeEntities(text.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<!--[\s\S]*?-->/g, '').replace(/<(?:br|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/gi, '\n')
-    .replace(/<\/?[a-z][^>]*>/gi, '')).replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const text = raw.includes('<![CDATA[') ? unwrapCdata(raw) : decodeEntities(raw);
+  return tidyLines(decodeEntities(stripHtml(text)));
 }
 function plainXmlText(v: unknown): string {
-  const raw = stringValue(v);
-  return (raw.includes('<![CDATA[') ? raw.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1') : decodeEntities(raw)).trim();
+  const raw = stringValue(v).slice(0, MAX_FIELD_CHARS);
+  return (raw.includes('<![CDATA[') ? unwrapCdata(raw) : decodeEntities(raw)).trim();
 }
 function atomText(v: unknown): string {
   const type = v && typeof v === 'object' ? (v as Record<string, unknown>)['@_type'] : undefined;
@@ -167,7 +235,7 @@ export function parseFeed(xml: string, base: string): ChannelEntryInput[] {
   if (!atom && !rss) throw new Error('RSS 또는 Atom 피드가 아닙니다');
   const items: Record<string, any>[] = atom ? array(atom.entry) : array(rss.item);
   if (items.length > MAX_FEED_ENTRIES) items.length = MAX_FEED_ENTRIES;
-  return items.map((item) => {
+  return items.map((item): ChannelEntryInput | null => {
     const atomLink = atom && array<Record<string, any>>(item.link).find((l) => !l['@_rel'] || l['@_rel'] === 'alternate');
     let url: string | null = null;
     try { url = externalLink(atom ? atomLink?.['@_href'] : stringValue(item.link), base); } catch { /* unsafe link is omitted */ }
@@ -178,9 +246,13 @@ export function parseFeed(xml: string, base: string): ChannelEntryInput[] {
     const rawDate = stringValue(item.published ?? item.pubDate ?? item.updated ?? item.date);
     const published = rawDate && Number.isFinite(Date.parse(rawDate)) ? new Date(rawDate).toISOString() : null;
     const author = htmlText(atom ? item.author?.name ?? atom.author?.name : item.creator ?? item.author) || null;
-    return { external_id: Buffer.byteLength(identity) > 2048 ? `sha256:${hash(identity)}` : identity, title, body: truncateBytes(body || title, MAX_ENTRY_BYTES), url,
+    // An item with only a link (or an image) shows its link; one with nothing to show is skipped,
+    // not left to fail the whole feed.
+    const shown = title || (body ? '' : url ?? '');
+    if (!shown && !body) return null;
+    return { external_id: Buffer.byteLength(identity) > 2048 ? `sha256:${hash(identity)}` : identity, title: shown, body: truncateBytes(body || shown, MAX_ENTRY_BYTES), url,
       author: author?.slice(0, 500), published_at: published };
-  }).reverse(); // Feed documents are usually newest first; receipt sequence stays oldest -> newest.
+  }).filter((x): x is ChannelEntryInput => x !== null).reverse(); // Feed documents are usually newest first; receipt sequence stays oldest -> newest.
 }
 
 function truncateBytes(text: string, max: number): string {
@@ -227,7 +299,11 @@ export class Channels {
       last_success_at: null, last_error: null, next_poll_at: url ? ts : null,
       etag: null, last_modified: null, failure_count: 0, read_through_id: 0 });
     const channel = this.emit(id);
-    if (this.timer && channel.source === 'feed' && channel.enabled) void this.refresh(id).catch(() => {});
+    // Collected right away when a slot is free; else the next tick does it (next_poll_at is now).
+    // refresh() throws synchronously when busy, which must not fail a channel already created.
+    if (this.timer && channel.source === 'feed' && channel.enabled && this.active.size < (this.options.maxConcurrent ?? 2)) {
+      try { void this.refresh(id).catch(() => {}); } catch { /* the tick retries */ }
+    }
     return { channel, token };
   }
   update(id: string, input: { name?: string; enabled?: boolean; feed_url?: string }): Channel {
@@ -312,7 +388,7 @@ export class Channels {
     for (const channel of this.list()) {
       if (this.active.size >= (this.options.maxConcurrent ?? 2)) break;
       if (channel.source === 'feed' && channel.enabled && (!channel.next_poll_at || Date.parse(channel.next_poll_at) <= this.clock()))
-        void this.refresh(channel.id).catch(() => {});
+        try { void this.refresh(channel.id).catch(() => {}); } catch { /* retried on a later tick */ }
     }
   }
   refresh(id: string): Promise<Channel> {
@@ -340,8 +416,13 @@ export class Channels {
       if (latest.feed_url !== c.feed_url || !latest.enabled) return this.store.getChannel(id)!;
       if (response.status !== 304) {
         if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
-        const inputs = parseFeed(response.body, c.feed_url!);
-        if (inputs.length) this.ingest(id, inputs, true);
+        // Only the newest MAX_FEED_KEPT: older items of a long feed would come back as new after being
+        // deleted, every poll.
+        const inputs = parseFeed(response.body, c.feed_url!).slice(-MAX_FEED_KEPT);
+        if (inputs.length) {
+          this.ingest(id, inputs, true);
+          if (this.store.pruneChannelEntries(id, MAX_FEED_KEPT)) this.emit(id);
+        }
       }
       this.store.updateChannel(id, { last_checked_at: ts, last_success_at: ts, last_error: null, failure_count: 0,
         next_poll_at: new Date(this.clock() + (this.options.pollMs ?? POLL_MS)).toISOString(),
