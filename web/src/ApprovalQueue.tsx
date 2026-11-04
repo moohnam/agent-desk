@@ -1,5 +1,5 @@
 import { ArrowUpRight, ChevronDown, MessageCircleQuestion } from 'lucide-react';
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
@@ -36,28 +36,46 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
 }) {
   const panelId = useId();
   const list = useRef<HTMLDivElement>(null);
+  // The list shows whenever something waits, not only in keyboard mode (`focus`, entered with `a`).
+  // Folded away, it opens again when a new item arrives.
+  const [folded, setFolded] = useState(false);
+  const seen = useRef(items.length);
+  useEffect(() => {
+    if (items.length > seen.current) setFolded(false);
+    seen.current = items.length;
+  }, [items.length]);
+  const open = focus != null || !folded;
+  // Keyboard mode moves the focus to the chosen row, only when the choice changes and never out of
+  // a field being typed in or a dialog: a row taking the focus there would turn the next `y` typed
+  // into an approval.
   useEffect(() => {
     const row = focus != null ? list.current?.querySelector<HTMLElement>(`[data-queue-index="${focus}"]`) : null;
-    if (row && !document.activeElement?.closest('[role="dialog"]')) {
-      if (!row.contains(document.activeElement)) row.focus({ preventScroll: true });
-      row.scrollIntoView({ block: 'nearest' });
-    }
-  }, [focus, showAll, items.length]);
+    const active = document.activeElement as HTMLElement | null;
+    if (!row || active?.closest('[role="dialog"], input, textarea, select, [contenteditable="true"]')) return;
+    if (!row.contains(active)) row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: 'nearest' });
+  }, [focus]);
   if (!items.length) return null;
   const rows = showAll ? items : items.slice(0, QUEUE_ROWS);
   const rest = items.length - rows.length;
   const cur = focus != null ? items[focus] : undefined;
   return (
     <aside className="queue-dock" aria-label="응답 대기"
+      // Leaving the panel (for the compose box, a column) ends keyboard mode, so y/n act on the deck
+      // again; a dialog opened from the panel (deny) keeps it.
+      onBlur={(e) => {
+        const to = e.relatedTarget as HTMLElement | null;
+        if (focus != null && to && !e.currentTarget.contains(to) && !to.closest('[role="dialog"]')) onFocus(null);
+      }}
       onKeyDown={(e) => {
         // Let native button activation reach the button, rather than the deck's Enter/Space keys.
         if ((e.key === 'Enter' || e.key === ' ') && (e.target as HTMLElement).closest('button')) e.stopPropagation();
       }}>
-      {focus != null && <section id={panelId} className="queue focused" aria-label="승인·질문 목록">
+      {open && <section id={panelId} className={`queue${focus != null ? ' focused' : ''}`} aria-label="승인·질문 목록">
       <header className="queue-head">
         <MessageCircleQuestion aria-hidden="true" /><b>응답 대기</b><span className="count">{items.length}</span>
         <span className="spacer" />
-        <button className="icon-btn" aria-label="응답 대기 접기" title="접기 (Esc)" onClick={() => onFocus(null)}><ChevronDown /></button>
+        <button className="icon-btn" aria-label="응답 대기 접기" title="접기" onClick={() => { setFolded(true); onFocus(null); }}><ChevronDown /></button>
       </header>
       <div className="queue-list" ref={list}>
       {rows.map((item, i) => {
@@ -104,14 +122,14 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
           {showAll ? '접기' : <>외 {rest}건 <ChevronDown /></>}
         </button>
       )}
-      <p className="queue-hint">{cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
-        ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 접기'
-        : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 접기'}</p>
+      <p className="queue-hint">{focus == null ? 'a 키로 목록 선택 · 버튼으로 바로 승인·거절' : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
+        ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 목록 선택 끝내기'
+        : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 목록 선택 끝내기'}</p>
       </section>}
-      <button className="queue-launcher" aria-expanded={focus != null} aria-controls={focus != null ? panelId : undefined}
-        title="승인·질문 목록 열기 / 접기 (a)" onClick={() => onFocus(focus == null ? 0 : null)}>
+      {!open && <button className="queue-launcher" aria-expanded={false} aria-controls={panelId}
+        title="승인·질문 목록 펼치기 (a: 목록 선택)" onClick={() => setFolded(false)}>
         <MessageCircleQuestion aria-hidden="true" /><span>응답 대기</span><b>{items.length}</b>
-      </button>
+      </button>}
     </aside>
   );
 }
