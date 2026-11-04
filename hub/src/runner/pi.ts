@@ -29,6 +29,31 @@ const READY_MS = 30_000;
 
 type Json = any;
 
+/**
+ * Small local models often announce the next step ("목록부터 확인해 보겠습니다") and end the turn
+ * without calling a tool. pi is told not to, and a run that still ends that way is sent on.
+ */
+const KEEP_GOING = '[데스크 진행 규칙] 다음에 할 일을 말로만 예고하고 응답을 끝내지 마세요. 할 일이 정해지면 같은 응답에서 바로 도구를 호출해 진행합니다. 작업을 끝냈거나, 사용자의 판단·정보가 꼭 필요할 때만 멈추고 그 이유를 말합니다.';
+const NUDGE = '계속 진행하세요. 방금 예고한 다음 단계를 지금 바로 도구로 실행하고, 끝까지 진행한 뒤 결과를 알려 주세요.';
+/** Nudges per message of the user, so a model that keeps announcing can't loop. */
+const MAX_NUDGES = 2;
+
+/**
+ * Whether a reply that ended the run only announced its next step: its last sentence says what it
+ * will do (Korean "-겠습니다/-ㄹ게요", English "I'll/let me") or it ends in a tool call written out as
+ * text, and it asks nothing.
+ */
+export function announcesNextStep(text: string): boolean {
+  const t = text.trim();
+  if (!t || /[?？]\s*$/.test(t)) return false;
+  // A tool call written out instead of made: a command link (`[파일 목록 확인](bash://ls -R)`) or a
+  // closing shell code block.
+  if (/\]\((?!https?:|file:|mailto:)[a-z][\w+.-]*:\/\/[^)]*\)[\s.]*$/i.test(t)) return true;
+  if (/```(?:bash|sh|shell|zsh|console)\n[^`]*```\s*$/i.test(t)) return true;
+  const last = t.split(/(?<=[.!。…])\s+|\n+/).filter((x) => x.trim()).at(-1) ?? '';
+  return /(겠습니다|겠어요|볼게요|할게요|드릴게요|하겠다)[.!…\s]*$/.test(last) || /\b(I'll|I will|let me|let's)\b/i.test(last);
+}
+
 /** pi's thinking level for a desk effort (pi has the same names). */
 const thinking = (e?: Effort) => (!e ? 'medium' : e === 'ultra' ? 'max' : e);
 
@@ -79,15 +104,35 @@ function ollamaRoot(doc: Json): string {
   return String(doc?.providers?.[PROVIDER]?.baseUrl ?? 'http://127.0.0.1:11434/v1').replace(/\/v1\/?$/, '');
 }
 
+/**
+ * The Ollama model behind a pi model id: the id itself when Ollama has it, else the one Ollama lists
+ * under another name with the same family, version and size (pi's `qwen3.8:27b-mlx` for Ollama's
+ * `hf.co/lmstudio-community/Qwen3.8-27B-GGUF:Q4_K_M`). Undefined when none or several match.
+ */
+export function ollamaModelFor(piId: string, family: string, names: string[]): string | undefined {
+  if (names.includes(piId)) return piId;
+  const id = piId.toLowerCase();
+  const version = id.match(new RegExp(`${family}(\\d+(?:\\.\\d+)?)`))?.[1];
+  const size = id.match(/(\d+(?:\.\d+)?)b\b/)?.[1];
+  if (!version || !size) return undefined;
+  const same = names.filter((n) => {
+    const l = n.toLowerCase();
+    return !n.includes(VARIANT) && l.includes(`${family}${version}`) && new RegExp(`(^|[^\\d.])${size.replace('.', '\\.')}b\\b`).test(l);
+  });
+  return same.length === 1 ? same[0] : undefined;
+}
+
 /** Makes Ollama's variant unless it exists. */
-async function ensureOllamaVariant(root: string, base: string, name: string, ctx: number) {
+async function ensureOllamaVariant(root: string, base: string, family: string, name: string, ctx: number) {
   const post = (path: string, body: Json) => fetch(`${root}${path}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
   });
   if ((await post('/api/show', { model: name })).ok) return;
   // A base Ollama lacks would be looked for in the registry (slow, then a failure).
-  if (!(await post('/api/show', { model: base })).ok) throw new Error(`Ollama에 ${base} 모델이 없습니다 (pi 설정의 모델 이름 확인)`);
-  const res = await post('/api/create', { model: name, from: base, parameters: { num_ctx: ctx }, stream: false });
+  const tags = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(10_000) }).then((r) => r.json()).catch(() => ({}));
+  const from = ollamaModelFor(base, family, (tags?.models ?? []).map((m: Json) => String(m.name)));
+  if (!from) throw new Error(`Ollama에 ${base} 모델이 없습니다 (pi 설정의 모델 이름 확인)`);
+  const res = await post('/api/create', { model: name, from, parameters: { num_ctx: ctx }, stream: false });
   if (!res.ok) throw new Error(`Ollama에 ${name}을(를) 만들지 못했습니다: ${(await res.text()).slice(0, 200)}`);
 }
 
@@ -109,7 +154,7 @@ function prepareVariants(ctx: number): Promise<{ variants: Partial<Record<ModelN
       if (!base) { errors[family] = `pi 모델 목록(${PROVIDER})에 #${family} 계열이 없습니다`; continue; }
       const name = variantName(base, ctx);
       try {
-        await ensureOllamaVariant(root, base, name, ctx);
+        await ensureOllamaVariant(root, base, family, name, ctx);
         doc = withVariant(doc, base, name, ctx) ?? doc;
         variants[family] = name;
       } catch (err) { errors[family] = err instanceof Error ? err.message : String(err); }
@@ -169,6 +214,10 @@ export const startPi: StartEngine = (opts) => {
   let active = false;
   /** An abort was sent: the run's "aborted" error is the interruption, not a failure to show. */
   let aborting = false;
+  /** The run's last reply ended without a tool call and only announced a step (announcesNextStep). */
+  let stalled = false;
+  /** Nudges sent since the user's last message. */
+  let nudges = 0;
   /** Messages waiting for pi to be ready (extension loaded, session known). */
   const waiting: { text: string; skills?: string[]; steer?: boolean }[] = [];
   let ready = false;
@@ -204,7 +253,7 @@ export const startPi: StartEngine = (opts) => {
     running = { model, thinking: thinking(effort) };
     const args = ['--mode', 'rpc', '--provider', PROVIDER, '--model', model, '--thinking', running.thinking,
       // Project-local pi resources are not trusted (their prompt would block a headless run).
-      '--no-approve', '-e', EXTENSION, '--append-system-prompt', deskInstructions(opts.skillsHome),
+      '--no-approve', '-e', EXTENSION, '--append-system-prompt', deskInstructions(opts.skillsHome), '--append-system-prompt', KEEP_GOING,
       ...(opts.skillsHome ? ['--skill', join(opts.skillsHome, 'skills')] : []),
       ...(opts.resume ? [opts.fork ? '--fork' : '--session', opts.resume] : [])];
     const proc = spawn(PI_BIN, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
@@ -286,6 +335,7 @@ export const startPi: StartEngine = (opts) => {
         if (msg.role !== 'assistant') return;
         const text = messageText(msg).trim();
         if (text) event({ kind: 'assistant', text });
+        stalled = msg.stopReason === 'stop' && announcesNextStep(text);
         if (msg.stopReason === 'error' && !aborting) event({ kind: 'status', state: 'error', detail: { message: String(msg.errorMessage ?? '모델 오류') } });
         return;
       }
@@ -305,6 +355,15 @@ export const startPi: StartEngine = (opts) => {
         return;
       case 'agent_settled': {
         if (!active) return;
+        // Stopped at an announcement: sent on (at most MAX_NUDGES times a message), still the same turn.
+        if (!m.aborted && !aborting && stalled && nudges < MAX_NUDGES && !waiting.length) {
+          stalled = false;
+          nudges++;
+          event({ kind: 'status', state: 'warning', detail: { message: 'pi가 할 일을 예고만 하고 멈춰서 이어서 진행하게 했습니다' } });
+          request({ type: 'prompt', message: NUDGE }).catch(() => {});
+          return;
+        }
+        stalled = false;
         active = false;
         aborting = false;
         for (const id of tools) event({ kind: 'tool_result', toolUseId: id, isError: true, text: m.aborted ? '중단됨' : '끝나지 않음' });
@@ -361,6 +420,7 @@ export const startPi: StartEngine = (opts) => {
     }
     if (active) return;
     const next = waiting.shift();
+    nudges = 0;
     if (!next) { emit({ type: 'busy', sessionId, busy: false }); return; }
     active = true;
     void applyModel().then(() => request({ type: 'prompt', message: turnText(next.text, next.skills) })).catch((err: Error) => {
