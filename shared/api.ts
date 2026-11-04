@@ -91,8 +91,7 @@ export interface TaskView<E = WireEvent> extends Task {
 }
 
 /** Desk-wide defaults for new tasks of each engine; null leaves the choice to the engine. */
-/** `context`: pi only, the local models' context size in tokens (PI_CONTEXTS); null: the default. */
-export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null; context?: number | null }>;
+export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
 
 export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'event'; event: E }

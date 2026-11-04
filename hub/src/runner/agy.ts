@@ -11,7 +11,7 @@
 // agy has no interrupt message: interrupting kills the process, and the next message starts a new
 // one that resumes the conversation (`--conversation`). A model change does the same between turns.
 
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ import { createInterface } from 'node:readline';
 import type { Effort, ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
-import { StderrTail, TurnQueue, clipResult, stopTree, type StartEngine } from './engine.ts';
+import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
 
@@ -60,6 +60,34 @@ export function agyModelId(ids: string[], family: string, lvl: string): string |
   const byFamily = ids.filter((id) => id.endsWith(`-${family}-${lvl}`)).map((id) => id.slice(0, -lvl.length - 1));
   const base = latestOfFamily(byFamily, family);
   return base && `${base}-${lvl}`;
+}
+
+/** Everything `root` started, deepest first, as ps shows it now. */
+function descendants(root: number): number[] {
+  let out = '';
+  try { out = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }); } catch { return []; }
+  const kids = new Map<number, number[]>();
+  for (const line of out.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (pid) kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
+  }
+  const found: number[] = [];
+  const walk = (p: number) => { for (const c of kids.get(p) ?? []) { walk(c); found.push(c); } };
+  walk(root);
+  return found;
+}
+
+/**
+ * Stops agy and what it started. agy runs each command in a session of its own (a terminal), which
+ * outlives agy and a signal to its process group, so the commands are found first and signalled one
+ * by one: SIGTERM, then SIGKILL for those still running a few seconds later.
+ */
+function stopTree(proc: ChildProcess, signal: NodeJS.Signals) {
+  const pids = proc.pid ? descendants(proc.pid) : [];
+  proc.kill(signal);
+  const send = (sig: NodeJS.Signals) => { for (const pid of pids) { try { process.kill(pid, sig); } catch { /* already gone */ } } };
+  send('SIGTERM');
+  setTimeout(() => send('SIGKILL'), 3000).unref();
 }
 
 let modelList: Promise<string[]> | null = null;

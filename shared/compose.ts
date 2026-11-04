@@ -29,8 +29,8 @@ export const DEFAULT_MODE: PermissionMode = 'default';
 export const MODE_TAGS: Record<string, PermissionMode> = { auto: 'auto', ask: 'default' };
 export const MODE_LABEL: Record<PermissionMode, string> = { auto: '#auto', default: '#ask' };
 
-export type EngineName = 'claude' | 'codex' | 'agy' | 'pi';
-export type ModelName = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna' | 'argon' | 'flash' | 'gemma' | 'qwen';
+export type EngineName = 'claude' | 'codex' | 'agy';
+export type ModelName = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna' | 'argon' | 'flash';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export const EFFORT_TAGS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
@@ -50,18 +50,8 @@ export const ENGINE_INFO: Record<EngineName, {
     efforts: EFFORT_TAGS, modelOwner: 'Codex', family: true },
   agy: { label: 'Antigravity', tagLabel: 'Antigravity(agy)', short: 'Ag', models: ['argon', 'flash'],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], modelOwner: 'agy(Gemini)', family: true },
-  // Local models through the pi agent (Ollama); a family tag runs its newest, smallest model pi lists.
-  pi: { label: 'Pi', tagLabel: 'pi(로컬 모델)', short: 'Pi', models: ['gemma', 'qwen'],
-    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], modelOwner: 'pi(로컬)', family: true },
 };
 export const DEFAULT_ENGINE: EngineName = 'claude';
-/**
- * Context sizes (tokens) the desk can run pi's local models at. Ollama's OpenAI API ignores a size
- * sent with a request, so the runner makes an Ollama variant of the model with this size (pi.ts).
- * The first is Ollama's own default.
- */
-export const PI_CONTEXTS = [32768, 65536, 131072];
-export const PI_DEFAULT_CONTEXT = PI_CONTEXTS[0];
 export const ENGINES = Object.keys(ENGINE_INFO) as EngineName[];
 const byEngine = <T>(f: (e: EngineName) => T) => Object.fromEntries(ENGINES.map((e) => [e, f(e)])) as Record<EngineName, T>;
 /** A stored engine name as an engine; anything unknown is Claude, the default. */
@@ -91,8 +81,6 @@ export const MODEL_INFO: Record<ModelName, { label: string; help: string }> = {
   luna: { label: 'Luna', help: 'Codex 모델을 Luna 계열 최신으로' },
   argon: { label: 'Argon', help: 'agy 모델을 Gemini Argon 계열 최신으로' },
   flash: { label: 'Flash', help: 'agy 모델을 Gemini Flash 계열 최신으로' },
-  gemma: { label: 'Gemma', help: 'pi 로컬 모델을 Gemma 계열로' },
-  qwen: { label: 'Qwen', help: 'pi 로컬 모델을 Qwen 계열로' },
 };
 export const MODEL_LABEL = Object.fromEntries(MODEL_TAGS.map((m) => [m, MODEL_INFO[m].label])) as Record<ModelName, string>;
 export const modelEngine = (m: ModelName): EngineName => ENGINES.find((e) => ENGINE_MODELS[e].includes(m))!;

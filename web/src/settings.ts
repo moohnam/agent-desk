@@ -3,7 +3,7 @@ import { api } from './api.ts';
 import type { Settings } from './types.ts';
 
 // The desk's defaults for new tasks of each engine, shared by the compose preview and the settings dialog.
-let settings: Settings = { claude: { model: null, effort: null }, codex: { model: null, effort: null }, agy: { model: null, effort: null }, pi: { model: null, effort: null } };
+let settings: Settings = { claude: { model: null, effort: null }, codex: { model: null, effort: null }, agy: { model: null, effort: null } };
 let loading: Promise<void> | null = null;
 const listeners = new Set<(s: Settings) => void>();
 

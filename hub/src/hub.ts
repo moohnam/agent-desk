@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, PI_CONTEXTS, PI_DEFAULT_CONTEXT, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
+  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
   type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from '../../shared/compose.ts';
 import type { Approval, ChannelContext, ChannelMessageInput, MessageReceipt, Settings, TaskView } from '../../shared/api.ts';
@@ -114,30 +114,22 @@ export class Hub extends DeskCore {
     const get = (e: EngineName) => ({
       model: (this.store.setting(`${e}_model`) ?? null) as ModelName | null,
       effort: (this.store.setting(`${e}_effort`) ?? null) as Effort | null,
-      ...(e === 'pi' && { context: Number(this.store.setting('pi_context')) || null }),
     });
     return Object.fromEntries(ENGINES.map((e) => [e, get(e)])) as Settings;
   }
   /** Only the engines and keys given change; null clears one. */
-  setSettings(s: Partial<Record<EngineName, { model?: ModelName | null; effort?: Effort | null; context?: number | null }>>): Settings {
+  setSettings(s: Partial<Record<EngineName, { model?: ModelName | null; effort?: Effort | null }>>): Settings {
     const engines = ENGINES.filter((e) => s[e]);
     for (const e of engines) {
-      const { model, effort, context } = s[e]!;
-      if (context != null && (e !== 'pi' || !PI_CONTEXTS.includes(context))) throw new HttpError(400, `${ENGINE_LABEL[e]}에서 쓸 수 없는 컨텍스트 크기입니다: ${context}`);
+      const { model, effort } = s[e]!;
       if (model != null && !ENGINE_MODELS[e].includes(model)) throw new HttpError(400, `${ENGINE_LABEL[e]} 모델이 아닙니다: ${model}`);
       if (effort != null && !ENGINE_EFFORTS[e].includes(effort)) throw new HttpError(400, `${ENGINE_LABEL[e]}에서 쓸 수 없는 effort입니다: ${effort}`);
     }
     for (const e of engines) {
       if (s[e]!.model !== undefined) this.store.setSetting(`${e}_model`, s[e]!.model);
       if (s[e]!.effort !== undefined) this.store.setSetting(`${e}_effort`, s[e]!.effort);
-      if (e === 'pi' && s[e]!.context !== undefined) this.store.setSetting('pi_context', s[e]!.context == null ? null : String(s[e]!.context));
     }
     return this.settings();
-  }
-
-  /** What a session start carries for one engine only: pi's context size (desk setting, else the default). */
-  private startExtras(engine: EngineName): { context?: number } {
-    return engine === 'pi' ? { context: this.settings().pi.context ?? PI_DEFAULT_CONTEXT } : {};
   }
 
   /** With `create`, a missing directory is made (with its parents) instead of refused. */
@@ -242,7 +234,7 @@ export class Hub extends DeskCore {
     });
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: project.root_path, prompt, permissionMode,
-      model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, ...this.startExtras(engine),
+      model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home,
     });
     this.busy.add(sessionId);
     return this.taskView(task);
@@ -351,7 +343,6 @@ export class Hub extends DeskCore {
         type: 'start', sessionId, engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
         resume: session.engine_session_id ?? undefined, permissionMode: session.permission_mode,
         model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home,
-        ...this.startExtras(engineOf(session.engine)),
       });
     }
     this.busy.add(sessionId);
@@ -454,7 +445,6 @@ export class Hub extends DeskCore {
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: parent.cwd, prompt: c.body, resume: parent.engine_session_id, fork: true,
       permissionMode, model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home,
-      ...this.startExtras(engine),
     });
     this.busy.add(sessionId);
     return task.id;
@@ -538,7 +528,6 @@ export class Hub extends DeskCore {
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: old.cwd ?? '', prompt: text, permissionMode: old.permission_mode,
       model: old.model ?? undefined, effort: old.effort ?? undefined, skills: [], skillsHome: this.skills.home,
-      ...this.startExtras(engine),
     });
     this.busy.add(sessionId);
     this.setStatus(taskId, sessionId, 'running');

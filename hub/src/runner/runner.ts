@@ -3,11 +3,10 @@ import { config } from '../config.ts';
 import { startClaude } from './claude.ts';
 import type { StartEngine } from './engine.ts';
 import { startAgy } from './agy.ts';
-import { startPi } from './pi.ts';
 import { startCodex } from './codex.ts';
 
 
-const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy, pi: startPi };
+const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
 
 interface Entry {
   adapter: EngineAdapter | null;
@@ -118,7 +117,7 @@ export class Runner {
           if (!start) throw new Error(`이 러너는 ${cmd.engine} 엔진을 모릅니다. 러너를 다시 시작하세요`);
           entry.adapter = start({
             sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, context: cmd.context,
+            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {

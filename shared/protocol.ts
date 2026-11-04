@@ -38,10 +38,9 @@ export type HubToRunner =
    * directory (skills.ts) the session loads skills from; both engines read the same files.
    * `fork`: start a new conversation from a copy of `resume` instead of continuing it (#fork).
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
-   * `context`: pi only, the local model's context size in tokens.
    */
   | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean;
-      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; context?: number }
+      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
   | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
@@ -117,7 +116,6 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
         && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome)
-        && (m.context === undefined || (typeof m.context === 'number' && Number.isInteger(m.context) && m.context > 0))
         ? m as HubToRunner : 'start: bad fields';
     case 'send': return str(m.text) && strList(m.skills) ? m as HubToRunner : 'send: bad fields';
     case 'set_mode': return MODES.includes(m.permissionMode as string) ? m as HubToRunner : 'set_mode: bad mode';

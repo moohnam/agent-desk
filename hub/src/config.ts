@@ -38,5 +38,4 @@ export const config = {
   },
   codexBin: env.CODEX_BIN || 'codex',
   agyBin: env.AGY_BIN || 'agy',
-  piBin: env.PI_BIN || 'pi',
 };
