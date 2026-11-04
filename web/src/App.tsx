@@ -25,7 +25,7 @@ import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch, taskSearchQuery } from './search.ts';
 import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, defaultColumn, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
-import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask } from './layout.ts';
+import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask, observeThreadSize } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
@@ -726,9 +726,7 @@ export function App() {
   useEffect(() => {
     const feed = threadFeed();
     if (!feed) return;
-    const ro = new ResizeObserver(stickThread);
-    ro.observe(feed);
-    return () => ro.disconnect();
+    return observeThreadSize(feed, stickThread);
   }, [threadTask, threadAt, floatThread]);
   useLayoutEffect(() => {
     const anchor = floatAnchor.current;
@@ -1126,17 +1124,19 @@ export function App() {
             threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
             if (f.scrollTop < 80 && !threadAtBottom.current && threadLoaded && threadMore && !threadLoadingEarlier) loadEarlierThread();
           }}>
-          {threadMore && (
-            <div className="older-posts">
-              <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
-                {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
-              </button>
-            </div>
-          )}
-          {col.placed.map((pp) => renderPost(pp, col.id, i, true))}
-          {col.posts.length === 0 && (
-            <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
-          )}
+          <div className="thread-content">
+            {threadMore && (
+              <div className="older-posts">
+                <button disabled={threadLoadingEarlier} onClick={loadEarlierThread}>
+                  {threadLoadingEarlier ? '불러오는 중…' : <><ArrowUp /> 이전 기록 더 보기</>}
+                </button>
+              </div>
+            )}
+            {col.placed.map((pp) => renderPost(pp, col.id, i, true))}
+            {col.posts.length === 0 && (
+              <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
+            )}
+          </div>
         </div>
         {threadTaskView && (threadTaskView.source === 'external' ? (
           <ExternalNote pending={!!questionOf(threadTaskView.id)}

@@ -73,3 +73,12 @@ export function firstPostBelow(feed: HTMLElement, top: number): HTMLElement | un
   }
   return all[lo];
 }
+
+/** The viewport stays the same size when a deferred diagram/image grows inside it. */
+export function observeThreadSize(feed: HTMLElement, onResize: () => void): () => void {
+  const observer = new ResizeObserver(onResize);
+  observer.observe(feed);
+  const content = feed.querySelector('.thread-content');
+  if (content) observer.observe(content);
+  return () => observer.disconnect();
+}

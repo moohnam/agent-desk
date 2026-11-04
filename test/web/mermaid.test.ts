@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Element } from 'hast';
-import { MAX_DIAGRAM_TEXT, mermaidSource, renderMermaid } from '../../web/src/mermaid.ts';
+import { MAX_DIAGRAM_TEXT, mermaidSource, renderMermaid, renderWhenVisible } from '../../web/src/mermaid.ts';
 import { colorHandDrawnNodes } from '../../web/src/mermaidColors.ts';
 
 const block = (language?: string): Element => ({
@@ -58,4 +58,61 @@ test('automatic colors preserve authored theme customization and non-color theme
   assert.equal(colorHandDrawnNodes(svg, palette, { themeVariables: { mainBkg: '#ffffff' } }), svg);
   assert.equal(colorHandDrawnNodes(svg, { ...palette, theme: 'forest' }, {}), svg);
   assert.equal(colorHandDrawnNodes(svg, { theme: 'redux-color' }, {}), svg);
+});
+
+test('offscreen diagrams wait, cancel stale work, retry on return and retain the completed image', async (t) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+  t.after(() => { if (original) Object.defineProperty(globalThis, 'IntersectionObserver', original); else Reflect.deleteProperty(globalThis, 'IntersectionObserver'); });
+  let notify: (visible: boolean, ratio?: number) => void = () => {};
+  let disconnected = false;
+  const element = {} as HTMLElement;
+  Object.defineProperty(globalThis, 'IntersectionObserver', { configurable: true, value: class {
+    constructor(callback: IntersectionObserverCallback, options: IntersectionObserverInit) {
+      assert.equal(options.rootMargin, undefined, 'do not pre-render outside the viewport');
+      assert.ok(options.threshold);
+      notify = (visible, ratio = visible ? 1 : 0) => callback([{ isIntersecting: visible, intersectionRatio: ratio } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+    }
+    observe(target: HTMLElement) { assert.equal(target, element); }
+    disconnect() { disconnected = true; }
+  } });
+  const attempts: { signal: AbortSignal; finish: () => void }[] = [];
+  const stop = renderWhenVisible(element, (signal) => new Promise<void>((finish) => attempts.push({ signal, finish })));
+  assert.equal(attempts.length, 0);
+  notify(false);
+  notify(true, 0); // Touching the viewport edge is not a visible diagram yet.
+  assert.equal(attempts.length, 0);
+  notify(true);
+  notify(true);
+  assert.equal(attempts.length, 1, 'one attempt per visible interval');
+  notify(false);
+  assert.equal(attempts[0].signal.aborted, true, 'skip stale queued Mermaid renders');
+  notify(true);
+  assert.equal(attempts.length, 2);
+  attempts[0].finish();
+  await Promise.resolve();
+  assert.equal(disconnected, false, 'old completion cannot disconnect a newer attempt');
+  attempts[1].finish();
+  await Promise.resolve();
+  assert.equal(disconnected, true);
+  notify(false);
+  notify(true);
+  assert.equal(attempts.length, 2, 'scrolling back does not redraw completed diagrams');
+  stop();
+});
+
+test('unmount/source replacement aborts pending diagrams even without visibility observer support', async (t) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+  t.after(() => { if (original) Object.defineProperty(globalThis, 'IntersectionObserver', original); else Reflect.deleteProperty(globalThis, 'IntersectionObserver'); });
+  Reflect.deleteProperty(globalThis, 'IntersectionObserver');
+  let signal: AbortSignal | undefined;
+  let finish = () => {};
+  const stop = renderWhenVisible({} as HTMLElement, (value) => {
+    signal = value;
+    return new Promise<void>((resolve) => { finish = resolve; });
+  });
+  assert.equal(signal?.aborted, false);
+  stop();
+  assert.equal(signal?.aborted, true);
+  finish();
+  await Promise.resolve();
 });

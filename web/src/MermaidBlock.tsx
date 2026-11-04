@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Modal } from './Modal.tsx';
-import { renderMermaid } from './mermaid.ts';
+import { renderMermaid, renderWhenVisible } from './mermaid.ts';
 
 export const MermaidBlock = memo(function MermaidBlock({ source }: { source: string }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -9,22 +9,15 @@ export const MermaidBlock = memo(function MermaidBlock({ source }: { source: str
   const [large, setLarge] = useState(false);
   const current = result?.source === source ? result : undefined;
   useEffect(() => {
-    let alive = true;
-    let started = false;
-    const controller = new AbortController();
-    const render = () => {
-      if (!alive || started) return;
-      started = true;
-      void renderMermaid(source, controller.signal).then(
-        (rendered) => { if (alive) setResult({ source, ...rendered }); },
-        () => { if (alive) setResult({ source, error: '도표를 그리지 못했습니다. 아래 원문을 확인해 주세요.' }); });
-    };
-    if (typeof IntersectionObserver === 'undefined') { render(); return () => { alive = false; controller.abort(); }; }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) { observer.disconnect(); render(); }
-    }, { rootMargin: '200px' });
-    if (ref.current) observer.observe(ref.current);
-    return () => { alive = false; controller.abort(); observer.disconnect(); };
+    if (!ref.current) return;
+    return renderWhenVisible(ref.current, async (signal) => {
+      try {
+        const rendered = await renderMermaid(source, signal);
+        if (!signal.aborted) setResult({ source, ...rendered });
+      } catch {
+        if (!signal.aborted) setResult({ source, error: '도표를 그리지 못했습니다. 아래 원문을 확인해 주세요.' });
+      }
+    });
   }, [source]);
   return (
     <div className="mermaid-block" ref={ref} onClick={(e) => e.stopPropagation()}>

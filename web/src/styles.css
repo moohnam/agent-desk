@@ -380,6 +380,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .thread-head h2 { font-size: 14px; font-weight: 650; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread-head .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); margin-top: 4px; padding-left: 28px; }
 .thread-head .meta .pdot { margin-right: 4px; }
+.thread-content { display: flow-root; }
 .thread-feed .post:not(.chain-down) { border-bottom: 1px solid var(--border); }
 .reply-box { flex: none; border-top: 1px solid var(--border); padding: 10px 15px 12px; background: transparent; }
 .reply-box .to { font-size: 12px; color: var(--muted); margin-bottom: 4px; }

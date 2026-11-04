@@ -12,6 +12,32 @@ const CONFIG_KEYS: Record<string, keyof MermaidConfig> = {
   xychart: 'xyChart', railroadAbnf: 'railroad', railroadEbnf: 'railroad', railroadPeg: 'railroad',
 };
 
+/** Defer work until visible, cancel queued work on exit, and keep a completed diagram. */
+export function renderWhenVisible(element: HTMLElement, render: (signal: AbortSignal) => Promise<void>): () => void {
+  let complete = false;
+  let pending: AbortController | undefined;
+  let observer: IntersectionObserver | undefined;
+  const start = () => {
+    if (complete || pending) return;
+    const controller = pending = new AbortController();
+    const finish = () => {
+      if (controller.signal.aborted) return;
+      complete = true;
+      observer?.disconnect();
+    };
+    void render(controller.signal).then(finish, finish);
+  };
+  if (typeof IntersectionObserver === 'undefined') start();
+  else {
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting && entry.intersectionRatio > 0)) start();
+      else { pending?.abort(); pending = undefined; }
+    }, { threshold: 0.001 }); // No prefetch margin: respect feed/body/viewport clipping.
+    observer.observe(element);
+  }
+  return () => { complete = true; pending?.abort(); observer?.disconnect(); };
+}
+
 /** Only fenced Mermaid blocks, not inline code or other languages. */
 export function mermaidSource(node: Element | undefined): string | null {
   const code = node?.children[0];
