@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api } from './api.ts';
-import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, modelTagsOf, type EngineName } from '../../shared/compose.ts';
+import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, PI_CONTEXTS, PI_DEFAULT_CONTEXT, modelTagsOf, type EngineName } from '../../shared/compose.ts';
 import { Modal } from './Modal.tsx';
 import { saveSettings, useSettings } from './settings.ts';
 import { resetTime } from './format.ts';
@@ -16,6 +16,7 @@ function UsageRows({ usage }: { usage: EngineUsage | undefined | null }) {
   if (usage === undefined) return <span className="muted small">불러오는 중…</span>;
   if (usage === null) return <span className="muted small">불러오지 못했습니다</span>;
   if (usage.error && !usage.windows.length) return <span className="muted small">조회 실패: {usage.error}</span>;
+  if (!usage.windows.length) return <span className="muted small">{usage.plan === '로컬' ? '로컬 모델이라 사용량 한도가 없습니다' : '한도 정보가 없습니다'}</span>;
   return (
     <ul className="usage">
       {usage.windows.map((w) => (
@@ -93,6 +94,21 @@ export function ModelDialog({ onClose, onChannels }: { onClose: () => void; onCh
                 ))}
               </div>
             </div>
+            {e === 'pi' && (
+              <div className="field">
+                <span className="lbl">컨텍스트<small>로컬 모델이 한 번에 기억하는 양. 클수록 메모리를 더 씁니다 · 새 세션부터</small></span>
+                <div className="pills" role="radiogroup" aria-label="pi 컨텍스트">
+                  {PI_CONTEXTS.map((n) => {
+                    const on = (pick.pi.context ?? PI_DEFAULT_CONTEXT) === n;
+                    return (
+                      <button key={n} type="button" role="radio" className="toggle" aria-pressed={on} aria-checked={on}
+                        onClick={() => set('pi', { context: n === PI_DEFAULT_CONTEXT ? null : n })}>
+                        {Math.round(n / 1024)}K{n === PI_DEFAULT_CONTEXT ? ' (Ollama 기본)' : ''}</button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </fieldset>
         ))}
         {error && <p className="error">{error}</p>}

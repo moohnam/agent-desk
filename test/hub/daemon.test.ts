@@ -1,3 +1,4 @@
+import { ENGINES } from '../../shared/compose.ts';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
@@ -56,7 +57,7 @@ test('a hub with the token gets the hello with the version and engines', async (
   await s.wait();
   assert.equal(s.lines[0]?.type, 'hello');
   assert.equal(s.lines[0].protocolVersion, PROTOCOL_VERSION);
-  assert.deepEqual(s.lines[0].capabilities.engines, ['claude', 'codex', 'agy']);
+  assert.deepEqual(s.lines[0].capabilities.engines, ENGINES);
   s.socket.destroy();
 });
 

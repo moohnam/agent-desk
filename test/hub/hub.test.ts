@@ -338,3 +338,20 @@ test('channel queued sources are delivered in order at turn end, with no new tas
   assert.equal((event.payload as any).channel_context.entries[0].body, 'original evidence');
   assert.equal(hub.store.listTasks().length, 1);
 });
+
+test('pi context: a desk setting only pi takes, sent with every pi start', () => {
+  const { hub, runner, dir } = setup();
+  runner.engines.add('pi');
+  runner.hello();
+  assert.equal(hub.settings().pi.context, null);
+  assert.equal(hub.settings().claude.context, undefined);
+  assert.throws(() => hub.setSettings({ pi: { context: 1000 } }), /컨텍스트/);
+  assert.throws(() => hub.setSettings({ claude: { context: 65536 } }), /컨텍스트/);
+  hub.compose(`@local:${dir} #pi 요약해 줘`);
+  assert.equal(runner.last('start')!.context, 32768);
+  assert.equal(hub.setSettings({ pi: { context: 65536 } }).pi.context, 65536);
+  hub.compose(`@local#1 #new #pi 다시`);
+  assert.equal(runner.last('start')!.context, 65536);
+  hub.compose(`@local#1 #new #claude 다른 엔진`);
+  assert.equal(runner.last('start')!.context, undefined);
+});

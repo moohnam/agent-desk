@@ -126,7 +126,10 @@ function agy(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
   });
 }
 
-const READERS: Record<EngineName, () => Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>>> = { claude, codex, agy };
+/** pi runs local models: there is no plan, and nothing to read. */
+const pi = async (): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> => ({ plan: '로컬', windows: [] });
+
+const READERS: Record<EngineName, () => Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>>> = { claude, codex, agy, pi };
 
 /** The last reading per engine. Engines are read separately: agy alone takes several seconds. */
 const last = new Map<EngineName, { at: number; value: Promise<EngineUsage> }>();

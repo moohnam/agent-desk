@@ -2,6 +2,7 @@
 // output is cut, the end of a process's stderr, and, for engines that run one turn at a time, the
 // queue of turns and the busy signal that goes with it.
 
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
 import type { EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
 
@@ -9,6 +10,8 @@ import type { EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
 export interface StartOptions {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
   model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string;
+  /** pi only: the local model's context size in tokens. */
+  context?: number;
   emit: (m: RunnerToHub) => void;
 }
 export type StartEngine = (opts: StartOptions) => EngineAdapter;
@@ -86,4 +89,32 @@ export class TurnQueue<T> {
     if (turn !== undefined) this.begin(turn);
     else this.setBusy(false);
   }
+}
+
+/** Everything `root` started, deepest first, as ps shows it now. */
+export function descendants(root: number): number[] {
+  let out = '';
+  try { out = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }); } catch { return []; }
+  const kids = new Map<number, number[]>();
+  for (const line of out.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (pid) kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
+  }
+  const found: number[] = [];
+  const walk = (p: number) => { for (const c of kids.get(p) ?? []) { walk(c); found.push(c); } };
+  walk(root);
+  return found;
+}
+
+/**
+ * Stops an engine process and what it started. agy runs each command in a session of its own (a
+ * terminal), which outlives agy and a signal to its process group, so the commands are found first
+ * and signalled one by one: SIGTERM, then SIGKILL for those still running a few seconds later.
+ */
+export function stopTree(proc: ChildProcess, signal: NodeJS.Signals) {
+  const pids = proc.pid ? descendants(proc.pid) : [];
+  proc.kill(signal);
+  const send = (sig: NodeJS.Signals) => { for (const pid of pids) { try { process.kill(pid, sig); } catch { /* already gone */ } } };
+  send('SIGTERM');
+  setTimeout(() => send('SIGKILL'), 3000).unref();
 }
