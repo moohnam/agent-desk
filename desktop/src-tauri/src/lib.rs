@@ -186,12 +186,41 @@ fn save_image(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// The URL pattern of the hub's origin (`http://127.0.0.1:4317/*`), or None for a host the pattern
+/// syntax can't hold (IPv6).
+fn notification_origin(hub: &Url) -> Option<String> {
+    let host = match hub.host()? {
+        url::Host::Domain(d) => d.to_string(),
+        url::Host::Ipv4(ip) => ip.to_string(),
+        url::Host::Ipv6(_) => return None,
+    };
+    let port = hub.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Some(format!("{}://{host}{port}/*", hub.scheme()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let hub = hub_url();
+            // The hub page may show OS notifications (window.__TAURI__.notification) and nothing
+            // else of the app: its origin only (the URL's path, query, fragment and credentials
+            // dropped), notification permissions only, not the local "hub not running" page.
+            // Tauri panics on a pattern it can't parse, and an IPv6 host ([::1]) is one: such a
+            // hub gets no notifications rather than an app that won't start.
+            if let Some(pattern) = notification_origin(&hub) {
+                app.add_capability(
+                    tauri::ipc::CapabilityBuilder::new("hub-notifications")
+                        .remote(pattern)
+                        .local(false)
+                        .window("main")
+                        .permission("notification:default"),
+                )?;
+            } else {
+                eprintln!("[agent-desk] notifications off: hub address {hub} is not a plain host name or IPv4 address");
+            }
             let mut started = String::new();
             let start = if hub_reachable(&hub) {
                 WebviewUrl::External(hub.clone())

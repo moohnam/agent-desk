@@ -473,12 +473,17 @@ export class Store {
   }
   /**
    * A task's newest event without its payload: the task list only needs when it happened, and a
-   * tool result can be hundreds of KB, sent again with every task update.
+   * tool result can be hundreds of KB, sent again with every task update. A status event keeps its
+   * state (`{ state }`), so a page can tell a turn that finished from one that was interrupted.
    */
   lastEvent(taskId: string): Event | undefined {
-    const row = this.db.prepare('SELECT id, session_id, task_id, ts, kind FROM event WHERE task_id = ? ORDER BY id DESC LIMIT 1')
-      .get(taskId) as unknown as Omit<Event, 'payload'> | undefined;
-    return row && { ...row, payload: null };
+    const row = this.db.prepare(
+      `SELECT id, session_id, task_id, ts, kind, CASE WHEN kind = 'status' THEN json_extract(payload_json, '$.state') END AS state
+         FROM event WHERE task_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(taskId) as unknown as (Omit<Event, 'payload'> & { state: string | null }) | undefined;
+    if (!row) return undefined;
+    const { state, ...e } = row;
+    return { ...e, payload: state == null ? null : { state } };
   }
 
   createApproval(a: Approval) {

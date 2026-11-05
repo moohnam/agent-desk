@@ -1,4 +1,4 @@
-import { ArrowRight, ArrowUp, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -33,6 +33,7 @@ import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, t
 import { ThreadHead } from './ThreadHead.tsx';
 import { AUTO_ORDER, ColumnMenu } from './ColumnMenu.tsx';
 import { Help } from './Help.tsx';
+import { setNotify, useDeskNotifications, useNotifyState } from './notify.ts';
 import { PANE_DEFAULT, PANE_MAX, PANE_MIN, ResizeHandle, SplitHandle } from './handles.tsx';
 
 /** Typing pauses this long before the search column asks the hub again. */
@@ -597,6 +598,8 @@ export function App() {
     return next;
   });
 
+  const notifyState = useNotifyState();
+  useDeskNotifications(hub, (taskId) => openThread(taskId));
   /**
    * Opens a task's thread. `from`: the column it was opened from; the thread column moves right of
    * it (otherwise it stays where it is). `post`: start reading at that post's top; otherwise the
@@ -1190,6 +1193,20 @@ export function App() {
           <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
             onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
           <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
+          <button className="btn" aria-pressed={notifyState === 'on'} aria-label="알림"
+            title={notifyState === 'on' ? '알림 켜짐: 데스크를 보고 있지 않을 때 승인 요청·질문·작업 끝남·오류를 OS 알림으로 (누르면 끄기)'
+              : notifyState === 'blocked' ? '알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 이 사이트의 알림을 허용하세요'
+              : notifyState === 'unsupported' ? '이 화면에서는 알림을 쓸 수 없습니다 (데스크톱 앱이나 PC 브라우저에서 사용)'
+              : '알림 켜기: 데스크를 보고 있지 않을 때 승인 요청·질문·작업 끝남·오류를 OS 알림으로'}
+            onClick={() => {
+              if (notifyState === 'unsupported') { setToast('이 화면에서는 알림을 쓸 수 없습니다. 데스크톱 앱이나 PC 브라우저에서 켜 주세요.'); return; }
+              void setNotify(notifyState !== 'on').then((s) => {
+                if (s === 'blocked') setToast('알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 허용해 주세요.');
+                else if (s === 'off' && notifyState !== 'on') setToast('알림을 허용하지 않아 켜지 않았습니다.');
+                else setToast(s === 'on' ? '알림을 켰습니다.' : '알림을 껐습니다.');
+              });
+            }}>
+            {notifyState === 'on' ? <Bell /> : <BellOff />}</button>
           <button className="btn" title={`새 작업의 엔진별 기본 모델과 effort: 작업마다 ${ENGINES.map(modelTagsOf).join(' · ')} · #low … #max (${effortNote()})`} aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
