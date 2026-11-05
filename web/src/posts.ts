@@ -1,7 +1,12 @@
 import { ALERT_STATES } from '../../shared/events.ts';
 import type { ColumnFilter, HubEvent, PlacedPost, Post, PostKind, TaskView } from './types.ts';
 
-/** Merges two id-ordered event lists, dropping duplicates and keeping at most `cap` newest. */
+/**
+ * Merges two id-ordered event lists, dropping duplicates and keeping at most `cap` newest. Events
+ * don't change once recorded, so one already held stays the same object (posts built from it are
+ * not drawn again), unless `b` brings it whole where it was cut (`clipped`). Nothing new: `a` itself.
+ * So `a` is the list already held, `b` what was just fetched, older or newer.
+ */
 export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity): HubEvent[] {
   if (!b.length) return a;
   const last = a[a.length - 1];
@@ -12,7 +17,14 @@ export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity): HubEv
   } else {
     const byId = new Map<number, HubEvent>();
     for (const e of a) byId.set(e.id, e);
-    for (const e of b) byId.set(e.id, e);
+    let changed = false;
+    for (const e of b) {
+      const held = byId.get(e.id);
+      if (held && !(held.payload?.clipped && !e.payload?.clipped)) continue;
+      byId.set(e.id, e);
+      changed = true;
+    }
+    if (!changed && a.length <= cap) return a;
     out = [...byId.values()].sort((x, y) => x.id - y.id);
   }
   return out.length > cap ? out.slice(-cap) : out;

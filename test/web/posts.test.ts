@@ -54,6 +54,17 @@ test('merging keeps id order, drops duplicates and caps to the newest', () => {
   assert.deepEqual(mergeEvents([a, c], [b, c, d], 3).map((e) => e.id), [2, 3, 4]);
 });
 
+test('merging a page already held keeps the same objects, unless it brings a cut event whole', () => {
+  const [a, b] = [1, 2].map((id) => ({ ...ev('tool', { name: 'Bash', clipped: true }), id }));
+  const held = [a, b];
+  assert.equal(mergeEvents(held, [{ ...a }, { ...b }]), held);
+  const whole = { ...ev('tool', { name: 'Bash' }), id: 2 };
+  const merged = mergeEvents(held, [{ ...a }, whole]);
+  assert.equal(merged[0], a);
+  assert.equal(merged[1], whole);
+  assert.equal(mergeEvents([whole], [b])[0], whole);
+});
+
 test('a column filter matches by task, kind, status and text', () => {
   const [post] = buildPosts([ev('assistant', { text: 'Fixed the build' })]);
   const task = { id: 't1', project_id: 'p1', status: 'done', title: 'CI' } as TaskView;

@@ -7,6 +7,7 @@ import type { AsyncQuestion } from '../../shared/protocol.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
+import { useNow } from './clock.ts';
 import { LongText, Markdown } from './Markdown.tsx';
 import { ChannelSources } from './ChannelSources.tsx';
 import { modelShort } from './projects.ts';
@@ -40,8 +41,6 @@ interface Props {
   /** Context reset (컨텍스트 재구성) is picking posts: whether this one is picked; unset when it can't be. */
   picked?: boolean;
   onPick?: () => void;
-  /** Changes every clock tick, so the relative time stays fresh in a post that is otherwise unchanged. */
-  tick?: number;
 }
 
 const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
@@ -81,13 +80,18 @@ function samePost(a: Props, b: Props): boolean {
   // Only what the post reads from its task; keep in step with the uses below.
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
   if ((a.task?.status === 'running') !== (b.task?.status === 'running')) return false;
-  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'tick', 'draft', 'picked'] as const) {
+  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked'] as const) {
     if (a[k] !== b[k]) return false;
   }
   return !a.onOpenThread === !b.onOpenThread;
 }
 
 export const PostView = memo(PostViewInner, samePost);
+
+/** "3분 전": kept fresh by the shared clock, without drawing the post again. */
+function RelTime({ iso }: { iso: string }) {
+  return <>{relTime(iso, useNow())}</>;
+}
 
 function PostViewInner(props: Props) {
   const { post, task, model, approval, question, selected, expanded, working, flash, inThread, up, down } = props;
@@ -146,7 +150,7 @@ function PostViewInner(props: Props) {
           {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>}
           <span className="spacer" />
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
-            {relTime(post.event.ts)}
+            <RelTime iso={post.event.ts} />
           </time>
         </div>
         {replyTo && <div className="replying">↳ <b>@{replyTo}</b>에게 답글</div>}

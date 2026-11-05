@@ -254,11 +254,17 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     if (any) bump();
   }), [onEvent]);
 
+  // Events without the deleted tasks', the same array while neither changes: posts are built per array.
+  const withoutGone = useRef(new WeakMap<HubEvent[], { gone: Set<string>; events: HubEvent[] }>());
   const feeds = useMemo(() => {
     const out = new Map<string, ColumnFeed>();
     for (const [id, q] of JSON.parse(sig) as [string, FeedQuery][]) {
       const e = cache.current.get(JSON.stringify(q));
-      if (e) out.set(id, gone.size ? { ...e, events: e.events.filter((x) => !gone.has(x.task_id)) } : e);
+      if (!e) continue;
+      if (!gone.size) { out.set(id, e); continue; }
+      let k = withoutGone.current.get(e.events);
+      if (k?.gone !== gone) withoutGone.current.set(e.events, k = { gone, events: e.events.filter((x) => !gone.has(x.task_id)) });
+      out.set(id, { ...e, events: k.events });
     }
     return out;
   }, [sig, version, gone]);
@@ -270,7 +276,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     if (!key || !cur || !oldest || !cur.more || cur.loading) return;
     set(key, (e) => ({ ...e, loading: true }));
     api.feed(FEED_PAGE, oldest, cur.q).then(
-      (page) => set(key, (e) => ({ ...e, events: mergeEvents(page, e.events), more: page.length >= FEED_PAGE, loading: false })),
+      (page) => set(key, (e) => ({ ...e, events: mergeEvents(e.events, page), more: page.length >= FEED_PAGE, loading: false })),
       () => set(key, (e) => ({ ...e, loading: false })));
   }, []);
 
@@ -306,7 +312,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       if (!alive) return;
       // Older events kept from before (pages loaded earlier) keep their own `more`.
       setHistory((prev) => ({
-        events: mergeEvents(page.events, prev.events),
+        events: mergeEvents(prev.events, page.events),
         more: prev.events.length && page.events.length && prev.events[0].id < page.events[0].id ? prev.more : page.more,
       }));
       setLoaded(key);
@@ -340,7 +346,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     setLoadingEarlier(true);
     api.events(taskId, { before: oldest.id }).then((page) => {
       if (gen.current !== g) return;
-      setHistory((prev) => ({ events: mergeEvents(page.events, prev.events), more: page.more }));
+      setHistory((prev) => ({ events: mergeEvents(prev.events, page.events), more: page.more }));
     }).catch(() => {}).finally(() => {
       if (gen.current === g) { earlierRequest.current = false; setLoadingEarlier(false); }
     });

@@ -520,6 +520,29 @@ export function App() {
     if (top < 0) feed.scrollTop += top;
     else if (bottom > feed.clientHeight) feed.scrollTop += Math.min(top, bottom - feed.clientHeight);
   };
+  /** The post shows at least partly in its column's feed. */
+  const postInView = (colId: string, postId: number) => {
+    const feed = document.querySelector(`section[data-col="${colId}"] .feed`);
+    const el = feed?.querySelector(`[data-post="${postId}"]`);
+    if (!feed || !el) return false;
+    const f = feed.getBoundingClientRect(), box = el.getBoundingClientRect();
+    return box.bottom > f.top && box.top < f.bottom;
+  };
+  /** The first post whose top shows in the column's feed (else the first showing at all). */
+  const topPostInView = (colId: string): number | null => {
+    const feed = document.querySelector(`section[data-col="${colId}"] .feed`);
+    if (!feed) return null;
+    const f = feed.getBoundingClientRect();
+    let partly: number | null = null;
+    for (const el of feed.querySelectorAll<HTMLElement>('[data-post]')) {
+      const box = el.getBoundingClientRect();
+      if (box.bottom <= f.top) continue;
+      if (box.top >= f.bottom) break;
+      if (box.top >= f.top) return Number(el.dataset.post);
+      partly ??= Number(el.dataset.post);
+    }
+    return partly;
+  };
   // Pressed into a column with the pointer: its feed must not jump to an older selection under the
   // press, or the release lands on another post and the click is lost.
   const pressing = useRef(false);
@@ -531,13 +554,23 @@ export function App() {
     deckRef.current?.scrollTo({ left: 0 });
     for (const f of deckRef.current?.querySelectorAll<HTMLElement>('section[data-col] .feed') ?? []) f.scrollTop = 0;
   }, [view]);
-  // Keep the selected post (or column) visible.
+  // Keep the selected post (or column) visible. Coming into a column whose post selected last is out
+  // of view (scrolled away from, or pushed down by new posts), the post at the top of its view is
+  // selected instead: the feed stays where the user left it.
+  const revealedCol = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!activeCol) return;
+    const entered = revealedCol.current !== activeCol.id;
+    revealedCol.current = activeCol.id;
     // The split thread is always in view; the deck beside it stays where it is.
     if (!(floatThread && activeCol.id === THREAD)) revealColumn(activeCol.id, activeCol.id === THREAD ? deck[activeIdx - 1]?.id : undefined);
     const id = selection[activeCol.id];
-    if (id != null && !pressing.current) revealPost(activeCol.id, id);
+    if (id == null || pressing.current) return;
+    if (entered && activeCol.id !== THREAD) {
+      const top = postInView(activeCol.id, id) ? id : topPostInView(activeCol.id);
+      if (top != null && top !== id) { select(activeCol.id, top); return; }
+    }
+    revealPost(activeCol.id, id);
   }, [activeCol?.id, selection]);
   // The thread column eases in where it opens (or moves to) rather than popping up.
   const threadAt = threadTask ? threadSlot(threadAfter) : null;
@@ -1027,7 +1060,7 @@ export function App() {
       approval={p.kind === 'approval' ? hub.approvals.get(p.event.payload.approvalId) : undefined}
       question={p.kind === 'question' ? hub.questions.get(p.event.payload.questionId) : undefined} onError={setToast}
       colId={colId} selected={i === activeIdx && selection[colId] === p.id} flash={flash === p.id}
-      expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread} tick={tick}
+      expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread}
       draft={draftPosts.has(`${colId}:${p.id}`)}
       picked={inThread && handoff?.open && pickable(p.event) ? handoff.picked.includes(p.event.id) : undefined}
       onPick={() => togglePick(p.taskId, p.event.id)}

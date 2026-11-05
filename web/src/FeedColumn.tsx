@@ -13,6 +13,8 @@ export const EXTERNAL_NOTE = '터미널 세션입니다. 에이전트가 질문�
 
 /** Posts a feed column draws at first, and adds at a time near its bottom. */
 export const DRAWN = 40, DRAW_STEP = 60;
+/** Drawn in a column off screen until it first comes into view: a view switch mounts far fewer posts. */
+const DRAWN_HIDDEN = 8;
 /** How near the bottom (px) a feed draws or loads more. */
 export const EXTEND_PX = 600;
 /** How long a feed stays at its top before it draws only its newest posts again. */
@@ -62,7 +64,16 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   // is unset. Posts arriving above do not push drawn ones out. The rest stay loaded, drawn as the
   // feed nears its bottom or the selection goes there.
   const [floor, setFloor] = useState<number | null>(null);
-  const base = floor == null ? Math.min(DRAWN, placed.length) : (() => {
+  const sectionRef = useRef<HTMLElement>(null);
+  const [seen, setSeen] = useState(typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    if (seen || !sectionRef.current) return;
+    // A floor set while hidden (a selection restored below the first posts) would hold the column short.
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setSeen(true); setFloor(null); } });
+    io.observe(sectionRef.current);
+    return () => io.disconnect();
+  }, [seen]);
+  const base = floor == null ? Math.min(seen ? DRAWN : DRAWN_HIDDEN, placed.length) : (() => {
     const k = placed.findIndex((x) => x.post.id < floor);
     return k < 0 ? placed.length : k;
   })();
@@ -74,12 +85,13 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   const feedRef = useRef<HTMLDivElement>(null);
   /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
   const extend = (feed: HTMLElement) => {
+    if (!seen) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
     if (count < placed.length) setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
     if (more && !loading && placed.length - count <= 2 * DRAW_STEP) act.current.older(id);
   };
   // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
-  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded]);
+  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen]);
   // Back at the top for a while: draw only the newest posts again (the rest stay loaded).
   const shrink = useRef(0);
   useEffect(() => () => clearTimeout(shrink.current), []);
@@ -91,7 +103,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
     if (floor != null) shrink.current = window.setTimeout(() => setFloor(null), SHRINK_MS);
   };
   return (
-    <section data-col={id} className={`column${active ? ' focused' : ''}`} style={{ '--w': `${width}px` } as CSSProperties}
+    <section ref={sectionRef} data-col={id} className={`column${active ? ' focused' : ''}`} style={{ '--w': `${width}px` } as CSSProperties}
       onMouseDown={() => act.current.press(id)}>
       {head ?? (
         <ColumnHead def={col.def!} loaded={col.posts.length} total={total} projects={projects} tasks={ctx.tasks}
@@ -118,7 +130,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
                   approval={p.kind === 'approval' ? ctx.approvals.get(p.event.payload.approvalId) : undefined}
                   question={p.kind === 'question' ? ctx.questions.get(p.event.payload.questionId) : undefined} onError={onError}
                   colId={id} selected={selected === p.id} flash={flash === p.id} expanded={expanded.has(p.id)}
-                  working={ctx.working.has(p.id)} inThread={false} tick={tick} draft={ctx.drafts.has(p.id)}
+                  working={ctx.working.has(p.id)} inThread={false} draft={ctx.drafts.has(p.id)}
                   onSelect={() => act.current.select(id, p.id)} onToggle={() => act.current.toggle(p.id)}
                   onAllow={() => act.current.allow(p)} onDeny={() => act.current.deny(p)}
                   onOpenThread={() => act.current.openThread(p.taskId, id, p.id)} />
