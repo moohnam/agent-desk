@@ -421,6 +421,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
       setText(''); setPick(null);
     }
     setSent(r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
+      : r.answered ? '에이전트의 질문에 이 답글로 답했습니다.'
       : r.queued_id ? `대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.${fromShortcut ? ' 입력을 바꾸지 않고 ⌘Enter를 한 번 더 누르면 지금 보냅니다.' : ''}`
       : running && delivery !== 'now' && content ? '대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.' : null);
     if (request !== null) await promote(shortcut.current.finish(request, r.task_id === task.id ? r.queued_id : undefined));

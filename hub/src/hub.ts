@@ -17,7 +17,7 @@ import { Store, now, type Queued, type Session } from './db.ts';
 import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
 import { RunnerClient, type RunnerFactory } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
-import type { Answers, LiveSession, RunnerToHub } from '../../shared/protocol.ts';
+import { ASK_USER, type Answers, type LiveSession, type RunnerToHub } from '../../shared/protocol.ts';
 
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
 const RUNNER_GRACE_MS = 5000;
@@ -244,7 +244,8 @@ export class Hub extends DeskCore {
    * A mode tag alone (e.g. "#auto") only switches the session's mode, even mid-turn. While the task
    * is working, a message waits until the turn ends (#later, the default), joins the running turn
    * (#now). #new and #fork start a new task instead, busy or not: a fresh one in the same project,
-   * or one that continues from a copy of this task's conversation.
+   * or one that continues from a copy of this task's conversation. While the agent waits on its
+   * multiple-choice question, a message is the answer to it (askedReply), not a message for later.
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
   sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context?: ChannelContext): string {
@@ -269,8 +270,11 @@ export class Hub extends DeskCore {
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
     const content = !!(c.body || c.skills.length);
+    // The agent's question waiting for a pick: the message answers it instead of the options.
+    const asked = live && c.body && !c.skills.length
+      ? this.store.pendingApprovals().find((a) => a.session_id === session.id && a.tool_name === ASK_USER) : undefined;
     // Behind messages already waiting too, so they keep their order.
-    const wait = content && c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0);
+    const wait = !asked && content && c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0);
     if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...(context && { channel_context: context }) });
 
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
@@ -291,6 +295,11 @@ export class Hub extends DeskCore {
       this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'mode', detail: { mode: c.mode } });
     }
     if (!content) return taskId;
+    if (asked) {
+      this.askedReply(asked, engine, c.body);
+      if (receipt) receipt.answered = true;
+      return taskId;
+    }
 
     if (wait) {
       const id = randomUUID();
@@ -591,8 +600,23 @@ export class Hub extends DeskCore {
   /** The working directory of a task's latest session, for resolving relative links in its replies. */
   cwdOf(taskId: string): string | undefined { return this.store.latestSession(taskId)?.cwd ?? undefined; }
 
-  /** `answers`: the user's picks when the approval is an agent's question (ASK_USER). */
-  resolveApproval(approvalId: string, allow: boolean, message?: string, answers?: Answers) {
+  /**
+   * A message sent while the agent's question waits: taken as the answer, as if "답하지 않기" were
+   * pressed with it (Claude reads the reason a question is turned down). Codex drops that reason, so
+   * there the text fills in every question's answer instead.
+   */
+  private askedReply(approval: Approval, engine: EngineName, text: string) {
+    if (engine === 'codex') {
+      const qs: { question: string }[] = Array.isArray((approval.input as { questions?: unknown }).questions) ? (approval.input as { questions: { question: string }[] }).questions : [];
+      this.resolveApproval(approval.id, true, undefined, Object.fromEntries(qs.map((q) => [q.question, text])), true);
+      return;
+    }
+    this.resolveApproval(approval.id, false,
+      `사용자가 선택지를 고르지 않고 직접 답했습니다. 이 답을 질문의 답으로 삼아 진행하세요.\n\n${text}`, undefined, true);
+  }
+
+  /** `answers`: the user's picks when the approval is an agent's question (ASK_USER). `replied`: answered by a message. */
+  resolveApproval(approvalId: string, allow: boolean, message?: string, answers?: Answers, replied = false) {
     const approval = this.store.getApproval(approvalId);
     if (!approval || approval.status !== 'pending') throw new HttpError(404, 'no pending approval');
     if (approval.tool_name === REQUEST_TOOL) { this.requests.resolveRequest(approval, allow, message); return; }
@@ -601,7 +625,7 @@ export class Hub extends DeskCore {
     this.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
     this.addEvent(approval.session_id, approval.task_id, 'approval',
       { approvalId, toolName: approval.tool_name, decision: allow ? 'allowed' : 'denied', message,
-        answers: maskSecretAnswers(approval.input, answers) });
+        answers: maskSecretAnswers(approval.input, answers), ...(replied && { replied: true }) });
     this.runner.handle({ type: 'approval_result', sessionId: approval.session_id, approvalId, allow, message, answers });
     if (this.store.pendingApprovals().every((a) => a.task_id !== approval.task_id)) {
       this.transition(approval.task_id, approval.session_id, 'approvals_cleared');

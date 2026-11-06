@@ -154,6 +154,35 @@ test('an approval makes the task wait until the user answers it', () => {
   assert.equal(status(hub, taskId), 'running');
 });
 
+test('a message sent while the agent\'s question waits answers it instead of waiting for the turn', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  runner.say({ type: 'approval_request', sessionId, approvalId: 'q1', toolName: 'AskUserQuestion',
+    input: { questions: [{ question: '어느 쪽?', options: [{ label: 'A' }, { label: 'B' }] }] } });
+  hub.sendMessage(taskId, '둘 다 아니고 C로 해 줘');
+  const r = runner.last('approval_result')!;
+  assert.equal(r.allow, false);
+  assert.match(r.message!, /직접 답했습니다[\s\S]*C로 해 줘/);
+  assert.equal(hub.taskView(hub.store.getTask(taskId)!).queued.length, 0);
+  assert.equal(runner.last('send'), undefined);
+  const events = hub.store.listEvents(taskId);
+  assert.ok(events.some((e) => e.kind === 'user' && (e.payload as { text: string }).text === '둘 다 아니고 C로 해 줘'));
+  assert.equal((events.findLast((e) => e.kind === 'approval')!.payload as { replied?: boolean }).replied, true);
+  assert.equal(status(hub, taskId), 'running');
+});
+
+test('in Codex a message during its question becomes every question\'s answer', () => {
+  const t = setup();
+  const view = t.hub.compose(`@web:${t.dir} #codex 고쳐 줘`);
+  const sessionId = t.runner.last('start')!.sessionId;
+  t.runner.say({ type: 'busy', sessionId, busy: true });
+  t.runner.say({ type: 'approval_request', sessionId, approvalId: 'q2', toolName: 'AskUserQuestion',
+    input: { questions: [{ question: '이름?', options: [] }] } });
+  t.hub.sendMessage(view.id, '데스크');
+  const r = t.runner.last('approval_result')!;
+  assert.equal(r.allow, true);
+  assert.deepEqual(r.answers, { '이름?': '데스크' });
+});
+
 test('a session the runner no longer has after a reconnect is lost, and its queue is dropped', () => {
   const { hub, runner, taskId } = started();
   hub.sendMessage(taskId, '대기 중인 말');

@@ -37,7 +37,8 @@ export interface Question {
 export type QueuedKind = 'handoff' | 'reset';
 
 /** Optional queue receipt for the message just sent, absent when it was delivered directly. */
-export interface MessageReceipt { queued_id?: string }
+/** `answered`: the message went to the agent as the answer to its waiting question. */
+export interface MessageReceipt { queued_id?: string; answered?: boolean }
 
 /** Independent, read-only content; never an agent task or session. */
 export interface Channel {

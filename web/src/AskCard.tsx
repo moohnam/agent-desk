@@ -27,7 +27,8 @@ export function askSummary(input: Record<string, any>): string {
 
 /**
  * The question card: pick an option per question (several when multiSelect), or write one's own
- * answer, then send them all at once. "답하지 않기" denies the request so the agent carries on.
+ * answer, then send them all at once. "답하지 않기" denies the request so the agent carries on; a
+ * reply sent to the task meanwhile answers it in place of the options (Hub.askedReply).
  */
 export function AskCard({ post, approval, onError }: {
   post: Post; approval: Approval | undefined; onError?: (msg: string) => void;
@@ -45,7 +46,7 @@ export function AskCard({ post, approval, onError }: {
   // Shown between a successful answer and its approval event arriving.
   const [sent, setSent] = useState<Answers | null>(null);
   const answers: Answers | undefined = r?.answers ?? sent ?? undefined;
-  const outcome = answers ? 'answered' : r ? (r.decision === 'allowed' ? 'empty' : r.decision === 'cancelled' ? 'cancelled' : 'skipped')
+  const outcome = answers ? 'answered' : r ? (r.replied ? 'replied' : r.decision === 'allowed' ? 'empty' : r.decision === 'cancelled' ? 'cancelled' : 'skipped')
     : approval ? null : 'closed';
 
   useEffect(() => {
@@ -89,7 +90,7 @@ export function AskCard({ post, approval, onError }: {
         ))}
         {outcome !== 'answered' && (
           <div className="approve-actions"><span className="resolution no">
-            {outcome === 'empty' ? '답 없이 넘어감' : outcome === 'skipped' ? '답하지 않음' : outcome === 'cancelled' ? '취소됨' : '닫힘'}
+            {outcome === 'replied' ? '답글로 답함' : outcome === 'empty' ? '답 없이 넘어감' : outcome === 'skipped' ? '답하지 않음' : outcome === 'cancelled' ? '취소됨' : '닫힘'}
           </span></div>
         )}
       </div>
