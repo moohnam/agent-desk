@@ -543,6 +543,22 @@ textarea.input { resize: none; }
 .access .qr svg { display: block; width: 100%; height: auto; }
 .access-urls { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
 .access .small { font-size: 12px; }
+.access section { display: flex; flex-direction: column; gap: 6px; }
+.access h3 { font-size: 13px; margin: 6px 0 0; color: var(--muted); font-weight: 600; }
+.access-row { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.access-row:last-of-type { border-bottom: 0; }
+.access-row .who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.access-row .device-name { all: unset; font-weight: 600; cursor: text; }
+.access-row .device-name:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+.access-row .muted { font-size: 12px; }
+.access-row .code { letter-spacing: 2px; }
+.access-row .live { color: #16a34a; font-weight: 600; }
+.access-requests { position: fixed; top: 56px; right: 16px; z-index: 85; width: min(420px, calc(100vw - 32px));
+  background: var(--col); border: 1px solid var(--accent); border-radius: 10px; padding: 10px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .18); animation: access-in .18s ease-out; }
+@keyframes access-in { from { opacity: 0; transform: translateY(-8px); } }
+.access-requests .title { margin: 0 0 4px; font-weight: 600; }
+.access-requests .small { font-size: 12px; margin: 4px 0 0; }
 
 /* ── 스킬 관리 ── */
 .dialog.wide { width: min(1040px, 100%); max-height: 84vh; display: flex; flex-direction: column; }

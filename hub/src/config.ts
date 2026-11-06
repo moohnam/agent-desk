@@ -23,6 +23,12 @@ export const config = {
   dbPath: DB_PATH,
   uploadsDir: env.AGENT_DESK_UPLOADS ?? join(DATA_DIR, 'uploads'),
   accessTokenFile: env.AGENT_DESK_TOKEN_FILE ?? join(DATA_DIR, 'access-token'),
+  /**
+   * Host names other devices may address the hub by, besides this Mac's IPv4 addresses and
+   * `<name>.local` (comma-separated, e.g. a Tailscale MagicDNS name). Others are refused, so a web
+   * page can't rebind its own domain to the hub and act as a device.
+   */
+  allowedHosts: (env.AGENT_DESK_HOSTS ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
   /** The desk plugin directory engines load desk skills from (skills.ts). */
   skillsHome: env.AGENT_DESK_SKILLS_HOME ?? join(DATA_DIR, 'desk-plugin'),
   webDist: join(REPO, 'web', 'dist'),

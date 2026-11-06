@@ -103,13 +103,23 @@ export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'channel_entry'; entry: ChannelEntry }
   | { type: 'channel_removed'; channel_id: string }
   /** Tasks and projects deleted, with everything recorded for them. */
-  | { type: 'removed'; taskIds: string[]; projectIds: string[] };
+  | { type: 'removed'; taskIds: string[]; projectIds: string[] }
+  /** Devices asking to connect and devices let in; sent to this Mac's own pages only. */
+  | ({ type: 'access' } & AccessView);
+
+/** A device without a token asking to connect; `code` shows on both screens to tell requests apart. */
+export interface AccessRequest { id: string; name: string; ip: string; code: string; created_at: string }
+/** A device let in with a token of its own. `connections`: its open desk pages. */
+export interface AccessDevice { id: string; name: string; created_at: string; last_seen_at: string | null; last_ip: string | null; connections: number }
+export interface AccessView { requests: AccessRequest[]; devices: AccessDevice[] }
 
 /** GET /api/state. `client.local`: the request came from this machine (no access token needed). */
 export interface DeskState<E = WireEvent, A = Approval> {
   projects: Project[]; tasks: TaskView<E>[]; approvals: A[]; questions: Question[];
   channels?: Channel[];
   runner: { connected: boolean }; client?: { local: boolean };
+  /** For this Mac's own pages only. */
+  access?: AccessView;
 }
 
 /** What a feed column shows; empty or missing fields mean no restriction. */

@@ -2,7 +2,7 @@ import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, La
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
-import { AccessDialog } from './AccessDialog.tsx';
+import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
@@ -1241,7 +1241,7 @@ export function App() {
             }}>
             {notifyState === 'on' ? <Bell /> : <BellOff />}</button>
           <button className="btn" title={`새 작업의 엔진별 기본 모델과 effort: 작업마다 ${ENGINES.map(modelTagsOf).join(' · ')} · #low … #max (${effortNote()})`} aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
-          {hub.local && <button className="btn" title="같은 네트워크의 폰이나 다른 기기에서 열기: QR 코드" aria-label="폰에서 열기" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
+          {hub.local && <button className="btn" title="다른 기기 연결: 접속 요청, 연결한 기기, QR 코드" aria-label="다른 기기 연결" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
       </header>
@@ -1289,6 +1289,7 @@ export function App() {
       </div>
 
       {toast && <div className="toast" role="status">{toast}</div>}
+      {hub.local && !accessOpen && hub.access && <AccessRequests requests={hub.access.requests} onError={setToast} />}
 
       {menu && menuCol >= 0 && (
         <ColumnMenu x={menu.x} y={menu.y} width={widthOf(menu.colId)} thread={menu.colId === THREAD}
@@ -1337,7 +1338,7 @@ export function App() {
           }} />
       )}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
-      {accessOpen && <AccessDialog onClose={() => setAccessOpen(false)} />}
+      {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} onChannels={() => { setModelOpen(false); setChannelsOpen(true); }} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}

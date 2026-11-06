@@ -1,5 +1,5 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
-import type { ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
+import type { AccessView, ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -103,7 +103,11 @@ export const api = {
   /** Opens a link from a reply in its local app (via the hub, which may run `open`). */
   open: (href: string, taskId?: string) => call<{ ok: true }>('POST', '/open', { href, task_id: taskId }),
   /** Addresses (with QR codes) other devices open the desk at; only on the hub's own machine. */
-  access: () => call<{ urls: { url: string; qr: string }[] }>('GET', '/access'),
+  access: () => call<{ urls: { url: string; qr: string }[] } & AccessView>('GET', '/access'),
+  answerAccess: (id: string, allow: boolean) => call<AccessView>('POST', `/access-requests/${id}`, { allow }),
+  renameDevice: (id: string, name: string) => call<AccessView>('PATCH', `/devices/${id}`, { name }),
+  removeDevice: (id: string) => call<AccessView>('DELETE', `/devices/${id}`),
+  rotateAccessToken: () => call<{ ok: true }>('POST', '/access-token'),
   settings: () => call<Settings>('GET', '/settings'),
   /** Each engine's plan limits: used share and reset time per window. `refresh`: skip the hub's one-minute cache. */
   usage: (engine: string, refresh = false) => call<EngineUsage>('GET', `/usage?engine=${engine}${refresh ? '&refresh=1' : ''}`),

@@ -3,6 +3,7 @@ import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { mergeEvents } from './posts.ts';
 import { assignProjectColors } from './projects.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
+import type { AccessView } from '../../shared/api.ts';
 
 const FEED_CAP = 3000;
 /** How long an open thread gathers cut live events before fetching them whole. */
@@ -26,6 +27,8 @@ export function useHub() {
   const [runnerConnected, setRunnerConnected] = useState<boolean | null>(null);
   // Whether this browser runs on the hub's own machine (local links open only there).
   const [local, setLocal] = useState(true);
+  // Devices asking to connect and devices let in: on this Mac's pages only.
+  const [access, setAccess] = useState<AccessView | null>(null);
   const listeners = useRef(new Set<(e: HubEvent) => void>());
   // Counts state reloads (each SSE (re)connect): feed columns reload their newest page with it.
   const [synced, setSynced] = useState(0);
@@ -50,6 +53,7 @@ export function useHub() {
     setQuestions(new Map((s.questions ?? []).filter((q) => q.status === 'pending').map((q) => [q.id, q])));
     if (s.runner) setRunnerConnected(s.runner.connected);
     if (s.client) setLocal(s.client.local);
+    setAccess(s.access ?? null);
     setSynced((n) => n + 1);
     } finally { if (channelRefresh.current === channelUpdates) channelRefresh.current = null; }
   }, []);
@@ -57,7 +61,11 @@ export function useHub() {
   useEffect(() => {
     const es = new EventSource('/api/stream');
     es.onopen = () => { setConnected(true); void refresh(); };
-    es.onerror = () => setConnected(false);
+    es.onerror = () => {
+      setConnected(false);
+      // This device was cut off on the Mac: the page asks to connect again.
+      fetch('/api/state', { method: 'HEAD' }).then((r) => { if (r.status === 401) location.reload(); }, () => {});
+    };
     // Messages are handled in batches: each event also brings its task's update, and several busy
     // agents send many a second; one render per batch instead of one per message.
     let batch: HubMessage[] = [];
@@ -88,6 +96,8 @@ export function useHub() {
             else next.delete(m.question.id);
             return next;
           });
+        } else if (m.type === 'access') {
+          setAccess({ requests: m.requests, devices: m.devices });
         } else if (m.type === 'runner') {
           setRunnerConnected(m.connected);
         } else if (m.type === 'event') {
@@ -130,7 +140,7 @@ export function useHub() {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, synced, gone, refresh, onEvent };
+  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */

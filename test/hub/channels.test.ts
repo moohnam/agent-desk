@@ -214,8 +214,9 @@ test('HTTP producer route is isolated from management, including rotation and lo
     runner: () => ({ connected: false, id: null, engines: new Set(), has: () => false, handle: () => {} }),
   });
   let local = false;
-  const access = { matches: () => false, isLocal: () => local,
-    allowed: (req: { headers: Record<string, string> }) => local || req.headers.authorization === 'Bearer test-admin' } as unknown as Access;
+  const access = { matches: () => false, isLocal: () => local, hostAllowed: () => true, view: () => ({ requests: [], devices: [] }),
+    identify: (req: { headers: Record<string, string> }) => local ? { kind: 'local' }
+      : req.headers.authorization === 'Bearer test-admin' ? { kind: 'shared', via: 'bearer' } : null } as unknown as Access;
   const server = createHttpServer(hub, access, directory);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); hub.channels.stop(); });

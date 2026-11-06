@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
-import type { Access } from './access.ts';
+import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import { parseFeedParams, type FeedFilter, type HubMessage, type MessageReceipt } from '../../shared/api.ts';
 import { config } from './config.ts';
@@ -61,24 +61,65 @@ function feedFilter(url: URL): FeedFilter {
   return parseFeedParams((name) => url.searchParams.get(name));
 }
 
+/** The page's own path for a redirect: one leading slash, so `//host` can't send it to another site. */
+const here = (url: URL) => `/${url.pathname.replace(/^\/+/, '')}${url.search}`;
+
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
 }
 
-const DENIED_PAGE = `<!doctype html><html lang="ko"><meta charset="utf-8">
+/**
+ * What a device without a token sees: it can ask this Mac to let it in, then waits for the answer.
+ * The code shows on both screens, so the Mac's user knows which request is this one.
+ */
+const REQUEST_PAGE = (name: string) => `<!doctype html><html lang="ko"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent Desk</title>
-<body style="font: 16px/1.6 system-ui, sans-serif; max-width: 30em; margin: 20vh auto; padding: 0 20px">
-<h1 style="font-size: 20px">접속 토큰이 필요합니다</h1>
-<p>Mac에서 Agent Desk를 열고 상단의 <b>폰에서 열기</b>를 눌러 QR 코드를 스캔하세요.</p></body></html>`;
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:30em;margin:18vh auto;padding:0 20px}
+h1{font-size:20px}input,button{font:inherit;padding:6px 10px}input{width:100%;box-sizing:border-box;margin:4px 0 10px}
+.code{font-size:32px;letter-spacing:6px;font-weight:600}.muted{color:#666;font-size:14px}</style>
+<body><h1>이 기기는 아직 데스크에 연결되지 않았습니다</h1>
+<div id="ask"><p>Mac에 접속 요청을 보내고, Mac의 Agent Desk 화면에서 <b>허용</b>을 누르면 연결됩니다.</p>
+<label>이 기기 이름<input id="name" maxlength="60" value="${name.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)}"></label>
+<button id="send">접속 요청 보내기</button></div>
+<div id="wait" hidden><p>Mac에서 아래 코드가 적힌 요청을 허용해 주세요.</p><p class="code" id="code"></p>
+<p class="muted">이 창을 열어 두세요. 10분 안에 답이 없으면 다시 요청해야 합니다.</p></div>
+<p id="msg"></p>
+<p class="muted">또는 Mac에서 Agent Desk 상단의 <b>다른 기기 연결</b> 창에 있는 QR 코드를 스캔해도 됩니다.</p>
+<script>
+const $ = (id) => document.getElementById(id);
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+$('send').onclick = async () => {
+  $('msg').textContent = '';
+  const r = await post('/access/request', { name: $('name').value });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $('msg').textContent = j.error || '요청하지 못했습니다'; return; }
+  $('ask').hidden = true; $('wait').hidden = false; $('code').textContent = j.code;
+  const poll = async () => {
+    const s = await post('/access/status', { id: j.id, secret: j.secret }).then((x) => x.json()).catch(() => ({ status: 'pending' }));
+    if (s.status === 'allowed') { location.reload(); return; }
+    if (s.status === 'pending') { setTimeout(poll, 2000); return; }
+    $('wait').hidden = true; $('ask').hidden = false;
+    $('msg').textContent = s.status === 'denied' ? 'Mac에서 거절했습니다.' : '요청이 만료되었습니다. 다시 보내 주세요.';
+  };
+  setTimeout(poll, 2000);
+};
+</script></body></html>`;
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
 export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
+  access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
     const route = `${req.method} /${parts.slice(1).map((p, i) => (i % 2 === 1 ? ':id' : p)).join('/')}`;
     const id = parts[2];
+
+    // Another device must name this Mac by an address it has (no rebound foreign domain).
+    if (!access.isLocal(req) && !access.hostAllowed(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('이 주소로는 데스크에 접속할 수 없습니다. Mac의 IP 주소나 이름.local로 여세요 (다른 이름은 AGENT_DESK_HOSTS에 추가).');
+    }
 
     // Producers can only write their own push channel. Even loopback/admin callers need its token;
     // this exception never grants a producer access to any other hub route.
@@ -94,18 +135,44 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       }
     }
 
-    // The QR link: remember the device, then drop the token from the address bar.
+
     if (access.matches(url.searchParams.get('token'))) {
       url.searchParams.delete('token');
-      res.writeHead(302, { 'set-cookie': access.cookie(), location: url.pathname + url.search });
+      const cookies = access.isLocal(req) ? [] : access.addDevice(deviceName(req.headers['user-agent']), ipOf(req));
+      res.writeHead(302, { 'set-cookie': cookies, location: here(url) });
       return res.end();
     }
-    if (!access.allowed(req)) {
+    // A device without a token asks this Mac to let it in, and comes back for the answer.
+    if (req.method === 'POST' && (url.pathname === '/access/request' || url.pathname === '/access/status')) {
+      try {
+        if (!sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+        const b = await readJson(req);
+        if (url.pathname === '/access/status') {
+          const { status, cookies } = access.status(b.id, b.secret);
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', ...(cookies && { 'set-cookie': cookies }) });
+          return res.end(JSON.stringify({ status }));
+        }
+        const made = access.request(b.name, req);
+        if (!made) throw new HttpError(429, '기다리는 접속 요청이 너무 많습니다. 잠시 뒤 다시 보내 주세요.');
+        return send(res, 200, made);
+      } catch (error) {
+        return send(res, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const client = access.identify(req);
+    if (!client) {
       if (parts[0] === 'api' || url.pathname === '/mcp') return send(res, 401, { error: '접속 토큰이 필요합니다' });
       res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' });
-      return res.end(DENIED_PAGE);
+      return res.end(REQUEST_PAGE(deviceName(req.headers['user-agent'])));
     }
-    const local = access.isLocal(req);
+    // A browser still on the shared token: a token of its own on its next page load.
+    // Only a real navigation: a prefetch or a link preview would leave a device nobody uses.
+    if (client.kind === 'shared' && client.via === 'cookie' && req.method === 'GET' && parts[0] !== 'api'
+      && req.headers['sec-fetch-mode'] === 'navigate' && !req.headers['sec-purpose'] && !req.headers.purpose) {
+      res.writeHead(302, { 'set-cookie': access.addDevice(deviceName(req.headers['user-agent']), ipOf(req)), location: here(url) });
+      return res.end();
+    }
+    const local = client.kind === 'local';
 
     try {
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
@@ -132,21 +199,48 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
         case 'POST /channels/:id/messages':
           return send(res, 200, hub.sendChannelMessage(id, await readJson(req) as any));
         case 'GET /state':
-          return send(res, 200, { ...hub.state(), client: { local } });
+          return send(res, 200, { ...hub.state(), client: { local }, ...(local && { access: access.view() }) });
         case 'GET /access': {
           if (!local) throw new HttpError(403, '이 Mac에서만 볼 수 있습니다');
           const urls = access.urls();
-          return send(res, 200, { urls: await Promise.all(urls.map(async (u) => ({ url: u, qr: await access.qrSvg(u) }))) });
+          return send(res, 200, { urls: await Promise.all(urls.map(async (u) => ({ url: u, qr: await access.qrSvg(u) }))), ...access.view() });
+        }
+        case 'POST /access-requests/:id': {
+          if (!local) throw new HttpError(403, '이 Mac에서만 허용할 수 있습니다');
+          if (!access.answer(id, (await readJson(req)).allow === true)) {
+            // Its card goes from every screen of this Mac.
+            access.onChange();
+            throw new HttpError(404, '이미 처리했거나 만료된 요청입니다. 그 기기에서 다시 요청해 주세요.');
+          }
+          return send(res, 200, access.view());
+        }
+        case 'POST /access-token': {
+          if (!local) throw new HttpError(403, '이 Mac에서만 바꿀 수 있습니다');
+          access.rotateToken();
+          return send(res, 200, { ok: true });
+        }
+        case 'PATCH /devices/:id': {
+          if (!local) throw new HttpError(403, '이 Mac에서만 바꿀 수 있습니다');
+          if (!access.renameDevice(id, (await readJson(req)).name)) throw new HttpError(404, '없는 기기입니다');
+          return send(res, 200, access.view());
+        }
+        case 'DELETE /devices/:id': {
+          if (!local) throw new HttpError(403, '이 Mac에서만 끊을 수 있습니다');
+          if (!access.removeDevice(id)) throw new HttpError(404, '없는 기기입니다');
+          return send(res, 200, access.view());
         }
         case 'GET /stream': {
           res.writeHead(200, {
             'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive',
           });
           res.write(': connected\n\n');
-          const onMessage = (m: HubMessage) => res.write(`data: ${JSON.stringify(m)}\n\n`);
+          // Who asks to connect and from where is for this Mac's pages only.
+          const onMessage = (m: HubMessage) => { if (local || m.type !== 'access') res.write(`data: ${JSON.stringify(m)}\n\n`); };
           const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
           hub.bus.on('message', onMessage);
-          req.on('close', () => { clearInterval(ping); hub.bus.off('message', onMessage); });
+          // A device's open pages, counted for the Mac's device list and closed when it is cut off.
+          const leave = client.kind === 'device' ? access.connect(client.device.id, ipOf(req), () => res.end()) : () => {};
+          req.on('close', () => { clearInterval(ping); hub.bus.off('message', onMessage); leave(); });
           return;
         }
         case 'GET /usage':
