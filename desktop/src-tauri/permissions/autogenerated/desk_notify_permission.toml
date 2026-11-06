@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desk-notify-permission"
+description = "Enables the desk_notify_permission command without any pre-configured scope."
+commands.allow = ["desk_notify_permission"]
+
+[[permission]]
+identifier = "deny-desk-notify-permission"
+description = "Denies the desk_notify_permission command without any pre-configured scope."
+commands.deny = ["desk_notify_permission"]

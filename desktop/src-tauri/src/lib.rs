@@ -16,7 +16,28 @@ use tauri::{DragDropEvent, Manager, WebviewUrl, WebviewWindowBuilder, WindowEven
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
+#[cfg(target_os = "macos")]
+mod notify;
+
 const DEFAULT_URL: &str = "http://127.0.0.1:4317/";
+
+/// Shows an OS notification; a click opens `task`'s thread.
+#[tauri::command]
+fn desk_notify(id: String, title: String, body: String, task: Option<String>) {
+    #[cfg(target_os = "macos")]
+    notify::post(&id, &title, &body, task.as_deref());
+    #[cfg(not(target_os = "macos"))]
+    let _ = (id, title, body, task);
+}
+
+/// Asks the OS for permission to notify (a prompt the first time); whether it is given.
+#[tauri::command]
+async fn desk_notify_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    return tauri::async_runtime::spawn_blocking(notify::authorize).await.unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    false
+}
 
 fn hub_url() -> Url {
     let raw = std::env::var("AGENT_DESK_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
@@ -202,8 +223,10 @@ fn notification_origin(hub: &Url) -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            notify::init(app.handle());
             let hub = hub_url();
             // The hub page may show OS notifications (window.__TAURI__.notification) and nothing
             // else of the app: its origin only (the URL's path, query, fragment and credentials
@@ -216,7 +239,8 @@ pub fn run() {
                         .remote(pattern)
                         .local(false)
                         .window("main")
-                        .permission("notification:default"),
+                        .permission("allow-desk-notify")
+                        .permission("allow-desk-notify-permission"),
                 )?;
             } else {
                 eprintln!("[agent-desk] notifications off: hub address {hub} is not a plain host name or IPv4 address");

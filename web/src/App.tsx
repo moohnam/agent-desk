@@ -1235,7 +1235,8 @@ export function App() {
               if (notifyState === 'unsupported') { setToast('이 화면에서는 알림을 쓸 수 없습니다. 데스크톱 앱이나 PC 브라우저에서 켜 주세요.'); return; }
               void setNotify(notifyState !== 'on').then((s) => {
                 if (s === 'blocked') setToast('알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 허용해 주세요.');
-                else if (s === 'off' && notifyState !== 'on') setToast('알림을 허용하지 않아 켜지 않았습니다.');
+                else if (s === 'off' && notifyState !== 'on') setToast(window.__AGENT_DESK_APP__
+                  ? 'macOS가 알림을 허용하지 않았습니다. 시스템 설정 > 알림 > Agent Desk에서 허용한 뒤 다시 켜 주세요.' : '알림을 허용하지 않아 켜지 않았습니다.');
                 else setToast(s === 'on' ? '알림을 켰습니다.' : '알림을 껐습니다.');
               });
             }}>

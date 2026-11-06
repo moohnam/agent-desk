@@ -1,7 +1,7 @@
 // OS notifications for what needs the user while the desk is not in front: approval requests, agent
-// questions, and tasks that finished or failed. The desktop app shows them through its notification
-// plugin (window.__TAURI__.notification, granted to the hub page only); a browser through the Web
-// Notifications API. Off until the user turns them on (a browser asks for permission then).
+// questions, and tasks that finished or failed. The desktop app shows them through its own commands
+// (macOS UserNotifications, granted to the hub page only; a click opens the thread); a browser through
+// the Web Notifications API. Off until the user turns them on (the OS or browser asks permission then).
 //
 // A notification's title is the kind of thing and the task's name; its body the agent's latest
 // message (or the question asked), cut short. They can show on the lock screen: macOS hides the body
@@ -9,14 +9,12 @@
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { ASK_USER } from '../../shared/protocol.ts';
+import type { AccessView } from '../../shared/api.ts';
 import type { Approval, HubEvent, Question, TaskView } from './types.ts';
 
-interface TauriNotification {
-  isPermissionGranted(): Promise<boolean>;
-  requestPermission(): Promise<string>;
-  sendNotification(o: { title: string; body?: string }): void;
-}
-const tauri = (): TauriNotification | undefined => (window as { __TAURI__?: { notification?: TauriNotification } }).__TAURI__?.notification;
+type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+/** The desktop app's command call, or undefined in a browser. */
+const tauri = (): Invoke | undefined => (window as { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__?.core?.invoke;
 
 const PREF = 'agent-desk.notify';
 /** Ids notified on this device, so two desk windows don't both show one. */
@@ -60,7 +58,7 @@ export async function setNotify(on: boolean): Promise<NotifyState> {
     const t = tauri();
     let granted = false;
     try {
-      granted = t ? (await t.isPermissionGranted()) || (await t.requestPermission()) === 'granted'
+      granted = t ? (await t('desk_notify_permission')) === true
         : typeof Notification !== 'undefined' && (Notification.permission === 'granted' || (await Notification.requestPermission()) === 'granted');
     } catch { /* treated as refused */ }
     if (!granted) { changed(); return state(); }
@@ -68,6 +66,8 @@ export async function setNotify(on: boolean): Promise<NotifyState> {
   pref = on;
   try { localStorage.setItem(PREF, on ? '1' : '0'); } catch { /* storage unavailable */ }
   changed();
+  // One right away, so the user sees that they arrive (and how they look).
+  if (on) deliver({ id: `enabled:${Date.now()}`, title: 'Agent Desk', body: '알림을 켰습니다. 데스크를 보고 있지 않을 때 이렇게 알려 드립니다.' }, () => {});
   return state();
 }
 
@@ -118,9 +118,13 @@ interface Note { id: string; title: string; body: string; taskId?: string }
 /** Shows `n` unless notifications are off or a desk window is in front. Claim its ids first. */
 function show(n: Note, open: (taskId: string) => void) {
   if (state() !== 'on' || deskInFront()) return;
+  deliver(n, open);
+}
+
+function deliver(n: Note, open: (taskId: string) => void) {
   try {
     const t = tauri();
-    if (t) { t.sendNotification({ title: n.title, body: n.body }); return; }
+    if (t) { t('desk_notify', { id: n.id, title: n.title, body: n.body, task: n.taskId ?? null }).catch(() => {}); return; }
     const note = new Notification(n.title, { body: n.body, tag: n.id });
     note.onclick = () => { window.focus(); if (n.taskId) open(n.taskId); note.close(); };
   } catch {
@@ -151,13 +155,19 @@ const interrupted = (t: TaskView) => {
  * `open`: the task's thread, for a click on a browser notification.
  */
 export function useDeskNotifications(hub: { synced: number; tasks: Map<string, TaskView>; approvals: Map<string, Approval>; questions: Map<string, Question>;
-  onEvent: (fn: (e: HubEvent) => void) => () => void }, open: (taskId: string) => void) {
-  const prev = useRef<{ approvals: Set<string>; questions: Set<string>; tasks: Map<string, { status: string; ask: number | null }> } | null>(null);
+  onEvent: (fn: (e: HubEvent) => void) => () => void; access: AccessView | null }, open: (taskId: string) => void) {
+  const prev = useRef<{ access: Set<string>; approvals: Set<string>; questions: Set<string>; tasks: Map<string, { status: string; ask: number | null }> } | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
   /** Each task's latest agent message seen live; events reach this before the state they come with renders. */
   const said = useRef(new Map<string, string>());
   useEffect(trackFront, []);
+  // The desktop app: a clicked notification opens its task's thread.
+  useEffect(() => {
+    const onOpen = (e: Event) => { const task = (e as CustomEvent<{ task?: string }>).detail?.task; if (task) openRef.current(task); };
+    window.addEventListener('desk-notification-open', onOpen);
+    return () => window.removeEventListener('desk-notification-open', onOpen);
+  }, []);
   useEffect(() => hub.onEvent((e) => {
     const text = e.kind === 'assistant' || e.kind === 'update' ? clip(e.payload?.text) : '';
     if (text) said.current.set(e.task_id, text);
@@ -165,6 +175,7 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
   useEffect(() => {
     if (!hub.synced) return;
     const now = {
+      access: new Set(hub.access?.requests.map((r) => r.id)),
       approvals: new Set(hub.approvals.keys()),
       questions: new Set(hub.questions.keys()),
       tasks: new Map([...hub.tasks].map(([id, t]) => [id, { status: t.status, ask: t.pending_ask?.event_id ?? null }])),
@@ -174,6 +185,10 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
     if (!before) return;
     const notes: (Note & { kind: 'ask' | 'done' | 'error' })[] = [];
     const latest = (taskId: string, fallback: string) => said.current.get(taskId) || fallback;
+    // Another device asking to connect (this Mac's pages only get these).
+    for (const r of hub.access?.requests ?? []) {
+      if (!before.access.has(r.id)) notes.push({ kind: 'ask', id: `access:${r.id}`, title: `접속 요청 · ${r.name}`, body: `${r.ip}에서 데스크 접속을 요청했습니다 · 코드 ${r.code}` });
+    }
     for (const a of hub.approvals.values()) {
       if (before.approvals.has(a.id)) continue;
       const t = hub.tasks.get(a.task_id);
@@ -210,5 +225,5 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
       return;
     }
     for (const n of fresh) show(n, go);
-  }, [hub.synced, hub.tasks, hub.approvals, hub.questions]);
+  }, [hub.synced, hub.tasks, hub.approvals, hub.questions, hub.access]);
 }
