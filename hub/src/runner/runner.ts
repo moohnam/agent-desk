@@ -41,6 +41,16 @@ export class Runner {
     return [...this.sessions.values()].map(({ live: s }) => ({ ...s, approvals: [...s.approvals] }));
   }
 
+  /** Stops this process's engines without treating their queued input as user-cancelled. */
+  shutdown() {
+    for (const [sessionId, entry] of this.sessions) {
+      this.drop(sessionId, entry);
+      let error: string | undefined;
+      try { entry.adapter?.close(); } catch (e) { error = errorText(e); }
+      this.emit({ type: 'closed', sessionId, busy: entry.live.busy, reason: 'shutdown', ...(error && { error }) });
+    }
+  }
+
   /**
    * Arms the idle timer when the session has nothing in progress, disarms it otherwise. Work left
    * running in the background (a subagent) counts: closing would end it.

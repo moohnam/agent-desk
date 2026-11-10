@@ -1,15 +1,22 @@
+import { apiBase, workspaceId, SharedPending } from './workspace.ts';
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
 import type { AccessView, ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  // getRandomValues also works on phones using an HTTP LAN address (randomUUID requires HTTPS).
+  const requestId = workspaceId && method !== 'GET' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
+  const init:RequestInit = {
     method,
-    headers: body ? { 'content-type': 'application/json' } : undefined,
+    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(requestId ? {'x-desk-operation-id':requestId} : {}) },
     body: body ? JSON.stringify(body) : undefined,
-  });
+    signal,
+  };
+  const send = ()=>fetch(`${apiBase}${path}`,init);
+  const res = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+  if (data.shared_pending) throw new SharedPending();
   return data as T;
 }
 
@@ -68,6 +75,7 @@ export const api = {
   },
   /** Saves a file on the hub's machine (for a device without it); returns the saved path. */
   upload: async (file: File) => {
+    if (workspaceId) throw new Error('공유 러너에는 파일을 직접 옮긴 뒤 원격 경로로 지시하세요');
     const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {
       method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
     });

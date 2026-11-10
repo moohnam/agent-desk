@@ -751,13 +751,15 @@ export class Hub extends DeskCore {
           break;
         }
         const midTurn = m.reason !== 'idle' && (m.busy ?? (status === 'running' || status === 'waiting'));
-        if (m.error || midTurn) this.dropQueue(session.id, taskId, '세션이 종료되어');
+        if ((m.error || midTurn) && m.reason !== 'shutdown') this.dropQueue(session.id, taskId, '세션이 종료되어');
         if (m.error) {
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'error', detail: { message: m.error } });
           this.transition(taskId, session.id, 'failed');
         } else if (midTurn) {
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'error', detail: {
-            message: '작업 도중 세션이 예기치 않게 종료되었습니다. 답글을 보내면 이어서 재개합니다.', reason: 'closed_mid_turn',
+            message: m.reason === 'shutdown' ? '러너 종료로 실행 중이던 턴이 중단되었습니다. 대기 중인 입력은 보관했습니다.'
+              : '작업 도중 세션이 예기치 않게 종료되었습니다. 답글을 보내면 이어서 재개합니다.',
+            reason: m.reason === 'shutdown' ? 'runner_shutdown' : 'closed_mid_turn',
           } });
           this.transition(taskId, session.id, 'failed');
         } else {

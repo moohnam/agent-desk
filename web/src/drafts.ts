@@ -1,3 +1,4 @@
+import { workspaceKey } from './workspace.ts';
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 
 /**
@@ -11,7 +12,7 @@ import { useEffect, useRef, useSyncExternalStore } from 'react';
  */
 export interface Draft<T = unknown> { taskId?: string; value: T; at: number }
 
-const KEY = 'agent-desk.drafts.v1';
+const KEY = workspaceKey('agent-desk.drafts.v1');
 const MAX_AGE = 30 * 24 * 60 * 60_000;
 const SAVE_MS = 300;
 

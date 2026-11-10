@@ -664,3 +664,5 @@ textarea.input { resize: none; }
 .finder-list li.empty { cursor: default; }
 
 .runner-command { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+
+.workspace-select { max-width: 150px; background: var(--col); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; font: inherit; font-size: 12px; }

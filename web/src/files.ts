@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { api } from './api.ts';
+import { workspaceId } from './workspace.ts';
 
 declare global {
   interface Window { __AGENT_DESK_APP__?: boolean }
@@ -85,6 +86,10 @@ export function useFileDrop(inputRef: RefObject<HTMLTextAreaElement | null>, val
     const drop = (e: CustomEvent<DeskDrop>) => {
       setOver(false);
       if (dropTarget() !== inputRef.current) return;
+      if (workspaceId && e.detail.paths.length) {
+        setError('이 기기의 파일 경로는 공유 러너에서 사용할 수 없습니다. 파일을 공유 러너에 먼저 옮긴 뒤 원격 경로를 입력하세요.');
+        return;
+      }
       if (e.detail.paths.length) insert(e.detail.paths);
       else void fromWeb(e.detail.url, e.detail.html);
     };

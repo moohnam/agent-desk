@@ -5,6 +5,8 @@ import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { RunnersDialog } from './Runners.tsx';
+import { WorkspaceSwitcher } from './Workspaces.tsx';
+import { workspaceId } from './workspace.ts';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
 import { ChannelsDialog } from './Channels.tsx';
@@ -1197,6 +1199,7 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand"><img className="logo" src="/favicon.png?v=sage-20261103" alt="" /><span className="word">Agent Desk</span></div>
+        <WorkspaceSwitcher />
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
@@ -1227,7 +1230,7 @@ export function App() {
           </button>
           <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
             onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
-          <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>
+          {!workspaceId && <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>}
           <button className="btn" aria-pressed={notifyState === 'on'} aria-label="알림"
             title={notifyState === 'on' ? '알림 켜짐: 데스크를 보고 있지 않을 때 승인 요청·질문·작업 끝남·오류를 OS 알림으로 (누르면 끄기)'
               : notifyState === 'blocked' ? '알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 이 사이트의 알림을 허용하세요'
@@ -1343,7 +1346,7 @@ export function App() {
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
-      {modelOpen && <ModelDialog onRunners={hub.local ? () => {setModelOpen(false);setRunnersOpen(true);} : undefined} onClose={() => setModelOpen(false)} onChannels={() => { setModelOpen(false); setChannelsOpen(true); }} />}
+      {modelOpen && <ModelDialog onRunners={hub.local ? () => {setModelOpen(false);setRunnersOpen(true);} : undefined} onClose={() => setModelOpen(false)} onChannels={workspaceId ? undefined : () => { setModelOpen(false); setChannelsOpen(true); }} />}
       {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}
     </div>

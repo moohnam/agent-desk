@@ -44,6 +44,11 @@ export const config = {
   },
   codexBin: env.CODEX_BIN || 'codex',
   agyBin: env.AGY_BIN || 'agy',
+  shared: {
+    directory: env.AGENT_DESK_SHARED_DIR ?? join(DATA_DIR, 'shared-runner'),
+    address: env.AGENT_DESK_SHARED_ADDRESS,
+    port: positive(env.AGENT_DESK_SHARED_PORT, 4321),
+  },
   remote: {
     hubUrl: env.AGENT_DESK_HUB_URL,
     id: env.AGENT_DESK_RUNNER_ID,

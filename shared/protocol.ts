@@ -85,10 +85,11 @@ export type RunnerToHub =
   | { type: 'approval_cancelled'; sessionId: string; approvalId: string }
   /**
    * The session ended. `busy`: whether a turn was still in progress (runner's view). `reason`
-   * 'idle': the runner closed it after RUNNER_IDLE_MS without activity; 'user': the user closed it.
+   * 'idle': the runner closed it after RUNNER_IDLE_MS without activity; 'user': the user closed it;
+   * 'shutdown': the runner process is stopping, without cancelling queued user input.
    * Either way the next message resumes it.
    */
-  | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' | 'user' };
+  | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' | 'user' | 'shutdown' };
 
 export interface EngineAdapter {
   send(text: string, skills?: string[], steer?: boolean): void;

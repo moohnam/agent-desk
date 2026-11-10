@@ -1,7 +1,8 @@
+import { workspaceKey } from './workspace.ts';
 import { useEffect, useState } from 'react';
 import type { ColumnDef } from './types.ts';
 
-const KEY = 'agent-desk.columns.v2';
+const KEY = workspaceKey('agent-desk.columns.v2');
 
 const DEFAULT_COLUMNS: ColumnDef[] = [{ id: 'all', title: '전체', filter: {} }];
 
@@ -21,7 +22,7 @@ export function useColumns() {
   return [columns, setColumns] as const;
 }
 
-const WIDTH_KEY = 'agent-desk.columnWidths';
+const WIDTH_KEY = workspaceKey('agent-desk.columnWidths');
 export const WIDTH_PRESETS = [{ label: '좁게', px: 300 }, { label: '보통', px: 380 }, { label: '넓게', px: 480 }];
 export const DEFAULT_WIDTH = 380;
 export const MIN_WIDTH = 260;

@@ -1,3 +1,4 @@
+import { workspaceKey } from './workspace.ts';
 import { useEffect, useState } from 'react';
 import { backgroundCount } from './format.ts';
 import type { ColumnDef, Project, TaskView } from './types.ts';
@@ -16,9 +17,9 @@ export const VIEWS: { id: View; key: string; label: string; title: string }[] = 
 /** F2 and F3 make at most this many columns. */
 export const VIEW_MAX = 12;
 
-const KEY = 'agent-desk.view';
-const BY_TASK_KEY = 'agent-desk.viewByTask';
-const ORDER_KEY = 'agent-desk.viewOrder';
+const KEY = workspaceKey('agent-desk.view');
+const BY_TASK_KEY = workspaceKey('agent-desk.viewByTask');
+const ORDER_KEY = workspaceKey('agent-desk.viewOrder');
 
 /** Views whose columns the user can reorder with H/L or sort; the order is kept per view. */
 export const ORDERED: View[] = ['project'];

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api } from './api.ts';
+import { workspaceId } from './workspace.ts';
 import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, modelTagsOf, type EngineName } from '../../shared/compose.ts';
 import { Modal } from './Modal.tsx';
 import { saveSettings, useSettings } from './settings.ts';
@@ -39,6 +40,7 @@ export function ModelDialog({ onClose, onChannels, onRunners }: { onClose: () =>
   /** Per engine, read separately so each shows as it arrives: missing while loading, null when the hub couldn't answer. */
   const [usage, setUsage] = useState<Partial<Record<EngineName, EngineUsage | null>>>({});
   const loadUsage = (refresh = false) => {
+    if (workspaceId) return;
     setUsage({});
     for (const e of ENGINES) {
       api.usage(e, refresh).then((u) => setUsage((p) => ({ ...p, [e]: u })), () => setUsage((p) => ({ ...p, [e]: null })));
@@ -64,14 +66,14 @@ export function ModelDialog({ onClose, onChannels, onRunners }: { onClose: () =>
         {onChannels && <button type="button" className="btn" onClick={onChannels}>읽기 전용 채널 관리 · 봇 알림 / RSS·Atom</button>}
         <p className="muted small">태그 없이 시작하는 새 작업에 씁니다. 작업마다 모델 태그와 <code>#low</code> … <code>#max</code>
           {' '}태그로 바꿀 수 있고, 바꾼 값은 그 작업에 유지됩니다. <code>#ultra</code>는 Codex에서만 씁니다.</p>
-        {ENGINES.map((e) => (
+        {(workspaceId ? ['claude'] as const : ENGINES).map((e) => (
           <fieldset key={e} className="field-group">
             <legend>{ENGINE_LABEL[e]} <small className="muted">{modelTagsOf(e)}{ENGINE_INFO[e].family ? ' (계열의 최신 버전)' : ''}</small></legend>
-            <div className="field">
+            {!workspaceId && <div className="field">
               <span className="lbl">사용량{usage[e]?.plan ? ` (${usage[e]!.plan})` : ''}
                 <small>계정 전체 기준, 사용 비율과 초기화 시각</small></span>
               <UsageRows usage={usage[e]} />
-            </div>
+            </div>}
             <div className="field">
               <span className="lbl">모델</span>
               <div className="pills" role="radiogroup" aria-label={`${ENGINE_LABEL[e]} 모델`}>
@@ -98,8 +100,8 @@ export function ModelDialog({ onClose, onChannels, onRunners }: { onClose: () =>
         ))}
         {error && <p className="error">{error}</p>}
         <div className="form-actions">
-          <button type="button" className="btn" title="사용량 다시 조회" disabled={loading} onClick={() => loadUsage(true)}>
-            <RefreshCw /> 사용량</button>
+          {!workspaceId && <button type="button" className="btn" title="사용량 다시 조회" disabled={loading} onClick={() => loadUsage(true)}>
+            <RefreshCw /> 사용량</button>}
           <span className="spacer" />
           <button type="button" className="btn" onClick={onClose}>취소</button>
           <button className="btn primary">저장</button>

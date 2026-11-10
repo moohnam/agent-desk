@@ -3,16 +3,17 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join, normalize } from 'node:path';
 import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
-import { parseFeedParams, type FeedFilter, type HubMessage, type MessageReceipt } from '../../shared/api.ts';
+import type { HubMessage } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Hub } from './hub.ts';
 import { handleMcp } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
-import { feedEvent } from './db.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
 import { remoteLocation } from '../../shared/remote.ts';
+import { workspaceApi, workspaceRoute } from './workspace-api.ts';
+import { WorkspaceLinks } from './workspace-links.ts';
 import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
 const WEB_DIST = config.webDist;
@@ -34,13 +35,6 @@ async function serveStatic(pathname: string, res: ServerResponse) {
   }
 }
 
-/** Question answers from a request body: string values keyed by question text, else none. */
-function answersOf(v: unknown): Record<string, string> | undefined {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
-  const out = Object.fromEntries(Object.entries(v).filter(([, a]) => typeof a === 'string'));
-  return Object.keys(out).length ? out : undefined;
-}
-
 async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
   const b = await readBody(req);
   if (b === undefined) return {};
@@ -55,11 +49,6 @@ function intParam(url: URL, name: string, fallback: number | undefined, max = Nu
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new HttpError(400, `${name}는 1 이상 ${max} 이하의 정수여야 합니다`);
   return n;
-}
-
-/** A feed column's filter from `/feed` parameters: comma lists of tasks, projects, statuses, kinds; `q` a search. */
-function feedFilter(url: URL): FeedFilter {
-  return parseFeedParams((name) => url.searchParams.get(name));
 }
 
 /** The page's own path for a redirect: one leading slash, so `//host` can't send it to another site. */
@@ -109,6 +98,7 @@ $('send').onclick = async () => {
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
 export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
+  const workspaces = new WorkspaceLinks(hub.store);
   access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -192,6 +182,33 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
       if (url.pathname === '/mcp') return await handleMcp(hub, req, res);
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
+      if (parts[1] === 'workspaces') {
+        if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list());
+        if (parts.length === 2 && req.method === 'POST') {
+          if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 등록할 수 있습니다');
+          return send(res,201,await workspaces.attach(await readJson(req)));
+        }
+        if (parts.length === 3 && req.method === 'PUT') {
+          if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 변경할 수 있습니다');
+          return send(res,200,await workspaces.attach(await readJson(req),id));
+        }
+        if (parts.length === 3 && req.method === 'DELETE') {
+          if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 제거할 수 있습니다');
+          workspaces.remove(id);return send(res,200,{ok:true});
+        }
+        if (parts.length >= 4) {
+          const path='/'+parts.slice(3).join('/')+url.search;
+          const leave = client.kind === 'device' ? access.connect(client.device.id,ipOf(req),()=>res.destroy()) : ()=>{};
+          res.on('close',leave);
+          return await workspaces.proxy(id,path,req,res);
+        }
+        throw new HttpError(404,'공유 작업공간 요청을 찾을 수 없습니다');
+      }
+      const workspaceUrl = new URL(url); workspaceUrl.pathname = url.pathname.slice(4);
+      if (workspaceRoute(req.method ?? '', workspaceUrl.pathname)) {
+        const result = workspaceApi(hub, req.method!, workspaceUrl, req.method === 'GET' ? {} : await readJson(req));
+        return send(res, result.status, result.body);
+      }
       switch (route) {
         case 'GET /runners':
           return send(res, 200, hub.remotes.list());
@@ -275,22 +292,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
             if (!(ENGINES as string[]).includes(engine)) throw new HttpError(400, `알 수 없는 엔진입니다: ${engine}`);
             return send(res, 200, await readEngineUsage(engine as EngineName, refresh));
           }
-        case 'GET /settings':
-          return send(res, 200, hub.settings());
-        case 'PUT /settings':
-          return send(res, 200, hub.setSettings(await readJson(req)));
-        case 'POST /projects': {
-          const b = await readJson(req);
-          return send(res, 201, hub.createProject(b.name, b.root_path));
-        }
-        case 'POST /tasks': {
-          const b = await readJson(req);
-          return send(res, 201, hub.createTask(b.project_id, b.title, b.prompt, b.permission_mode));
-        }
-        case 'POST /compose': {
-          const b = await readJson(req);
-          return send(res, 201, hub.compose(b.text));
-        }
         case 'POST /uploads': {
           // `{url}`: a file on the web (an image dragged in from a web page), downloaded here.
           if (/^application\/json\b/i.test(req.headers['content-type'] ?? '')) {
@@ -301,78 +302,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           if (!/^application\/octet-stream\b/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, 'application/octet-stream 본문만 받습니다');
           const name = url.searchParams.get('name') ?? '';
           return send(res, 201, { path: await saveUpload(req, uploadsDir, name) });
-        }
-        case 'GET /feed': {
-          // A column's events (feedFilter); tool payloads come cut (feedEvent).
-          return send(res, 200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), feedFilter(url)).map(feedEvent));
-        }
-        case 'GET /feed/:id': {
-          // `/feed/count`: how many posts the column has in all, for its "loaded / total".
-          if (id !== 'count') throw new HttpError(404, `no route for ${route}`);
-          return send(res, 200, hub.store.countFeed(feedFilter(url)));
-        }
-        case 'GET /tasks/:id/events': {
-          // `since`: a thread opened at an older post loads from that post on. `before`: the page of
-          // history before a client's oldest event; `more`: still older events exist. `ids`: just
-          // those events, whole (live events come cut, like the feed's).
-          const ids = url.searchParams.get('ids');
-          if (ids) {
-            const list = ids.split(',').map(Number).filter(Number.isInteger).slice(0, 500);
-            return send(res, 200, { events: hub.store.eventsByIds(id, list), more: false });
-          }
-          const events = hub.store.listEvents(id, 500, intParam(url, 'since', undefined), intParam(url, 'before', undefined));
-          return send(res, 200, { events, more: events.length > 0 && hub.store.hasEventsBefore(id, events[0].id) });
-        }
-        case 'POST /tasks/:id/messages': {
-          const b = await readJson(req);
-          const receipt: MessageReceipt = {};
-          const task_id = hub.sendMessage(id, b.text, false, receipt);
-          return send(res, 202, { ok: true, task_id, ...receipt });
-        }
-        case 'DELETE /tasks/:id/queue/:id':
-          hub.cancelQueued(id, parts[4]);
-          return send(res, 200, { ok: true });
-        case 'POST /tasks/:id/queue/:id/send':
-          hub.sendQueuedNow(id, parts[4]);
-          return send(res, 202, { ok: true });
-        case 'PUT /tasks/:id/queue/:id': {
-          const b = await readJson(req);
-          hub.moveQueued(id, parts[4], Number(b.index));
-          return send(res, 200, { ok: true });
-        }
-        case 'POST /tasks/:id/handoff': {
-          const b = await readJson(req);
-          return send(res, 202, hub.requestHandoff(id, {
-            picked: Array.isArray(b.picked) ? b.picked.map(Number) : [],
-            feedback: typeof b.feedback === 'string' ? b.feedback : undefined,
-            current: typeof b.current === 'string' ? b.current : undefined,
-          }));
-        }
-        case 'POST /tasks/:id/reset': {
-          const b = await readJson(req);
-          return send(res, 202, hub.resetContext(id, typeof b.text === 'string' ? b.text : ''));
-        }
-        case 'DELETE /tasks/:id':
-          hub.deleteTask(id);
-          return send(res, 200, { ok: true });
-        case 'DELETE /projects/:id':
-          hub.deleteProject(id);
-          return send(res, 200, { ok: true });
-        case 'POST /tasks/:id/interrupt':
-          hub.interrupt(id);
-          return send(res, 202, { ok: true });
-        case 'POST /tasks/:id/close':
-          hub.closeSession(id);
-          return send(res, 202, { ok: true });
-        case 'POST /approvals/:id': {
-          const b = await readJson(req);
-          hub.resolveApproval(id, b.allow === true, b.message, answersOf(b.answers));
-          return send(res, 200, { ok: true });
-        }
-        case 'POST /questions/:id': {
-          const b = await readJson(req);
-          hub.external.answerQuestion(id, b.answer);
-          return send(res, 200, { ok: true });
         }
         case 'POST /open': {
           if (!local) throw new HttpError(403, '이 기기에서는 열 수 없습니다. Mac에서 열어 주세요.');
@@ -414,6 +343,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
     }
   });
   server.on('listening', () => hub.channels.start());
-  server.on('close', () => hub.channels.stop());
+  server.on('close', () => { hub.channels.stop(); void workspaces.close(); });
   return server;
 }

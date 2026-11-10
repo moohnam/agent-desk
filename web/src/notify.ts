@@ -8,6 +8,7 @@
 // there when System Settings > Notifications > Show previews is "When Unlocked".
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { workspaceId, workspaceKey } from './workspace.ts';
 import { ASK_USER } from '../../shared/protocol.ts';
 import type { AccessView } from '../../shared/api.ts';
 import type { Approval, HubEvent, Question, TaskView } from './types.ts';
@@ -18,9 +19,9 @@ const tauri = (): Invoke | undefined => (window as { __TAURI__?: { core?: { invo
 
 const PREF = 'agent-desk.notify';
 /** Ids notified on this device, so two desk windows don't both show one. */
-const SEEN = 'agent-desk.notified';
+const SEEN = workspaceKey('agent-desk.notified');
 /** When a desk window on this device was last in front: none notifies while one is. */
-const FRONT = 'agent-desk.front';
+const FRONT = workspaceKey('agent-desk.front');
 /** This browser can't show notifications (it refused once), kept so a reload doesn't show the bell on. */
 const BROKEN = 'agent-desk.notify-broken';
 const FRONT_FRESH_MS = 8000;
@@ -124,8 +125,9 @@ function show(n: Note, open: (taskId: string) => void) {
 function deliver(n: Note, open: (taskId: string) => void) {
   try {
     const t = tauri();
-    if (t) { t('desk_notify', { id: n.id, title: n.title, body: n.body, task: n.taskId ?? null }).catch(() => {}); return; }
-    const note = new Notification(n.title, { body: n.body, tag: n.id });
+    const id = workspaceKey(n.id);
+    if (t) { t('desk_notify', { id, title: n.title, body: n.body, task: n.taskId ? `workspace:${workspaceId}:${n.taskId}` : null }).catch(() => {}); return; }
+    const note = new Notification(n.title, { body: n.body, tag: id });
     note.onclick = () => { window.focus(); if (n.taskId) open(n.taskId); note.close(); };
   } catch {
     broken = true;
@@ -164,10 +166,22 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
   useEffect(trackFront, []);
   // The desktop app: a clicked notification opens its task's thread.
   useEffect(() => {
-    const onOpen = (e: Event) => { const task = (e as CustomEvent<{ task?: string }>).detail?.task; if (task) openRef.current(task); };
+    const onOpen = (e: Event) => {
+      const raw = (e as CustomEvent<{ task?: string }>).detail?.task;
+      if (!raw) return;
+      const parsed = /^workspace:([a-zA-Z0-9-]*):([a-zA-Z0-9-]+)$/.exec(raw);
+      const workspace = parsed?.[1] ?? '', task = parsed?.[2] ?? raw;
+      if (workspace === workspaceId) openRef.current(task);
+      else location.assign(`${workspace ? `/shared/${workspace}` : '/'}?openTask=${encodeURIComponent(task)}`);
+    };
     window.addEventListener('desk-notification-open', onOpen);
     return () => window.removeEventListener('desk-notification-open', onOpen);
   }, []);
+  useEffect(() => {
+    const url = new URL(location.href), task = url.searchParams.get('openTask');
+    if (!task || !hub.tasks.has(task)) return;
+    openRef.current(task);url.searchParams.delete('openTask');history.replaceState(null,'',url);
+  }, [hub.synced, hub.tasks]);
   useEffect(() => hub.onEvent((e) => {
     const text = e.kind === 'assistant' || e.kind === 'update' ? clip(e.payload?.text) : '';
     if (text) said.current.set(e.task_id, text);

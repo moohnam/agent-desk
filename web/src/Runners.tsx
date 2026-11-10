@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from './api.ts';
 import { Modal } from './Modal.tsx';
 import type { RemoteRunnerView } from '../../shared/remote.ts';
+import { WorkspaceConnections } from './Workspaces.tsx';
 
 export function RunnersDialog({ onClose }: { onClose: () => void }) {
   const [runners,setRunners]=useState<RemoteRunnerView[]>([]);
@@ -41,6 +42,7 @@ export function RunnersDialog({ onClose }: { onClose: () => void }) {
       </section>}
       <p className="muted small">연결이 끊겨도 실행은 대상 머신에서 이어지고, 메시지와 결과는 양쪽 디스크에 보관됩니다. 승인이 필요하면 답을 받을 때까지 기다립니다. 연결 토큰과 전달 DB를 보관하세요.</p>
       {error&&<p className="error" role="alert">{error}</p>}
+      <WorkspaceConnections />
     </div>
   </Modal>;
 }

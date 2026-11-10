@@ -1,3 +1,4 @@
+import { apiBase } from './workspace.ts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { mergeEvents } from './posts.ts';
@@ -59,7 +60,7 @@ export function useHub() {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource('/api/stream');
+    const es = new EventSource(`${apiBase}/stream`);
     es.onopen = () => { setConnected(true); void refresh(); };
     es.onerror = () => {
       setConnected(false);

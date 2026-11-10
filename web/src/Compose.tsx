@@ -5,6 +5,8 @@ import {
   modelHelpOf, modelProblem, modelTagsOf, parseCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../shared/compose.ts';
 import { api } from './api.ts';
+import { SharedPending } from './workspace.ts';
+import type { MessageReceipt } from '../../shared/api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
@@ -272,8 +274,12 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
 }) {
   // Unsent text stays while the drawer is closed and across reloads (drafts.ts).
   const [text, setText] = useState(() => getDraft<string>('drawer') ?? '');
+  const revision = useRef(0);
+  const mounted = useRef(true);
+  const editText = (value: string) => { revision.current++; setText(value); };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setDraft('drawer', text, { empty: !text.trim() }); }, [text]);
-  useDraftSync<string>('drawer', (v) => setText(v ?? ''));
+  useDraftSync<string>('drawer', (v) => editText(v ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const skills = useSkills();
@@ -283,19 +289,28 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
 
   const submit = async () => {
     if (!hint.ok || busy) return;
+    const unchanged = revision.current;
+    const submittedDraft = getDraft('drawer');
+    const clearSubmitted = () => {
+      // A delayed response must preserve edits made here or after reopening the drawer.
+      if (revision.current !== unchanged || (!mounted.current && getDraft('drawer') !== submittedDraft)) return false;
+      setDraft('drawer', '', { empty: true });
+      setText('');
+      return true;
+    };
     setBusy(true); setError(null);
     try {
       const task = await api.compose(text);
       // onSent closes the drawer in the same render, before the effect would see the empty text.
-      setDraft('drawer', '', { empty: true });
-      setText('');
-      onSent(task);
+      if (clearSubmitted() && mounted.current) onSent(task);
+      else if (mounted.current) setError('이전 지시를 보냈습니다. 현재 작성 중인 내용은 보관했습니다.');
     } catch (e) {
+      if (e instanceof SharedPending) clearSubmitted();
       setError(e instanceof Error ? e.message : String(e));
     } finally { setBusy(false); }
   };
   const example = (s: string) => {
-    setText(s);
+    editText(s);
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(s.length, s.length); });
   };
 
@@ -306,7 +321,7 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
         <button className="icon-btn" title="닫기" aria-label="닫기" onClick={onClose}><X /></button>
       </header>
       <div className="cmp-body">
-        <ComposeField value={text} onChange={setText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
+        <ComposeField value={text} onChange={editText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
           projects={projects} tasks={tasks} mentions="route"
           placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
         <Preview ok={hint.ok} rows={hint.rows} />
@@ -391,10 +406,13 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const running = isRunning(task);
   const ok = !otherEngine && !problem && !!(c.body || c.mode || modelTag || c.skills.length) && !(branch && !content);
 
-  const send = async (body: string) => {
+  const send = async (body: string):Promise<({task_id:string;shared_pending?:boolean}&MessageReceipt)|null> => {
     setBusy(true);
     try { return await api.send(task.id, body); }
-    catch (e) { onError(e instanceof Error ? e.message : String(e)); return null; }
+    catch (e) {
+      if (e instanceof SharedPending) return {task_id:task.id,shared_pending:true};
+      onError(e instanceof Error ? e.message : String(e)); return null;
+    }
     finally { setBusy(false); }
   };
   const promote = async (target: QueuedTarget | null) => {
@@ -421,7 +439,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
       setDraft(draftKey, null, { empty: true });
       setText(''); setPick(null);
     }
-    setSent(r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
+    setSent(r.shared_pending ? new SharedPending().message : r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
       : r.answered ? '에이전트의 질문에 이 답글로 답했습니다.'
       : r.queued_id && task.runner_id?.startsWith('remote-') && task.runner_connected === false ? '메시지를 보관했습니다. 러너 재연결 후 순서대로 전달합니다.'
       : r.queued_id ? `대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.${fromShortcut ? ' 입력을 바꾸지 않고 ⌘Enter를 한 번 더 누르면 지금 보냅니다.' : ''}`
