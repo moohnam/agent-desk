@@ -69,7 +69,8 @@ export class RemoteRunners implements RunnerPort {
   canQueue(sessionId: string) { return !!this.sessionPeer(sessionId); }
   has(sessionId: string) {
     const p = this.sessionPeer(sessionId);
-    return p ? this.online(p) && (JSON.parse(p.sessions) as LiveSession[]).some(s => s.sessionId === sessionId) : this.local.has(sessionId);
+    return p ? this.online(p) && ((JSON.parse(p.sessions) as LiveSession[]).some(s => s.sessionId === sessionId)
+      || this.pendingWork(p.id).some(s => s.sessionId === sessionId)) : this.local.has(sessionId);
   }
   forPath(path: string) {
     let location;

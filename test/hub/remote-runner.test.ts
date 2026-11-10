@@ -354,3 +354,16 @@ test('an offline answer resolves the known question and an offline reset waits f
     assert.equal(t.store.latestSession(task.id)!.runner_id,t.registered.runner.id);
   }finally{t.cleanup();}
 });
+
+test('a reply before the pending remote start is received queues behind that first turn',()=>{
+  const t=setup();try{
+    t.exchange();
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex first`);
+    t.hub.sendMessage(task.id,'immediate-follow-up');
+    assert.equal(t.store.queued({taskId:task.id}).length,1);
+    t.exchange();t.exchange();
+    assert.equal(t.starts.length,1);assert.equal(t.sent.length,0);
+    t.finish();t.exchange();
+    assert.deepEqual(t.sent,['immediate-follow-up']);assert.equal(t.starts.length,1);
+  }finally{t.cleanup();}
+});
