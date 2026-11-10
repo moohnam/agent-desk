@@ -20,6 +20,7 @@ import { SkillStore } from './skills.ts';
 import { config } from './config.ts';
 import { RemoteRunners } from './runner/remote-hub.ts';
 import { remoteLocation } from '../../shared/remote.ts';
+import { steeringSkillText } from './runner/skill-input.ts';
 import { ASK_USER, type Answers, type LiveSession, type RunnerToHub } from '../../shared/protocol.ts';
 
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
@@ -369,6 +370,11 @@ export class Hub extends DeskCore {
   /** Hands a message to the session: to the live one, or by resuming the conversation. */
   private dispatch(sessionId: string, body: string, skills: string[], steer = false) {
     const session = this.store.getSession(sessionId)!;
+    // Also protect already-running local daemons: updating their module would end live engines.
+    // Remote runners choose their own skills path and add this in the adapter instead.
+    if (steer && session.engine === 'codex' && !this.remotes.canQueue(sessionId)) {
+      body = steeringSkillText(body, skills, this.skills.home);
+    }
     if (this.runner.has(sessionId)) {
       this.runner.handle({ type: 'send', sessionId, text: body, skills, steer });
     } else {

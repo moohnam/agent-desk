@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import type { ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
+import { steeringSkillText } from './skill-input.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
@@ -285,9 +286,12 @@ export const startCodex: StartEngine = (opts) => {
   // Desk skills come from the skills root registered at start; a skill input names one for this turn.
   const skillItem = (name: string) => ({ type: 'skill', name, path: join(opts.skillsHome!, 'skills', name, 'SKILL.md') });
 
-  const turnInput = (turn: Turn) => {
+  const turnInput = (turn: Turn, steering = false) => {
     const input: Json[] = opts.skillsHome ? (turn.skills ?? []).map(skillItem) : [];
-    if (turn.text || !input.length) input.push({ type: 'text', text: turn.text, text_elements: [] });
+    const text = steering ? steeringSkillText(turn.text, turn.skills, opts.skillsHome) : turn.text;
+    // Codex 0.164.0 accepts skill items in turn/steer without expanding their instructions.
+    // Keep the native items, but explicitly ask the model to read the selected files as well.
+    if (text || !input.length) input.push({ type: 'text', text, text_elements: [] });
     return input;
   };
 
@@ -384,7 +388,7 @@ export const startCodex: StartEngine = (opts) => {
     if (steer && turns.active && threadId && turnId) {
       // Adds the input to the running turn; if that turn ended meanwhile, run it as the next turn.
       const turn = { text, skills };
-      request('turn/steer', { threadId, input: turnInput(turn), expectedTurnId: turnId }).catch(() => {
+      request('turn/steer', { threadId, input: turnInput(turn, true), expectedTurnId: turnId }).catch(() => {
         if (closing) return;
         turns.push(turn);
       });

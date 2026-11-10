@@ -139,6 +139,25 @@ test('remote project starts on its registered runner; skills and session owner s
   }finally{t.cleanup();}
 });
 
+test('remote Codex skill steering preserves the message and leaves skill paths to the remote adapter',()=>{
+  const t=setup();try{
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex initial`);
+    t.exchange();t.exchange();
+    assert.equal(t.agent.runner.snapshot()[0].busy,true);
+    t.hub.sendMessage(task.id,'#parent 이어서 진행 #now');
+    const command=t.exchange().commands.find(c=>c.value.type==='send')!.value;
+    assert.equal(command.type,'send');
+    if(command.type!=='send')throw new Error('expected send command');
+    assert.equal(command.text,'이어서 진행');
+    assert.deepEqual(command.skills,['parent']);
+    assert.equal(command.steer,true);
+    assert.ok(!command.text.includes(t.skills.home));
+    assert.ok(!command.text.includes('[데스크 스킬]'));
+    assert.deepEqual(t.sent,['이어서 진행']);
+    assert.equal(t.localSent.length,0);
+  }finally{t.cleanup();}
+});
+
 test('offline input is retained, output replayed once, and later turns keep their order',()=>{
   const t=setup();try{
     const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`);

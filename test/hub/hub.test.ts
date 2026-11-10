@@ -367,3 +367,27 @@ test('channel queued sources are delivered in order at turn end, with no new tas
   assert.equal((event.payload as any).channel_context.entries[0].body, 'original evidence');
   assert.equal(hub.store.listTasks().length, 1);
 });
+
+for (const engine of ['codex','claude']) test(`live ${engine} skill steering remains readable to a daemon loaded before the hub update`,()=>{
+  const t=setup();try{
+    t.hub.skills.create('parent','fixture');
+    const task=t.hub.compose(`@project:${t.dir} #${engine} initial`);
+    const session=t.runner.last('start')!;
+    t.runner.say({type:'busy',sessionId:session.sessionId,busy:true});
+    t.hub.sendMessage(task.id,'#parent 랑 진행을 반복 #now');
+    const command=t.runner.last('send')!;
+    assert.deepEqual(command.skills,['parent']);assert.equal(command.steer,true);
+    if(engine==='codex'){
+      assert.ok(command.text.includes('#parent:'));
+      assert.ok(command.text.includes(join(t.hub.skills.home,'skills','parent','SKILL.md')));
+      assert.ok(command.text.includes('먼저 다음 스킬 파일을 읽고'));
+    }else assert.ok(!command.text.includes('[데스크 스킬]'));
+    assert.ok(command.text.includes('랑 진행을 반복'));
+    const user=t.hub.store.listEvents(task.id).filter(e=>e.kind==='user').at(-1)!;
+    assert.equal((user.payload as {text:string}).text,'#parent 랑 진행을 반복 #now');
+    t.hub.sendMessage(task.id,'#parent');
+    const queued=t.hub.store.queued({taskId:task.id})[0];assert.ok(queued);
+    t.hub.sendQueuedNow(task.id,queued.id);
+    if(engine==='codex')assert.ok(t.runner.last('send')!.text.includes('(추가 지시 없음)'));
+  }finally{t.hub.remotes.close();t.hub.store.database.close();}
+});
