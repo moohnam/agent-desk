@@ -12,6 +12,7 @@ import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { feedEvent } from './db.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
+import { remoteLocation } from '../../shared/remote.ts';
 import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
 const WEB_DIST = config.webDist;
@@ -115,6 +116,19 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
     const route = `${req.method} /${parts.slice(1).map((p, i) => (i % 2 === 1 ? ':id' : p)).join('/')}`;
     const id = parts[2];
 
+    // Runner credentials authorize this exchange only, never the desk UI, MCP or management API.
+    if (req.method === 'POST' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'runners' && parts[3] === 'exchange') {
+      try {
+        if (!sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+        const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+        if (!hub.remotes.accepts(id, token)) throw new HttpError(401, '이 러너의 연결 토큰이 필요합니다');
+        const input = await readJson(req);
+        return send(res, 200, hub.atomic(() => hub.remotes.exchange(id, input as any)));
+      } catch (error) {
+        return send(res, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // Another device must name this Mac by an address it has (no rebound foreign domain).
     if (!access.isLocal(req) && !access.hostAllowed(req)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
@@ -179,6 +193,14 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       if (url.pathname === '/mcp') return await handleMcp(hub, req, res);
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
       switch (route) {
+        case 'GET /runners':
+          return send(res, 200, hub.remotes.list());
+        case 'POST /runners':
+          if (!local) throw new HttpError(403, '러너 등록은 허브 머신에서만 할 수 있습니다');
+          return send(res, 201, hub.remotes.register((await readJson(req)).address));
+        case 'POST /runners/:id/token':
+          if (!local) throw new HttpError(403, '러너 토큰 재발급은 허브 머신에서만 할 수 있습니다');
+          return send(res, 200, hub.remotes.rotate(id));
         case 'GET /channels':
           return send(res, 200, hub.channels.list());
         case 'POST /channels':
@@ -357,6 +379,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           if (!localOrigin(req.headers.origin)) throw new HttpError(403, 'forbidden');
           const b = await readJson(req);
           if (typeof b.href !== 'string' || !b.href) throw new HttpError(400, 'href is required');
+          if (typeof b.task_id === 'string' && remoteLocation(hub.cwdOf(b.task_id) ?? '') && !/^(akb|lectern):/i.test(b.href)) throw new HttpError(409, '원격 머신의 파일입니다. 해당 머신에서 이 경로를 열어 주세요');
           const target = linkTarget(b.href, typeof b.task_id === 'string' ? hub.cwdOf(b.task_id) : undefined);
           await openTarget(target);
           return send(res, 200, { ok: true, ...target });

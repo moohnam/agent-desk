@@ -4,6 +4,7 @@ import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
+import { RunnersDialog } from './Runners.tsx';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
 import { ChannelsDialog } from './Channels.tsx';
@@ -97,6 +98,7 @@ export function App() {
   const [accessOpen, setAccessOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [runnersOpen, setRunnersOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [phoneChannel, setPhoneChannel] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1341,7 +1343,8 @@ export function App() {
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
-      {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} onChannels={() => { setModelOpen(false); setChannelsOpen(true); }} />}
+      {modelOpen && <ModelDialog onRunners={hub.local ? () => {setModelOpen(false);setRunnersOpen(true);} : undefined} onClose={() => setModelOpen(false)} onChannels={() => { setModelOpen(false); setChannelsOpen(true); }} />}
+      {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}
     </div>
   );

@@ -17,6 +17,9 @@ import { Store, now, type Queued, type Session } from './db.ts';
 import { draftPrompt, quoteEvent, revisePrompt, type Quoted } from '../../shared/handoff.ts';
 import { RunnerClient, type RunnerFactory } from './runner/client.ts';
 import { SkillStore } from './skills.ts';
+import { config } from './config.ts';
+import { RemoteRunners } from './runner/remote-hub.ts';
+import { remoteLocation } from '../../shared/remote.ts';
 import { ASK_USER, type Answers, type LiveSession, type RunnerToHub } from '../../shared/protocol.ts';
 
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
@@ -40,6 +43,7 @@ export class Hub extends DeskCore {
   readonly external: ExternalSessions;
   /** Read-only sources, independent of the runner. */
   readonly channels: Channels;
+  readonly remotes: RemoteRunners;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
   /**
@@ -60,10 +64,15 @@ export class Hub extends DeskCore {
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
     this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
-    this.runner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
+    const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
       (m) => this.onRunnerMessage(m),
       (connected) => this.publish({ type: 'runner', connected }),
     );
+    this.remotes = new RemoteRunners(store, localRunner, (m, at) => this.atTime(at, () => this.onRunnerMessage(m)),
+      (sessions, id) => this.reconcile(sessions, false, id), () => {
+        this.publish({ type: 'runners', runners: this.remotes.list() });
+      }, this.skills);
+    this.runner = this.remotes;
     setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS).unref();
   }
 
@@ -74,10 +83,12 @@ export class Hub extends DeskCore {
    * Applies the runner's view of live sessions after a (re)connect. `presumed`: no runner has
    * reported yet; sessions are only marked lost, and what waits on them is settled on the report.
    */
-  private reconcile(sessions: LiveSession[], presumed = false) {
+  private reconcile(sessions: LiveSession[], presumed = false, runnerId?: string) {
+    const owns = (id: string) => runnerId ? id === runnerId : !this.remotes.owns(id);
+    const ownedSession = (id: string) => owns(this.store.getSession(id)?.runner_id ?? '');
     const approvals = sessions.flatMap((s) => s.approvals.map((a) => ({ ...a, sessionId: s.sessionId })));
     const { lost, touched } = this.store.reconcile(
-      new Set(sessions.map((s) => s.sessionId)), new Set(approvals.map((a) => a.approvalId)));
+      new Set(sessions.map((s) => s.sessionId)), new Set(approvals.map((a) => a.approvalId)), owns);
     // App sessions the runner no longer has died with it (runner restart, crash): say so instead of going quiet.
     for (const r of lost) {
       this.addEvent(r.id, r.task_id, 'status', { kind: 'status', state: 'error', detail: {
@@ -91,8 +102,8 @@ export class Hub extends DeskCore {
       if (s.approvals.length) this.setStatus(session.task_id, session.id, 'waiting');
       else if (s.busy) this.setStatus(session.task_id, session.id, 'running');
     }
-    this.busy = new Set(sessions.filter((s) => s.busy).map((s) => s.sessionId));
-    this.background = new Map(sessions.filter((s) => s.background?.length).map((s) => [s.sessionId, s.background!]));
+    this.busy = new Set([...this.busy].filter(id => !ownedSession(id)).concat(sessions.filter(s => s.busy).map(s => s.sessionId)));
+    this.background = new Map([...this.background].filter(([id]) => !ownedSession(id)).concat(sessions.filter(s => s.background?.length).map(s => [s.sessionId, s.background!] as [string, import("../../shared/protocol.ts").BackgroundTask[]])));
     for (const s of sessions) if (s.background?.length) { const t = this.store.getSession(s.sessionId)?.task_id; if (t) touched.push(t); }
     // Messages that waited for a session the runner no longer has will not be sent.
     const live = new Set(sessions.map((s) => s.sessionId));
@@ -101,11 +112,11 @@ export class Hub extends DeskCore {
     else {
       for (const id of this.presumedLost) {
         const s = this.store.getSession(id);
-        if (s && !live.has(id)) gone.push({ id, task_id: s.task_id });
+        if (s && owns(s.runner_id) && !live.has(id)) gone.push({ id, task_id: s.task_id });
       }
-      this.presumedLost.clear();
+      for (const id of this.presumedLost) if (ownedSession(id)) this.presumedLost.delete(id);
     }
-    for (const r of gone) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
+    for (const r of (runnerId ? [] : gone)) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }
@@ -135,12 +146,16 @@ export class Hub extends DeskCore {
   /** With `create`, a missing directory is made (with its parents) instead of refused. */
   createProject(name: string, rootPath: string, create = false) {
     if (!name?.trim() || !rootPath?.trim()) throw new HttpError(400, 'name and root_path are required');
-    let st;
-    try { st = statSync(rootPath); } catch { /* missing */ }
-    if (!st && create) {
-      try { mkdirSync(rootPath, { recursive: true }); } catch (e) { throw new HttpError(400, `디렉터리를 만들지 못했습니다: ${rootPath} (${(e as Error).message})`); }
-    } else if (!st?.isDirectory()) {
-      throw new HttpError(400, st ? `디렉터리가 아니라 파일입니다: ${rootPath}` : `디렉터리가 없습니다: ${rootPath}`);
+    rootPath = this.remotes.canonicalPath(rootPath) ?? rootPath;
+    const remote = this.remotes.forPath(rootPath);
+    if (!remote) {
+      let st;
+      try { st = statSync(rootPath); } catch { /* missing */ }
+      if (!st && create) {
+        try { mkdirSync(rootPath, { recursive: true }); } catch (e) { throw new HttpError(400, `디렉터리를 만들지 못했습니다: ${rootPath} (${(e as Error).message})`); }
+      } else if (!st?.isDirectory()) {
+        throw new HttpError(400, st ? `디렉터리가 아니라 파일입니다: ${rootPath}` : `디렉터리가 없습니다: ${rootPath}`);
+      }
     }
     const project = { id: randomUUID(), name: name.trim(), root_path: rootPath, created_at: now() };
     this.store.createProject(project);
@@ -154,21 +169,22 @@ export class Hub extends DeskCore {
    * `#claude`/`#codex` picks the engine of a new task; naming another engine than the latest task's
    * starts a new task with it instead of continuing.
    */
-  compose(text: string): TaskView {
+  compose(text: string): TaskView { return this.atomic(() => this.composeInner(text)); }
+  private composeInner(text: string): TaskView {
     const c = this.parse(text, true);
     if (!c.mention) throw new HttpError(400, '@프로젝트로 대상을 지정하거나 @이름:/경로로 새 프로젝트를 정의하세요');
     let project = this.store.findProjectByName(c.mention.name);
     if (c.mention.path) {
       if (c.mention.no) throw new HttpError(400, '작업 번호와 경로는 함께 쓸 수 없습니다');
-      const path = resolve(expandHome(c.mention.path));
+      const path = this.remotes.canonicalPath(c.mention.path) ?? resolve(expandHome(c.mention.path));
       if (project && project.root_path !== path) {
         throw new HttpError(409, `@${project.name}은 이미 ${project.root_path}로 등록되어 있습니다`);
       }
       // Checked before the directory and project are made, so a request that fails leaves nothing behind.
-      this.checkNewTask(c);
+      this.checkNewTask(c, undefined, path);
       // Naming a new directory there is how a new project starts: it is made, and the thread says so.
       let made = false;
-      if (!project) { try { statSync(path); } catch { made = true; } }
+      if (!project && !remoteLocation(path)) { try { statSync(path); } catch { made = true; } }
       project ??= this.createProject(c.mention.name, path, true);
       const view = this.createTask(project.id, '', text, c.mode, undefined, true);
       const session = made ? this.store.latestSession(view.id) : undefined;
@@ -192,11 +208,12 @@ export class Hub extends DeskCore {
   }
 
   /** Throws what would stop a new task from starting; returns its engine. */
-  private checkNewTask(c: Composed, engine0?: EngineName): EngineName {
-    this.requireRunner();
+  private checkNewTask(c: Composed, engine0?: EngineName, rootPath?: string): EngineName {
+    const peer = rootPath ? this.remotes.forPath(rootPath) : null;
+    if (!peer) this.requireRunner();
     if (!c.body && !c.skills.length) throw new HttpError(400, 'prompt is required');
     const engine = wantedEngine(c) ?? engine0 ?? DEFAULT_ENGINE;
-    if (!this.runner.engines.has(engine)) {
+    if (!(peer ? new Set<string>(JSON.parse(peer.engines)) : this.runner.engines).has(engine)) {
       throw new HttpError(409, `지금 러너는 ${ENGINE_LABEL[engine]} 엔진을 실행하지 못합니다. 러너를 재시작하세요`);
     }
     const problem = modelProblem(engine, c);
@@ -208,12 +225,16 @@ export class Hub extends DeskCore {
    * `text` may carry compose syntax; the agent receives it with the mention and mode tag removed.
    * `engine`: the engine when no tag picks one (else the default). `routed`: the compose box's text.
    */
-  createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false, context?: ChannelContext) {
+  createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false, context?: ChannelContext): TaskView {
+    return this.atomic(() => this.createTaskInner(projectId, title, text, mode, engine0, routed, context));
+  }
+  private createTaskInner(projectId: string, title: string, text: string, mode: PermissionMode, engine0?: EngineName, routed = false, context?: ChannelContext) {
     const project = this.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'project not found');
     const c = this.parse(text, routed);
-    const engine = this.checkNewTask(c, engine0);
+    const engine = this.checkNewTask(c, engine0, project.root_path);
     const prompt = channelPrompt(c.body, context);
+    if (this.remotes.forPath(project.root_path) && prompt.includes(config.uploadsDir + '/')) throw new HttpError(400, '첨부 파일은 허브 머신에 있습니다. 원격 머신에 파일을 옮긴 뒤 해당 경로를 입력하세요');
     const permissionMode = c.mode ?? mode;
     const d = this.settings()[engine];
     const model = c.model ?? d.model, effort = c.effort ?? d.effort;
@@ -225,7 +246,7 @@ export class Hub extends DeskCore {
     const sessionId = randomUUID();
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: project.root_path,
-      source: 'app', status: 'running', runner_id: this.runnerId, created_at: ts, permission_mode: permissionMode,
+      source: 'app', status: 'running', runner_id: this.remotes.forPath(project.root_path)?.id ?? this.runnerId, created_at: ts, permission_mode: permissionMode,
       model, effort,
     });
     this.addEvent(sessionId, task.id, 'user', {
@@ -249,12 +270,16 @@ export class Hub extends DeskCore {
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
   sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context?: ChannelContext): string {
+    return this.atomic(() => this.sendMessageInner(taskId, text, routed, receipt, context));
+  }
+  private sendMessageInner(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context?: ChannelContext): string {
     const c = this.parse(text, routed);
     if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     const session = this.store.latestSession(taskId);
     if (!session) throw new HttpError(404, 'task has no session');
     if (session.source !== 'app') throw new HttpError(409, 'external sessions are view-only');
     const engine = engineOf(session.engine);
+    if (this.remotes.canQueue(session.id) && text.includes(config.uploadsDir + '/')) throw new HttpError(400, '첨부 파일은 허브 머신에 있습니다. 원격 머신에 파일을 옮긴 뒤 해당 경로를 입력하세요');
     if (c.delivery === 'new') {
       if (!c.body && !c.skills.length) throw new HttpError(400, '#new로 맡길 지시를 함께 쓰세요');
       return this.createTask(this.store.getTask(taskId)!.project_id, '', text, c.mode, engine, routed).id;
@@ -264,17 +289,18 @@ export class Hub extends DeskCore {
     }
     const problem = modelProblem(engine, c);
     if (problem) throw new HttpError(400, problem);
-    this.requireRunner();
+    this.requireRunner(session.id);
     if (c.delivery === 'fork') return this.fork(taskId, session, c, text);
     if (c.body || c.skills.length) c.body = channelPrompt(c.body, context);
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
     const content = !!(c.body || c.skills.length);
     // The agent's question waiting for a pick: the message answers it instead of the options.
-    const asked = live && c.body && !c.skills.length
+    const asked = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
       ? this.store.pendingApprovals().find((a) => a.session_id === session.id && a.tool_name === ASK_USER) : undefined;
     // Behind messages already waiting too, so they keep their order.
-    const wait = !asked && content && c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0);
+    const offline = !this.remotes.ready(session.id);
+    const wait = !asked && content && (offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
     if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...(context && { channel_context: context }) });
 
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
@@ -283,7 +309,7 @@ export class Hub extends DeskCore {
     const effort = c.effort && c.effort !== session.effort ? c.effort : undefined;
     if (model || effort) {
       this.store.updateSession(session.id, { ...(model && { model }), ...(effort && { effort }) });
-      if (live) this.runner.handle({ type: 'set_model', sessionId: session.id, model, effort });
+      if (live || this.remotes.canQueue(session.id)) this.runner.handle({ type: 'set_model', sessionId: session.id, model, effort });
       this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'model', detail: {
         model: model ?? session.model, effort: effort ?? session.effort,
       } });
@@ -291,7 +317,7 @@ export class Hub extends DeskCore {
 
     if (c.mode && c.mode !== session.permission_mode) {
       this.store.updateSession(session.id, { permission_mode: c.mode });
-      if (live) this.runner.handle({ type: 'set_mode', sessionId: session.id, permissionMode: c.mode });
+      if (live || this.remotes.canQueue(session.id)) this.runner.handle({ type: 'set_mode', sessionId: session.id, permissionMode: c.mode });
       this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'mode', detail: { mode: c.mode } });
     }
     if (!content) return taskId;
@@ -359,13 +385,13 @@ export class Hub extends DeskCore {
   }
 
   /** Sends the oldest waiting message once the session has no turn in progress. */
-  private drain(sessionId: string) {
-    if (!this.runner.connected || this.busy.has(sessionId)) return;
+  private drain(sessionId: string) { return this.atomic(() => this.drainInner(sessionId)); }
+  private drainInner(sessionId: string) {
+    if (!this.remotes.ready(sessionId) || this.busy.has(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
     if (!next || !this.store.dequeue(next.id)) return;
     if (next.kind === 'reset') { this.reset(this.store.getSession(sessionId)!, next.body, next.created_at); return; }
-    this.sendQueued(next, 'later');
-    this.dispatch(sessionId, next.body, next.skills);
+    this.atTime(undefined, () => { this.sendQueued(next, 'later'); this.dispatch(sessionId, next.body, next.skills); });
   }
 
   /** Records a waiting message as sent; one carrying an agent's request starts that request's answer. */
@@ -404,11 +430,13 @@ export class Hub extends DeskCore {
    * Sends a waiting message right away: into the running turn (as #now does), or as the next turn
    * when none runs.
    */
-  sendQueuedNow(taskId: string, queuedId: string) {
+  sendQueuedNow(taskId: string, queuedId: string) { return this.atomic(() => this.sendQueuedNowInner(taskId, queuedId)); }
+  private sendQueuedNowInner(taskId: string, queuedId: string) {
     const q = this.store.queued({ taskId }).find((x) => x.id === queuedId);
     if (!q) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     if (q.kind === 'reset') throw new HttpError(409, '컨텍스트 재구성은 지금 턴이 끝난 뒤에 실행됩니다');
-    this.requireRunner();
+    this.requireRunner(q.session_id);
+    if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
     if (!this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const steer = this.runner.has(q.session_id) && this.busy.has(q.session_id);
     this.sendQueued(q, steer ? 'now' : 'later');
@@ -444,7 +472,7 @@ export class Hub extends DeskCore {
     const engine = engineOf(parent.engine);
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: parent.cwd,
-      source: 'app', status: 'running', runner_id: this.runnerId, created_at: ts, permission_mode: permissionMode,
+      source: 'app', status: 'running', runner_id: parent.runner_id, created_at: ts, permission_mode: permissionMode,
       model, effort,
     });
     this.addEvent(sessionId, task.id, 'user', {
@@ -464,7 +492,7 @@ export class Hub extends DeskCore {
     const session = this.store.latestSession(taskId);
     if (!session) throw new HttpError(404, 'task has no session');
     if (session.source !== 'app') throw new HttpError(409, '터미널 세션은 데스크에서 컨텍스트를 재구성할 수 없습니다');
-    this.requireRunner();
+    this.requireRunner(session.id);
     return session;
   }
 
@@ -473,7 +501,8 @@ export class Hub extends DeskCore {
    * `feedback`, to rewrite `current` as asked (handoff.ts). An ordinary message the user sees in the
    * thread, but sent as written: quoted posts may hold #tags. Waits for a running turn like #later.
    */
-  requestHandoff(taskId: string, a: { picked?: number[]; feedback?: string; current?: string }) {
+  requestHandoff(taskId: string, a: { picked?: number[]; feedback?: string; current?: string }) { return this.atomic(() => this.requestHandoffInner(taskId, a)); }
+  private requestHandoffInner(taskId: string, a: { picked?: number[]; feedback?: string; current?: string }) {
     const session = this.appSession(taskId);
     let text: string;
     if (a.feedback?.trim()) {
@@ -484,7 +513,7 @@ export class Hub extends DeskCore {
         .map(quoteEvent).filter((q): q is Quoted => !!q);
       text = draftPrompt(picked);
     }
-    if (this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
+    if (!this.remotes.ready(session.id) || this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
       this.store.enqueue({
         id: randomUUID(), task_id: taskId, session_id: session.id, text, body: text, skills: [], mode: null, created_at: now(), kind: 'handoff',
       });
@@ -501,11 +530,12 @@ export class Hub extends DeskCore {
    * Continues the task in a fresh engine session whose first message is `text`: the agent keeps
    * nothing of the conversation so far. Waits for a running turn and the messages queued before it.
    */
-  resetContext(taskId: string, text: string) {
+  resetContext(taskId: string, text: string) { return this.atomic(() => this.resetContextInner(taskId, text)); }
+  private resetContextInner(taskId: string, text: string) {
     const body = text?.trim();
     if (!body) throw new HttpError(400, '새 세션에 넘길 내용을 쓰세요');
     const session = this.appSession(taskId);
-    if (this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
+    if (!this.remotes.ready(session.id) || this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
       this.store.enqueue({
         id: randomUUID(), task_id: taskId, session_id: session.id, text: body, body, skills: [], mode: null, created_at: now(), kind: 'reset',
       });
@@ -527,7 +557,7 @@ export class Hub extends DeskCore {
     const engine = engineOf(old.engine);
     this.store.createSession({
       id: sessionId, task_id: taskId, engine, engine_session_id: null, cwd: old.cwd, source: 'app', status: 'running',
-      runner_id: this.runnerId, created_at: ts, permission_mode: old.permission_mode, model: old.model, effort: old.effort,
+      runner_id: old.runner_id, created_at: ts, permission_mode: old.permission_mode, model: old.model, effort: old.effort,
     });
     // What was waiting behind the reset, and requests to this task, go on in the new session.
     this.store.moveQueued(old.id, sessionId);
@@ -554,7 +584,7 @@ export class Hub extends DeskCore {
   closeSession(taskId: string) {
     const session = this.store.latestSession(taskId);
     if (!session || session.source !== 'app' || !this.runner.has(session.id)) throw new HttpError(409, '열려 있는 세션이 없습니다');
-    if (!this.runnerCloses) throw new HttpError(409, '지금 러너는 세션 닫기를 지원하지 않습니다. 러너를 재시작하면 쓸 수 있습니다');
+    if (!this.runnerCloses && !this.remotes.canQueue(session.id)) throw new HttpError(409, '지금 러너는 세션 닫기를 지원하지 않습니다. 러너를 재시작하면 쓸 수 있습니다');
     this.runner.handle({ type: 'close', sessionId: session.id });
   }
 
@@ -562,10 +592,11 @@ export class Hub extends DeskCore {
    * Deletes tasks for good: their open sessions are closed, requests and questions waiting on them
    * end, and their records go. `projectId`: the project goes too (with all its tasks).
    */
-  deleteTasks(taskIds: string[], projectId?: string) {
+  deleteTasks(taskIds: string[], projectId?: string) { return this.atomic(() => this.deleteTasksInner(taskIds, projectId)); }
+  private deleteTasksInner(taskIds: string[], projectId?: string) {
     for (const taskId of taskIds) {
       for (const s of this.store.listSessions(taskId)) {
-        if (s.source === 'app' && this.runner.has(s.id)) this.runner.handle({ type: 'close', sessionId: s.id });
+        if (s.source === 'app' && !this.remotes.cancelSession(s.id) && this.runner.has(s.id)) this.runner.handle({ type: 'close', sessionId: s.id });
         this.busy.delete(s.id);
         this.background.delete(s.id);
       }
@@ -617,10 +648,13 @@ export class Hub extends DeskCore {
 
   /** `answers`: the user's picks when the approval is an agent's question (ASK_USER). `replied`: answered by a message. */
   resolveApproval(approvalId: string, allow: boolean, message?: string, answers?: Answers, replied = false) {
+    return this.atomic(() => this.resolveApprovalInner(approvalId, allow, message, answers, replied));
+  }
+  private resolveApprovalInner(approvalId: string, allow: boolean, message?: string, answers?: Answers, replied = false) {
     const approval = this.store.getApproval(approvalId);
     if (!approval || approval.status !== 'pending') throw new HttpError(404, 'no pending approval');
     if (approval.tool_name === REQUEST_TOOL) { this.requests.resolveRequest(approval, allow, message); return; }
-    this.requireRunner();
+    this.requireRunner(approval.session_id);
     this.store.setApprovalStatus(approvalId, allow ? 'allowed' : 'denied');
     this.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
     this.addEvent(approval.session_id, approval.task_id, 'approval',

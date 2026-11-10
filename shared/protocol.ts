@@ -14,6 +14,7 @@ export type Answers = Record<string, string>;
 export const ASK_USER = 'AskUserQuestion';
 
 export type Engine = EngineName;
+export interface SkillTransfer { name: string; path: string; content: string; executable: boolean }
 
 /**
  * Bumped when a message changes in a way the other side must know. The hub sends its version with
@@ -40,9 +41,9 @@ export type HubToRunner =
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
   | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean;
-      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string }
+      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[] }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
-  | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean }
+  | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[] }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
   /** Changes what is given; takes effect from the next turn. */
   | { type: 'set_model'; sessionId: string; model?: ModelName; effort?: Effort }

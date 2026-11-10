@@ -20,6 +20,9 @@ export interface RunnerPort {
   has(sessionId: string): boolean;
   /** Sends a command; throws when not connected. */
   handle(cmd: HubToRunner): void;
+  /** Remote commands can be accepted durably while the link is down. */
+  canQueue?(sessionId: string): boolean;
+  ready?(sessionId: string): boolean;
 }
 
 /** Makes the hub's runner connection, which reports messages and connection changes back. */

@@ -28,6 +28,13 @@ export class DeskCore {
   background = new Map<string, BackgroundTask[]>();
   /** Waiters of desk_ask / desk_request / desk_wait_answer, by question or request id. */
   private waiters = new Map<string, Set<() => void>>();
+  private publications: HubMessage[] | null = null;
+  private eventTime?: string;
+  atTime<T>(at: string | undefined, work: () => T): T {
+    const previous = this.eventTime;
+    this.eventTime = at;
+    try { return work(); } finally { this.eventTime = previous; }
+  }
 
   constructor(store: Store, skills: SkillStore) {
     this.store = store;
@@ -37,7 +44,30 @@ export class DeskCore {
   /** The runner a new session is recorded with: the connected one, else this machine's. */
   get runnerId() { return this.runner.id ?? `local-${hostname()}`; }
 
-  publish(m: HubMessage) { this.bus.emit('message', m); }
+  publish(m: HubMessage) {
+    if (this.publications) this.publications.push(m);
+    else this.bus.emit('message', m);
+  }
+
+  /** Persist a user operation and its remote outbox together; publish only after commit. */
+  atomic<T>(work: () => T): T {
+    const outer = this.publications;
+    const messages: HubMessage[] = [];
+    const busy = new Set(this.busy), background = new Map(this.background);
+    this.publications = messages;
+    this.store.database.exec('SAVEPOINT hub_operation');
+    try {
+      const result = work();
+      this.store.database.exec('RELEASE hub_operation');
+      this.publications = outer;
+      for (const m of messages) this.publish(m);
+      return result;
+    } catch (error) {
+      this.store.database.exec('ROLLBACK TO hub_operation; RELEASE hub_operation');
+      this.busy = busy; this.background = background; this.publications = outer;
+      throw error;
+    }
+  }
 
   taskView(task: Task): TaskView {
     const session = this.store.latestSession(task.id);
@@ -48,6 +78,9 @@ export class DeskCore {
       permission_mode: session?.permission_mode ?? null,
       model: session?.model ?? null,
       effort: session?.effort ?? null,
+      runner_id: session?.runner_id,
+      runner_connected: session ? (this.runner.ready?.(session.id) ?? this.runner.connected) : false,
+      delivery_pending: session ? (this.runner as RunnerPort & { pendingFor?: (id: string) => number }).pendingFor?.(session.id) ?? 0 : 0,
       live: session ? (session.source === 'external' ? task.status !== 'done' : this.runner.has(session.id)) : false,
       source: session?.source ?? null,
       last_event: this.store.lastEvent(task.id) ?? null,
@@ -90,7 +123,7 @@ export class DeskCore {
 
   /** Records an event of `kind` with that kind's payload (shared/events.ts) and publishes it. */
   addEvent<K extends EventKind>(sessionId: string, taskId: string, kind: K, payload: EventPayloads[K]): Event {
-    const event = this.store.addEvent(sessionId, taskId, kind, payload);
+    const event = this.store.addEvent(sessionId, taskId, kind, payload, this.eventTime);
     this.store.touchTask(taskId);
     // Live events come cut like the feed's (feedEvent); an open thread fetches clipped ones whole.
     this.publish({ type: 'event', event: feedEvent(event) });
@@ -98,7 +131,8 @@ export class DeskCore {
     return event;
   }
 
-  requireRunner() {
+  requireRunner(sessionId?: string) {
+    if (sessionId && this.runner.canQueue?.(sessionId)) return;
     if (!this.runner.connected) throw new HttpError(503, 'Runner에 연결되어 있지 않습니다. 잠시 후 다시 시도하세요');
   }
 

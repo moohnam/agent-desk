@@ -75,6 +75,7 @@ export function useHub() {
       const ms = batch;
       batch = [];
       const tasks = new Map<string, TaskView>();
+      const runnerUpdates = new Map<string, boolean>();
       const events: HubEvent[] = [];
       const channelEntries: ChannelEntry[] = [];
       for (const m of ms) {
@@ -98,6 +99,8 @@ export function useHub() {
           });
         } else if (m.type === 'access') {
           setAccess({ requests: m.requests, devices: m.devices });
+        } else if (m.type === 'runners') {
+          for (const r of m.runners) runnerUpdates.set(r.id, r.connected);
         } else if (m.type === 'runner') {
           setRunnerConnected(m.connected);
         } else if (m.type === 'event') {
@@ -117,7 +120,15 @@ export function useHub() {
       }
       // A task's update can come in the same batch as its deletion.
       for (const m of ms) if (m.type === 'removed') for (const id of m.taskIds) tasks.delete(id);
-      if (tasks.size) setTasks((prev) => { const next = new Map(prev); for (const [id, t] of tasks) next.set(id, t); return next; });
+      if (tasks.size || runnerUpdates.size) setTasks(prev => {
+        const next = new Map(prev);
+        for (const [id, task] of tasks) next.set(id, task);
+        if (runnerUpdates.size) for (const [id, task] of next) {
+          const connected = task.runner_id ? runnerUpdates.get(task.runner_id) : undefined;
+          if (connected !== undefined && connected !== task.runner_connected) next.set(id, { ...task, runner_connected: connected });
+        }
+        return next;
+      });
       if (events.length) {
         setEvents((prev) => mergeEvents(prev, events, FEED_CAP));
         for (const e of events) listeners.current.forEach((fn) => fn(e));

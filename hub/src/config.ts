@@ -44,4 +44,10 @@ export const config = {
   },
   codexBin: env.CODEX_BIN || 'codex',
   agyBin: env.AGY_BIN || 'agy',
+  remote: {
+    hubUrl: env.AGENT_DESK_HUB_URL,
+    id: env.AGENT_DESK_RUNNER_ID,
+    tokenFile: env.AGENT_DESK_REMOTE_TOKEN_FILE,
+    dbPath: env.AGENT_DESK_REMOTE_DB ?? join(DATA_DIR, 'remote-runner.db'),
+  },
 };

@@ -194,6 +194,7 @@ const isRunning = (t: TaskView) => t.status === 'running' || t.status === 'waiti
 
 /** What happens to a message for `task` given its delivery tag (hub.sendMessage). */
 function deliveryText(task: TaskView, d: Delivery | undefined): string | null {
+  if (task.runner_id?.startsWith('remote-') && task.runner_connected === false) return '러너 재연결 후 순서대로 전달 (#now도 대기열에 보관)';
   if (d === 'fork') return '이 작업의 대화를 이어받은 새 작업으로 동시에 진행';
   if (d === 'new') return '같은 프로젝트에서 새 작업 시작 (이전 대화 없이)';
   if (!isRunning(task)) return d ? `실행 중이 아니라 바로 보냅니다 (#${d} 무시)` : null;
@@ -307,7 +308,7 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
       <div className="cmp-body">
         <ComposeField value={text} onChange={setText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
           projects={projects} tasks={tasks} mentions="route"
-          placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 할 일'} />
+          placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
         <Preview ok={hint.ok} rows={hint.rows} />
         {error && <p className="error">{error}</p>}
         <div className="cmp-actions">
@@ -422,6 +423,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     }
     setSent(r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
       : r.answered ? '에이전트의 질문에 이 답글로 답했습니다.'
+      : r.queued_id && task.runner_id?.startsWith('remote-') && task.runner_connected === false ? '메시지를 보관했습니다. 러너 재연결 후 순서대로 전달합니다.'
       : r.queued_id ? `대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.${fromShortcut ? ' 입력을 바꾸지 않고 ⌘Enter를 한 번 더 누르면 지금 보냅니다.' : ''}`
       : running && delivery !== 'now' && content ? '대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.' : null);
     if (request !== null) await promote(shortcut.current.finish(request, r.task_id === task.id ? r.queued_id : undefined));

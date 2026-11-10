@@ -41,7 +41,7 @@ export class AgentRequests {
     if (this.waitsOn(to.task.id, from.task_id)) {
       throw new HttpError(409, `@${this.core.taskLabel(to.task)}가 이 작업의 답을 기다리는 중이라, 물으면 서로 기다리게 됩니다. 그 질문에 먼저 답하세요`);
     }
-    this.core.requireRunner();
+    this.core.requireRunner(to.session.id);
     const r: AgentRequest = {
       id: randomUUID(), from_task_id: from.task_id, from_session_id: from.id, to_task_id: to.task.id, to_session_id: to.session.id,
       text: a.text.trim(), status: 'approval', answer: null, approval_id: null, queued_id: null, prompt_event_id: null,
@@ -141,7 +141,7 @@ export class AgentRequests {
   deliverRequest(r: AgentRequest) {
     const session = this.core.store.latestSession(r.to_task_id)!;
     const busy = this.core.runner.has(session.id) && this.core.busy.has(session.id);
-    if (busy || this.core.store.queued({ sessionId: session.id }).length) {
+    if (!(this.core.runner.ready?.(session.id) ?? this.core.runner.connected) || busy || this.core.store.queued({ sessionId: session.id }).length) {
       const id = randomUUID();
       this.core.store.enqueue({
         id, task_id: r.to_task_id, session_id: session.id, text: `@${this.core.taskLabel(this.core.store.getTask(r.from_task_id)!)}의 질문: ${r.text}`,
@@ -190,7 +190,7 @@ export class AgentRequests {
   /** The user allowed or denied a request's card. */
   resolveRequest(approval: Approval, allow: boolean, message?: string) {
     const r = this.core.store.openRequests().find((x) => x.approval_id === approval.id);
-    if (allow && r) this.core.requireRunner();
+    if (allow && r) this.core.requireRunner(r.to_session_id);
     this.core.store.setApprovalStatus(approval.id, allow ? 'allowed' : 'denied');
     this.core.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
     this.core.addEvent(approval.session_id, approval.task_id, 'approval',

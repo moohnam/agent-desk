@@ -22,6 +22,9 @@ const feedSearch = (q: FeedQuery) => new URLSearchParams(feedParams(q));
 export const FEED_PAGE = 1000;
 
 export const api = {
+  runners: () => call<import('../../shared/remote.ts').RemoteRunnerView[]>('GET', '/runners'),
+  rotateRunner: (id: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', `/runners/${encodeURIComponent(id)}/token`),
+  registerRunner: (address: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', '/runners', {address}),
   channels: () => call<Channel[]>('GET', '/channels'),
   createChannel: (input: ChannelInput) => call<ChannelTokenReceipt>('POST', '/channels', input),
   updateChannel: (id: string, input: Partial<Pick<ChannelInput, 'name' | 'feed_url' | 'enabled'>>) => call<Channel>('PATCH', `/channels/${encodeURIComponent(id)}`, input),

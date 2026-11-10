@@ -13,6 +13,7 @@
     "typecheck": "tsc -p shared && npm --workspace hub run typecheck && npm --workspace web run typecheck && tsc -p test",
     "test": "node --test 'test/**/*.test.ts'",
     "runner": "node hub/src/runner/daemon.ts",
+    "runner:remote": "node hub/src/runner/remote.ts",
     "runner:stop": "kill $(cat data/runner.pid)"
   },
   "engines": {

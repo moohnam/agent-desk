@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Approval, Channel, ChannelContext, ChannelEntry, ChannelEntryInput, ChannelIngestReceipt, FeedFilter, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
 import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from '../../shared/compose.ts';
@@ -155,11 +155,16 @@ export const now = () => new Date().toISOString();
 
 export class Store {
   private db: DatabaseSync;
+  /** Remote delivery records share the same transaction as the events they apply. */
+  get database() { return this.db; }
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    // Remote outboxes may temporarily contain answers to secret approval questions.
+    if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    if (path !== ':memory:') for (const sidecar of [`${path}-wal`, `${path}-shm`]) if (existsSync(sidecar)) chmodSync(sidecar, 0o600);
     this.db.exec(SCHEMA);
     const cols = this.db.prepare('PRAGMA table_info(session)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'permission_mode')) {
@@ -334,15 +339,15 @@ export class Store {
   deleteTasks(ids: string[]) {
     if (!ids.length) return;
     const marks = ids.map(() => '?').join(',');
-    this.db.exec('BEGIN');
+    this.db.exec('SAVEPOINT delete_tasks');
     try {
       for (const table of ['event', 'approval', 'question', 'queued', 'session']) {
         this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (${marks})`).run(...ids);
       }
       this.db.prepare(`DELETE FROM request WHERE from_task_id IN (${marks})`).run(...ids);
       this.db.prepare(`DELETE FROM task WHERE id IN (${marks})`).run(...ids);
-      this.db.exec('COMMIT');
-    } catch (err) { this.db.exec('ROLLBACK'); throw err; }
+      this.db.exec('RELEASE delete_tasks');
+    } catch (err) { this.db.exec('ROLLBACK TO delete_tasks; RELEASE delete_tasks'); throw err; }
   }
   /** Removes a project that has no tasks left. */
   deleteProject(id: string) {
@@ -385,12 +390,12 @@ export class Store {
    * of app sessions expire. External (MCP) sessions are not the runner's and are left alone.
    * Returns the lost sessions and every touched task.
    */
-  reconcile(liveSessions: Set<string>, liveApprovals: Set<string>): { lost: { id: string; task_id: string }[]; touched: string[] } {
+  reconcile(liveSessions: Set<string>, liveApprovals: Set<string>, owns: (runnerId: string) => boolean = () => true): { lost: { id: string; task_id: string }[]; touched: string[] } {
     const lost = (this.db.prepare(
-      "SELECT id, task_id FROM session WHERE source = 'app' AND status IN ('running', 'waiting')",
-    ).all() as unknown as { id: string; task_id: string }[]).filter((r) => !liveSessions.has(r.id));
-    const appSessions = new Set((this.db.prepare("SELECT id FROM session WHERE source = 'app'").all() as
-      unknown as { id: string }[]).map((r) => r.id));
+      "SELECT id, task_id, runner_id FROM session WHERE source = 'app' AND status IN ('running', 'waiting')",
+    ).all() as unknown as { id: string; task_id: string; runner_id: string }[]).filter((r) => owns(r.runner_id) && !liveSessions.has(r.id));
+    const appSessions = new Set((this.db.prepare("SELECT id, runner_id FROM session WHERE source = 'app'").all() as
+      unknown as { id: string; runner_id: string }[]).filter((r) => owns(r.runner_id)).map((r) => r.id));
     // desk_request cards are the hub's own, not the runner's.
     const expired = this.pendingApprovals().filter((a) => appSessions.has(a.session_id) && !liveApprovals.has(a.id)
       && a.tool_name !== REQUEST_TOOL);
@@ -403,8 +408,7 @@ export class Store {
     return { lost, touched: [...new Set([...lost.map((r) => r.task_id), ...expired.map((a) => a.task_id)])] };
   }
 
-  addEvent(sessionId: string, taskId: string, kind: EventKind, payload: unknown): Event {
-    const ts = now();
+  addEvent(sessionId: string, taskId: string, kind: EventKind, payload: unknown, ts = now()): Event {
     const r = this.db.prepare('INSERT INTO event (session_id, task_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)')
       .run(sessionId, taskId, ts, kind, JSON.stringify(payload));
     return { id: Number(r.lastInsertRowid), session_id: sessionId, task_id: taskId, ts, kind, payload };
