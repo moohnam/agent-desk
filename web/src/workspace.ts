@@ -1,5 +1,7 @@
-export const workspaceId = typeof location === 'undefined' ? '' : /^\/shared\/([a-zA-Z0-9-]+)\/?$/.exec(location.pathname)?.[1] ?? '';
-export const apiBase = workspaceId ? `/api/workspaces/${workspaceId}` : '/api';
+export const legacyWorkspaceId = typeof location === 'undefined' ? '' : /^\/shared\/([a-zA-Z0-9-]+)\/?$/.exec(location.pathname)?.[1] ?? '';
+// One desk, regardless of a legacy shared URL.
+export const workspaceId = '';
+export const apiBase = '/api';
 export const workspaceKey = (key:string) => workspaceId ? `${key}.workspace.${workspaceId}` : key;
 /** The hub accepted it durably; a task result does not exist until the runner receives it. */
 export class SharedPending extends Error {

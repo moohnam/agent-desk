@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request, type Server } from 'node:http';
@@ -49,6 +49,7 @@ test('two ordinary hub APIs share one runner: history, commands, approvals, offl
  let streamController:AbortController|undefined;
  try {
   const a=await make('a');let b=await make('b');
+  assert.equal((await api(a,'/compose','POST',{text:'@bad:worker:relative #claude invalid'})).status,400);
   const task=(await api(a,'/compose','POST',{text:`@test:shared@worker:${f.project} #claude #ask initial`})).body;
   assert.ok(task.id);await wait(()=>f.starts.length===1);
   assert.equal((await api(b,'/state')).body.tasks[0].id,task.id);
@@ -81,7 +82,11 @@ test('two ordinary hub APIs share one runner: history, commands, approvals, offl
   assert.equal((await api(b,`/delivery/${offlineId}`)).body.status,202);
   const list=await fetch(b.url+'/api/workspaces').then(r=>r.json()) as any[];assert.ok(!JSON.stringify(list).includes('token'));
   assert.equal((await api(a,'/access')).status,404);assert.equal((await api(a,'/skills','POST',{name:'x'})).status,400);
-  assert.equal((await api(a,'/compose','POST',{text:`@bad:${f.project} #claude forbidden-local`})).status,409);
+  const implicit=(await api(a,'/compose','POST',{text:`@implicit:${f.project} #claude runner-local-path`}));
+  assert.equal(implicit.status,201);assert.equal(implicit.body.runner_id,task.runner_id);
+  await wait(()=>f.starts.some(o=>o.prompt==='runner-local-path'));assert.equal(f.starts.find(o=>o.prompt==='runner-local-path')!.cwd,f.project);
+  const home=await api(a,'/compose','POST',{text:'@home:~/ #claude runner-home-path'});assert.equal(home.status,201);
+  await wait(()=>f.starts.some(o=>o.prompt==='runner-home-path'));assert.equal(f.starts.find(o=>o.prompt==='runner-home-path')!.cwd,homedir());
  }finally{streamController?.abort();for(const g of [...gateways])await closeGateway(g);await stop(authority);f.close();}
 });
 
@@ -266,4 +271,17 @@ test('workspace mismatch preserves queued input until recovery while business co
   assert.equal(links.deliveries(link.id).find(d=>d.id===original.id)!.status,409);
   assert.equal(f.runtime.hub.store.listProjects().length,2);
  }finally{await links.close();store.database.close();await stop(server);f.close();}
+});
+
+
+test('workspace view indices survive restarts without consuming sequence numbers and are never reused',async()=>{
+ const store=new Store(':memory:');let links=new WorkspaceLinks(store);
+ try {
+   store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('a','a','http://localhost/','wa','secret');
+   for(let i=0;i<10;i++){await links.close();links=new WorkspaceLinks(store);assert.equal(links.list()[0].view_index,1);}
+   store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('b','b','http://localhost/','wb','secret');
+   await links.close();links=new WorkspaceLinks(store);assert.equal(links.list().find(l=>l.id==='b')!.view_index,2);
+   links.remove('a');store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('c','c','http://localhost/','wc','secret');
+   await links.close();links=new WorkspaceLinks(store);assert.equal(links.list().find(l=>l.id==='c')!.view_index,3);
+ }finally{await links.close();store.database.close();}
 });

@@ -114,3 +114,17 @@ test('task numbers count up per project', () => {
   assert.deepEqual([s.getTask('t1')?.seq, s.getTask('t2')?.seq], [1, 2]);
   assert.equal(s.taskBySeq('p1', 2)?.id, 't2');
 });
+
+
+test('time cursor pages delayed runner events and equal timestamps without gaps',()=>{
+  const s=store();
+  try {
+    const late=s.addEvent('s-t1','t1','user',{text:'new'},'2026-11-10T00:00:01.000Z');
+    const a=s.addEvent('s-t1','t1','user',{text:'a'},'2026-11-10T00:00:00.000Z');
+    const b=s.addEvent('s-t1','t1','user',{text:'b'},a.ts);
+    assert.deepEqual(s.listFeed(2,undefined,{}, {ts:'9999-12-31T23:59:59.999Z',id:Number.MAX_SAFE_INTEGER}).map(e=>e.id),[b.id,late.id]);
+    assert.deepEqual(s.listFeed(2,undefined,{}, {ts:b.ts,id:b.id}).map(e=>e.id),[a.id]);
+    assert.equal(s.listFeed(2,undefined,{}, {ts:b.ts,id:0}).length,0);
+    assert.deepEqual(s.listFeed(2,undefined,{}, {ts:b.ts,id:Number.MAX_SAFE_INTEGER}).map(e=>e.id),[a.id,b.id]);
+  }finally{s.database.close();}
+});

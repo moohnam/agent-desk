@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import * as federation from '../../web/src/federation.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -8,6 +9,7 @@ import * as compose from '../../shared/compose.ts';
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
+  imports={ './federation.ts':federation,'./Workspaces.tsx':{useSources:()=>[]},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
@@ -30,6 +32,7 @@ function hooks() {
     },
     useRef(value: any) { const i = cursor++; return slots[i] ??= { current: value }; },
     useMemo(fn: () => any) { return fn(); },
+    useCallback(fn:any,deps:any[]) {const i=cursor++,old=slots[i];if(!old||!deps.every((v,j)=>Object.is(v,old.deps[j])))slots[i]={deps,fn};return slots[i].fn;},
     useEffect(fn: () => any, deps: any[]) {
       const i = cursor++, old = slots[i];
       if (old && deps.every((v, j) => Object.is(v, old.deps[j]))) return;
@@ -83,7 +86,7 @@ test('native file drops remain local and explain why shared runner paths must be
       requestAnimationFrame: (fn: () => void) => fn(),
     });
     const ref = { current: input };
-    const render = () => h.render(() => files.useFileDrop(ref, '', (value: string) => { inserted = value; }));
+    const render = () => h.render(() => files.useFileDrop(ref, '', (value: string) => { inserted = value; }, !!id));
     render(); events['desk-drop']({ detail: { paths: ['/local/report.txt'] } });
     const result = render();
     if (id) { assert.equal(inserted, ''); assert.match(result.error, /공유 러너에 먼저 옮긴 뒤 원격 경로/); }
@@ -110,7 +113,7 @@ for (const pending of [false, true]) {
       const module = load('Compose.tsx', {
         react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
         '../../shared/compose.ts': compose, './api.ts': { api: { compose: () => response } }, './workspace.ts': { SharedPending },
-        './drafts.ts': { getDraft: () => draft, setDraft: (_key: string, value: string, options: { empty: boolean }) => { draft = options.empty ? undefined : value; }, useDraftSync() {} },
+        './drafts.ts': { getDraft: (key:string) => key==='drawer'?draft:undefined, setDraft: (key: string, value: string, options: { empty: boolean }) => { if(key==='drawer')draft = options.empty ? undefined : value; }, useDraftSync() {} },
         './files.ts': {}, './projects.ts': { rankProjects: () => [] }, './skills.ts': { useSkills: () => [] },
         './settings.ts': { useSettings: () => ({ claude: {}, codex: {}, agy: {} }) }, './Modal.tsx': {}, './queuedShortcut.ts': {},
       });
@@ -127,3 +130,43 @@ for (const pending of [false, true]) {
     });
   }
 }
+
+
+test('a new shared project draft keeps its execution target after closing and reopening',async()=>{
+ const saved=new Map<string,string>();const sent:{text:string;source:string}[]=[];
+ const make=(sources=[{id:'shared-a',name:'srv19'}])=>{
+   const h=hooks();const jsx=(type:any,props:any)=>({type,props});
+   const module=load('Compose.tsx',{
+     react:h.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'../../shared/compose.ts':compose,
+     './Workspaces.tsx':{useSources:()=>sources},
+     './api.ts':{api:{compose:async(text:string,source:string)=>{sent.push({text,source});return{id:'new'};}}},'./workspace.ts':{},
+     './drafts.ts':{getDraft:(key:string)=>saved.get(key),setDraft:(key:string,value:string,opts:{empty:boolean})=>{if(opts.empty)saved.delete(key);else saved.set(key,value);},useDraftSync(){}},
+     './files.ts':{},'./projects.ts':{rankProjects:()=>[]},'./skills.ts':{useSkills:()=>[]},'./settings.ts':{useSettings:()=>({claude:{},codex:{},agy:{}})},'./Modal.tsx':{},'./queuedShortcut.ts':{},
+   });
+   return {h,render:()=>h.render(()=>module.ComposeDrawer({projects:[],tasks:[],inputRef:{current:null},onClose(){},onSent(){}}))};
+ };
+ const find=(node:any):any=>node?.props?.['aria-label']==='새 지시의 실행 대상'?node:[node?.props?.children].flat().filter(Boolean).map(find).find(Boolean);
+ const first=make();let tree=first.render();find(tree).props.onChange({target:{value:'shared-a'}});tree=first.render();findField(tree).onChange('@new:~/test-proj #claude do work');first.render();first.h.unmount();
+ const reopened=make();tree=reopened.render();assert.equal(find(tree).props.value,'shared-a');await findField(tree).onSubmit();
+ assert.deepEqual(sent,[{text:'@new:~/test-proj #claude do work',source:'shared-a'}]);reopened.h.unmount();
+ const removed=make([]);tree=removed.render();assert.ok(find(tree));assert.equal(find(tree).props.value,'shared-a');find(tree).props.onChange({target:{value:'auto'}});assert.equal(find(removed.render()),undefined);removed.h.unmount();
+});
+
+
+test('approval and question SSE updates survive a delayed feed during state refresh',async()=>{
+ const h=hooks();const streams:any[]=[];let finish:(events:any[])=>void=()=>{};
+ const feed=new Promise<any[]>(r=>{finish=r;});
+ const request=(id:string,status:string)=>({id,task_id:'task',session_id:'session',status,created_at:'',text:'?',answer:null,answered_at:null,tool_name:'Bash',input:{}});
+ const module=load('useHub.ts',{
+   react:h.react,'./api.ts':{api:{state:async()=>({projects:[],tasks:[],approvals:[request('old','pending')],questions:[request('old','pending')],runner:{connected:true}}),feed:()=>feed,remember(){}},FEED_PAGE:1000},
+   './federation.ts':{...federation,discoverSources:async()=>{},getSources:()=>[],subscribeSources:()=>()=>{}},
+   './posts.ts':{mergeEvents:(_a:any,b:any)=>b},'./projects.ts':{assignProjectColors(){},forgetProjectColors(){}},'./feedCache.ts':{},
+ },{
+   EventSource:class {onopen:any;onmessage:any;constructor(){streams.push(this);}close(){}},
+   setTimeout,clearTimeout,setInterval:()=>0,clearInterval(){},
+ });
+ h.render(()=>module.useHub());streams[0].onopen();await new Promise(r=>setTimeout(r,0));
+ for(const [type,value] of [['approval',request('old','allowed')],['approval',request('new','pending')],['question',request('old','answered')],['question',request('new','pending')]] as const)streams[0].onmessage({data:JSON.stringify({type,[type]:value})});
+ await new Promise(r=>setTimeout(r,65));let result=h.render(()=>module.useHub());assert.deepEqual([...result.approvals.keys()],['new']);assert.deepEqual([...result.questions.keys()],['new']);
+ finish([]);await new Promise(r=>setTimeout(r,0));result=h.render(()=>module.useHub());assert.deepEqual([...result.approvals.keys()],['new']);assert.deepEqual([...result.questions.keys()],['new']);h.unmount();
+});

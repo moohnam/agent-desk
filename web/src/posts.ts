@@ -1,3 +1,4 @@
+import { compareEvents } from './federation.ts';
 import { ALERT_STATES } from '../../shared/events.ts';
 import type { ColumnFilter, HubEvent, PlacedPost, Post, PostKind, TaskView } from './types.ts';
 
@@ -7,11 +8,11 @@ import type { ColumnFilter, HubEvent, PlacedPost, Post, PostKind, TaskView } fro
  * not drawn again), unless `b` brings it whole where it was cut (`clipped`). Nothing new: `a` itself.
  * So `a` is the list already held, `b` what was just fetched, older or newer.
  */
-export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity): HubEvent[] {
+export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity, compare = compareEvents): HubEvent[] {
   if (!b.length) return a;
   const last = a[a.length - 1];
   let out: HubEvent[];
-  if ((!last || last.id < b[0].id) && b.every((e, i) => i === 0 || b[i - 1].id < e.id)) {
+  if ((!last || compare(last, b[0]) < 0) && b.every((e, i) => i === 0 || compare(b[i - 1], e) < 0)) {
     // All newer and in order (a live batch): append without a Map and a sort.
     out = a.concat(b);
   } else {
@@ -25,9 +26,14 @@ export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity): HubEv
       changed = true;
     }
     if (!changed && a.length <= cap) return a;
-    out = [...byId.values()].sort((x, y) => x.id - y.id);
+    out = [...byId.values()].sort(compare);
   }
   return out.length > cap ? out.slice(-cap) : out;
+}
+
+/** Thread paging uses native IDs, even when delayed runner timestamps arrive out of order. */
+export function mergeTaskEvents(a:HubEvent[],b:HubEvent[]):HubEvent[] {
+  return mergeEvents(a,b,Infinity,(x,y)=>x.id-y.id);
 }
 
 function postKind(e: HubEvent): PostKind | null {

@@ -1,3 +1,4 @@
+import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { api } from './api.ts';
@@ -5,7 +6,7 @@ import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { RunnersDialog } from './Runners.tsx';
-import { WorkspaceSwitcher } from './Workspaces.tsx';
+import { WorkspaceSwitcher, initialLocation, inLocation } from './Workspaces.tsx';
 import { workspaceId } from './workspace.ts';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
@@ -62,6 +63,10 @@ const PANE_MIN_PX = 560, DECK_MIN_PX = 420;
 
 export function App() {
   const hub = useHub();
+  const [locationFilter,setLocationFilter]=useState(initialLocation);
+  const changeLocation=(value:string)=>{setLocationFilter(value);try{localStorage.setItem('agent-desk.location',value);}catch{/* optional preference */}};
+  const visibleTasks=useMemo(()=>new Map([...hub.tasks].filter(([,t])=>inLocation(t,locationFilter))),[hub.tasks,locationFilter]);
+  const visibleProjects=useMemo(()=>{if(!locationFilter)return hub.projects;const ids=new Set([...visibleTasks.values()].map(t=>t.project_id));return hub.projects.filter(p=>ids.has(p.id));},[hub.projects,visibleTasks,locationFilter]);
   const [custom, setCustom] = useColumns();
   const { view, setView, byTask: viewByTask, setByTask: setViewByTask, order: viewOrder, setOrder: setViewOrder } = useView();
   const [widths, setWidth] = useColumnWidths();
@@ -142,13 +147,13 @@ export function App() {
   /** How many columns F2 and F3 show: VIEW_MAX, raised by going right past the last column (older ones). */
   const [viewLimit, setViewLimit] = useState(VIEW_MAX);
   const columns = useMemo(() => (view === 'custom' ? custom
-    : applyOrder(viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewLimit), ORDERED.includes(view) ? viewOrder[view] : undefined, (c) =>
+    : applyOrder(viewColumns(view, visibleTasks, visibleProjects, stalled, drafts, viewByTask, viewLimit), ORDERED.includes(view) ? viewOrder[view] : undefined, (c) =>
       (c.filter.projectIds ? hub.projects.find((p) => p.id === c.filter.projectIds![0])?.created_at
         : hub.tasks.get(c.filter.taskIds?.[0] ?? '')?.created_at) ?? '', (c) => countSnap[c.id])),
-  [view, custom, hub.tasks, hub.projects, stalled, drafts, viewByTask, viewOrder, countSnap, viewLimit]);
+  [view, custom, hub.tasks, hub.projects, visibleTasks, visibleProjects, stalled, drafts, viewByTask, viewOrder, countSnap, viewLimit]);
   /** F2 projects (with tasks) or F3 tasks not shown yet: older ones. */
-  const olderCols = view === 'task' ? Math.max(0, hub.tasks.size - viewLimit)
-    : view === 'project' ? Math.max(0, new Set([...hub.tasks.values()].map((t) => t.project_id)).size - viewLimit) : 0;
+  const olderCols = view === 'task' ? Math.max(0, visibleTasks.size - viewLimit)
+    : view === 'project' ? Math.max(0, new Set([...visibleTasks.values()].map((t) => t.project_id)).size - viewLimit) : 0;
   const setColumns: typeof setCustom = editable ? setCustom : () => setToast(FIXED_NOTE);
   const switchView = (v: View) => {
     if (v === view) return;
@@ -195,12 +200,12 @@ export function App() {
   const phone = useMedia(PHONE);
   // Search metadata for every column, without fetching the hidden columns' feeds.
   const finderColumns = useMemo(() => {
-    if (phone) return phoneChannel ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
-    if (!finder || (view !== 'project' && view !== 'task')) return columns;
+    if (phone) return phoneChannel && (!locationFilter||locationFilter==='local') ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
+    if (!finder || (view !== 'project' && view !== 'task')) return columns.filter(c=>!c.channelId||!locationFilter||locationFilter==='local');
     const shown = new Set(columns.map((c) => c.id));
-    return [...columns, ...viewColumns(view, hub.tasks, hub.projects, stalled, drafts, viewByTask, Infinity)
+    return [...columns, ...viewColumns(view, visibleTasks, visibleProjects, stalled, drafts, viewByTask, Infinity)
       .filter((c) => !shown.has(c.id))];
-  }, [finder, phone, phoneChannel, hub.channels, columns, view, hub.tasks, hub.projects, stalled, drafts, viewByTask]);
+  }, [finder, phone, phoneChannel, hub.channels, columns, view, locationFilter, visibleTasks, visibleProjects, stalled, drafts, viewByTask]);
   /** One list per hub update, so the boxes given it keep their memoized suggestions between renders. */
   const taskList = useMemo(() => [...hub.tasks.values()], [hub.tasks]);
   // The thread as a panel on the right half of the workspace, next to a narrower deck, instead of a column.
@@ -235,17 +240,19 @@ export function App() {
   const parsedSearch = useMemo(() => parseSearch(searchApplied, hub.projects, hub.tasks.values()),
     [searchApplied, hub.projects, hub.tasks]);
   const deckDefs = useMemo(() => {
-    if (phone) return phoneChannel ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
-    if (search == null) return columns;
+    if (phone) return phoneChannel && (!locationFilter||locationFilter==='local') ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
+    if (search == null) return columns.filter(c=>!c.channelId||!locationFilter||locationFilter==='local');
     const k = columns.findIndex((c) => !c.channelId && isAllFilter(c.filter));
-    const next = [...columns];
+    const next = columns.filter(c=>!c.channelId||!locationFilter||locationFilter==='local');
     next.splice(k + 1, 0, { id: SEARCH, title: '검색', filter: parsedSearch.filter });
     return next;
-  }, [phone, phoneChannel, hub.channels, columns, search != null, parsedSearch]);
+  }, [phone, phoneChannel, hub.channels, columns, search != null, parsedSearch,locationFilter]);
   // Each feed column loads its own events, filtered by the hub, so older history is a page away.
   // An empty search shows a hint, not a second copy of everything.
   const searching = !!searchApplied.trim();
-  const feedDefs = useMemo(() => (searching ? deckDefs : deckDefs.filter((c) => c.id !== SEARCH)), [deckDefs, searching]);
+  const feedDefs = useMemo(() => (searching ? deckDefs : deckDefs.filter((c) => c.id !== SEARCH))
+    .filter(c=>!c.channelId||!locationFilter||locationFilter==='local')
+    .map(c=>!locationFilter||c.channelId?c:{...c,filter:{...c.filter,taskIds:[...visibleTasks.keys()].filter(id=>!c.filter.taskIds||c.filter.taskIds.includes(id))}}), [deckDefs, searching,locationFilter,visibleTasks]);
   // Every view's columns: their loaded events stay while any of them uses the query.
   const keptDefs = () => [...custom, ...(['project', 'task', 'status'] as const)
     .flatMap((v) => viewColumns(v, hub.tasks, hub.projects, stalled, drafts, viewByTask))];
@@ -343,7 +350,7 @@ export function App() {
         if (feed && seen != null && top !== seen) feed.scrollTop = 0;
         continue;
       }
-      const n = col.posts.findIndex((p) => p.id <= seen);
+      const n = col.posts.findIndex((p) => p.id === seen);
       if (n !== 0) next[col.id] = n < 0 ? col.posts.length : n;
     }
     setUnseen((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
@@ -1131,7 +1138,7 @@ export function App() {
       active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
       onPress={() => { setActive(i); setQueueFocus(null); }} onResize={(px) => setWidth(col.id, px)} onManage={() => setChannelsOpen(true)}
       onClose={() => phone ? setPhoneChannel(null) : deleteColumn(col.id)} onError={setToast} onRead={() => {}}
-      chat={{ projects: hub.projects, tasks: hub.tasks, approvals: hub.approvals, questions: hub.questions, onEvent: hub.onEvent,
+      chat={{ projects: hub.projects.filter(p=>!splitId(p.id)[0]), tasks: hub.tasks, approvals: hub.approvals, questions: hub.questions, onEvent: hub.onEvent,
         onOpenTask: (taskId) => openThread(taskId, { from: col.id }), onApproval: (approval, yes) => yes ? allow(approval) : setDenying(approval) }}
       onEdge={edgeColumn} onRecent={goRecent} onBack={phone ? () => setPhoneChannel(null) : undefined} />;
     if (!isThread) {
@@ -1199,7 +1206,7 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand"><img className="logo" src="/favicon.png?v=sage-20261103" alt="" /><span className="word">Agent Desk</span></div>
-        <WorkspaceSwitcher />
+        <WorkspaceSwitcher value={locationFilter} onChange={changeLocation} />
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}

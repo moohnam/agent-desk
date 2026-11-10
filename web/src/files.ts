@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { api } from './api.ts';
-import { workspaceId } from './workspace.ts';
 
 declare global {
   interface Window { __AGENT_DESK_APP__?: boolean }
@@ -61,7 +60,7 @@ const dropTarget = () => (lastFocused?.isConnected ? lastFocused : document.quer
  * picked in a browser (uploaded to the hub, which answers with the saved path). Either way the
  * paths go in at the caret.
  */
-export function useFileDrop(inputRef: RefObject<HTMLTextAreaElement | null>, value: string, onChange: (v: string) => void) {
+export function useFileDrop(inputRef: RefObject<HTMLTextAreaElement | null>, value: string, onChange: (v: string) => void, remote = false) {
   const [over, setOver] = useState(false);
   const [uploading, setUploading] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +85,7 @@ export function useFileDrop(inputRef: RefObject<HTMLTextAreaElement | null>, val
     const drop = (e: CustomEvent<DeskDrop>) => {
       setOver(false);
       if (dropTarget() !== inputRef.current) return;
-      if (workspaceId && e.detail.paths.length) {
+      if (remote && e.detail.paths.length) {
         setError('이 기기의 파일 경로는 공유 러너에서 사용할 수 없습니다. 파일을 공유 러너에 먼저 옮긴 뒤 원격 경로를 입력하세요.');
         return;
       }
@@ -96,11 +95,12 @@ export function useFileDrop(inputRef: RefObject<HTMLTextAreaElement | null>, val
     window.addEventListener('desk-drag', drag);
     window.addEventListener('desk-drop', drop);
     return () => { window.removeEventListener('desk-drag', drag); window.removeEventListener('desk-drop', drop); };
-  }, [inputRef]);
+  }, [inputRef,remote]);
 
   /** Saves each item on the hub (by `save`) and inserts the paths of those that made it. */
   const saveAll = async <T,>(items: T[], save: (x: T) => Promise<{ path: string }>, label: (x: T) => string) => {
     if (!items.length) return;
+    if(remote){setError('파일을 공유 러너에 먼저 옮긴 뒤 원격 경로를 입력하세요');return;}
     setError(null);
     setUploading((n) => n + items.length);
     const paths: string[] = [];

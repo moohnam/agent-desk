@@ -86,7 +86,12 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         }
         case 'GET /feed': {
           // A column's events (feedFilter); tool payloads come cut (feedEvent).
-          return reply(200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), feedFilter(url)).map(feedEvent));
+          const ts = url.searchParams.get('before_ts');
+          if (ts !== null && (ts.length > 40 || !Number.isFinite(Date.parse(ts)))) throw new HttpError(400,'before_ts 형식이 잘못되었습니다');
+          const cursorId = url.searchParams.get('cursor_id');
+          if (cursorId !== null && (!Number.isSafeInteger(Number(cursorId)) || Number(cursorId) < 0)) throw new HttpError(400,'cursor_id 형식이 잘못되었습니다');
+          return reply(200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), feedFilter(url),
+            ts ? {ts,id:cursorId === null ? Number.MAX_SAFE_INTEGER : Number(cursorId)} : undefined).map(feedEvent));
         }
         case 'GET /feed/:id': {
           // `/feed/count`: how many posts the column has in all, for its "loaded / total".

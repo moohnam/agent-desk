@@ -74,8 +74,8 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
     return () => io.disconnect();
   }, [seen]);
   const base = floor == null ? Math.min(seen ? DRAWN : DRAWN_HIDDEN, placed.length) : (() => {
-    const k = placed.findIndex((x) => x.post.id < floor);
-    return k < 0 ? placed.length : k;
+    const k = placed.findIndex((x) => x.post.id === floor);
+    return k < 0 ? placed.length : k + 1;
   })();
   const selectedAt = selected == null ? -1 : placed.findIndex((x) => x.post.id === selected);
   const count = Math.max(base, selectedAt + 1);

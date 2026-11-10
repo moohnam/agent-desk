@@ -5,6 +5,8 @@ import {
   modelHelpOf, modelProblem, modelTagsOf, parseCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../shared/compose.ts';
 import { api } from './api.ts';
+import { composeSource, splitId } from './federation.ts';
+import { useSources } from './Workspaces.tsx';
 import { SharedPending } from './workspace.ts';
 import type { MessageReceipt } from '../../shared/api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
@@ -71,24 +73,24 @@ type Mentions = 'route' | 'refer';
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows }: {
+export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='' }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; without it, Esc leaves the field. */
   onEscape?: () => void;
   onBlur?: () => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
-  projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number;
+  projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string;
 }) {
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const list = useRef<HTMLDivElement>(null);
-  const skills = useSkills();
+  const skills = useSkills(source);
   const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills), [value, caret, projects, tasks, mentions, skills]);
   const open = !dismissed && !!sug?.items.length;
   const cur = Math.min(index, (sug?.items.length ?? 1) - 1);
   const app = useDeskApp();
-  const files = useFileDrop(inputRef, value, onChange);
+  const files = useFileDrop(inputRef, value, onChange, !!source);
   const picker = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setIndex(0); }, [sug?.start, sug?.items.length]);
@@ -268,10 +270,16 @@ function Preview({ ok, rows }: { ok: boolean; rows: Row[] }) {
 // ── 작성 서랍 ──
 
 /** Left drawer for new work: `@project` continues its last task, `@name:/path` starts a project. */
-export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
+export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef, onClose, onSent }: {
   projects: Project[]; tasks: TaskView[]; inputRef: RefObject<HTMLTextAreaElement | null>;
   onClose: () => void; onSent: (task: TaskView) => void;
 }) {
+  const sources=useSources();
+  const [target,setTarget]=useState(()=>getDraft<string>('drawer-target')??'auto');
+  useEffect(()=>{setDraft('drawer-target',target,{empty:target==='auto'});},[target]);
+  useDraftSync<string>('drawer-target',v=>{revision.current++;setTarget(v??'auto');});
+  const projects=target==='auto'?allProjects:allProjects.filter(p=>splitId(p.id)[0]===target);
+  const tasks=target==='auto'?allTasks:allTasks.filter(t=>splitId(t.id)[0]===target);
   // Unsent text stays while the drawer is closed and across reloads (drafts.ts).
   const [text, setText] = useState(() => getDraft<string>('drawer') ?? '');
   const revision = useRef(0);
@@ -282,8 +290,10 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
   useDraftSync<string>('drawer', (v) => editText(v ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const skills = useSkills();
-  const settings = useSettings();
+  let selectedSource='';
+  try{selectedSource=composeSource(text,allProjects,target==='auto'?undefined:target);}catch{/* submit explains ambiguity */}
+  const skills = useSkills(selectedSource);
+  const settings = useSettings(selectedSource);
   const hint = useMemo(() => interpretNew(text, projects, tasks, skills, settings), [text, projects, tasks, skills, settings]);
   const recent = useMemo(() => rankProjects(projects, tasks)[0]?.project.name, [projects, tasks]);
 
@@ -300,7 +310,7 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
     };
     setBusy(true); setError(null);
     try {
-      const task = await api.compose(text);
+      const task = await api.compose(text,target==='auto'?undefined:target);
       // onSent closes the drawer in the same render, before the effect would see the empty text.
       if (clearSubmitted() && mounted.current) onSent(task);
       else if (mounted.current) setError('이전 지시를 보냈습니다. 현재 작성 중인 내용은 보관했습니다.');
@@ -321,8 +331,13 @@ export function ComposeDrawer({ projects, tasks, inputRef, onClose, onSent }: {
         <button className="icon-btn" title="닫기" aria-label="닫기" onClick={onClose}><X /></button>
       </header>
       <div className="cmp-body">
+        {(!!sources.length||(target&&target!=='auto'))&&<label>새 지시의 실행 대상<select className="input" aria-label="새 지시의 실행 대상" value={target} onChange={e=>{revision.current++;setTarget(e.target.value);}}>
+          {target&&target!=='auto'&&!sources.some(s=>s.id===target)&&<option value={target}>연결되지 않은 공유 실행 대상</option>}
+          <option value="auto">프로젝트에 따라 자동 선택</option><option value="">이 허브 · 로컬/원격 러너</option>
+          {sources.map(s=><option key={s.id} value={s.id}>{s.name} · 공유</option>)}
+        </select></label>}
         <ComposeField value={text} onChange={editText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
-          projects={projects} tasks={tasks} mentions="route"
+          projects={projects} tasks={tasks} mentions="route" source={selectedSource}
           placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
         <Preview ok={hint.ok} rows={hint.rows} />
         {error && <p className="error">{error}</p>}
@@ -390,7 +405,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   }, []);
   useEffect(() => { setDraft(draftKey, { text, pick }, { taskId: task.id, empty: !text.trim() }); }, [draftKey, text, pick, task.id]);
   useDraftSync<{ text: string; pick: Delivery | null }>(draftKey, (v) => { edited(); setText(v?.text ?? ''); setPick(v?.pick ?? null); });
-  const skills = useSkills();
+  const skills = useSkills(splitId(task.id)[0]);
   const c = parseCompose(text, skillNames(skills), false);
   const name = engineName(task.engine);
   const delivery = c.delivery ?? pick ?? undefined;
@@ -499,7 +514,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
       )}
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
       <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2}
-        projects={projects} tasks={tasks} mentions="refer"
+        projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]}
         placeholder={running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">

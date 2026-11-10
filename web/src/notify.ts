@@ -1,3 +1,4 @@
+import { scopeId, splitId } from './federation.ts';
 // OS notifications for what needs the user while the desk is not in front: approval requests, agent
 // questions, and tasks that finished or failed. The desktop app shows them through its own commands
 // (macOS UserNotifications, granted to the hub page only; a click opens the thread); a browser through
@@ -8,7 +9,7 @@
 // there when System Settings > Notifications > Show previews is "When Unlocked".
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import { workspaceId, workspaceKey } from './workspace.ts';
+import { legacyWorkspaceId, workspaceKey } from './workspace.ts';
 import { ASK_USER } from '../../shared/protocol.ts';
 import type { AccessView } from '../../shared/api.ts';
 import type { Approval, HubEvent, Question, TaskView } from './types.ts';
@@ -126,7 +127,7 @@ function deliver(n: Note, open: (taskId: string) => void) {
   try {
     const t = tauri();
     const id = workspaceKey(n.id);
-    if (t) { t('desk_notify', { id, title: n.title, body: n.body, task: n.taskId ? `workspace:${workspaceId}:${n.taskId}` : null }).catch(() => {}); return; }
+    if (t) { t('desk_notify', { id, title: n.title, body: n.body, task: n.taskId ? n.taskId : null }).catch(() => {}); return; }
     const note = new Notification(n.title, { body: n.body, tag: id });
     note.onclick = () => { window.focus(); if (n.taskId) open(n.taskId); note.close(); };
   } catch {
@@ -171,14 +172,14 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
       if (!raw) return;
       const parsed = /^workspace:([a-zA-Z0-9-]*):([a-zA-Z0-9-]+)$/.exec(raw);
       const workspace = parsed?.[1] ?? '', task = parsed?.[2] ?? raw;
-      if (workspace === workspaceId) openRef.current(task);
-      else location.assign(`${workspace ? `/shared/${workspace}` : '/'}?openTask=${encodeURIComponent(task)}`);
+      openRef.current(scopeId(workspace,task));
     };
     window.addEventListener('desk-notification-open', onOpen);
     return () => window.removeEventListener('desk-notification-open', onOpen);
   }, []);
   useEffect(() => {
-    const url = new URL(location.href), task = url.searchParams.get('openTask');
+    const url = new URL(location.href), rawTask = url.searchParams.get('openTask');
+    const task=rawTask?(splitId(rawTask)[0]?rawTask:scopeId(legacyWorkspaceId,rawTask)):null;
     if (!task || !hub.tasks.has(task)) return;
     openRef.current(task);url.searchParams.delete('openTask');history.replaceState(null,'',url);
   }, [hub.synced, hub.tasks]);

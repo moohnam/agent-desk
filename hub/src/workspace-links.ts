@@ -31,13 +31,15 @@ export class WorkspaceLinks {
     this.db.exec(`PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS workspace_link(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,workspace_id TEXT NOT NULL UNIQUE,token TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_delivery(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,link_id TEXT NOT NULL,digest TEXT NOT NULL,payload TEXT NOT NULL,result TEXT,status INTEGER);
+      CREATE TABLE IF NOT EXISTS workspace_view_index(seq INTEGER PRIMARY KEY AUTOINCREMENT,link_id TEXT NOT NULL UNIQUE);
+      INSERT INTO workspace_view_index(link_id) SELECT id FROM workspace_link l WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index v WHERE v.link_id=l.id);
       CREATE INDEX IF NOT EXISTS workspace_delivery_pending ON workspace_delivery(link_id,status,seq);`);
     this.timer=setInterval(()=>{for(const link of this.rows())void this.flush(link.id);},1500);this.timer.unref();
   }
   async close() { this.stopped=true;clearInterval(this.timer);for(const c of this.requests.keys())c.abort();await Promise.all(this.flushing.values()); }
   private rows() {return this.db.prepare('SELECT * FROM workspace_link').all() as Link[];}
   private link(id:string) {const link=this.db.prepare('SELECT * FROM workspace_link WHERE id=?').get(id) as Link|undefined;if(!link)throw new HttpError(404,'공유 작업공간 연결이 없습니다');return link;}
-  list():SharedWorkspaceView[] {return this.rows().map(({token,...link})=>({...link,pending:Number((this.db.prepare('SELECT count(*) n FROM workspace_delivery WHERE link_id=? AND status IS NULL').get(link.id) as {n:number}).n)}));}
+  list():SharedWorkspaceView[] {return this.rows().map(({token,...link})=>({...link,view_index:Number((this.db.prepare('SELECT seq FROM workspace_view_index WHERE link_id=?').get(link.id) as {seq:number}).seq),pending:Number((this.db.prepare('SELECT count(*) n FROM workspace_delivery WHERE link_id=? AND status IS NULL').get(link.id) as {n:number}).n)}));}
   private async request(link:Link,path:string,init:RequestInit={},stream=false):Promise<{status:number;body:any}|{response:Response;release:()=>void}> {
     if(this.stopped)throw new Error('종료 중입니다');
     const controller=new AbortController();this.requests.set(controller,link.id);
@@ -59,6 +61,7 @@ export class WorkspaceLinks {
     if(id&&this.link(id).workspace_id!==link.workspace_id)throw new HttpError(409,'기존 연결을 다른 작업공간으로 바꿀 수 없습니다');
     if(this.rows().some(l=>l.workspace_id===link.workspace_id&&l.id!==id))throw new HttpError(409,'이미 연결한 공유 작업공간입니다');
     this.db.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,token=excluded.token').run(link.id,link.name,link.url,link.workspace_id,link.token);
+    this.db.prepare('INSERT INTO workspace_view_index(link_id) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index WHERE link_id=?)').run(link.id,link.id);
     return this.list().find(l=>l.id===link.id)!;
   }
   remove(id:string) {

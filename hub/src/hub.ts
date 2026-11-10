@@ -47,6 +47,7 @@ export class Hub extends DeskCore {
   readonly remotes: RemoteRunners;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
+  private pathAddress?: string;
   /**
    * Sessions shown as lost because no runner connected in time after startup. Their queued messages
    * and open requests wait for the runner's actual report: it may still have them.
@@ -57,8 +58,9 @@ export class Hub extends DeskCore {
    * `runner`: makes the runner connection (by default the daemon's, started if need be).
    * `graceMs`: how long after startup to wait for the runner before showing its sessions as lost.
    */
-  constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number; channelOptions?: ChannelOptions } = {}) {
+  constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number; channelOptions?: ChannelOptions; pathAddress?: string } = {}) {
     super(store, opts.skills ?? new SkillStore());
+    this.pathAddress = opts.pathAddress;
     this.requests = new AgentRequests(this, {
       dispatch: (sessionId, body, skills) => this.dispatch(sessionId, body, skills),
       drain: (sessionId) => this.drain(sessionId),
@@ -144,10 +146,20 @@ export class Hub extends DeskCore {
     return this.settings();
   }
 
+  private projectPath(path: string) {
+    try {
+      const target = this.pathAddress && !remoteLocation(path) ? `${this.pathAddress}:${path}` : path;
+      return this.remotes.canonicalPath(target) ?? resolve(expandHome(target));
+    } catch(e) {
+      if(e instanceof HttpError)throw e;
+      throw new HttpError(400,e instanceof Error?e.message:String(e));
+    }
+  }
+
   /** With `create`, a missing directory is made (with its parents) instead of refused. */
   createProject(name: string, rootPath: string, create = false) {
     if (!name?.trim() || !rootPath?.trim()) throw new HttpError(400, 'name and root_path are required');
-    rootPath = this.remotes.canonicalPath(rootPath) ?? rootPath;
+    rootPath = this.projectPath(rootPath);
     const remote = this.remotes.forPath(rootPath);
     if (!remote) {
       let st;
@@ -177,7 +189,7 @@ export class Hub extends DeskCore {
     let project = this.store.findProjectByName(c.mention.name);
     if (c.mention.path) {
       if (c.mention.no) throw new HttpError(400, '작업 번호와 경로는 함께 쓸 수 없습니다');
-      const path = this.remotes.canonicalPath(c.mention.path) ?? resolve(expandHome(c.mention.path));
+      const path = this.projectPath(c.mention.path);
       if (project && project.root_path !== path) {
         throw new HttpError(409, `@${project.name}은 이미 ${project.root_path}로 등록되어 있습니다`);
       }

@@ -1,22 +1,60 @@
-import { apiBase, workspaceId, SharedPending } from './workspace.ts';
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
 import type { AccessView, ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
-import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, Project, Settings, Skill, TaskView } from './types.ts';
+import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, HubMessage, Project, Settings, Skill, TaskView } from './types.ts';
+import { workspaceId, SharedPending } from './workspace.ts';
+import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
 
-async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, target?:string): Promise<T> {
+  let source=target??'';
+  const url=new URL(path,'http://desk');
+  const route=url.pathname;
+  url.pathname=url.pathname.split('/').map(part=>{
+    const [owner,id]=splitId(decodeURIComponent(part));
+    if(owner){if(source&&source!==owner)throw new Error('서로 다른 작업공간의 요청입니다');source=owner;}
+    return encodeURIComponent(id);
+  }).join('/');
+  let input=body as Record<string,unknown>|undefined;
+  if(input) {
+    input={...input};
+    for(const key of ['project_id','task_id']) if(typeof input[key]==='string') {
+      const [owner,id]=splitId(input[key] as string);
+      if(owner){if(source&&source!==owner)throw new Error('서로 다른 작업공간의 요청입니다');source=owner;input[key]=id;}
+    }
+    if(Array.isArray(input.picked))input.picked=input.picked.map(id=>nativeEventId(Number(id)));
+  }
+  if(source) {
+    await discoverSources();
+    sourceIndex(source);
+    for(const key of ['before','since','ids']) {
+      const value=url.searchParams.get(key);if(value)url.searchParams.set(key,value.split(',').map(v=>String(nativeEventId(Number(v)))).join(','));
+    }
+  }
+  if(source&&route.startsWith('/channels/'))throw new Error('채널 대화는 같은 허브의 프로젝트를 선택하세요');
+  if(source&&route==='/open')throw new Error('공유 러너의 파일은 실행 머신에서 열어주세요');
+  path=url.pathname+url.search;
   // getRandomValues also works on phones using an HTTP LAN address (randomUUID requires HTTPS).
-  const requestId = workspaceId && method !== 'GET' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
+  const requestId = source && method !== 'GET' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
   const init:RequestInit = {
     method,
-    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(requestId ? {'x-desk-operation-id':requestId} : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+    headers: { ...(input ? { 'content-type': 'application/json' } : {}), ...(requestId ? {'x-desk-operation-id':requestId} : {}) },
+    body: input ? JSON.stringify(input) : undefined,
     signal,
   };
-  const send = ()=>fetch(`${apiBase}${path}`,init);
+  const send = ()=>fetch(`${sourceBase(source)}${path}`,init);
   const res = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
   if (data.shared_pending) throw new SharedPending();
+  if(!source)return data as T;
+  const index=sourceIndex(source);
+  if(route==='/compose'||route==='/tasks'&&method==='POST')return mapTask(source,index,data) as T;
+  if(route==='/projects'&&method==='POST')return {...data,id:scopeId(source,data.id)} as T;
+  if(route.endsWith('/events')) {
+    if(Array.isArray(data))return data.map(e=>mapEvent(source,index,e)) as T;
+    return {...data,events:data.events.map((e:HubEvent)=>mapEvent(source,index,e))} as T;
+  }
+  if(data.task_id)data.task_id=scopeId(source,data.task_id);
+  if(data.queued_id)data.queued_id=scopeId(source,data.queued_id);
   return data as T;
 }
 
@@ -24,11 +62,79 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
 export interface FeedQuery extends FeedFilter { members?: string[] }
 
 const feedSearch = (q: FeedQuery) => new URLSearchParams(feedParams(q));
+const snapshots=new Map<string,DeskState>();
+/** Keep the last remote snapshot current so a disconnect cannot erase SSE-only tasks/answers. */
+const refreshing=new Map<string,Set<HubMessage[]>>();
+function applyMessage(s:DeskState,m:HubMessage) {
+  if(m.type==='task')s.tasks=[...s.tasks.filter(t=>t.id!==m.task.id),m.task];
+  if(m.type==='approval')s.approvals=[...s.approvals.filter(a=>a.id!==m.approval.id),...(m.approval.status==='pending'?[m.approval]:[])];
+  if(m.type==='question')s.questions=[...s.questions.filter(q=>q.id!==m.question.id),...(m.question.status==='pending'?[m.question]:[])];
+  if(m.type==='removed'){
+    s.tasks=s.tasks.filter(t=>!m.taskIds.includes(t.id));s.projects=s.projects.filter(p=>!m.projectIds.includes(p.id));
+    s.approvals=s.approvals.filter(a=>!m.taskIds.includes(a.task_id));s.questions=s.questions.filter(q=>!m.taskIds.includes(q.task_id));
+  }
+}
+function remember(source:string,m:HubMessage) {
+  if(!['task','approval','question','removed'].includes(m.type))return;
+  const s=snapshots.get(source);if(s)applyMessage(s,m);
+  for(const updates of refreshing.get(source)??[])updates.push(m);
+}
+let projects:Project[]=[];
+async function state():Promise<DeskState> {
+  await discoverSources();
+  const local=await call<DeskState>('GET','/state');
+  const unavailableSources:string[]=[];
+  const linked=await Promise.all(getSources().map(async source=>{
+    const updates:HubMessage[]=[];
+    let active=refreshing.get(source.id);if(!active)refreshing.set(source.id,active=new Set());active.add(updates);
+    try {
+      const r=await fetch(sourceBase(source.id)+'/state');if(!r.ok)throw Error('offline');
+      const value=mapState(source.id,source.view_index,await r.json());
+      for(const update of updates)applyMessage(value,update);
+      snapshots.set(source.id,value);sourceConnected(source.id,true);return value;
+    }catch {
+      unavailableSources.push(source.id);sourceConnected(source.id,false);
+      const held=snapshots.get(source.id);
+      return held&&{...held,tasks:held.tasks.map(t=>({...t,runner_connected:false}))};
+    }finally{active.delete(updates);if(!active.size)refreshing.delete(source.id);}
+  }));
+  for(const id of snapshots.keys())if(!getSources().some(s=>s.id===id))snapshots.delete(id);
+  const all=[local,...linked.filter((s):s is DeskState=>!!s)];
+  const combined={...local,unavailableSources,projects:all.flatMap(s=>s.projects),tasks:all.flatMap(s=>s.tasks),approvals:all.flatMap(s=>s.approvals),questions:all.flatMap(s=>s.questions)};
+  projects=combined.projects;return combined;
+}
+async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal) {
+  await discoverSources();
+  const all=[{id:'',view_index:0},...getSources()];
+  const pages=await Promise.all(all.map(async source=>{
+    const filter=sourceFilter(source.id,q);if(!filter)return [];
+    const p=feedSearch(filter);p.set('limit',String(limit));
+    // A stable timestamp + source index + native ID cursor prevents cross-store gaps/ties.
+    p.set('before_ts',before?.ts??'9999-12-31T23:59:59.999Z');
+    const index=before?eventSourceIndex(before.id):0;
+    p.set('cursor_id',String(!before||source.view_index<index?Number.MAX_SAFE_INTEGER:source.view_index>index?0:nativeEventId(before.id)));
+    try {
+      const r=await fetch(sourceBase(source.id)+'/feed?'+p,{signal});if(!r.ok)throw Error('글을 불러오지 못했습니다');
+      return (await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e));
+    }catch(e){if(before||!source.id||signal?.aborted)throw e;return [];}
+  }));
+  return pages.flat().sort(compareEvents).slice(-limit);
+}
+async function feedCount(q:FeedQuery,signal?:AbortSignal) {
+  await discoverSources();
+  const counts=await Promise.all([{id:''},...getSources()].map(async source=>{
+    const filter=sourceFilter(source.id,q);if(!filter)return {posts:0,tasks:0};
+    const r=await fetch(sourceBase(source.id)+'/feed/count?'+feedSearch(filter),{signal});if(!r.ok)throw Error('글 수를 불러오지 못했습니다');
+    return await r.json() as {posts:number;tasks:number};
+  }));
+  return counts.reduce((a,b)=>({posts:a.posts+b.posts,tasks:a.tasks+b.tasks}),{posts:0,tasks:0});
+}
 
 /** Events per feed page: a full page means older ones may exist. */
 export const FEED_PAGE = 1000;
 
 export const api = {
+  remember,
   runners: () => call<import('../../shared/remote.ts').RemoteRunnerView[]>('GET', '/runners'),
   rotateRunner: (id: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', `/runners/${encodeURIComponent(id)}/token`),
   registerRunner: (address: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', '/runners', {address}),
@@ -46,36 +152,30 @@ export const api = {
     if (at.q?.trim()) query.set('q', at.q.trim());
     return call<ChannelEntryPage>('GET', `/channels/${encodeURIComponent(id)}/entries?${query}`);
   },
-  state: () => call<DeskState>('GET', '/state'),
+  state,
   /**
    * The newest `limit` events, oldest first; `before`: those before that event id; `q`: only those a
    * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
    */
-  feed: (limit = FEED_PAGE, before?: number, q: FeedQuery = {}) => {
-    const p = feedSearch(q);
-    p.set('limit', String(limit));
-    if (before) p.set('before', String(before));
-    return call<HubEvent[]>('GET', `/feed?${p}`);
-  },
-  /** How many posts a column's query has in the hub in all, and in how many tasks (for "loaded / total"). */
-  feedCount: (q: FeedQuery) => call<{ posts: number; tasks: number }>('GET', `/feed/count?${feedSearch(q)}`),
+  feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal),
+  feedCount,
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
    * every event from `since` on. `more`: older events exist before the page.
    */
-  events: (taskId: string, at: { since?: number; before?: number; ids?: number[] } = {}) => {
+  events: (taskId: string, at: { since?: number; before?: number; ids?: number[] } = {}, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (at.ids?.length) q.set('ids', at.ids.join(','));
     if (at.since) q.set('since', String(at.since));
     if (at.before) q.set('before', String(at.before));
     const qs = q.toString();
     // A hub not yet restarted answers with the bare array (newest 500, no paging).
-    return call<{ events: HubEvent[]; more: boolean } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`)
+    return call<{ events: HubEvent[]; more: boolean } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
       .then((r) => (Array.isArray(r) ? { events: r, more: false } : r));
   },
   /** Saves a file on the hub's machine (for a device without it); returns the saved path. */
   upload: async (file: File) => {
-    if (workspaceId) throw new Error('공유 러너에는 파일을 직접 옮긴 뒤 원격 경로로 지시하세요');
+    if (workspaceId) throw new Error('공유 러너에 파일을 먼저 옮긴 뒤 원격 경로를 입력하세요');
     const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {
       method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
     });
@@ -86,7 +186,7 @@ export const api = {
   /** Has the hub download a web file (an image dragged in from a page); returns the saved path. */
   uploadUrl: (url: string) => call<{ path: string }>('POST', '/uploads', { url }),
   createProject: (name: string, root_path: string) => call<Project>('POST', '/projects', { name, root_path }),
-  compose: (text: string) => call<TaskView>('POST', '/compose', { text }),
+  compose: (text: string, source?:string) => call<TaskView>('POST', '/compose', { text },undefined,composeSource(text,projects,source)),
   createTask: (project_id: string, title: string, prompt: string) =>
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
@@ -119,12 +219,12 @@ export const api = {
   renameDevice: (id: string, name: string) => call<AccessView>('PATCH', `/devices/${id}`, { name }),
   removeDevice: (id: string) => call<AccessView>('DELETE', `/devices/${id}`),
   rotateAccessToken: () => call<{ ok: true }>('POST', '/access-token'),
-  settings: () => call<Settings>('GET', '/settings'),
+  settings: (source='') => call<Settings>('GET', '/settings',undefined,undefined,source),
   /** Each engine's plan limits: used share and reset time per window. `refresh`: skip the hub's one-minute cache. */
   usage: (engine: string, refresh = false) => call<EngineUsage>('GET', `/usage?engine=${engine}${refresh ? '&refresh=1' : ''}`),
   /** Only the engines and keys given change; null clears one. */
   saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }) => call<Settings>('PUT', '/settings', s),
-  skills: () => call<Skill[]>('GET', '/skills'),
+  skills: (source='') => call<Skill[]>('GET', '/skills',undefined,undefined,source),
   createSkill: (name: string, description: string) => call<Skill>('POST', '/skills', { name, description }),
   deleteSkill: (name: string) => call('DELETE', `/skills/${name}`),
   readSkillFile: (name: string, path: string) =>

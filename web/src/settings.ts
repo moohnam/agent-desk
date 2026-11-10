@@ -18,12 +18,13 @@ export function refreshSettings() {
 
 export async function saveSettings(s: Parameters<typeof api.saveSettings>[0]) { publish(await api.saveSettings(s)); }
 
-export function useSettings(): Settings {
+export function useSettings(source=''): Settings {
   const [cur, setCur] = useState(settings);
   useEffect(() => {
+    if(source){let alive=true;setCur({claude:{model:null,effort:null},codex:{model:null,effort:null},agy:{model:null,effort:null}});void api.settings(source).then(v=>{if(alive)setCur(v);},()=>{});return()=>{alive=false;};}
     listeners.add(setCur);
     if (!loading) void refreshSettings();
     return () => { listeners.delete(setCur); };
-  }, []);
+  }, [source]);
   return cur;
 }

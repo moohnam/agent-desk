@@ -16,12 +16,13 @@ export function refreshSkills() {
   return loading;
 }
 
-export function useSkills(): Skill[] {
+export function useSkills(source=''): Skill[] {
   const [list, setList] = useState(skills);
   useEffect(() => {
+    if(source){let alive=true;setList([]);void api.skills(source).then(v=>{if(alive)setList(v);},()=>{});return()=>{alive=false;};}
     listeners.add(setList);
     if (!loading) void refreshSkills();
     return () => { listeners.delete(setList); };
-  }, []);
+  }, [source]);
   return list;
 }

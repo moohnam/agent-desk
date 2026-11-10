@@ -1,7 +1,7 @@
-import { apiBase } from './workspace.ts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
-import { mergeEvents } from './posts.ts';
+import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
+import { mergeEvents, mergeTaskEvents } from './posts.ts';
 import { assignProjectColors } from './projects.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
 import type { AccessView } from '../../shared/api.ts';
@@ -15,10 +15,12 @@ const SSE_BATCH_MS = 50;
 /** Hub state and the recent cross-task event feed, kept live over SSE. */
 export function useHub() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const currentProjects=useRef(projects);currentProjects.current=projects;
   const [channels, setChannels] = useState<Map<string, Channel>>(new Map());
   const channelListeners = useRef(new Set<(entry: ChannelEntry) => void>());
   const channelRefresh = useRef<Map<string, Channel | null> | null>(null);
   const [tasks, setTasks] = useState<Map<string, TaskView>>(new Map());
+  const currentTasks=useRef(tasks);currentTasks.current=tasks;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   // Only unanswered questions are kept, like approvals.
   const [questions, setQuestions] = useState<Map<string, Question>>(new Map());
@@ -35,13 +37,36 @@ export function useHub() {
   const [synced, setSynced] = useState(0);
   // Tasks deleted while this page is open: their events, wherever cached, are no longer shown.
   const [gone, setGone] = useState<Set<string>>(new Set());
+  const deleted = useRef(new Set<string>());
+  const knownTasks = useRef(new Set<string>());
+  const taskRefresh = useRef<Map<string, TaskView | null> | null>(null);
 
+  const approvalRefresh=useRef<Map<string,Approval>|null>(null);
+  const questionRefresh=useRef<Map<string,Question>|null>(null);
   const refresh = useCallback(async () => {
     const channelUpdates = new Map<string, Channel | null>();
+    const taskUpdates = new Map<string, TaskView | null>();
+    const approvalUpdates=new Map<string,Approval>(),questionUpdates=new Map<string,Question>();
+    approvalRefresh.current=approvalUpdates;questionRefresh.current=questionUpdates;
     channelRefresh.current = channelUpdates;
+    taskRefresh.current = taskUpdates;
     try {
-    const [s, feed] = await Promise.all([api.state(), api.feed()]);
-    setEvents((prev) => mergeEvents(prev, feed, FEED_CAP));
+    const s = await api.state();
+    const feed = await api.feed();
+    if (channelRefresh.current !== channelUpdates) return;
+    const nextTasks = new Map(s.tasks.filter(t => !deleted.current.has(t.id)).map(t => [t.id, t]));
+    for(const [id,task] of currentTasks.current) {
+      if(s.unavailableSources?.includes(splitId(id)[0])&&!nextTasks.has(id)&&!deleted.current.has(id))nextTasks.set(id,{...task,runner_connected:false});
+    }
+    // SSE can add/update/delete tasks while the full snapshot is in flight.
+    for (const [id, task] of taskUpdates) { if (task && !deleted.current.has(id)) nextTasks.set(id, task); else nextTasks.delete(id); }
+    const missing = [...knownTasks.current].filter(id => !nextTasks.has(id));
+    if (missing.length) {
+      deleted.current = new Set([...deleted.current, ...missing]);
+      setGone(deleted.current);
+    }
+    knownTasks.current = new Set(nextTasks.keys());
+    setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)), feed.filter(e => !deleted.current.has(e.task_id)), FEED_CAP));
     assignProjectColors(s.projects);
     setProjects(s.projects);
     if (channelRefresh.current === channelUpdates) {
@@ -49,28 +74,29 @@ export function useHub() {
       for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
       setChannels(next);
     }
-    setTasks(new Map(s.tasks.map((t) => [t.id, t])));
-    setApprovals(new Map(s.approvals.map((a) => [a.id, a])));
-    setQuestions(new Map((s.questions ?? []).filter((q) => q.status === 'pending').map((q) => [q.id, q])));
+    setTasks(nextTasks);
+    const allApprovals=new Map(s.approvals.map(a=>[a.id,a]));for(const [id,a] of approvalUpdates)allApprovals.set(id,a);
+    setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
+    const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
+    setQuestions(new Map([...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))));
     if (s.runner) setRunnerConnected(s.runner.connected);
     if (s.client) setLocal(s.client.local);
     setAccess(s.access ?? null);
     setSynced((n) => n + 1);
-    } finally { if (channelRefresh.current === channelUpdates) channelRefresh.current = null; }
+    } finally {
+      if (channelRefresh.current === channelUpdates) channelRefresh.current = null;
+      if (taskRefresh.current === taskUpdates) taskRefresh.current = null;
+      if(approvalRefresh.current===approvalUpdates)approvalRefresh.current=null;
+      if(questionRefresh.current===questionUpdates)questionRefresh.current=null;
+    }
   }, []);
 
   useEffect(() => {
-    const es = new EventSource(`${apiBase}/stream`);
-    es.onopen = () => { setConnected(true); void refresh(); };
-    es.onerror = () => {
-      setConnected(false);
-      // This device was cut off on the Mac: the page asks to connect again.
-      fetch('/api/state', { method: 'HEAD' }).then((r) => { if (r.status === 401) location.reload(); }, () => {});
-    };
     // Messages are handled in batches: each event also brings its task's update, and several busy
     // agents send many a second; one render per batch instead of one per message.
     let batch: HubMessage[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let projectTimer:ReturnType<typeof setTimeout>|undefined;
     const flush = () => {
       timer = undefined;
       const ms = batch;
@@ -83,18 +109,20 @@ export function useHub() {
         if (m.type === 'channel') { channelRefresh.current?.set(m.channel.id, m.channel); setChannels((prev) => new Map(prev).set(m.channel.id, m.channel)); }
         else if (m.type === 'channel_entry') channelEntries.push(m.entry);
         else if (m.type === 'channel_removed') { channelRefresh.current?.set(m.channel_id, null); setChannels((prev) => { const next = new Map(prev); next.delete(m.channel_id); return next; }); }
-        else if (m.type === 'task') tasks.set(m.task.id, m.task);
+        else if (m.type === 'task') { tasks.set(m.task.id, m.task); taskRefresh.current?.set(m.task.id, m.task); }
         else if (m.type === 'approval') {
+          approvalRefresh.current?.set(m.approval.id,m.approval);
           setApprovals((prev) => {
             const next = new Map(prev);
-            if (m.approval.status === 'pending') next.set(m.approval.id, m.approval);
+            if (m.approval.status === 'pending' && !deleted.current.has(m.approval.task_id)) next.set(m.approval.id, m.approval);
             else next.delete(m.approval.id);
             return next;
           });
         } else if (m.type === 'question') {
+          questionRefresh.current?.set(m.question.id,m.question);
           setQuestions((prev) => {
             const next = new Map(prev);
-            if (m.question.status === 'pending') next.set(m.question.id, m.question);
+            if (m.question.status === 'pending' && !deleted.current.has(m.question.task_id)) next.set(m.question.id, m.question);
             else next.delete(m.question.id);
             return next;
           });
@@ -109,7 +137,9 @@ export function useHub() {
         } else if (m.type === 'removed') {
           const ids = new Set(m.taskIds);
           const keep = <T extends { task_id: string }>(prev: Map<string, T>) => new Map([...prev].filter(([, x]) => !ids.has(x.task_id)));
-          setGone((prev) => new Set([...prev, ...ids]));
+          deleted.current = new Set([...deleted.current, ...ids]);
+          for (const id of ids) { knownTasks.current.delete(id); taskRefresh.current?.set(id, null); }
+          setGone(deleted.current);
           setTasks((prev) => new Map([...prev].filter(([id]) => !ids.has(id))));
           setProjects((prev) => prev.filter((p) => !m.projectIds.includes(p.id)));
           setApprovals(keep);
@@ -119,8 +149,12 @@ export function useHub() {
           setSynced((n) => n + 1);
         }
       }
+      if(!projectTimer&&[...tasks.values()].some(t=>!currentProjects.current.some(p=>p.id===t.project_id))) {
+        projectTimer=setTimeout(()=>{projectTimer=undefined;void refresh().catch(()=>{});},200);
+      }
       // A task's update can come in the same batch as its deletion.
-      for (const m of ms) if (m.type === 'removed') for (const id of m.taskIds) tasks.delete(id);
+      for (const id of tasks.keys()) if (deleted.current.has(id)) tasks.delete(id);
+      for (const id of tasks.keys()) knownTasks.current.add(id);
       if (tasks.size || runnerUpdates.size) setTasks(prev => {
         const next = new Map(prev);
         for (const [id, task] of tasks) next.set(id, task);
@@ -130,17 +164,36 @@ export function useHub() {
         }
         return next;
       });
-      if (events.length) {
-        setEvents((prev) => mergeEvents(prev, events, FEED_CAP));
-        for (const e of events) listeners.current.forEach((fn) => fn(e));
+      const liveEvents = events.filter(e => !deleted.current.has(e.task_id));
+      if (liveEvents.length) {
+        setEvents((prev) => mergeEvents(prev, liveEvents, FEED_CAP));
+        for (const e of liveEvents) listeners.current.forEach((fn) => fn(e));
       }
       for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
-    es.onmessage = (msg) => {
-      batch.push(JSON.parse(msg.data) as HubMessage);
-      timer ??= setTimeout(flush, SSE_BATCH_MS);
+    const streams=new Map<string,EventSource>();
+    const update=()=>{
+      const sources=[{id:'',view_index:0},...getSources()];
+      for(const [id,stream] of streams)if(!sources.some(s=>s.id===id)){stream.close();streams.delete(id);void refresh().catch(()=>{});}
+      for(const source of sources) {
+        if(streams.has(source.id))continue;
+        const es=new EventSource(sourceBase(source.id)+'/stream');streams.set(source.id,es);
+        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh().catch(()=>{});};
+        es.onerror=()=>{
+          if(source.id){sourceConnected(source.id,false);setTasks(prev=>new Map([...prev].map(([id,t])=>[id,id.startsWith(`w:${source.id}:`)?{...t,runner_connected:false}:t])));}
+          else {setConnected(false);fetch('/api/state',{method:'HEAD'}).then(r=>{if(r.status===401)location.reload();},()=>{});}
+        };
+        es.onmessage=msg=>{
+          const mapped=mapMessage(source.id,source.view_index,JSON.parse(msg.data));
+          if(mapped){api.remember(source.id,mapped);batch.push(mapped);timer??=setTimeout(flush,SSE_BATCH_MS);}
+        };
+      }
     };
-    return () => { es.close(); clearTimeout(timer); };
+    const unsubscribe=subscribeSources(update);
+    update();
+    const poll=setInterval(()=>{void discoverSources(true).catch(()=>{});},5000);
+    void discoverSources(true).then(update,()=>{});
+    return()=>{unsubscribe();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
   }, [refresh]);
 
   const onEvent = useCallback((fn: (e: HubEvent) => void) => {
@@ -167,7 +220,7 @@ const EVENT_KINDS: Record<PostKind, EventKind[]> = {
 function feedQuery(f: ColumnFilter, tasks: Map<string, TaskView>): FeedQuery {
   const members = f.statuses?.length ? [...tasks.values()].filter((t) => f.statuses!.includes(t.status)).map((t) => t.id).sort() : undefined;
   return {
-    taskIds: f.taskIds?.length ? f.taskIds : undefined,
+    taskIds: f.taskIds,
     projectIds: f.projectIds?.length ? f.projectIds : undefined,
     statuses: f.statuses?.length ? f.statuses : undefined,
     kinds: f.kinds?.length ? f.kinds.flatMap((k) => EVENT_KINDS[k]) : undefined,
@@ -254,7 +307,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       count(key);
       api.feed(FEED_PAGE, undefined, q).then((page) => set(key, (e) => {
         // A reload after a reconnect or a view switch keeps the older pages already shown.
-        const keepsOlder = e.events.length > 0 && page.length > 0 && e.events[0].id < page[0].id;
+        const keepsOlder = e.events.length > 0 && page.length > 0 && compareEvents(e.events[0], page[0]) < 0;
         return { ...e, events: mergeEvents(e.events, page), more: keepsOlder ? e.more : page.length >= FEED_PAGE, loading: false };
       }), () => set(key, (e) => ({ ...e, loading: false })));
     }
@@ -294,7 +347,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const loadEarlier = useCallback((id: string) => {
     const key = shown.current.get(id);
     const cur = key ? cache.current.get(key) : undefined;
-    const oldest = cur?.events[0]?.id;
+    const oldest = cur?.events[0];
     if (!key || !cur || !oldest || !cur.more || cur.loading) return;
     set(key, (e) => ({ ...e, loading: true }));
     api.feed(FEED_PAGE, oldest, cur.q).then(
@@ -334,7 +387,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       if (!alive) return;
       // Older events kept from before (pages loaded earlier) keep their own `more`.
       setHistory((prev) => ({
-        events: mergeEvents(prev.events, page.events),
+        events: mergeTaskEvents(prev.events, page.events),
         more: prev.events.length && page.events.length && prev.events[0].id < page.events[0].id ? prev.more : page.more,
       }));
       setLoaded(key);
@@ -347,12 +400,12 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       const ids = [...cut];
       cut.clear();
       api.events(taskId, { ids }).then((page) => {
-        if (alive) setHistory((prev) => ({ ...prev, events: mergeEvents(prev.events, page.events) }));
+        if (alive) setHistory((prev) => ({ ...prev, events: mergeTaskEvents(prev.events, page.events) }));
       }).catch(() => {});
     };
     const off = onEvent((e) => {
       if (e.task_id !== taskId) return;
-      setHistory((prev) => ({ ...prev, events: mergeEvents(prev.events, [e]) }));
+      setHistory((prev) => ({ ...prev, events: mergeTaskEvents(prev.events, [e]) }));
       if (e.payload?.clipped) {
         cut.add(e.id);
         timer ??= setTimeout(fetchWhole, WHOLE_DELAY_MS);
@@ -368,7 +421,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     setLoadingEarlier(true);
     api.events(taskId, { before: oldest.id }).then((page) => {
       if (gen.current !== g) return;
-      setHistory((prev) => ({ events: mergeEvents(prev.events, page.events), more: page.more }));
+      setHistory((prev) => ({ events: mergeTaskEvents(prev.events, page.events), more: page.more }));
     }).catch(() => {}).finally(() => {
       if (gen.current === g) { earlierRequest.current = false; setLoadingEarlier(false); }
     });

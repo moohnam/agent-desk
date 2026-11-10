@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
   ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
+CREATE INDEX IF NOT EXISTS event_time ON event(ts, id);
 CREATE TABLE IF NOT EXISTS approval (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, tool_name TEXT NOT NULL,
   input_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -456,8 +457,14 @@ export class Store {
    * Most recent events across all tasks, oldest first; `beforeId` pages further back. `f` narrows
    * them to a feed column's tasks, projects, task statuses, event kinds, and a text search.
    */
-  listFeed(limit = 1000, beforeId = Number.MAX_SAFE_INTEGER, f: FeedFilter = {}): Event[] {
+  listFeed(limit = 1000, beforeId = Number.MAX_SAFE_INTEGER, f: FeedFilter = {}, cursor?: { ts: string; id: number }): Event[] {
     const { where, args } = feedWhere(f);
+    if (cursor) {
+      const rows = this.db.prepare(`SELECT e.* FROM event e JOIN task t ON t.id=e.task_id
+        WHERE (e.ts < ? OR (e.ts = ? AND e.id < ?)) AND ${where}
+        ORDER BY e.ts DESC,e.id DESC LIMIT ?`).all(cursor.ts,cursor.ts,cursor.id,...args,limit) as unknown as (Omit<Event,'payload'> & {payload_json:string})[];
+      return rows.reverse().map(({payload_json,...e})=>({...e,payload:JSON.parse(payload_json)}));
+    }
     const rows = this.db.prepare(
       `SELECT * FROM (SELECT e.* FROM event e JOIN task t ON t.id = e.task_id WHERE e.id < ? AND ${where}
          ORDER BY e.id DESC LIMIT ?) ORDER BY id`,

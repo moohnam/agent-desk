@@ -26,7 +26,7 @@ export class SharedRuntime {
     let store:Store|undefined,hub:Hub|undefined,agent:RemoteAgent|undefined;
     try {
       store=new Store(join(dir,'workspace.db'));
-      this.hub=hub=new Hub(store,{skills:new SkillStore(join(dir,'desk-plugin')),runner:()=>({connected:true,id:'shared-local-disabled',engines:new Set(),has:()=>false,handle:()=>{throw new Error('공유 러너 주소를 프로젝트 경로에 지정하세요');}})});
+      this.hub=hub=new Hub(store,{pathAddress:address,skills:new SkillStore(join(dir,'desk-plugin')),runner:()=>({connected:true,id:'shared-local-disabled',engines:new Set(),has:()=>false,handle:()=>{throw new Error('공유 러너 주소를 프로젝트 경로에 지정하세요');}})});
       this.workspace=new SharedWorkspace(this.hub);
       const peers=this.hub.remotes.list();
       if(peers.length&&peers[0].address!==address)throw new Error('기존 공유 작업공간의 러너 주소를 바꿀 수 없습니다');

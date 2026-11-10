@@ -13,7 +13,7 @@ export type HubEvent = WireEvent<Record<string, any>>;
 export type Approval = WireApproval<Record<string, any>>;
 export type TaskView = WireTaskView<HubEvent>;
 export type HubMessage = WireHubMessage<HubEvent, Approval>;
-export type DeskState = WireDeskState<HubEvent, Approval>;
+export type DeskState = WireDeskState<HubEvent, Approval> & { unavailableSources?:string[] };
 
 /** A timeline post: one utterance, approval request, question, or alert. Tool calls fold into `activity`. */
 export type PostKind = 'user' | 'assistant' | 'approval' | 'question' | 'alert';
