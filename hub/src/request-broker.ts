@@ -10,7 +10,8 @@ import { HttpError } from './errors.ts';
 import { expandHome } from './paths.ts';
 import type { WorkspaceLinks } from './workspace-links.ts';
 
-type Lookup = { peer: CrossPeer; source: 'app' | 'external'; last_user_event_id: number | null };
+type Lookup = { peer: CrossPeer; source: 'app' | 'external'; last_user_event_id: number | null;
+  last_user_message_id: number | null };
 type LocalEdge = { from: string; to: string };
 type Call = { status: number; body: any };
 type BrokerRow = { id: string; fingerprint: string; origin: string; target: string; from_json: string;
@@ -25,14 +26,18 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
     return { peer: { task_id: task.id, session_id: session.id,
       project_name: hub.store.getProject(task.project_id)?.name ?? '?', seq: task.seq,
       title: task.title, cwd: session.cwd }, source: session.source,
-      last_user_event_id: hub.store.lastEventOf(task.id, 'user')?.id ?? null };
+      last_user_event_id: hub.store.lastEventOf(task.id, 'user')?.id ?? null,
+      last_user_message_id: hub.store.lastUserMessageId(task.id) };
   };
   if (action === 'lookup') {
     const kind = String(body.kind ?? '');
-    if (kind === 'request' || kind === 'question') {
+    if (kind === 'request' || kind === 'question' || kind === 'reply') {
       const id = String(body.id ?? '');
-      const found = kind === 'request' && hub.requests.crossRole(id) === 'target' ? undefined
+      const found = kind === 'reply' ? hub.store.getRequest(id)
+        : kind === 'request' && hub.requests.crossRole(id) === 'target' ? undefined
         : kind === 'request' ? hub.store.getRequest(id) : hub.store.getQuestion(id);
+      if (kind === 'reply' && (!found || hub.requests.crossRole(id) === 'origin'))
+        return { status: 404, body: { error: '답할 질문이 없습니다' } };
       return { status: found ? 200 : 404, body: found ? { id } : { error: '질문이 없습니다' } };
     }
     if (kind === 'list') {
@@ -146,7 +151,7 @@ class RequestBroker {
     if (r.status >= 400) throw new HttpError(r.status, r.body?.error ?? `작업공간 중계에 실패했습니다 (${r.status})`);
     return r.body;
   }
-  async lookup(kind: 'origin' | 'target' | 'request' | 'question', query: Record<string, unknown>) {
+  async lookup(kind: 'origin' | 'target' | 'request' | 'question' | 'reply', query: Record<string, unknown>) {
     const outcomes = await Promise.all(this.sources().map(async source => {
       try { return { source, result: await this.call(source, 'lookup', { kind, ...query }) as Lookup }; }
       catch (error) { return { source, error }; }
@@ -177,7 +182,12 @@ class RequestBroker {
     const to = await this.lookup('target', { to: a.to });
     if (from.source === to.source) return { proxy: from.source };
     if (to.result.source !== 'app') throw new HttpError(409, '대상은 터미널에서 붙은 작업이라 질문을 넣을 수 없습니다');
-    const input = [from.source, from.result.peer.task_id, from.result.last_user_event_id,
+    const pending = this.pending().find(row => row.origin === from.source && row.target === to.source
+      && (JSON.parse(row.from_json) as CrossPeer).task_id === from.result.peer.task_id
+      && (JSON.parse(row.to_json) as CrossPeer).task_id === to.result.peer.task_id
+      && row.text === a.question.trim());
+    if (pending) { await this.drive(pending.id); return this.row(pending.id)!; }
+    const input = [from.source, from.result.peer.task_id, from.result.last_user_message_id,
       to.source, to.result.peer.task_id, String(a.question ?? '').trim()];
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
     let row = this.db.prepare('SELECT * FROM broker_request WHERE fingerprint=?').get(fingerprint) as BrokerRow | undefined;
@@ -329,7 +339,7 @@ function result(row: BrokerRow) {
   if (row.status === 'answered') return mcpText(`@${to.project_name}#${to.seq} 에이전트의 답:\n${row.answer}`);
   if (row.status === 'denied' || row.status === 'failed') return mcpText(row.answer ?? '답을 받지 못했습니다.');
   const waiting: Record<string, string> = { new: '전달 대기', approval: '사용자 승인 대기', queued: '대상 작업 대기', running: '대상 에이전트가 답하는 중', settling: '답변 전달 중' };
-  return mcpText(`아직 답이 없습니다 (${waiting[row.status] ?? row.status}). desk_wait_answer(question_id: "${row.id}")로 계속 기다리세요.`);
+  return mcpText(`아직 답이 없습니다 (${waiting[row.status] ?? row.status}). 같은 문의를 다시 만들지 말고 desk_wait_answer(question_id: "${row.id}")로 계속 기다리세요.`);
 }
 
 /** Gateway MCP interception. Unrelated tools keep the existing owner MCP implementation. */
@@ -363,7 +373,7 @@ export async function handleBrokerMcp(links: WorkspaceLinks, localAuthorityId: s
   if (rpc.method !== 'tools/call') return false;
   const name = rpc.params?.name;
   if (!['desk_attach', 'desk_post', 'desk_checkpoint', 'desk_ask', 'desk_wait_answer',
-    'desk_request', 'desk_finish', 'desk_handoff', 'desk_list_tasks'].includes(name)) return false;
+    'desk_request', 'desk_reply', 'desk_finish', 'desk_handoff', 'desk_list_tasks'].includes(name)) return false;
   const work = broker(links, localAuthorityId);
   const args = rpc.params?.arguments ?? {};
   return work.run(async () => {
@@ -391,6 +401,14 @@ export async function handleBrokerMcp(links: WorkspaceLinks, localAuthorityId: s
       mcpReply(res, rpc, result(await work.wait(held.id, ms, abort.signal)));
       return true;
     }
+    if (name === 'desk_reply') {
+      const id = String(args.question_id ?? '');
+      const held = work.find(id);
+      const source = held?.target ?? (await work.lookup('reply', { id })).source;
+      await links.proxyMcp(source, req, res, body);
+      if (held) void work.drive(id);
+      return true;
+    }
     if (name !== 'desk_request') {
       const taskId = typeof args.task_id === 'string' ? args.task_id.trim() : '';
       const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
@@ -403,7 +421,7 @@ export async function handleBrokerMcp(links: WorkspaceLinks, localAuthorityId: s
     const started = await work.begin(args);
     if ('proxy' in started) { await links.proxyMcp(started.proxy, req, res, body); return true; }
     const abort = new AbortController(); res.on('close', () => abort.abort());
-    const ms = Math.min(Math.max(Number(args.timeout_sec) || 300, 1), 600) * 1000;
+    const ms = Math.min(Math.max(Number(args.timeout_sec) || 15, 1), 600) * 1000;
     mcpReply(res, rpc, result(await work.wait(started.id, ms, abort.signal)));
   } catch (error) { mcpReply(res, rpc, error instanceof Error ? error.message : String(error), true); }
   return true;

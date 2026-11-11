@@ -559,6 +559,13 @@ export class Store {
     const { payload_json, ...e } = row;
     return { ...e, payload: JSON.parse(payload_json) };
   }
+  /** Latest user-authored prompt, excluding another agent's delivered request. */
+  lastUserMessageId(taskId: string): number | null {
+    const row = this.db.prepare(`SELECT id FROM event WHERE task_id=? AND kind='user'
+      AND json_type(payload_json, '$.request') IS NULL ORDER BY id DESC LIMIT 1`)
+      .get(taskId) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
 
   /**
    * The task's Codex async question still unanswered: an agent message with `questions` that no

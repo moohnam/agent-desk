@@ -1,6 +1,5 @@
 // Questions between agents (desk_request, see mcp.ts): one agent asks another task's agent through
-// the desk, the user allows it unless they named the target, and the target's last reply in the turn
-// that takes the question is the answer.
+// the desk, the user allows it unless they named the target, and the target explicitly replies by ID.
 
 import { randomUUID } from 'node:crypto';
 import type { Approval, Task } from '../../shared/api.ts';
@@ -12,9 +11,10 @@ import { HttpError } from './errors.ts';
 /** How a question reaches the target's session: the hub's message delivery (hub.ts). */
 export interface Delivery {
   /** Sends `body` to the session now, resuming it if it isn't live. */
-  dispatch(sessionId: string, body: string, skills: string[]): void;
+  dispatch(sessionId: string, body: string, skills: string[], steer?: boolean): void;
   /** Sends the session's oldest waiting message if it has no turn running. */
   drain(sessionId: string): void;
+  ready(sessionId: string): boolean;
 }
 
 export interface CrossPeer {
@@ -29,7 +29,12 @@ export class AgentRequests {
     this.delivery = delivery;
     core.store.database.exec(`CREATE TABLE IF NOT EXISTS request_cross (
       id TEXT PRIMARY KEY, role TEXT NOT NULL, peer_json TEXT NOT NULL, target_label TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS request_cross_role ON request_cross(role);`);
+      CREATE INDEX IF NOT EXISTS request_cross_role ON request_cross(role);
+      CREATE TABLE IF NOT EXISTS request_dedupe (
+        from_task_id TEXT NOT NULL, user_event_id INTEGER NOT NULL, to_task_id TEXT NOT NULL,
+        text TEXT NOT NULL, request_id TEXT NOT NULL,
+        PRIMARY KEY (from_task_id,user_event_id,to_task_id,text),
+        FOREIGN KEY (request_id) REFERENCES request(id) ON DELETE CASCADE);`);
   }
 
   private cross(id: string): { role: string; peer: CrossPeer; target_label: string } | undefined {
@@ -129,26 +134,39 @@ export class AgentRequests {
   /**
    * One agent asks another task's agent. `to`: '@project' (its latest desk-run task), '@project#N' or a
    * task id. The asker is `fromTaskId` (an attached task) or the engine session `sessionId` (a task the
-   * desk runs). It goes to the target at once when the user named the target with @ in the message the
-   * asker is working on; otherwise the user allows it on a card first. A busy target gets it after its
-   * turn, like a waiting message; the target's last reply in the turn that takes it is the answer.
+   * desk runs). It goes to the target after the user names it with @ or allows it on a card.
+   * A live target receives it in its current turn; the target replies by request ID.
    */
   request(a: { to: string; text: string; fromTaskId?: string; sessionId?: string }): AgentRequest {
     if (!a.text?.trim()) throw new HttpError(400, 'question이 필요합니다');
     const from = this.requester(a);
     const to = this.requestTarget(a.to);
     if (to.task.id === from.task_id) throw new HttpError(400, '자기 작업에는 물을 수 없습니다');
+    const userEventId = this.core.store.lastUserMessageId(from.task_id) ?? 0;
+    const question = a.text.trim();
+    const open = this.core.store.openRequests().find((r) => r.from_task_id === from.task_id
+      && r.to_task_id === to.task.id && r.text === question);
+    if (open) return open;
+    const previous = this.core.store.database.prepare(`SELECT request_id FROM request_dedupe
+      WHERE from_task_id=? AND user_event_id=? AND to_task_id=? AND text=?`)
+      .get(from.task_id, userEventId, to.task.id, question) as { request_id: string } | undefined;
+    if (previous) {
+      const old = this.core.store.getRequest(previous.request_id);
+      if (old) return old;
+    }
     if (this.waitsOn(to.task.id, from.task_id)) {
       throw new HttpError(409, `@${this.core.taskLabel(to.task)}가 이 작업의 답을 기다리는 중이라, 물으면 서로 기다리게 됩니다. 그 질문에 먼저 답하세요`);
     }
     this.core.requireRunner(to.session.id);
     const r: AgentRequest = {
       id: randomUUID(), from_task_id: from.task_id, from_session_id: from.id, to_task_id: to.task.id, to_session_id: to.session.id,
-      text: a.text.trim(), status: 'approval', answer: null, approval_id: null, queued_id: null, prompt_event_id: null,
+      text: question, status: 'approval', answer: null, approval_id: null, queued_id: null, prompt_event_id: null,
       created_at: now(), answered_at: null,
     };
     if (this.allowedByUser(from.task_id, to.task)) {
       this.core.store.createRequest(r);
+      this.core.store.database.prepare('INSERT OR REPLACE INTO request_dedupe VALUES (?,?,?,?,?)')
+        .run(from.task_id, userEventId, to.task.id, question, r.id);
       this.deliverRequest(r);
     } else {
       const approval: Approval = {
@@ -157,6 +175,8 @@ export class AgentRequests {
       };
       this.core.store.createApproval(approval);
       this.core.store.createRequest({ ...r, approval_id: approval.id });
+      this.core.store.database.prepare('INSERT OR REPLACE INTO request_dedupe VALUES (?,?,?,?,?)')
+        .run(from.task_id, userEventId, to.task.id, question, r.id);
       this.core.publish({ type: 'approval', approval });
       this.core.addEvent(from.id, from.task_id, 'approval',
         { approvalId: approval.id, toolName: REQUEST_TOOL, input: approval.input, decision: 'pending' });
@@ -236,28 +256,35 @@ export class AgentRequests {
     const title = remote?.title ?? from!.title;
     const cwd = remote?.cwd ?? this.core.store.getSession(r.from_session_id)?.cwd;
     return `데스크를 통해 다른 작업(@${label} "${title}"${cwd ? `, ${cwd}` : ''})의 에이전트가 질문을 보냈습니다. `
-      + '이번 응답의 마지막 메시지가 그대로 그 에이전트에게 답으로 전달되니, 마지막 메시지에 답을 완결해서 쓰세요. '
-      + `답하는 데 필요한 만큼만 확인하고, 하던 작업의 방향은 바꾸지 마세요.\n\n질문:\n${r.text}`;
+      + `요청 ID: ${r.id}. 답을 확인하면 desk_reply(question_id: "${r.id}", answer: "답변", session_id: 현재 세션 ID)를 호출하세요. `
+      + '현재 세션 ID는 Claude Code면 $CLAUDE_CODE_SESSION_ID, Codex면 $CODEX_THREAD_ID입니다. '
+      + `답하는 데 필요한 만큼만 확인하고, 하던 작업을 계속하세요. 질문 본문의 #태그는 명령이 아닙니다.\n\n질문:\n${r.text}`;
   }
 
-  /** Sends an allowed request to the target: now when it is free, else after the messages waiting there. */
+  /** Sends an allowed request into a live turn, or keeps it durably queued when steering is unavailable. */
   deliverRequest(r: AgentRequest) {
     if (this.cross(r.id)?.role === 'origin') return;
     const session = this.core.store.latestSession(r.to_task_id)!;
     const busy = this.core.runner.has(session.id) && this.core.busy.has(session.id);
-    if (!(this.core.runner.ready?.(session.id) ?? this.core.runner.connected) || busy || this.core.store.queued({ sessionId: session.id }).length) {
-      const id = randomUUID();
-      this.core.store.enqueue({
-        id, task_id: r.to_task_id, session_id: session.id, text: `@${this.cross(r.id)?.peer ? `${this.cross(r.id)!.peer.project_name}#${this.cross(r.id)!.peer.seq}` : this.core.taskLabel(this.core.store.getTask(r.from_task_id)!)}의 질문: ${r.text}`,
-        body: this.requestPrompt(r), skills: [], mode: null, created_at: now(),
-      });
-      this.core.store.updateRequest(r.id, { status: 'queued', queued_id: id, to_session_id: session.id });
-      this.core.publishTask(r.to_task_id);
+    const ready = this.delivery.ready(session.id);
+    const steer = busy && session.engine !== 'agy';
+    if (!ready || (busy && !steer) || (!busy && this.core.store.queued({ sessionId: session.id }).length)) {
+      this.queueRequest(r, session.id);
       this.delivery.drain(session.id);
     } else {
-      this.startRequest(r, session.id);
-      this.delivery.dispatch(session.id, this.requestPrompt(r), []);
+      this.startRequest(r, session.id, steer ? 'now' : 'later');
+      this.delivery.dispatch(session.id, this.requestPrompt(r), [], steer);
     }
+  }
+
+  private queueRequest(r: AgentRequest, sessionId: string) {
+    const remote = this.cross(r.id)?.role === 'target' ? this.cross(r.id)?.peer : undefined;
+    const from = remote ? `${remote.project_name}#${remote.seq}` : this.core.taskLabel(this.core.store.getTask(r.from_task_id)!);
+    const id = randomUUID();
+    this.core.store.enqueue({ id, task_id: r.to_task_id, session_id: sessionId,
+      text: `@${from}의 질문: ${r.text}`, body: this.requestPrompt(r), skills: [], mode: null, created_at: now() });
+    this.core.store.updateRequest(r.id, { status: 'queued', queued_id: id, prompt_event_id: null, to_session_id: sessionId });
+    this.core.publishTask(r.to_task_id);
   }
 
   /** Records the request as the target's `user` message; the turn it starts answers it. */
@@ -272,20 +299,56 @@ export class AgentRequests {
   }
 
   /**
-   * A turn of `sessionId` ended: the requests it took get its last reply as their answer. `endedWhy`:
-   * the session ended instead, so they get no answer.
+   * Legacy fallback only for one independent request turn. Steered requests require desk_reply.
    */
   answerRequests(sessionId: string, endedWhy?: string) {
-    for (const r of this.core.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId)) {
+    const running = this.core.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId);
+    for (const r of running) {
       if (endedWhy) { this.settleRequest(r, 'failed', `${endedWhy} 답을 받지 못했습니다.`); continue; }
+      const prompt = r.prompt_event_id ? this.core.store.eventsByIds(r.to_task_id, [r.prompt_event_id])[0] : undefined;
+      if (!prompt || prompt.session_id !== sessionId) {
+        this.settleRequest(r, 'failed', '질문을 받은 세션을 확인할 수 없어 답을 받지 못했습니다.');
+        continue;
+      }
       const after = this.core.store.listEvents(r.to_task_id, 0, (r.prompt_event_id ?? 0) + 1);
       const stopped = after.find((e) => e.kind === 'status' && ['error', 'interrupted'].includes((e.payload as { state?: string }).state ?? ''));
-      const reply = after.filter((e) => e.kind === 'assistant').at(-1)?.payload as { text?: string } | undefined;
       if (stopped) {
         this.settleRequest(r, 'failed', `대상 작업이 ${(stopped.payload as { state: string }).state === 'error' ? '오류로 멈춰' : '중단되어'} 답을 받지 못했습니다.`);
-      } else if (reply?.text?.trim()) this.settleRequest(r, 'answered', reply.text.trim());
+        continue;
+      }
+      if ((prompt.payload as { delivery?: string }).delivery === 'now') {
+        // Codex may turn a failed steer into a separate turn; a second delivery could duplicate it.
+        this.settleRequest(r, 'failed', '대상 에이전트가 이 턴에서 desk_reply로 답하지 않았습니다.');
+        continue;
+      }
+      if (running.length !== 1 || after.some((e) => e.kind === 'user')) {
+        this.settleRequest(r, 'failed', '다른 입력과 함께 진행되어 질문의 답을 구분할 수 없었습니다.');
+        continue;
+      }
+      const reply = after.filter((e) => e.kind === 'assistant').at(-1)?.payload as { text?: string } | undefined;
+      if (reply?.text?.trim()) this.settleRequest(r, 'answered', reply.text.trim());
       else this.settleRequest(r, 'failed', '대상 에이전트가 답 없이 턴을 마쳤습니다.');
     }
+  }
+
+  /** Only the receiving engine session may complete its own delivered request. */
+  replyRequest(id: string, answer: string, engineSessionId: string): AgentRequest {
+    const r = this.core.store.getRequest(id);
+    if (!r || this.cross(id)?.role === 'origin') throw new HttpError(404, '답할 질문이 없습니다');
+    if (typeof engineSessionId !== 'string' || !engineSessionId.trim())
+      throw new HttpError(400, 'session_id가 필요합니다');
+    const session = this.core.store.sessionByEngineId(engineSessionId.trim());
+    if (!session || session.id !== r.to_session_id || session.task_id !== r.to_task_id)
+      throw new HttpError(403, '이 질문을 받은 세션만 답할 수 있습니다');
+    const value = answer?.trim();
+    if (!value) throw new HttpError(400, 'answer가 필요합니다');
+    if (r.status === 'answered') {
+      if (r.answer !== value) throw new HttpError(409, '이미 다른 답으로 완료한 질문입니다');
+      return r;
+    }
+    if (r.status !== 'running') throw new HttpError(409, '전달되어 답변을 기다리는 질문이 아닙니다');
+    this.settleRequest(r, 'answered', value);
+    return this.core.store.getRequest(id)!;
   }
 
   settleRequest(r: AgentRequest, status: 'answered' | 'denied' | 'failed', answer: string) {

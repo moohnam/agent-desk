@@ -47,15 +47,25 @@ function rpc(links: WorkspaceLinks, body: unknown) {
 
 test('cross-source request keeps approval at origin, delivery and final turn at target, and replays once', async () => {
   const from = owner('from'), to = owner('to'), gateway = new Store(':memory:');
+  to.store.updateSession(to.session.id, { engine_session_id: 'target-engine-session' });
+  let replySource = '';
   const links = { database: gateway.database, list: () => [{ id: 'origin' }, { id: 'target' }],
     trustedCall: async (id: string, path: string, body: Record<string, unknown>) => {
       try { return (id === 'origin' ? from.hub : to.hub).atomic(() =>
         handleWorkspaceBroker(id === 'origin' ? from.hub : to.hub, path.split('/').at(-1)!, body)); }
       catch (e) { return { status: e instanceof HttpError ? e.status : 500, body: { error: e instanceof Error ? e.message : String(e) } }; }
     },
-    proxyMcp: async () => { throw Error('same-source proxy should not run'); },
+    proxyMcp: async (source: string, _req: unknown, res: ServerResponse, body: any) => {
+      assert.equal(body.params.name, 'desk_reply');
+      replySource = source;
+      const a = body.params.arguments;
+      to.hub.requests.replyRequest(a.question_id, a.answer, a.session_id);
+      res.writeHead(200).end(JSON.stringify({ jsonrpc: '2.0', id: body.id,
+        result: { content: [{ type: 'text', text: '전달했습니다' }] } }));
+    },
   } as unknown as WorkspaceLinks;
   try {
+    from.hub.addEvent(from.session.id, from.task.id, 'user', { text: '대상에게 물어봐 주세요' });
     const args = { to: `@${to.task.project_name}#${to.task.seq}`, question: '결과를 알려 주세요', task_id: from.task.id, timeout_sec: 1 };
     const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'desk_request', arguments: args } };
     const first = await rpc(links, request);
@@ -65,6 +75,8 @@ test('cross-source request keeps approval at origin, delivery and final turn at 
     assert.equal(from.store.getRequest(id)?.status, 'approval');
     assert.equal(to.store.getRequest(id), undefined);
     assert.equal(from.store.pendingApprovals().length, 1);
+    from.hub.addEvent(from.session.id, from.task.id, 'user', { text: '다른 에이전트의 질문',
+      request: { id: 'inbound', task_id: to.task.id, from: 'to', title: 'to' } });
     const again = await rpc(links, request);
     assert.match(again.content[0].text, new RegExp(id));
     assert.equal(from.store.pendingApprovals().length, 1);
@@ -82,14 +94,20 @@ test('cross-source request keeps approval at origin, delivery and final turn at 
       'the target copy must not look like the owner of desk_wait_answer');
     const event = to.store.listEvents(to.task.id).find(e => e.kind === 'user' && (e.payload as any).request?.id === id);
     assert.ok(event);
-    assert.match((to.sent.at(-1) as { prompt: string }).prompt, /하던 작업의 방향은 바꾸지 마세요/);
+    assert.match((to.sent.at(-1) as { prompt: string }).prompt, new RegExp(id));
     to.hub.addEvent(to.session.id, to.task.id, 'assistant', { text: '최종 답변' });
+    await rpc(links, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'desk_reply',
+      arguments: { question_id: id, answer: '명시적 답변', session_id: 'target-engine-session' } } });
+    assert.equal(replySource, 'target');
     to.hub.requests.answerRequests(to.session.id);
     const answered = await pending;
-    assert.match(answered.content[0].text, /최종 답변/);
+    assert.match(answered.content[0].text, /명시적 답변/);
     assert.equal(from.store.getRequest(id)?.status, 'answered');
     assert.equal(to.store.getRequest(id)?.status, 'answered');
     assert.equal(to.store.listEvents(to.task.id).filter(e => e.kind === 'user' && (e.payload as any).request?.id === id).length, 1);
+    const completedRetry = await rpc(links, request);
+    assert.match(completedRetry.content[0].text, /명시적 답변/);
+    assert.equal(from.store.pendingApprovals().length, 0);
   } finally { await closeRequestBroker(links); gateway.database.close(); from.close(); to.close(); }
 });
 

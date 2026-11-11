@@ -18,6 +18,7 @@ const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 /** desk_ask / desk_wait_answer hold the request at most this long, then tell the agent to call again. */
 const MAX_WAIT_SEC = 600;
 const DEFAULT_WAIT_SEC = 300;
+const DEFAULT_REQUEST_WAIT_SEC = 15;
 /** Most requests one JSON-RPC batch may carry. */
 const MAX_BATCH = 32;
 
@@ -28,7 +29,7 @@ const INSTRUCTIONS = `Agent Desk: 사용자가 여러 에이전트 작업을 한
 3. 사용자 판단이 필요하면 desk_ask로 묻고 답을 기다립니다. "아직 답 없음"이 오면 desk_wait_answer를 다시 호출합니다.
 4. 작업을 마치면 desk_finish를 호출합니다.
 사용자가 이 세션을 데스크로 "넘겨", "옮겨", "가져가"라고 하면 desk_handoff를 씁니다. 세션 ID는 Claude Code면 \`echo $CLAUDE_CODE_SESSION_ID\`, Codex면 \`echo $CODEX_THREAD_ID\`로 얻습니다(비어 있으면 생략). 넘긴 뒤에는 이 터미널 세션을 더 진행하지 말고 종료하라고 사용자에게 알립니다.
-다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. "아직 답 없음"이 오면 desk_wait_answer로 계속 기다립니다.
+다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. "아직 답 없음"이 오면 같은 문의를 다시 만들지 말고 desk_wait_answer로 계속 기다립니다. 받은 문의에는 desk_reply로 요청 ID를 지정해 답합니다.
 데스크에 쓰는 글은 한국어로 씁니다.`;
 
 const str = (description: string) => ({ type: 'string', description });
@@ -85,7 +86,7 @@ const TOOLS = [
   },
   {
     name: 'desk_request',
-    description: '데스크에 있는 다른 작업의 에이전트에게 질문하고 답을 기다립니다. 대상 에이전트가 자기 작업의 맥락으로 답하고, 그 응답의 마지막 메시지가 답으로 돌아옵니다. 대상이 작업 중이면 그 턴이 끝난 뒤 답합니다. 사용자가 대상을 @로 언급하지 않았으면 사용자 승인을 먼저 받습니다. 시간 안에 답이 없으면 question_id를 돌려주니 desk_wait_answer로 계속 기다리세요.',
+    description: '다른 작업의 에이전트에게 질문합니다. 승인된 질문은 연결된 지원 엔진의 실행 중인 턴에 즉시 전달됩니다. 기본 15초 안에 답이 없으면 question_id를 돌려줍니다. 같은 질문을 다시 만들지 말고 desk_wait_answer로 계속 기다리세요. 사용자가 대상을 @로 언급하지 않았으면 먼저 승인받습니다.',
     inputSchema: {
       type: 'object', required: ['to', 'question'],
       properties: {
@@ -93,9 +94,17 @@ const TOOLS = [
         question: str('질문 (마크다운). 대상은 이 대화를 모르니 필요한 맥락을 함께 씁니다'),
         task_id: str('묻는 쪽이 데스크에 붙은 작업이면 desk_attach가 준 task_id'),
         session_id: str('묻는 쪽이 데스크가 실행한 작업이면 이 세션의 ID. Claude Code: $CLAUDE_CODE_SESSION_ID, Codex: $CODEX_THREAD_ID'),
-        timeout_sec: { type: 'number', description: `기다릴 최대 초 (기본 ${DEFAULT_WAIT_SEC}, 최대 ${MAX_WAIT_SEC})` },
+        timeout_sec: { type: 'number', description: `최초 답을 기다릴 최대 초 (기본 ${DEFAULT_REQUEST_WAIT_SEC}, 최대 ${MAX_WAIT_SEC})` },
       },
     },
+  },
+  {
+    name: 'desk_reply',
+    description: '다른 작업에서 받은 질문에 요청 ID별로 답합니다. 현재 대상 세션의 ID를 함께 보내야 합니다. 실행 중인 원래 작업은 계속할 수 있습니다.',
+    inputSchema: { type: 'object', required: ['question_id', 'answer', 'session_id'], properties: {
+      question_id: str('받은 문의의 요청 ID'), answer: str('질문한 에이전트에게 보낼 답변'),
+      session_id: str('현재 대상 세션 ID. Claude Code: $CLAUDE_CODE_SESSION_ID, Codex: $CODEX_THREAD_ID'),
+    } },
   },
   {
     name: 'desk_finish',
@@ -138,7 +147,7 @@ class RpcError extends Error {
 }
 
 const text = (t: string) => ({ content: [{ type: 'text', text: t }] });
-const waitSec = (v: unknown) => Math.min(Math.max(Number(v) || DEFAULT_WAIT_SEC, 1), MAX_WAIT_SEC);
+const waitSec = (v: unknown, fallback = DEFAULT_WAIT_SEC) => Math.min(Math.max(Number(v) || fallback, 1), MAX_WAIT_SEC);
 
 function taskLine(t: TaskView) {
   return `- ${t.id} [${t.status}${t.source === 'external' ? ', 터미널' : ''}] @${t.project_name} › ${t.title} (갱신 ${t.updated_at})`;
@@ -167,7 +176,11 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
     }
     case 'desk_request': {
       const r = hub.requests.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id });
-      return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec) * 1000, signal));
+      return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec, DEFAULT_REQUEST_WAIT_SEC) * 1000, signal));
+    }
+    case 'desk_reply': {
+      hub.requests.replyRequest(a.question_id, a.answer, a.session_id);
+      return text('답변을 저장했습니다. 질문한 작업에 전달됩니다.');
     }
     case 'desk_finish':
       hub.external.finishExternal(a.task_id, a.summary);
@@ -200,7 +213,7 @@ function requestResult(hub: Hub, r: AgentRequest) {
   const who = to ? `@${hub.store.getProject(to.project_id)?.name ?? '?'}#${to.seq}` : '대상';
   if (r.status === 'answered') return text(`${who} 에이전트의 답:\n${r.answer}`);
   if (r.status === 'denied' || r.status === 'failed') return text(r.answer ?? '답을 받지 못했습니다.');
-  return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). desk_wait_answer(question_id: "${r.id}")로 계속 기다리세요.`);
+  return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). 같은 문의를 다시 만들지 말고 desk_wait_answer(question_id: "${r.id}")로 계속 기다리세요.`);
 }
 
 async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal): Promise<unknown> {

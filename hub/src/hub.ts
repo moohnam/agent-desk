@@ -65,8 +65,9 @@ export class Hub extends DeskCore {
     super(store, opts.skills ?? new SkillStore());
     this.pathAddress = opts.pathAddress;
     this.requests = new AgentRequests(this, {
-      dispatch: (sessionId, body, skills) => this.dispatch(sessionId, body, skills),
+      dispatch: (sessionId, body, skills, steer) => this.dispatch(sessionId, body, skills, steer),
       drain: (sessionId) => this.drain(sessionId),
+      ready: (sessionId) => this.remotes.ready(sessionId),
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
     this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
@@ -618,9 +619,12 @@ export class Hub extends DeskCore {
       id: sessionId, task_id: taskId, engine, engine_session_id: null, cwd: old.cwd, source: 'app', status: 'running',
       runner_id: old.runner_id, created_at: ts, permission_mode: old.permission_mode, model: old.model, effort: old.effort,
     });
-    // What was waiting behind the reset, and requests to this task, go on in the new session.
+    // Queued work moves to the new session. An in-flight request has lost its receiving turn.
     this.store.moveQueued(old.id, sessionId);
-    for (const r of this.store.openRequests().filter((x) => x.to_session_id === old.id)) this.store.updateRequest(r.id, { to_session_id: sessionId });
+    for (const r of this.store.openRequests().filter((x) => x.to_session_id === old.id)) {
+      if (r.status === 'running') this.requests.settleRequest(r, 'failed', '대상 작업의 문맥이 재구성되어 답을 받지 못했습니다.');
+      else this.store.updateRequest(r.id, { to_session_id: sessionId });
+    }
     this.addEvent(old.id, taskId, 'status', { kind: 'status', state: 'context_reset', detail: { session_id: sessionId } });
     this.addEvent(sessionId, taskId, 'user', { text, skills: [], handoff: 'reset', ...(queuedAt && { queued_at: queuedAt }) });
     this.runner.handle({

@@ -224,6 +224,115 @@ test('deleting the task that asked settles its request', async () => {
   assert.match(settled.answer ?? '', /질문한 작업이 삭제/);
 });
 
+test('an approved request steers a busy target and only its receiving session can reply', () => {
+  const { hub, runner, taskId: target, sessionId, dir } = started();
+  hub.store.updateSession(sessionId, { engine_session_id: 'receiving-thread' });
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const request = hub.requests.request({ to: target, text: '상태는? #auto', fromTaskId: asker.id });
+  assert.equal(request.status, 'approval');
+  assert.equal(runner.last('send'), undefined);
+  hub.resolveApproval(request.approval_id!, true);
+  const sent = runner.last('send')!;
+  assert.equal(sent.steer, true);
+  assert.match(sent.text, new RegExp(request.id));
+  assert.match(sent.text, /#auto/);
+  assert.equal(hub.store.getRequest(request.id)?.status, 'running');
+  hub.addEvent(sessionId, target, 'assistant', { text: '원래 작업의 응답' });
+  assert.equal(hub.store.getRequest(request.id)?.status, 'running');
+  assert.throws(() => hub.requests.replyRequest(request.id, '답', 'wrong-thread'), /받은 세션만/);
+  assert.equal(hub.requests.replyRequest(request.id, '정확한 답', 'receiving-thread').answer, '정확한 답');
+  assert.equal(hub.requests.replyRequest(request.id, '정확한 답', 'receiving-thread').answer, '정확한 답');
+  assert.throws(() => hub.requests.replyRequest(request.id, '다른 답', 'receiving-thread'), /이미 다른 답/);
+  hub.requests.answerRequests(sessionId);
+  assert.equal(hub.store.getRequest(request.id)?.answer, '정확한 답');
+});
+
+test('repeating a request after an inbound agent prompt reuses it; a new user message may ask again', () => {
+  const { hub, taskId: target, dir } = started();
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  hub.addEvent(hub.store.latestSession(asker.id)!.id, asker.id, 'user', { text: '물어봐 주세요' });
+  const ask = () => hub.requests.request({ to: target, text: '상태는?', fromTaskId: asker.id });
+  const first = ask();
+  hub.addEvent(hub.store.latestSession(asker.id)!.id, asker.id, 'user', { text: '다른 에이전트의 질문',
+    request: { id: 'inbound', task_id: target, from: 'target', title: 'target' } });
+  assert.equal(ask().id, first.id);
+  assert.equal(hub.store.pendingApprovals().length, 1);
+  hub.resolveApproval(first.approval_id!, false);
+  assert.equal(ask().id, first.id, 'a completed retry still belongs to the same user message');
+  hub.addEvent(hub.store.latestSession(asker.id)!.id, asker.id, 'user', { text: '다시 물어봐 주세요' });
+  assert.notEqual(ask().id, first.id);
+  hub.deleteTask(asker.id);
+  assert.equal((hub.store.database.prepare('SELECT count(*) AS n FROM request_dedupe').get() as { n: number }).n, 0);
+});
+
+test('an attached task without a user message reuses a completed identical request', () => {
+  const { hub, taskId: target, dir } = started();
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const ask = () => hub.requests.request({ to: target, text: '상태는?', fromTaskId: asker.id });
+  const first = ask();
+  hub.resolveApproval(first.approval_id!, false);
+  assert.equal(ask().id, first.id);
+});
+
+test('a context reset does not replay a failed steered request in the new session', () => {
+  const { hub, runner, taskId: target, sessionId: oldSession, dir } = started();
+  hub.store.updateSession(oldSession, { engine_session_id: 'old-engine' });
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '재확인 부탁합니다', fromTaskId: asker.id });
+  hub.resolveApproval(r.approval_id!, true);
+  assert.equal(hub.store.getRequest(r.id)?.status, 'running');
+  assert.equal(hub.resetContext(target, '새 문맥').queued, true);
+  hub.addEvent(oldSession, target, 'status', { kind: 'status', state: 'turn_done' });
+  runner.say({ type: 'busy', sessionId: oldSession, busy: false });
+  const replacement = hub.store.latestSession(target)!;
+  assert.notEqual(replacement.id, oldSession);
+  assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
+  assert.equal(hub.store.queued({ sessionId: replacement.id }).length, 0);
+  assert.throws(() => hub.requests.replyRequest(r.id, '오래된 답', 'old-engine'), /답변을 기다리는 질문이 아닙니다/);
+});
+
+test('an unanswered steered request fails without using the original final or replaying it', () => {
+  const { hub, runner, taskId: target, sessionId, dir } = started();
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '독립적으로 답해 주세요', fromTaskId: asker.id });
+  hub.resolveApproval(r.approval_id!, true);
+  hub.addEvent(sessionId, target, 'assistant', { text: '원래 작업의 최종 응답' });
+  hub.addEvent(sessionId, target, 'status', { kind: 'status', state: 'turn_done' });
+  const sends = runner.sent.length;
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
+  assert.notEqual(hub.store.getRequest(r.id)?.answer, '원래 작업의 최종 응답');
+  assert.equal(runner.sent.length, sends);
+  assert.equal(hub.store.listEvents(target).filter(e => (e.payload as any).request?.id === r.id).length, 1);
+});
+
+test('an independent request with mixed input fails instead of taking an unrelated final', () => {
+  const { hub, runner, taskId: target, sessionId, dir } = started();
+  runner.say({ type: 'busy', sessionId, busy: false });
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '질문', fromTaskId: asker.id });
+  hub.resolveApproval(r.approval_id!, true);
+  assert.equal(runner.last('send')?.steer, false);
+  hub.addEvent(sessionId, target, 'user', { text: '다른 지시', delivery: 'now' });
+  hub.addEvent(sessionId, target, 'assistant', { text: '다른 지시의 답' });
+  hub.addEvent(sessionId, target, 'status', { kind: 'status', state: 'turn_done' });
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
+  assert.notEqual(hub.store.getRequest(r.id)?.answer, '다른 지시의 답');
+});
+
+test('an interrupted steered turn fails without starting a new request turn', () => {
+  const { hub, runner, taskId: target, sessionId, dir } = started();
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '질문', fromTaskId: asker.id });
+  hub.resolveApproval(r.approval_id!, true);
+  const sends = runner.sent.length;
+  hub.addEvent(sessionId, target, 'status', { kind: 'status', state: 'interrupted' });
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
+  assert.equal(runner.sent.length, sends);
+});
+
 test('a channel lazily creates one conversation and keeps selected source snapshots out of compose parsing', () => {
   const { hub, runner, dir } = setup();
   const project = hub.createProject('news', dir);
