@@ -209,7 +209,7 @@ export function App() {
   };
 
   const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, loadEarlier }
-    = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined);
+    = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced);
   const threadPosts = useMemo(() => buildPosts(threadEvents), [threadEvents]);
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
@@ -481,7 +481,9 @@ export function App() {
     setReferenceTask(previous => referencesVisible ? threadTask : canReference && previous === threadTask ? previous : null);
   }, [threadTask, referencesVisible, canReference]);
   useEffect(() => {
-    if (referencesVisible && activeCol?.id !== THREAD) references.show(false);
+    // A deck reorder briefly changes the column at the active index before the layout effect
+    // restores focus by column ID. Only a settled move away from the thread closes this pane.
+    if (referencesVisible && activeCol?.id !== THREAD && activeId.current === activeCol?.id) references.show(false);
   }, [referencesVisible, activeCol?.id]);
   /**
    * Glides the deck sideways just enough to show column `id` whole, and the column before it too
