@@ -17,7 +17,7 @@ export const WIDTH_STEP = 40;
 /** Shown when a built view (F2–F4) is asked to change its columns. */
 export const FIXED_NOTE = '자동으로 만든 뷰는 편집할 수 없습니다. F1(내 컬럼)에서 편집하세요.';
 
-/** The help (?): each key and what it does. Keep it in step with onDeckKey below. */
+/** The help (?): deck keys below, plus input and native WebView shortcuts handled elsewhere. */
 export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] = [
   { title: '이동·글 보기', keys: [
     ['j / k', '아래 / 위 글', '방향키 ↓ / ↑도 사용할 수 있습니다.'],
@@ -47,6 +47,9 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['x', '정리본에 담을 글 선택 / 해제', '재구성 패널을 연 뒤 스레드의 글을 선택합니다.'],
   ] },
   { title: '뷰·컬럼 관리', keys: [
+    ['⌘ = / ⌘ +', '글자·화면 크게', '입력란이나 대화창 안에서도 사용할 수 있습니다.'],
+    ['⌘ -', '글자·화면 작게'],
+    ['⌘ 0', '기본 크기로 복원'],
     ['F1 – F4', '내 컬럼 / 프로젝트 / 작업 / 상태', 'F2–F4는 자동 구성됩니다. 컬럼 추가·편집·삭제는 F1에서 합니다. Mac은 fn 키가 필요할 수 있습니다.'],
     ['c', '컬럼 추가'],
     ['e', '컬럼 조건 편집', '이름은 더블클릭으로도 바꿉니다. 검색 컬럼에서는 검색 입력란으로 이동합니다.'],

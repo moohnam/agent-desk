@@ -8,7 +8,7 @@ import type { EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
 /** How the runner starts a session of any engine; the adapter reports through `emit`. */
 export interface StartOptions {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
-  model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string;
+  model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillSnapshotHome?: string;
   emit: (m: RunnerToHub) => void;
 }
 export type StartEngine = (opts: StartOptions) => EngineAdapter;

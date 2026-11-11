@@ -34,7 +34,8 @@ while (!stopping) {
     const events = journal.events();
     if (!events.length && journal.lastEvent > journal.eventAck) throw new Error('첫 미전달 이벤트가 배치 크기 한도를 넘었습니다. 전달 DB 원본을 보존하고 확인해 주세요');
     const input: RemoteExchange = {version:1,journalId:journal.id,commandAck:journal.commandAck,events,
-      more:journal.lastEvent > (events.at(-1)?.seq ?? journal.eventAck), sessions:agent.runner.snapshot(),engines:agent.runner.capabilities.engines};
+      more:journal.lastEvent > (events.at(-1)?.seq ?? journal.eventAck), sessions:agent.runner.snapshot(),engines:agent.runner.capabilities.engines,
+      skillSnapshot:agent.runner.capabilities.skillSnapshot};
     const res = await fetch(url,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify(input),signal:AbortSignal.timeout(10_000)});
     if (!res.ok) {
       const detail = await res.json().catch(()=>({})) as {error?:string};

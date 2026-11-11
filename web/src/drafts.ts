@@ -35,18 +35,22 @@ function load(): [string, Draft][] {
 }
 
 /** Writes this window's changes over what is stored now, so other windows' drafts stay as they are. */
-function save() {
+function save(): boolean {
   if (timer) { clearTimeout(timer); timer = null; }
-  if (!dirty.size) return;
+  if (!dirty.size) return true;
   const stored = new Map(load());
   for (const k of dirty) {
     const d = drafts.get(k);
     if (d) stored.set(k, d); else stored.delete(k);
   }
-  dirty.clear();
-  try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(stored))); } catch { /* storage unavailable */ }
+  try {
+    localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(stored)));
+    dirty.clear();
+    return true;
+  } catch { return false; }
 }
 addEventListener('pagehide', save);
+addEventListener('desk-before-legacy-migration', (event) => { if (!save()) event.preventDefault(); });
 
 // Another window saved: take its drafts, except keys changed here and not saved yet.
 addEventListener('storage', (e) => {

@@ -97,7 +97,7 @@ test('a message sent mid-turn waits (#later) and goes when the turn ends', () =>
   assert.equal(runner.last('send'), undefined);
   assert.deepEqual(hub.taskView(hub.store.getTask(taskId)!).queued.map((q) => q.text), ['그다음 이것도']);
   runner.say({ type: 'busy', sessionId, busy: false });
-  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '그다음 이것도', skills: [], steer: false });
+  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '그다음 이것도', skills: [], steer: false, skillSnapshot: undefined });
   assert.equal(hub.taskView(hub.store.getTask(taskId)!).queued.length, 0);
   assert.equal(status(hub, taskId), 'running');
 });
@@ -105,7 +105,7 @@ test('a message sent mid-turn waits (#later) and goes when the turn ends', () =>
 test('#now joins the running turn instead of waiting', () => {
   const { hub, runner, taskId, sessionId } = started();
   hub.sendMessage(taskId, '#now 이것도 같이');
-  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '이것도 같이', skills: [], steer: true });
+  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '이것도 같이', skills: [], steer: true, skillSnapshot: undefined });
 });
 
 test('a queue receipt promotes exactly its message once, leaving identical and older messages queued', () => {
@@ -117,7 +117,7 @@ test('a queue receipt promotes exactly its message once, leaving identical and o
   const queued = hub.taskView(hub.store.getTask(taskId)!).queued;
   assert.equal(receipt.queued_id, queued[2].id);
   hub.sendQueuedNow(taskId, receipt.queued_id!);
-  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '같은 내용', skills: [], steer: true });
+  assert.deepEqual(runner.last('send'), { type: 'send', sessionId, text: '같은 내용', skills: [], steer: true, skillSnapshot: undefined });
   assert.deepEqual(hub.taskView(hub.store.getTask(taskId)!).queued.map(q => q.id), queued.slice(0, 2).map(q => q.id));
   const count = runner.sent.length;
   assert.throws(() => hub.sendQueuedNow(taskId, receipt.queued_id!), /이미 보냈을 수 있습니다/);
@@ -368,7 +368,7 @@ test('channel queued sources are delivered in order at turn end, with no new tas
   assert.equal(hub.store.listTasks().length, 1);
 });
 
-for (const engine of ['codex','claude']) test(`live ${engine} skill steering remains readable to a daemon loaded before the hub update`,()=>{
+for (const engine of ['codex','claude']) test(`live ${engine} skill steering sends the selected pinned snapshot`,()=>{
   const t=setup();try{
     t.hub.skills.create('parent','fixture');
     const task=t.hub.compose(`@project:${t.dir} #${engine} initial`);
@@ -377,17 +377,15 @@ for (const engine of ['codex','claude']) test(`live ${engine} skill steering rem
     t.hub.sendMessage(task.id,'#parent 랑 진행을 반복 #now');
     const command=t.runner.last('send')!;
     assert.deepEqual(command.skills,['parent']);assert.equal(command.steer,true);
-    if(engine==='codex'){
-      assert.ok(command.text.includes('#parent:'));
-      assert.ok(command.text.includes(join(t.hub.skills.home,'skills','parent','SKILL.md')));
-      assert.ok(command.text.includes('먼저 다음 스킬 파일을 읽고'));
-    }else assert.ok(!command.text.includes('[데스크 스킬]'));
+    assert.deepEqual(command.skillSnapshot?.selected,['parent']);
+    assert.ok(command.skillSnapshot?.files.some(file=>file.name==='parent'&&file.path==='SKILL.md'));
+    assert.ok(!command.text.includes('[데스크 스킬]'));
     assert.ok(command.text.includes('랑 진행을 반복'));
     const user=t.hub.store.listEvents(task.id).filter(e=>e.kind==='user').at(-1)!;
     assert.equal((user.payload as {text:string}).text,'#parent 랑 진행을 반복 #now');
     t.hub.sendMessage(task.id,'#parent');
     const queued=t.hub.store.queued({taskId:task.id})[0];assert.ok(queued);
     t.hub.sendQueuedNow(task.id,queued.id);
-    if(engine==='codex')assert.ok(t.runner.last('send')!.text.includes('(추가 지시 없음)'));
+    assert.deepEqual(t.runner.last('send')!.skillSnapshot?.selected,['parent']);
   }finally{t.hub.remotes.close();t.hub.store.database.close();}
 });

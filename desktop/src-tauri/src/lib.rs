@@ -228,9 +228,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             notify::init(app.handle());
             let hub = hub_url();
-            // The hub page may show OS notifications (window.__TAURI__.notification) and nothing
-            // else of the app: its origin only (the URL's path, query, fragment and credentials
-            // dropped), notification permissions only, not the local "hub not running" page.
+            // Only the configured hub origin can show notifications or change this window's zoom.
+            // The local "hub not running" page gets zoom only, never notification permissions.
             // Tauri panics on a pattern it can't parse, and an IPv6 host ([::1]) is one: such a
             // hub gets no notifications rather than an app that won't start.
             if let Some(pattern) = notification_origin(&hub) {
@@ -240,11 +239,18 @@ pub fn run() {
                         .local(false)
                         .window("main")
                         .permission("allow-desk-notify")
-                        .permission("allow-desk-notify-permission"),
+                        .permission("allow-desk-notify-permission")
+                        .permission("core:webview:allow-set-webview-zoom"),
                 )?;
             } else {
                 eprintln!("[agent-desk] notifications off: hub address {hub} is not a plain host name or IPv4 address");
             }
+            app.add_capability(
+                tauri::ipc::CapabilityBuilder::new("local-window-zoom")
+                    .local(true)
+                    .window("main")
+                    .permission("core:webview:allow-set-webview-zoom"),
+            )?;
             let mut started = String::new();
             let start = if hub_reachable(&hub) {
                 WebviewUrl::External(hub.clone())
@@ -269,6 +275,7 @@ pub fn run() {
                 .title("Agent Desk")
                 .inner_size(1500.0, 950.0)
                 .min_inner_size(800.0, 500.0)
+                .zoom_hotkeys_enabled(true)
                 .initialization_script(init_script(&hub, &started))
                 // Same-origin (hub) and internal app pages stay in the window;
                 // other http(s) links open in the system browser.

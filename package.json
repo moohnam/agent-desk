@@ -14,7 +14,9 @@
     "test": "node --test 'test/**/*.test.ts'",
     "runner": "node hub/src/runner/daemon.ts",
     "runner:remote": "node hub/src/runner/remote.ts",
+    "runner:remote-migrate": "node hub/src/runner/remote-migration.ts",
     "runner:shared": "node hub/src/runner/shared.ts",
+    "runner:local": "node hub/src/runner/local.ts",
     "runner:stop": "kill $(cat data/runner.pid)"
   },
   "engines": {

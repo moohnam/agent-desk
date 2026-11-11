@@ -2,9 +2,10 @@ import { parseCompose } from '../../shared/compose.ts';
 import type { DeskState, HubEvent, HubMessage, TaskView } from './types.ts';
 import type { FeedFilter } from '../../shared/api.ts';
 import type { SharedWorkspaceView } from '../../shared/workspace.ts';
+import { EVENT_BLOCK, legacyIds, legacySourceId as resolveLegacySourceId, migrateLegacyStorage } from './legacyMigration.ts';
 
 // Persisted, never reused source indices keep existing local event IDs/preferences intact.
-export const EVENT_BLOCK = 1_000_000_000_000;
+export { EVENT_BLOCK } from './legacyMigration.ts';
 export const scopeId = (source: string, id: string) => source ? `w:${source}:${id}` : id;
 export function splitId(id: string): [string, string] {
   const m = /^w:([a-zA-Z0-9-]+):(.+)$/.exec(id);
@@ -66,6 +67,8 @@ export function sourceFilter(source:string,q:FeedFilter):FeedFilter|null {
 }
 export interface Source extends SharedWorkspaceView { connected?:boolean }
 let sources:Source[]=[];
+export const legacyTaskId=(id:string)=>{const ids=legacyIds(sources);return ids.scoped(id,ids.tasks);};
+export const legacySourceId=(id:string)=>resolveLegacySourceId(id,sources);
 const listeners=new Set<()=>void>();
 export const getSources=()=>sources;
 export const subscribeSources=(fn:()=>void)=>{listeners.add(fn);return()=>{listeners.delete(fn);};};
@@ -85,6 +88,12 @@ export async function discoverSources(force=false) {
   discovering=(async()=>{
     const r=await fetch('/api/workspaces');if(!r.ok)throw new Error('공유 러너 목록을 불러오지 못했습니다');
     const next=await r.json() as Source[];
+    if(typeof localStorage!=='undefined'&&next.some(s=>s.legacy_project_ids?.length||s.legacy_task_ids?.length
+      ||s.legacy_approval_ids?.length||s.legacy_question_ids?.length||s.legacy_runner_ids?.length)) {
+      if(typeof window!=='undefined'&&!window.dispatchEvent(new Event('desk-before-legacy-migration',{cancelable:true})))
+        throw new Error('저장 중인 초안을 보존하려고 작업공간 전환을 기다립니다');
+      if(migrateLegacyStorage(localStorage,next) && typeof window!=='undefined')window.dispatchEvent(new Event('desk-legacy-migrated'));
+    }
     publish(next.map(s=>({...s,connected:sources.find(p=>p.id===s.id)?.connected})));
     discoveredAt=Date.now();
   })().finally(()=>{discovering=undefined;});

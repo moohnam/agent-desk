@@ -9,8 +9,14 @@ const COLORS = Array.from({ length: 8 }, (_, i) => `var(--proj-${i + 1})`);
 // Colors by creation order, so the first eight projects never share one; set with the project list.
 const assigned = new Map<string, string>();
 export function assignProjectColors(projects: Project[]) {
+  assigned.clear();
   [...projects].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
     .forEach((p, i) => assigned.set(p.id, COLORS[i % COLORS.length]));
+}
+
+/** Deletion must release its assignment even if this page never reconnects. */
+export function forgetProjectColors(ids: string[]) {
+  for (const id of ids) assigned.delete(id);
 }
 
 /** A stable color per project, so its dot looks the same in every column. */

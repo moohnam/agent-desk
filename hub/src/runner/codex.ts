@@ -43,7 +43,7 @@ function mcpText(result: Json): string {
 }
 
 /** A message waiting for its turn: the text and the desk skills it names. */
-interface Turn { text: string; skills?: string[] }
+interface Turn { text: string; skills?: string[]; skillSnapshotHome?: string }
 
 /** An approval the app answers: the JSON-RPC request to reply to and how to phrase the reply. */
 interface Pending { requestId: Id; reply: (allow: boolean, message?: string, answers?: Answers) => Json }
@@ -287,8 +287,9 @@ export const startCodex: StartEngine = (opts) => {
   const skillItem = (name: string) => ({ type: 'skill', name, path: join(opts.skillsHome!, 'skills', name, 'SKILL.md') });
 
   const turnInput = (turn: Turn, steering = false) => {
-    const input: Json[] = opts.skillsHome ? (turn.skills ?? []).map(skillItem) : [];
-    const text = steering ? steeringSkillText(turn.text, turn.skills, opts.skillsHome) : turn.text;
+    const input: Json[] = opts.skillsHome && !turn.skillSnapshotHome ? (turn.skills ?? []).map(skillItem) : [];
+    const text = turn.skillSnapshotHome ? steeringSkillText(turn.text, turn.skills, turn.skillSnapshotHome)
+      : steering ? steeringSkillText(turn.text, turn.skills, opts.skillsHome) : turn.text;
     // Codex 0.164.0 accepts skill items in turn/steer without expanding their instructions.
     // Keep the native items, but explicitly ask the model to read the selected files as well.
     if (text || !input.length) input.push({ type: 'text', text, text_elements: [] });
@@ -379,22 +380,22 @@ export const startCodex: StartEngine = (opts) => {
 
   // A model switch looks the id up first; messages sent after it wait so their turn runs on the new model.
   let switching: Promise<unknown> = Promise.resolve();
-  const send = (text: string, skills?: string[], steer?: boolean) => {
+  const send = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
     emit({ type: 'busy', sessionId, busy: true });
-    void switching.then(() => deliver(text, skills, steer));
+    void switching.then(() => deliver(text, skills, steer, skillSnapshotHome));
   };
-  const deliver = (text: string, skills?: string[], steer?: boolean) => {
+  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
     if (closing) return;
     if (steer && turns.active && threadId && turnId) {
       // Adds the input to the running turn; if that turn ended meanwhile, run it as the next turn.
-      const turn = { text, skills };
+      const turn = { text, skills, skillSnapshotHome };
       request('turn/steer', { threadId, input: turnInput(turn, true), expectedTurnId: turnId }).catch(() => {
         if (closing) return;
         turns.push(turn);
       });
-    } else turns.push({ text, skills });
+    } else turns.push({ text, skills, skillSnapshotHome });
   };
-  send(opts.prompt, opts.skills);
+  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
 
   return {
     send,

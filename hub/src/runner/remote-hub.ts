@@ -9,10 +9,32 @@ import { HttpError } from '../errors.ts';
 import type { RunnerPort } from './client.ts';
 import type { SkillStore } from '../skills.ts';
 
-type Peer = { id: string; address: string; token_hash: string; journal_id: string | null; event_ack: number; sent_through: number; last_seen: string | null; engines: string; sessions: string };
+type Peer = { id: string; address: string; token_hash: string; journal_id: string | null; event_ack: number; sent_through: number; last_seen: string | null; engines: string; sessions: string; skill_snapshot: number };
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const integer = (v: unknown) => Number.isSafeInteger(v) && Number(v) >= 0;
 const ALIVE_MS = 15_000;
+
+/** The delivery tables also exist before a migrated workspace starts its Hub. */
+export function ensureRemoteTables(db:DatabaseSync) {
+  db.exec(`CREATE TABLE IF NOT EXISTS remote_runner (
+      id TEXT PRIMARY KEY, address TEXT UNIQUE NOT NULL, token_hash TEXT NOT NULL, journal_id TEXT,
+      event_ack INTEGER NOT NULL DEFAULT 0, sent_through INTEGER NOT NULL DEFAULT 0, last_seen TEXT,
+      engines TEXT NOT NULL DEFAULT '["claude","codex","agy"]', sessions TEXT NOT NULL DEFAULT '[]',
+      skill_snapshot INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS remote_command (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, runner_id TEXT NOT NULL REFERENCES remote_runner(id),
+      session_id TEXT NOT NULL, kind TEXT, payload TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS remote_command_runner ON remote_command(runner_id, seq);
+      CREATE INDEX IF NOT EXISTS remote_command_session ON remote_command(session_id);
+      CREATE TABLE IF NOT EXISTS remote_migration (
+        runner_id TEXT PRIMARY KEY, address TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        legacy_json TEXT NOT NULL, committed_at TEXT NOT NULL);`);
+  if (!(db.prepare('PRAGMA table_info(remote_command)').all() as {name:string}[]).some(c=>c.name==='kind')) {
+    db.exec("ALTER TABLE remote_command ADD COLUMN kind TEXT; UPDATE remote_command SET kind=json_extract(payload,'$.type')");
+  }
+  if (!(db.prepare('PRAGMA table_info(remote_runner)').all() as {name:string}[]).some(c=>c.name==='skill_snapshot'))
+    db.exec('ALTER TABLE remote_runner ADD COLUMN skill_snapshot INTEGER NOT NULL DEFAULT 0');
+}
 
 export class RemoteRunners implements RunnerPort {
   private db: DatabaseSync;
@@ -32,18 +54,7 @@ export class RemoteRunners implements RunnerPort {
     this.store=store; this.local=local; this.onMessage=onMessage; this.onSnapshot=onSnapshot; this.changed=changed;
     this.skills=skills;
     this.db = store.database;
-    this.db.exec(`CREATE TABLE IF NOT EXISTS remote_runner (
-      id TEXT PRIMARY KEY, address TEXT UNIQUE NOT NULL, token_hash TEXT NOT NULL, journal_id TEXT,
-      event_ack INTEGER NOT NULL DEFAULT 0, sent_through INTEGER NOT NULL DEFAULT 0, last_seen TEXT,
-      engines TEXT NOT NULL DEFAULT '["claude","codex","agy"]', sessions TEXT NOT NULL DEFAULT '[]');
-      CREATE TABLE IF NOT EXISTS remote_command (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT, runner_id TEXT NOT NULL REFERENCES remote_runner(id),
-      session_id TEXT NOT NULL, kind TEXT, payload TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS remote_command_runner ON remote_command(runner_id, seq);
-      CREATE INDEX IF NOT EXISTS remote_command_session ON remote_command(session_id);`);
-    if (!(this.db.prepare('PRAGMA table_info(remote_command)').all() as {name:string}[]).some(c=>c.name==='kind')) {
-      this.db.exec("ALTER TABLE remote_command ADD COLUMN kind TEXT; UPDATE remote_command SET kind=json_extract(payload,'$.type')");
-    }
+    ensureRemoteTables(this.db);
     // A process restart does not prove that a remote process has stopped.
     this.db.prepare('UPDATE remote_runner SET last_seen = NULL').run();
     this.timer = setInterval(() => {
@@ -67,6 +78,10 @@ export class RemoteRunners implements RunnerPort {
   private online(p: Peer) { return !this.syncing.has(p.id) && !!p.last_seen && Date.now() - Date.parse(p.last_seen) < ALIVE_MS; }
   ready(sessionId: string) { const p = this.sessionPeer(sessionId); return p ? this.online(p) : this.local.connected; }
   canQueue(sessionId: string) { return !!this.sessionPeer(sessionId); }
+  canSnapshot(sessionId?: string) { const peer = sessionId ? this.sessionPeer(sessionId) : undefined;
+    return peer ? peer.skill_snapshot === 1 : this.local.skillSnapshotSupported !== false; }
+  canSnapshotForPath(path: string) { const peer = this.forPath(path);
+    return peer ? peer.skill_snapshot === 1 : this.local.skillSnapshotSupported !== false; }
   has(sessionId: string) {
     const p = this.sessionPeer(sessionId);
     return p ? this.online(p) && ((JSON.parse(p.sessions) as LiveSession[]).some(s => s.sessionId === sessionId)
@@ -78,6 +93,9 @@ export class RemoteRunners implements RunnerPort {
     catch (e) { throw new HttpError(400, e instanceof Error ? e.message : String(e)); }
     if (!location) return null;
     const peers = this.peers();
+    const migrated=this.db.prepare('SELECT address FROM remote_migration').all() as {address:string}[];
+    if (migrated.some(r=>r.address===location.address||(!location.address.includes('@')&&r.address.split('@').at(-1)===location.address)))
+      throw new HttpError(409, '이 원격 러너의 작업 원본은 해당 머신의 작업공간으로 옮겼습니다');
     // An explicitly registered name also remains stable when more accounts are registered later.
     const exact = peers.find(p => p.address === location.address);
     if (exact) return exact;
@@ -100,6 +118,8 @@ export class RemoteRunners implements RunnerPort {
       if (typeof address !== 'string' || remoteLocation(`${address}:/`)?.address !== address) throw new Error();
     } catch { throw new HttpError(400, '호스트 또는 사용자@호스트 형식으로 입력하세요'); }
     if (this.peers().some(p => p.address === address)) throw new HttpError(409, '이미 등록된 러너입니다');
+    if (this.db.prepare('SELECT 1 FROM remote_migration WHERE address=?').get(address))
+      throw new HttpError(409, '이미 해당 머신의 작업공간으로 이관한 러너입니다');
     const id = `remote-${randomUUID()}`, token = randomBytes(32).toString('base64url');
     this.db.prepare('INSERT INTO remote_runner (id, address, token_hash) VALUES (?, ?, ?)').run(id, address, hash(token));
     this.notify();
@@ -127,12 +147,14 @@ export class RemoteRunners implements RunnerPort {
     if (cmd.type === 'auth') throw new Error('unexpected auth command');
     const peer = this.sessionPeer(cmd.sessionId);
     if (!peer) { this.local.handle(cmd); return; }
+    if ((cmd.type === 'start' || cmd.type === 'send') && cmd.skillSnapshot && peer.skill_snapshot !== 1)
+      throw new HttpError(409, '대상 원격 러너가 고정 스킬 버전을 지원하지 않습니다. 러너 업데이트 후 다시 보내주세요');
     if (cmd.type === 'start') {
       const location = remoteLocation(cmd.cwd);
       if (!location || (location.address !== peer.address && this.forPath(cmd.cwd)?.id !== peer.id)) throw new Error('원격 작업 경로와 러너가 일치하지 않습니다');
       cmd = { ...cmd, cwd: location.path, skillsHome: undefined };
     }
-    if (cmd.type === 'start' || (cmd.type === 'send' && cmd.skills?.length)) {
+    if ((cmd.type === 'start' || (cmd.type === 'send' && cmd.skills?.length)) && !cmd.skillSnapshot) {
       const files = this.skills.list().flatMap(s => s.files.map(f => ({ name: s.name, ...this.skills.readFile(s.name, f.path) })));
       if (Buffer.byteLength(JSON.stringify(files)) > 4 * 1024 * 1024) throw new HttpError(413, '원격 전송할 데스크 스킬은 합계 4 MiB 이하여야 합니다');
       cmd = { ...cmd, skillFiles: files };
@@ -155,7 +177,7 @@ export class RemoteRunners implements RunnerPort {
     if (!input || input.version !== 1 || typeof input.journalId !== 'string' || input.journalId.length > 100 || !input.journalId
       || !integer(input.commandAck) || input.commandAck > peer.sent_through || !Array.isArray(input.events) || input.events.length > 64
       || typeof input.more !== 'boolean' || !Array.isArray(input.sessions) || !Array.isArray(input.engines)
-      || input.engines.some(e => !['claude','codex','agy'].includes(e))) throw new HttpError(400, '원격 러너 교환 형식이 잘못되었습니다');
+      || input.engines.some(e => !['claude','codex','agy'].includes(e)) || (input.skillSnapshot !== undefined && typeof input.skillSnapshot !== 'boolean')) throw new HttpError(400, '원격 러너 교환 형식이 잘못되었습니다');
     if (peer.journal_id && peer.journal_id !== input.journalId) throw new HttpError(409, '러너 전달 DB가 바뀌었습니다. 이전 DB를 복구하거나 새 러너로 등록하세요');
     const snapshot = checkRunnerToHub({ type: 'hello', runnerId: id, host: peer.address, capabilities: { engines: input.engines }, sessions: input.sessions });
     if (typeof snapshot === 'string' || input.sessions.length > 1000 || input.sessions.some(s => !s || typeof s.sessionId !== 'string' || typeof s.busy !== 'boolean' || !Array.isArray(s.approvals) || s.approvals.some(a => !a || typeof a.approvalId !== 'string' || typeof a.toolName !== 'string') || (this.store.getSession(s.sessionId) && this.store.getSession(s.sessionId)?.runner_id !== id))) throw new HttpError(403, '다른 러너의 세션을 보고할 수 없습니다');
@@ -170,14 +192,15 @@ export class RemoteRunners implements RunnerPort {
       if (item.seq !== ack + 1) throw new HttpError(409, `이벤트 ${ack + 1}부터 다시 보내세요`);
       ack = item.seq;
     }
-    const reconcile = !this.online(peer) || peer.sessions !== JSON.stringify(input.sessions) || ack > peer.event_ack;
+    const reconcile = !this.online(peer) || peer.sessions !== JSON.stringify(input.sessions) || ack > peer.event_ack
+      || peer.skill_snapshot !== (input.skillSnapshot === true ? 1 : 0);
     this.syncing.add(id);
     this.db.exec('SAVEPOINT remote_exchange');
     try {
       this.db.prepare('DELETE FROM remote_command WHERE runner_id = ? AND seq <= ?').run(id, input.commandAck);
       for (const item of input.events) if (item.seq > peer.event_ack) this.onMessage(item.value, item.created_at);
-      this.db.prepare('UPDATE remote_runner SET journal_id = ?, event_ack = ?, last_seen = ?, engines = ?, sessions = ? WHERE id = ?')
-        .run(input.journalId, ack, new Date().toISOString(), JSON.stringify(input.engines), JSON.stringify(input.sessions), id);
+      this.db.prepare('UPDATE remote_runner SET journal_id = ?, event_ack = ?, last_seen = ?, engines = ?, sessions = ?, skill_snapshot = ? WHERE id = ?')
+        .run(input.journalId, ack, new Date().toISOString(), JSON.stringify(input.engines), JSON.stringify(input.sessions), input.skillSnapshot === true ? 1 : 0, id);
       if (!input.more) {
         this.syncing.delete(id);
         const combined = new Map(input.sessions.map(s => [s.sessionId, s]));
@@ -185,9 +208,16 @@ export class RemoteRunners implements RunnerPort {
         if (reconcile) this.onSnapshot([...combined.values()], id);
       }
       let bytes = 0;
-      const commands = !input.more ? (this.db.prepare('SELECT seq, payload FROM remote_command WHERE runner_id = ? ORDER BY seq LIMIT 16').all(id) as unknown as { seq: number; payload: string }[])
-        .filter(r => { bytes += Buffer.byteLength(r.payload); return bytes <= 8 * 1024 * 1024; })
-        .map(r => ({ seq: r.seq, value: JSON.parse(r.payload) as HubToRunner })) : [];
+      const commands: { seq: number; value: HubToRunner }[] = [];
+      if (!input.more) for (const row of this.db.prepare('SELECT seq, payload FROM remote_command WHERE runner_id = ? ORDER BY seq LIMIT 16').all(id) as { seq: number; payload: string }[]) {
+        const value = JSON.parse(row.payload) as HubToRunner;
+        if (value.type === 'start' || value.type === 'send') {
+          if (value.skillSnapshot && input.skillSnapshot !== true) break;
+        }
+        bytes += Buffer.byteLength(row.payload);
+        if (bytes > 8 * 1024 * 1024) break;
+        commands.push({ seq: row.seq, value });
+      }
       if (commands.length) this.db.prepare('UPDATE remote_runner SET sent_through = max(sent_through, ?) WHERE id = ?').run(commands.at(-1)!.seq, id);
       this.db.exec('RELEASE remote_exchange');
       this.notify();

@@ -116,3 +116,27 @@ test('unmount/source replacement aborts pending diagrams even without visibility
   finish();
   await Promise.resolve();
 });
+
+test('an inert reading pane pauses diagrams even when its geometry stays in the viewport', async t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+  t.after(() => { if (original) Object.defineProperty(globalThis, 'IntersectionObserver', original); else Reflect.deleteProperty(globalThis, 'IntersectionObserver'); });
+  const view = new EventTarget();
+  let hidden = true;
+  let intersect = () => {};
+  Object.defineProperty(globalThis, 'IntersectionObserver', { configurable: true, value: class {
+    constructor(callback: IntersectionObserverCallback) { intersect = () => callback([{ isIntersecting: true, intersectionRatio: 1 } as IntersectionObserverEntry], this as unknown as IntersectionObserver); }
+    observe() {}
+    disconnect() {}
+  } });
+  const element = { ownerDocument: { defaultView: view }, closest: () => hidden ? {} : null } as unknown as HTMLElement;
+  const attempts: { signal: AbortSignal; finish: () => void }[] = [];
+  const stop = renderWhenVisible(element, signal => new Promise<void>(finish => attempts.push({ signal, finish })));
+  intersect();assert.equal(attempts.length, 0);
+  hidden = false;view.dispatchEvent(new Event('desk-pane-visibility'));assert.equal(attempts.length, 1);
+  hidden = true;view.dispatchEvent(new Event('desk-pane-visibility'));assert.equal(attempts[0].signal.aborted, true);
+  hidden = false;view.dispatchEvent(new Event('desk-pane-visibility'));assert.equal(attempts.length, 2);
+  attempts[1].finish();await Promise.resolve();
+  hidden = true;view.dispatchEvent(new Event('desk-pane-visibility'));
+  hidden = false;view.dispatchEvent(new Event('desk-pane-visibility'));assert.equal(attempts.length, 2, 'a completed image is retained');
+  stop();
+});

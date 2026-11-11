@@ -17,12 +17,112 @@ export interface Delivery {
   drain(sessionId: string): void;
 }
 
+export interface CrossPeer {
+  task_id: string; session_id: string; project_name: string; seq: number; title: string; cwd: string;
+}
+
 export class AgentRequests {
   private core: DeskCore;
   private delivery: Delivery;
   constructor(core: DeskCore, delivery: Delivery) {
     this.core = core;
     this.delivery = delivery;
+    core.store.database.exec(`CREATE TABLE IF NOT EXISTS request_cross (
+      id TEXT PRIMARY KEY, role TEXT NOT NULL, peer_json TEXT NOT NULL, target_label TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS request_cross_role ON request_cross(role);`);
+  }
+
+  private cross(id: string): { role: string; peer: CrossPeer; target_label: string } | undefined {
+    const row = this.core.store.database.prepare('SELECT role,peer_json,target_label FROM request_cross WHERE id=?').get(id) as
+      { role: string; peer_json: string; target_label: string } | undefined;
+    return row && { role: row.role, peer: JSON.parse(row.peer_json) as CrossPeer, target_label: row.target_label };
+  }
+
+  /** The origin owns the approval and final answer, even when the target belongs to another workspace. */
+  requestCross(id: string, a: { text: string; fromTaskId?: string; sessionId?: string; target: CrossPeer;
+    explicitMention: boolean; userEventId?: number | null }): AgentRequest {
+    if (!a.text?.trim()) throw new HttpError(400, 'question이 필요합니다');
+    const from = this.requester(a);
+    if (from.task_id === a.target.task_id) throw new HttpError(400, '자기 작업에는 물을 수 없습니다');
+    const label = `${a.target.project_name}#${a.target.seq}`;
+    const old = this.core.store.getRequest(id);
+    if (old) {
+      const meta = this.cross(id);
+      if (meta?.role !== 'origin' || old.from_task_id !== from.task_id || old.to_task_id !== a.target.task_id || old.text !== a.text.trim())
+        throw new HttpError(409, '같은 요청 ID의 내용이 바뀌었습니다');
+      return old;
+    }
+    const r: AgentRequest = {
+      id, from_task_id: from.task_id, from_session_id: from.id, to_task_id: a.target.task_id,
+      to_session_id: a.target.session_id, text: a.text.trim(), status: 'approval', answer: null,
+      approval_id: null, queued_id: null, prompt_event_id: null, created_at: now(), answered_at: null,
+    };
+    // Only a verified mention in the user's current message can skip approval.
+    const allowed = a.explicitMention && this.allowedCrossMention(from.task_id, a.target, a.userEventId);
+    if (allowed) r.status = 'queued';
+    else {
+      const approval: Approval = { id: randomUUID(), session_id: from.id, task_id: from.task_id,
+        tool_name: REQUEST_TOOL, input: { to: `@${label}`, title: a.target.title, description: r.text },
+        status: 'pending', created_at: now() };
+      r.approval_id = approval.id;
+      this.core.store.createApproval(approval);
+      this.core.publish({ type: 'approval', approval });
+      this.core.addEvent(from.id, from.task_id, 'approval',
+        { approvalId: approval.id, toolName: REQUEST_TOOL, input: approval.input, decision: 'pending' });
+      this.core.transition(from.task_id, from.id, 'approval_pending');
+    }
+    this.core.store.createRequest(r);
+    this.core.store.database.prepare('INSERT INTO request_cross VALUES (?,?,?,?)')
+      .run(id, 'origin', JSON.stringify(a.target), label);
+    return this.core.store.getRequest(id)!;
+  }
+
+  private allowedCrossMention(fromTaskId: string, target: CrossPeer, userEventId?: number | null) {
+    const event = this.core.store.lastEventOf(fromTaskId, 'user');
+    if (userEventId !== undefined && event?.id !== userEventId) return false;
+    const p = event?.payload as { text?: string; request?: unknown } | undefined;
+    if (!p?.text || p.request) return false;
+    const own = this.core.store.getTask(fromTaskId);
+    const ownName = own && this.core.store.getProject(own.project_id)?.name;
+    return mentionsIn(p.text).some(m => m.name.toLowerCase() === target.project_name.toLowerCase()
+      && (m.no ? m.no === target.seq : ownName?.toLowerCase() !== target.project_name.toLowerCase()));
+  }
+
+  /** The target owns the delivery queue and resulting turn. Replayed receives never dispatch twice. */
+  receiveCross(id: string, a: { text: string; from: CrossPeer; toTaskId: string }): AgentRequest {
+    if (!a.text?.trim()) throw new HttpError(400, 'question이 필요합니다');
+    const task = this.core.store.getTask(a.toTaskId);
+    if (!task) throw new HttpError(404, '대상 작업이 없습니다');
+    const session = this.core.store.latestSession(task.id);
+    if (!session) throw new HttpError(404, '대상 세션이 없습니다');
+    if (session.source !== 'app') throw new HttpError(409, '대상은 데스크가 실행하는 작업이어야 합니다');
+    const old = this.core.store.getRequest(id);
+    if (old) {
+      const meta = this.cross(id);
+      if (meta?.role !== 'target' || old.from_task_id !== a.from.task_id || old.to_task_id !== task.id || old.text !== a.text.trim())
+        throw new HttpError(409, '같은 요청 ID의 내용이 바뀌었습니다');
+      return old;
+    }
+    this.core.requireRunner(session.id);
+    const r: AgentRequest = { id, from_task_id: a.from.task_id, from_session_id: a.from.session_id,
+      to_task_id: task.id, to_session_id: session.id, text: a.text.trim(), status: 'queued', answer: null,
+      approval_id: null, queued_id: null, prompt_event_id: null, created_at: now(), answered_at: null };
+    this.core.store.createRequest(r);
+    this.core.store.database.prepare('INSERT INTO request_cross VALUES (?,?,?,?)')
+      .run(id, 'target', JSON.stringify(a.from), this.core.taskLabel(task));
+    this.deliverRequest(r);
+    return this.core.store.getRequest(id)!;
+  }
+
+  crossRole(id: string) { return this.cross(id)?.role; }
+
+  settleCrossOrigin(id: string, status: 'answered' | 'denied' | 'failed', answer: string) {
+    const r = this.core.store.getRequest(id);
+    if (!r || this.cross(id)?.role !== 'origin') throw new HttpError(404, '요청한 작업의 질문이 없습니다');
+    if (r.status === 'answered' || r.status === 'denied' || r.status === 'failed') return r;
+    if (r.status === 'approval') throw new HttpError(409, '사용자 승인을 기다리는 질문입니다');
+    this.settleRequest(r, status, answer);
+    return this.core.store.getRequest(id)!;
   }
 
 
@@ -130,21 +230,25 @@ export class AgentRequests {
 
   /** What the target agent receives. */
   private requestPrompt(r: AgentRequest) {
-    const from = this.core.store.getTask(r.from_task_id)!;
-    const cwd = this.core.store.getSession(r.from_session_id)?.cwd;
-    return `데스크를 통해 다른 작업(@${this.core.taskLabel(from)} "${from.title}"${cwd ? `, ${cwd}` : ''})의 에이전트가 질문을 보냈습니다. `
+    const from = this.core.store.getTask(r.from_task_id);
+    const remote = this.cross(r.id)?.role === 'target' ? this.cross(r.id)?.peer : undefined;
+    const label = remote ? `${remote.project_name}#${remote.seq}` : this.core.taskLabel(from!);
+    const title = remote?.title ?? from!.title;
+    const cwd = remote?.cwd ?? this.core.store.getSession(r.from_session_id)?.cwd;
+    return `데스크를 통해 다른 작업(@${label} "${title}"${cwd ? `, ${cwd}` : ''})의 에이전트가 질문을 보냈습니다. `
       + '이번 응답의 마지막 메시지가 그대로 그 에이전트에게 답으로 전달되니, 마지막 메시지에 답을 완결해서 쓰세요. '
       + `답하는 데 필요한 만큼만 확인하고, 하던 작업의 방향은 바꾸지 마세요.\n\n질문:\n${r.text}`;
   }
 
   /** Sends an allowed request to the target: now when it is free, else after the messages waiting there. */
   deliverRequest(r: AgentRequest) {
+    if (this.cross(r.id)?.role === 'origin') return;
     const session = this.core.store.latestSession(r.to_task_id)!;
     const busy = this.core.runner.has(session.id) && this.core.busy.has(session.id);
     if (!(this.core.runner.ready?.(session.id) ?? this.core.runner.connected) || busy || this.core.store.queued({ sessionId: session.id }).length) {
       const id = randomUUID();
       this.core.store.enqueue({
-        id, task_id: r.to_task_id, session_id: session.id, text: `@${this.core.taskLabel(this.core.store.getTask(r.from_task_id)!)}의 질문: ${r.text}`,
+        id, task_id: r.to_task_id, session_id: session.id, text: `@${this.cross(r.id)?.peer ? `${this.cross(r.id)!.peer.project_name}#${this.cross(r.id)!.peer.seq}` : this.core.taskLabel(this.core.store.getTask(r.from_task_id)!)}의 질문: ${r.text}`,
         body: this.requestPrompt(r), skills: [], mode: null, created_at: now(),
       });
       this.core.store.updateRequest(r.id, { status: 'queued', queued_id: id, to_session_id: session.id });
@@ -158,9 +262,11 @@ export class AgentRequests {
 
   /** Records the request as the target's `user` message; the turn it starts answers it. */
   startRequest(r: AgentRequest, sessionId: string, delivery?: 'now' | 'later') {
-    const from = this.core.store.getTask(r.from_task_id)!;
+    const from = this.core.store.getTask(r.from_task_id);
+    const remote = this.cross(r.id)?.role === 'target' ? this.cross(r.id)?.peer : undefined;
     const e = this.core.addEvent(sessionId, r.to_task_id, 'user', {
-      text: r.text, delivery, request: { id: r.id, task_id: from.id, from: this.core.taskLabel(from), title: from.title },
+      text: r.text, delivery, request: { id: r.id, task_id: remote?.task_id ?? from!.id,
+        from: remote ? `${remote.project_name}#${remote.seq}` : this.core.taskLabel(from!), title: remote?.title ?? from!.title },
     });
     this.core.store.updateRequest(r.id, { status: 'running', prompt_event_id: e.id, to_session_id: sessionId });
   }
@@ -190,12 +296,16 @@ export class AgentRequests {
   /** The user allowed or denied a request's card. */
   resolveRequest(approval: Approval, allow: boolean, message?: string) {
     const r = this.core.store.openRequests().find((x) => x.approval_id === approval.id);
-    if (allow && r) this.core.requireRunner(r.to_session_id);
+    const crossOrigin = r && this.cross(r.id)?.role === 'origin';
+    if (allow && r && !crossOrigin) this.core.requireRunner(r.to_session_id);
     this.core.store.setApprovalStatus(approval.id, allow ? 'allowed' : 'denied');
     this.core.publish({ type: 'approval', approval: { ...approval, status: allow ? 'allowed' : 'denied' } });
     this.core.addEvent(approval.session_id, approval.task_id, 'approval',
       { approvalId: approval.id, toolName: approval.tool_name, decision: allow ? 'allowed' : 'denied', message });
-    if (r && allow) {
+    if (r && allow && crossOrigin) {
+      this.core.store.updateRequest(r.id, { status: 'queued' });
+      this.core.wake(r.id);
+    } else if (r && allow) {
       try { this.deliverRequest(r); }
       catch (err) { this.settleRequest(r, 'failed', `전달하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`); }
     } else if (r) this.settleRequest(r, 'denied', message ? `사용자가 거절했습니다: ${message}` : '사용자가 거절했습니다.');

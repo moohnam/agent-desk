@@ -263,7 +263,7 @@ async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal) {
   }
 }
 
-export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse) {
+export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse, authorize?: () => void) {
   if (req.method !== 'POST') {
     // No server-initiated stream: every response comes back on its POST.
     res.writeHead(405, { allow: 'POST' }).end();
@@ -279,6 +279,8 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
     if (err instanceof HttpError && err.status !== 400) return fail(err.status, -32600, err.message);
     return fail(400, -32700, 'parse error');
   }
+  try { authorize?.(); }
+  catch (err) { return fail(err instanceof HttpError ? err.status : 500, -32600, err instanceof Error ? err.message : String(err)); }
   if (body === undefined) return fail(400, -32600, 'invalid request');
   if (Array.isArray(body) && (!body.length || body.length > MAX_BATCH)) return fail(400, -32600, `배치는 1~${MAX_BATCH}개만 받습니다`);
   // A client giving up on a long desk_ask releases its waiter.

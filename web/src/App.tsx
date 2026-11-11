@@ -1,12 +1,12 @@
 import { splitId } from './federation.ts';
-import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { RunnersDialog } from './Runners.tsx';
-import { WorkspaceSwitcher, initialLocation, inLocation } from './Workspaces.tsx';
+import { WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
 import { workspaceId } from './workspace.ts';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
@@ -21,6 +21,7 @@ import { stalledMinutes } from './format.ts';
 import { HandoffPanel, pickable, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { PostView } from './PostView.tsx';
 import { pruneDrafts, useDraftTasks } from './drafts.ts';
+import { keepTaskDraft } from './draftRetention.ts';
 import { DEFAULT_WIDTH, SAVE_DELAY, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
 import { projectColor } from './projects.ts';
@@ -35,6 +36,9 @@ import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
 import { ThreadHead } from './ThreadHead.tsx';
+import { ThreadReferences } from './ThreadReferences.tsx';
+import { useThreadReferences } from './threadReferences.ts';
+import { PANE_VISIBILITY_EVENT } from './mermaid.ts';
 import { AUTO_ORDER, ColumnMenu } from './ColumnMenu.tsx';
 import { Help } from './Help.tsx';
 import { setNotify, useDeskNotifications, useNotifyState } from './notify.ts';
@@ -61,6 +65,14 @@ const SPLIT_KEY = 'agent-desk.threadSplit';
  */
 const PANE_MIN_PX = 560, DECK_MIN_PX = 420;
 
+/** Keep the hidden deck's geometry and DOM; don't reconcile its content while reading references. */
+const ColumnDeck = memo(function ColumnDeck({ inactive, phone, elementRef, children }: {
+  inactive: boolean; phone: boolean; elementRef: RefObject<HTMLElement | null>; children: ReactNode;
+}) {
+  return <main className={`deck${phone ? ' phone' : ''}${inactive ? ' reading-hidden' : ''}`} ref={elementRef}
+    aria-hidden={inactive} inert={inactive}>{children}</main>;
+}, (a, b) => a.inactive && b.inactive && a.phone === b.phone);
+
 export function App() {
   const hub = useHub();
   const [locationFilter,setLocationFilter]=useState(initialLocation);
@@ -74,6 +86,9 @@ export function App() {
   const [queueFocus, setQueueFocus] = useState<number | null>(null);
   const [queueAll, setQueueAll] = useState(false);
   const [threadTask, setThreadTask] = useState<string | null>(null);
+  const references = useThreadReferences(threadTask, hub.gone);
+  const referencedIds = useMemo(() => new Set(references.ids), [references.ids]);
+  const [referenceTask, setReferenceTask] = useState<string | null>(null);
   /** The thread column sits right of this column (or last, when unset or deleted). */
   const [threadAfter, setThreadAfter] = useState<string | null>(null);
   /** The post a thread opens at (top of the view); null opens at the newest post. */
@@ -106,6 +121,7 @@ export function App() {
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [runnersOpen, setRunnersOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [phoneChannel, setPhoneChannel] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -256,7 +272,7 @@ export function App() {
   // Every view's columns: their loaded events stay while any of them uses the query.
   const keptDefs = () => [...custom, ...(['project', 'task', 'status'] as const)
     .flatMap((v) => viewColumns(v, hub.tasks, hub.projects, stalled, drafts, viewByTask))];
-  const { feeds, loadEarlier: loadEarlierColumn } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
+  const { feeds, loadEarlier: loadEarlierColumn, setReading: keepColumnHistory } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
   // "글 많은 순": a column takes its place by its first count, and keeps it until the view opens again.
   useEffect(() => {
     if (viewOrder[view] !== 'count') return;
@@ -358,6 +374,7 @@ export function App() {
   // Older posts (drawn or loaded as a feed nears its bottom) are FeedColumn's.
   const onFeedScroll = (colId: string, feed: HTMLElement) => {
     const top = feed.scrollTop < 40;
+    keepColumnHistory(colId, !top);
     atTop.current.set(colId, top);
     if (!top) { markAnchor(colId, feed); return; }
     feedAnchor.current.delete(colId);
@@ -434,11 +451,11 @@ export function App() {
   // Drafts outlive nothing they belong to: a deleted task, or a question answered elsewhere.
   useEffect(() => {
     if (!hub.synced) return;
-    pruneDrafts((k, d) => (!d.taskId || hub.tasks.has(d.taskId))
-      && (!k.startsWith('question:') || hub.questions.has(k.slice('question:'.length)))
-      && (!k.startsWith('ask:') || hub.approvals.has(k.slice('ask:'.length))));
-    pruneDrafts((k) => !k.startsWith('channel-chat:') && !k.startsWith('channel-sources:') || hub.channels.has(k.slice(k.indexOf(':') + 1)));
-  }, [hub.synced, hub.tasks, hub.questions, hub.approvals, hub.channels]);
+    const state = { tasks: hub.tasks, questions: hub.questions, approvals: hub.approvals,
+      gone: hub.gone, availableSources: hub.availableSources };
+    pruneDrafts((k, d) => keepTaskDraft(k, d, state));
+    if (hub.availableSources.has('')) pruneDrafts((k) => !k.startsWith('channel-chat:') && !k.startsWith('channel-sources:') || hub.channels.has(k.slice(k.indexOf(':') + 1)));
+  }, [hub.synced, hub.tasks, hub.questions, hub.approvals, hub.channels, hub.gone, hub.availableSources]);
 
   const widthOf = (id: string) => widths[id] ?? (id === THREAD ? THREAD_WIDTH : DEFAULT_WIDTH);
 
@@ -457,6 +474,15 @@ export function App() {
   }, [drawer]);
   const paneWidth = Math.max(Math.round(workspaceWidth * split / 100), PANE_MIN_PX);
   const paneCover = workspaceWidth - paneWidth < DECK_MIN_PX;
+  const canReference = floatThread && !paneCover;
+  const referencesVisible = canReference && references.open && !!threadTask && hub.tasks.has(threadTask);
+  useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible]);
+  useEffect(() => {
+    setReferenceTask(previous => referencesVisible ? threadTask : canReference && previous === threadTask ? previous : null);
+  }, [threadTask, referencesVisible, canReference]);
+  useEffect(() => {
+    if (referencesVisible && activeCol?.id !== THREAD) references.show(false);
+  }, [referencesVisible, activeCol?.id]);
   /**
    * Glides the deck sideways just enough to show column `id` whole, and the column before it too
    * when both fit (a thread next to the column it was opened from). No movement if already shown.
@@ -593,7 +619,11 @@ export function App() {
   }, [threadAt]);
 
   const select = (colId: string, postId: number) => setSelection((s) => ({ ...s, [colId]: postId }));
-  const focusColumn = (i: number) => setActive(Math.max(0, Math.min(i, deck.length - 1)));
+  const focusColumn = (i: number) => {
+    const next = Math.max(0, Math.min(i, deck.length - 1));
+    if (referencesVisible && deck[next]?.id !== THREAD) references.show(false);
+    setActive(next);
+  };
   /** The deck column focused last, for t and h/l to come back to from the thread. */
   const lastDeckCol = useRef<string | undefined>(undefined);
   useEffect(() => { if (activeCol && activeCol.id !== THREAD) lastDeckCol.current = activeCol.id; }, [activeCol?.id]);
@@ -1064,8 +1094,8 @@ export function App() {
   const menuDef = menu ? columns.findIndex((c) => c.id === menu.colId) : -1;
 
   // Post handlers go through the latest state: a memoized post keeps the closures of the render that drew it.
-  const postActions = useRef({ select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, deck });
-  postActions.current = { select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, deck };
+  const postActions = useRef({ select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask });
+  postActions.current = { select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask };
   const renderPost = ({ post: p, up, down }: PlacedPost, colId: string, i: number, inThread: boolean) => (
     <PostView key={p.id} post={p} task={hub.tasks.get(p.taskId)} model={models.get(p.taskId)} up={up} down={down}
       approval={p.kind === 'approval' ? hub.approvals.get(p.event.payload.approvalId) : undefined}
@@ -1074,6 +1104,13 @@ export function App() {
       expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread}
       draft={draftPosts.has(`${colId}:${p.id}`)}
       picked={inThread && handoff?.open && pickable(p.event) ? handoff.picked.includes(p.event.id) : undefined}
+      referenced={inThread && canReference && p.taskId === threadTask ? referencedIds.has(p.id) : undefined}
+      onReference={() => {
+        const a = postActions.current;
+        if (a.threadTask !== p.taskId) return;
+        if (!a.references.ids.includes(p.id)) a.setDrawer(false);
+        a.references.toggle(p.id);
+      }}
       onPick={() => togglePick(p.taskId, p.event.id)}
       onSelect={() => {
         const a = postActions.current;
@@ -1167,6 +1204,8 @@ export function App() {
           model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
           onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
+          references={canReference ? { open: references.open, count: references.ids.length } : undefined}
+          onReferences={() => { if (!references.open) setDrawer(false); references.show(!references.open); }}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
         <div className="feed thread-feed"
           onScroll={(e) => {
@@ -1206,7 +1245,6 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand"><img className="logo" src="/favicon.png?v=sage-20261103" alt="" /><span className="word">Agent Desk</span></div>
-        <WorkspaceSwitcher value={locationFilter} onChange={changeLocation} />
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
@@ -1253,6 +1291,8 @@ export function App() {
               });
             }}>
             {notifyState === 'on' ? <Bell /> : <BellOff />}</button>
+          <button className="btn" title={`실행 위치 필터 · 공유 러너 전달 내역${locationFilter ? ' (필터 적용 중)' : ''}`} aria-label="실행 위치 및 전달 내역"
+            aria-haspopup="dialog" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)}><Network /></button>
           <button className="btn" title={`새 작업의 엔진별 기본 모델과 effort: 작업마다 ${ENGINES.map(modelTagsOf).join(' · ')} · #low … #max (${effortNote()})`} aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="다른 기기 연결: 접속 요청, 연결한 기기, QR 코드" aria-label="다른 기기 연결" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
@@ -1278,7 +1318,12 @@ export function App() {
               openThread(task.id, { from: columns.find((c) => !c.channelId && isAllFilter(c.filter))?.id });
             }} />
         )}
-        <main className={`deck${phone ? ' phone' : ''}`} ref={deckRef}>
+        <div className="deck-space">
+        {canReference && threadTaskView && (referencesVisible || (referenceTask === threadTask && references.ids.length > 0)) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
+          visible={referencesVisible}
+          ids={references.ids} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
+          onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
+        <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
@@ -1290,7 +1335,8 @@ export function App() {
               <ArrowRight aria-hidden />이전 {view === 'project' ? '프로젝트' : '작업'}<small>{Math.min(VIEW_MAX, olderCols)}개 더 · 남은 {olderCols}개</small>
             </button>
           )}
-        </main>
+        </ColumnDeck>
+        </div>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
           <div className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
@@ -1355,6 +1401,7 @@ export function App() {
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
       {modelOpen && <ModelDialog onRunners={hub.local ? () => {setModelOpen(false);setRunnersOpen(true);} : undefined} onClose={() => setModelOpen(false)} onChannels={workspaceId ? undefined : () => { setModelOpen(false); setChannelsOpen(true); }} />}
       {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
+      {workspaceOpen && <WorkspaceDialog value={locationFilter} onChange={changeLocation} onClose={() => setWorkspaceOpen(false)} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}
     </div>
   );

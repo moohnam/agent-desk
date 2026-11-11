@@ -2,7 +2,7 @@ import { mergeEvents, mergeTaskEvents } from '../../web/src/posts.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { api } from '../../web/src/api.ts';
-import { compareEvents, composeSource, discoverSources, eventId, mapEvent, mapMessage, mapState, scopeId, sourceFilter, splitId } from '../../web/src/federation.ts';
+import { compareEvents, composeSource, discoverSources, eventId, legacyTaskId, mapEvent, mapMessage, mapState, scopeId, sourceFilter, splitId } from '../../web/src/federation.ts';
 import type { DeskState, HubEvent } from '../../web/src/types.ts';
 
 const event=(id:number,ts='2026-11-10T00:00:00.000Z'):HubEvent=>({id,ts,task_id:'task',session_id:'session',kind:'assistant',payload:{text:'hello'}});
@@ -23,9 +23,56 @@ test('source identities isolate tasks, events, approvals, questions and queues w
  assert.equal(composeSource('@same hello',a.projects),'a');assert.equal(composeSource('#claude @same hello',a.projects),'a');assert.equal(composeSource('@same hello',a.projects,''),'');
 });
 
+test('migrated remote records appear once, old task links resolve, and offline snapshots respect removal',async()=>{
+ const original=globalThis.fetch;
+ const source='remote-runner', task='moved-task', project='moved-project';
+ const row={id:source,view_index:4,name:'remote',url:'',workspace_id:'uuid',pending:0,
+   legacy_task_ids:[task],legacy_project_ids:[project],legacy_approval_ids:[],legacy_question_ids:[]};
+ let offline=false;
+ const calls:string[]=[];
+ globalThis.fetch=async(input)=>{
+   const path=String(input),url=new URL(path,'http://desk');calls.push(path);
+   if(path==='/api/workspaces')return Response.json([row]);
+   const remote=url.pathname.startsWith(`/api/workspaces/${source}/`);
+   const route=url.pathname.replace(remote?`/api/workspaces/${source}`:'/api','');
+   if(remote&&offline)throw Error('offline');
+   if(route==='/state') {
+     if(!remote)return Response.json({...state(),projects:[],tasks:[],approvals:[],questions:[]});
+     const value=state();value.projects[0].id=project;value.tasks[0].id=task;value.tasks[0].project_id=project;
+     value.tasks[0].last_event={...event(11),task_id:task};value.approvals=[];value.questions=[];
+     return Response.json(value);
+   }
+   if(route==='/feed')return Response.json(remote?[{...event(11),task_id:task}]:[]);
+   if(route==='/compose')return Response.json({...state().tasks[0],id:task,project_id:project});
+   return Response.json({ok:true});
+ };
+ try {
+   await discoverSources(true);
+   assert.equal(legacyTaskId(task),scopeId(source,task));
+   const first=await api.state();
+   assert.deepEqual(first.availableSources?.sort(),['','remote-runner']);
+   assert.deepEqual(first.projects.map(p=>p.id),[scopeId(source,project)]);
+   assert.deepEqual(first.tasks.map(t=>t.id),[scopeId(source,task)]);
+   assert.deepEqual((await api.feed()).map(e=>e.id),[eventId(4,11)]);
+   assert.equal((await api.compose('@same hello')).id,scopeId(source,task));
+   assert.ok(calls.at(-1)!.startsWith(`/api/workspaces/${source}/compose`));
+   await api.send(scopeId(source,task),'hello');
+   assert.ok(calls.at(-1)!.startsWith(`/api/workspaces/${source}/tasks/${task}/messages`));
+   offline=true;
+   const unavailable=await api.state();
+   assert.equal(unavailable.tasks[0].runner_connected,false);
+   assert.deepEqual(unavailable.availableSources,['']);
+   api.remember(source,{type:'removed',taskIds:[scopeId(source,task)],projectIds:[scopeId(source,project)]});
+   const removed=await api.state();
+   assert.deepEqual(removed.tasks,[]);assert.deepEqual(removed.projects,[]);
+ }finally{globalThis.fetch=original;}
+});
+
 test('unified API pages equal timestamps without gaps, routes writes and keeps offline SSE updates',async()=>{
  const original=globalThis.fetch;const calls:{path:string;body:any;method:string}[]=[];
  let offline=false;let duringState:(()=>void)|undefined;
+ let remoteProjectName='same',remoteProjectDeleted=false;
+ let remoteStateGate:Promise<void>|undefined,remoteStateEntered:(()=>void)|undefined;
  const sourceRows=[{id:'a',view_index:1,name:'remote',url:'',workspace_id:'uuid',pending:0}];
  const data=[event(1),event(2),event(3,'2026-11-10T00:00:01.000Z')];
  globalThis.fetch=async(input,init)=>{
@@ -35,7 +82,10 @@ test('unified API pages equal timestamps without gaps, routes writes and keeps o
    calls.push({path,body,method:init?.method??'GET'});
    if(path==='/api/workspaces')return Response.json(sourceRows);
    if(remote&&offline)throw Error('offline');
-   if(route==='/state'){if(remote)duringState?.();return Response.json(state());}
+   if(route==='/state'){
+     if(remote){duringState?.();if(remoteStateGate){remoteStateEntered?.();await remoteStateGate;}const value=state();value.projects=remoteProjectDeleted?[]:[{...value.projects[0],name:remoteProjectName}];return Response.json(value);}
+     return Response.json(state());
+   }
    if(route==='/feed'){
      const ts=url.searchParams.get('before_ts')!,id=Number(url.searchParams.get('cursor_id'));
      return Response.json(data.filter(e=>e.ts<ts||e.ts===ts&&e.id<id).slice(-Number(url.searchParams.get('limit'))));
@@ -57,17 +107,76 @@ test('unified API pages equal timestamps without gaps, routes writes and keeps o
    await api.events('w:a:task',{before:eventId(1,4),ids:[eventId(1,1)]});assert.match(calls.at(-1)!.path,/ids=1&before=4/);
    assert.deepEqual(await api.send('w:a:task','reply'),{task_id:'w:a:task',queued_id:'w:a:queue'});
    await api.sendQueuedNow('w:a:task','w:a:queue');assert.equal(calls.at(-1)!.path,'/api/workspaces/a/tasks/task/queue/queue/send');
+   await api.open('/tmp/report.html','w:a:task');assert.equal(calls.at(-1)!.path,'/api/workspaces/a/open');assert.deepEqual(calls.at(-1)!.body,{href:'/tmp/report.html',task_id:'task'});
    await assert.rejects(api.sendChannel('local-channel',{text:'summarize',project_id:'w:a:project'}),/같은 허브/);
    await api.resolve('w:a:approval',true);assert.equal(calls.at(-1)!.path,'/api/workspaces/a/approvals/approval');
    await api.answer('w:a:question','answer');assert.equal(calls.at(-1)!.path,'/api/workspaces/a/questions/question');
    await api.requestHandoff('w:a:task',{picked:[eventId(1,2)]});assert.deepEqual(calls.at(-1)!.body.picked,[2]);
    assert.throws(()=>api.compose('@same hello'),/여러 작업공간/);
    assert.equal((await api.compose('@same hello','a')).id,'w:a:task');
+   remoteProjectName='deleted-shared';await api.state();remoteProjectDeleted=true;
+   api.remember('a',{type:'removed',taskIds:[scopeId('a','task')],projectIds:[scopeId('a','project')]});
+   await api.compose('@deleted-shared:/tmp/recreated-shared');
+   assert.equal(calls.at(-1)!.path,'/api/compose');
    const newTask={...s.tasks[1],id:'w:a:new'};
    duringState=()=>api.remember('a',{type:'task',task:newTask});await api.state();duringState=undefined;offline=true;
    const disconnected=await api.state();assert.ok(disconnected.tasks.some(t=>t.id==='w:a:new'&&t.runner_connected===false));
+   assert.ok(!disconnected.projects.some(p=>p.name==='deleted-shared'));
+   await api.compose('@deleted-shared:/tmp/recreated-shared');assert.equal(calls.at(-1)!.path,'/api/compose');
    await assert.rejects(api.feed(2,event(3)),/offline/); // Failed paging must remain retryable, not mark the end.
    assert.equal((await api.feed(2)).length,2); // Local feed remains useful.
+   offline=false;
+   let enterRemote!:()=>void,releaseRemote!:()=>void;
+   const entered=new Promise<void>(resolve=>{enterRemote=resolve;});
+   remoteStateGate=new Promise<void>(resolve=>{releaseRemote=resolve;});remoteStateEntered=enterRemote;
+   const pendingState=api.state();await entered;
+   api.remember('',{type:'removed',taskIds:['task'],projectIds:['project']});
+   releaseRemote();const afterLocalRemoval=await pendingState;
+   remoteStateGate=undefined;remoteStateEntered=undefined;
+   assert.ok(!afterLocalRemoval.projects.some(p=>p.id==='project'));
+   assert.ok(! (await api.state()).projects.some(p=>p.id==='project'));
+ }finally{globalThis.fetch=original;}
+});
+
+test('local authority outage preserves known local IDs while a live shared source remains readable',async()=>{
+ const original=globalThis.fetch;
+ let localFailure=0;
+ const sourceRows=[{id:'a',view_index:1,name:'remote',url:'',workspace_id:'uuid',pending:0}];
+ globalThis.fetch=async(input)=>{
+   const path=String(input),url=new URL(path,'http://desk');
+   if(path==='/api/workspaces')return Response.json(sourceRows);
+   const remote=url.pathname.startsWith('/api/workspaces/a/');
+   const route=url.pathname.replace(remote?'/api/workspaces/a':'/api','');
+   if(!remote&&localFailure&&['/state','/feed','/feed/count'].includes(route))
+     return Response.json({error:'로컬 작업공간 연결 끊김'},{status:localFailure});
+   if(route==='/state')return Response.json(state());
+   if(route==='/feed')return Response.json([event(remote?1:2)]);
+   if(route==='/feed/count')return Response.json({posts:1,tasks:1});
+   return Response.json({ok:true});
+ };
+ try{
+   await discoverSources(true);
+   const before=await api.state();
+   assert.deepEqual(before.tasks.map(task=>task.id).sort(),['task','w:a:task']);
+   localFailure=503;
+   const disconnected=await api.state();
+   assert.ok(disconnected.unavailableSources?.includes(''));
+   assert.deepEqual(disconnected.tasks.map(task=>task.id).sort(),['task','w:a:task']);
+   assert.equal(disconnected.tasks.find(task=>task.id==='task')?.runner_connected,false);
+   assert.notEqual(disconnected.tasks.find(task=>task.id==='w:a:task')?.runner_connected,false);
+   assert.deepEqual((await api.feed()).map(post=>post.id),[eventId(1,1)]);
+   assert.deepEqual(await api.feedCount({}),{posts:1,tasks:1});
+   for(const status of [401,403]){
+     localFailure=status;
+     await assert.rejects(api.state(),/로컬 작업공간 연결 끊김/);
+     await assert.rejects(api.feed(),/글을 불러오지 못했습니다|로컬 작업공간 연결 끊김/);
+     await assert.rejects(api.feedCount({}),/글 수를 불러오지 못했습니다|로컬 작업공간 연결 끊김/);
+   }
+   localFailure=0;
+   const restored=await api.state();
+   assert.ok(!restored.unavailableSources?.includes(''));
+   assert.deepEqual(restored.tasks.map(task=>task.id).sort(),['task','w:a:task']);
+   assert.equal(restored.tasks.find(task=>task.id==='task')?.runner_connected,undefined);
  }finally{globalThis.fetch=original;}
 });
 

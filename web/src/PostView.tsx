@@ -1,4 +1,4 @@
-import { ChevronRight, PenLine } from 'lucide-react';
+import { Bookmark, ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
@@ -41,6 +41,9 @@ interface Props {
   /** Context reset (컨텍스트 재구성) is picking posts: whether this one is picked; unset when it can't be. */
   picked?: boolean;
   onPick?: () => void;
+  /** Reading references, available only beside the split thread. */
+  referenced?: boolean;
+  onReference?: () => void;
 }
 
 const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
@@ -80,7 +83,7 @@ function samePost(a: Props, b: Props): boolean {
   // Only what the post reads from its task; keep in step with the uses below.
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
   if ((a.task?.status === 'running') !== (b.task?.status === 'running')) return false;
-  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked'] as const) {
+  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked', 'referenced'] as const) {
     if (a[k] !== b[k]) return false;
   }
   return !a.onOpenThread === !b.onOpenThread;
@@ -152,6 +155,9 @@ function PostViewInner(props: Props) {
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
             <RelTime iso={post.event.ts} />
           </time>
+          {props.referenced !== undefined && <button className="icon-btn reference-button" aria-pressed={props.referenced}
+            title={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'} aria-label={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'}
+            onClick={(e) => { e.stopPropagation(); props.onReference?.(); }}><Bookmark /></button>}
         </div>
         {replyTo && <div className="replying">↳ <b>@{replyTo}</b>에게 답글</div>}
         {post.kind === 'user' && p.request && <div className="replying">⇄ “{p.request.title}”의 에이전트가 물음</div>}

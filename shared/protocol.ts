@@ -15,6 +15,8 @@ export const ASK_USER = 'AskUserQuestion';
 
 export type Engine = EngineName;
 export interface SkillTransfer { name: string; path: string; content: string; executable: boolean }
+/** Files and selected tags captured when the user input was accepted. */
+export interface SkillSnapshot { version: 1; selected: string[]; files: SkillTransfer[]; hashes: Record<string, string>; digest: string }
 
 /**
  * Bumped when a message changes in a way the other side must know. The hub sends its version with
@@ -23,7 +25,7 @@ export interface SkillTransfer { name: string; path: string; content: string; ex
 export const PROTOCOL_VERSION = 1;
 
 /** What a runner can do: the engines it runs, and `close`: it understands the close command. */
-export interface Capabilities { engines: string[]; close?: boolean }
+export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean }
 
 /** A Codex question asked in passing (delivery 'async'): the user's next message answers it. */
 export interface AsyncQuestion { title: string; options: string[] }
@@ -41,9 +43,9 @@ export type HubToRunner =
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
   | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean;
-      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[] }
+      permissionMode: PermissionMode; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
-  | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[] }
+  | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
   /** Changes what is given; takes effect from the next turn. */
   | { type: 'set_model'; sessionId: string; model?: ModelName; effort?: Effort }
@@ -92,7 +94,7 @@ export type RunnerToHub =
   | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' | 'user' | 'shutdown' };
 
 export interface EngineAdapter {
-  send(text: string, skills?: string[], steer?: boolean): void;
+  send(text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string): void;
   interrupt(): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
   setModel(model?: ModelName, effort?: Effort): Promise<void>;
@@ -107,6 +109,9 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 const str = (v: unknown) => typeof v === 'string';
 const optStr = (v: unknown) => v === undefined || typeof v === 'string';
 const strList = (v: unknown) => v === undefined || (Array.isArray(v) && v.every(str));
+const snapshot = (v: unknown) => v === undefined || (isObj(v) && v.version === 1 && str(v.digest)
+  && Array.isArray(v.selected) && v.selected.every(str) && Array.isArray(v.files)
+  && isObj(v.hashes));
 const MODES = ['auto', 'default'];
 
 /** `m` as a hub command, or why it isn't one. */
@@ -117,9 +122,9 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
   switch (m.type) {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
-        && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome)
+        && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
         ? m as HubToRunner : 'start: bad fields';
-    case 'send': return str(m.text) && strList(m.skills) ? m as HubToRunner : 'send: bad fields';
+    case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';
     case 'set_mode': return MODES.includes(m.permissionMode as string) ? m as HubToRunner : 'set_mode: bad mode';
     case 'set_model': return optStr(m.model) && optStr(m.effort) ? m as HubToRunner : 'set_model: bad fields';
     case 'interrupt': case 'close': return m as HubToRunner;

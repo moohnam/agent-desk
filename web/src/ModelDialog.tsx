@@ -66,7 +66,7 @@ export function ModelDialog({ onClose, onChannels, onRunners }: { onClose: () =>
         {onChannels && <button type="button" className="btn" onClick={onChannels}>읽기 전용 채널 관리 · 봇 알림 / RSS·Atom</button>}
         <p className="muted small">태그 없이 시작하는 새 작업에 씁니다. 작업마다 모델 태그와 <code>#low</code> … <code>#max</code>
           {' '}태그로 바꿀 수 있고, 바꾼 값은 그 작업에 유지됩니다. <code>#ultra</code>는 Codex에서만 씁니다.</p>
-        {(workspaceId ? ['claude'] as const : ENGINES).map((e) => (
+        {ENGINES.map((e) => (
           <fieldset key={e} className="field-group">
             <legend>{ENGINE_LABEL[e]} <small className="muted">{modelTagsOf(e)}{ENGINE_INFO[e].family ? ' (계열의 최신 버전)' : ''}</small></legend>
             {!workspaceId && <div className="field">

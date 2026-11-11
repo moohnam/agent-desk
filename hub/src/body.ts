@@ -20,16 +20,16 @@ export function sameOrigin(req: IncomingMessage): boolean {
  * Reads a JSON body of at most MAX_BODY bytes. JSON only: a form on another site can't post one
  * without a CORS preflight, which the hub never answers.
  */
-export async function readBody(req: IncomingMessage): Promise<unknown> {
+export async function readBody(req: IncomingMessage, limit = MAX_BODY): Promise<unknown> {
   const declared = Number(req.headers['content-length']);
-  if (declared > MAX_BODY) throw new HttpError(413, `요청 본문이 너무 큽니다 (최대 ${MAX_BODY / 1024 / 1024} MiB)`);
+  if (declared > limit) throw new HttpError(413, `요청 본문이 너무 큽니다 (최대 ${limit / 1024 / 1024} MiB)`);
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const c of req) {
     size += (c as Buffer).length;
-    if (size > MAX_BODY) {
+    if (size > limit) {
       req.destroy();
-      throw new HttpError(413, `요청 본문이 너무 큽니다 (최대 ${MAX_BODY / 1024 / 1024} MiB)`);
+      throw new HttpError(413, `요청 본문이 너무 큽니다 (최대 ${limit / 1024 / 1024} MiB)`);
     }
     chunks.push(c as Buffer);
   }

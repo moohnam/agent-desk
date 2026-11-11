@@ -1,22 +1,16 @@
 import type { Element } from 'hast';
-import type { MermaidConfig } from 'mermaid';
-import { colorHandDrawnNodes } from './mermaidColors.ts';
+import { MAX_DIAGRAM_TEXT, type DiagramResult, type DiagramReply } from './mermaidProtocol.ts';
+export { MAX_DIAGRAM_TEXT } from './mermaidProtocol.ts';
 
-export const MAX_DIAGRAM_TEXT = 20_000;
-let library: Promise<typeof import('mermaid')['default']> | undefined;
-let nextId = 0;
-let rendering: Promise<unknown> = Promise.resolve();
-// Mermaid's diagram identifiers sometimes differ from their config keys.
-const CONFIG_KEYS: Record<string, keyof MermaidConfig> = {
-  'flowchart-v2': 'flowchart', 'flowchart-elk': 'flowchart', classDiagram: 'class', stateDiagram: 'state',
-  xychart: 'xyChart', railroadAbnf: 'railroad', railroadEbnf: 'railroad', railroadPeg: 'railroad',
-};
-
+/** A split pane can become inert without changing IntersectionObserver geometry. */
+export const PANE_VISIBILITY_EVENT = 'desk-pane-visibility';
 /** Defer work until visible, cancel queued work on exit, and keep a completed diagram. */
 export function renderWhenVisible(element: HTMLElement, render: (signal: AbortSignal) => Promise<void>): () => void {
   let complete = false;
   let pending: AbortController | undefined;
   let observer: IntersectionObserver | undefined;
+  let intersecting = typeof IntersectionObserver === 'undefined';
+  const view = element.ownerDocument?.defaultView;
   const start = () => {
     if (complete || pending) return;
     const controller = pending = new AbortController();
@@ -24,18 +18,25 @@ export function renderWhenVisible(element: HTMLElement, render: (signal: AbortSi
       if (controller.signal.aborted) return;
       complete = true;
       observer?.disconnect();
+      view?.removeEventListener(PANE_VISIBILITY_EVENT, update);
     };
     void render(controller.signal).then(finish, finish);
   };
-  if (typeof IntersectionObserver === 'undefined') start();
+  const update = () => {
+    if (complete) return;
+    if (intersecting && !element.closest?.('[inert]')) start();
+    else { pending?.abort(); pending = undefined; }
+  };
+  view?.addEventListener(PANE_VISIBILITY_EVENT, update);
+  if (typeof IntersectionObserver === 'undefined') update();
   else {
     observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting && entry.intersectionRatio > 0)) start();
-      else { pending?.abort(); pending = undefined; }
+      intersecting = entries.some((entry) => entry.isIntersecting && entry.intersectionRatio > 0);
+      update();
     }, { threshold: 0.001 }); // No prefetch margin: respect feed/body/viewport clipping.
     observer.observe(element);
   }
-  return () => { complete = true; pending?.abort(); observer?.disconnect(); };
+  return () => { complete = true; pending?.abort(); observer?.disconnect(); view?.removeEventListener(PANE_VISIBILITY_EVENT, update); };
 }
 
 /** Only fenced Mermaid blocks, not inline code or other languages. */
@@ -47,64 +48,87 @@ export function mermaidSource(node: Element | undefined): string | null {
   return code.children.filter((c) => c.type === 'text').map((c) => c.value).join('').replace(/\n$/, '');
 }
 
-/** Render off-screen, then display as an image so SVG links/scripts never join the app's DOM. */
-export async function renderMermaid(source: string, signal?: AbortSignal): Promise<{ image: string; background: string }> {
+/** A short-lived document lets the browser reclaim Mermaid's private module/DOM caches. */
+const RENDERER_IDLE_MS = 5000;
+const RENDERER_TIMEOUT_MS = 30_000;
+interface Renderer {
+  frame: HTMLIFrameElement;
+  port: MessagePort;
+  ready: Promise<void>;
+  pending?: { resolve: (result: DiagramResult) => void; reject: (error: Error) => void; id: number };
+  stop: (reason: Error) => void;
+  idle?: ReturnType<typeof setTimeout>;
+}
+let renderer: Renderer | undefined;
+let rendering: Promise<void> = Promise.resolve();
+let requestId = 0;
+
+function getRenderer(): Renderer {
+  if (renderer) { clearTimeout(renderer.idle); return renderer; }
+  const frame = document.createElement('iframe');
+  frame.title = '도표 렌더링';
+  frame.setAttribute('aria-hidden', 'true');
+  frame.inert = true;
+  frame.tabIndex = -1;
+  frame.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px;height:1000px;visibility:hidden;pointer-events:none;border:0';
+  const channel = new MessageChannel();
+  let ready!: () => void, fail!: (reason: Error) => void;
+  const state: Renderer = {
+    frame, port: channel.port1,
+    ready: new Promise<void>((resolve, reject) => { ready = resolve; fail = reject; }),
+    stop(reason) {
+      if (renderer === state) renderer = undefined;
+      clearTimeout(state.idle); clearTimeout(loading);
+      state.frame.onload = null; state.frame.onerror = null;
+      state.port.onmessage = null; state.port.close(); channel.port2.close();
+      state.frame.remove();
+      fail(reason); state.pending?.reject(reason); state.pending = undefined;
+    },
+  };
+  const loading = setTimeout(() => state.stop(new Error('도표 렌더러를 불러오는 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
+  state.port.onmessage = ({ data }: MessageEvent<DiagramReply & { ready?: boolean }>) => {
+    if (data.ready) { clearTimeout(loading); ready(); return; }
+    const pending = state.pending;
+    if (!pending || data.id !== pending.id) return;
+    state.pending = undefined;
+    if (data.result) pending.resolve(data.result);
+    else pending.reject(new Error(data.error || '도표를 그리지 못했습니다.'));
+  };
+  frame.onload = () => frame.contentWindow?.postMessage({ type: 'desk-mermaid-connect' }, location.origin, [channel.port2]);
+  frame.onerror = () => state.stop(new Error('도표 렌더러를 불러오지 못했습니다.'));
+  frame.src = new URL('/mermaid-renderer.html', location.href).href;
+  renderer = state;
+  document.body.append(frame);
+  return state;
+}
+
+/** Serialized config/render work; cancelled frames and idle library state are fully released. */
+export async function renderMermaid(source: string, signal?: AbortSignal): Promise<DiagramResult> {
   if (source.length > MAX_DIAGRAM_TEXT) throw new Error('도표가 너무 커서 원문으로 표시합니다.');
   signal?.throwIfAborted();
-  library ??= import('mermaid').then((m) => m.default)
-    .catch((error: unknown) => { library = undefined; throw error; });
-  const mermaid = await library;
   const render = async () => {
-    // Configuration is global in Mermaid: change it only inside our serial render queue.
     signal?.throwIfAborted();
-    mermaid.initialize({
-      startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true,
-      theme: 'redux-color', look: 'handDrawn', handDrawnSeed: 1, htmlLabels: false, fontFamily: 'sans-serif',
-      maxTextSize: MAX_DIAGRAM_TEXT, maxEdges: 300,
-      secure: ['secure', 'securityLevel', 'startOnLoad', 'suppressErrorRendering', 'maxTextSize', 'maxEdges',
-        'htmlLabels', 'dompurifyConfig'],
-    });
-    const scratch = document.createElement('div');
-    scratch.setAttribute('aria-hidden', 'true');
-    scratch.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px;visibility:hidden;pointer-events:none';
-    document.body.append(scratch);
+    const state = getRenderer();
+    const abort = () => state.stop(new DOMException('도표 렌더링을 취소했습니다.', 'AbortError'));
+    signal?.addEventListener('abort', abort, { once: true });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      const { svg, diagramType } = await mermaid.render(`desk-mermaid-${++nextId}`, source, scratch);
+      await state.ready;
       signal?.throwIfAborted();
-      const config = mermaid.mermaidAPI.getConfig();
-      let appearance = config;
-      let authored: MermaidConfig | undefined;
-      let background = config.themeVariables?.background;
-      const section = config[(CONFIG_KEYS[diagramType] ?? diagramType) as keyof MermaidConfig];
-      if (section && typeof section === 'object' && 'theme' in section && typeof section.theme === 'string' && section.theme !== config.theme) {
-        // render() clears the diagram scope before returning. Ask Mermaid to resolve the
-        // scoped theme's background with the author's variables, without hardcoded palettes.
-        authored = (await mermaid.parse(source)).config;
-        const authoredSection = authored[(CONFIG_KEYS[diagramType] ?? diagramType) as keyof MermaidConfig];
-        if (authoredSection && typeof authoredSection === 'object' && 'theme' in authoredSection && authoredSection.theme === section.theme) {
-          mermaid.initialize({ theme: section.theme as MermaidConfig['theme'], themeVariables: authored.themeVariables });
-          const resolved = mermaid.mermaidAPI.getConfig();
-          if (resolved.theme === section.theme) {
-            background = resolved.themeVariables?.background;
-            appearance = resolved;
-          }
-        }
-      }
-      let imageSvg = svg;
-      if ((CONFIG_KEYS[diagramType] ?? diagramType) === 'flowchart' && svg.includes('data-look="handDrawn"')
-        && ['redux-color', 'redux-dark-color'].includes(appearance.theme ?? '')) {
-        authored ??= (await mermaid.parse(source)).config;
-        signal?.throwIfAborted();
-        imageSvg = colorHandDrawnNodes(svg, appearance, authored);
-      }
-      signal?.throwIfAborted();
-      return {
-        image: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(imageSvg)}`,
-        background: typeof background === 'string' ? background : '#fff',
-      };
-    } finally { scratch.remove(); }
+      return await new Promise<DiagramResult>((resolve, reject) => {
+        const id = ++requestId;
+        state.pending = { id, resolve, reject };
+        deadline = setTimeout(() => state.stop(new Error('도표 렌더링 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
+        state.port.postMessage({ id, source });
+      });
+    } finally {
+      clearTimeout(deadline);
+      signal?.removeEventListener('abort', abort);
+      if (renderer === state) state.idle = setTimeout(() => state.stop(new Error('idle')), RENDERER_IDLE_MS);
+    }
   };
   const result = rendering.then(render);
-  rendering = result.catch(() => {});
+  // Queue completion must not retain the last image as a fulfilled Promise's value.
+  rendering = result.then(() => {}, () => {});
   return result;
 }

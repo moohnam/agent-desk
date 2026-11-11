@@ -18,6 +18,8 @@ export interface RemoteExchange {
   events: Sequenced<import('./protocol.ts').RunnerToHub>[]; more: boolean;
   sessions: import('./protocol.ts').LiveSession[];
   engines: string[];
+  /** Absent from old agents; only true means frozen desk skill commands are safe to deliver. */
+  skillSnapshot?: boolean;
 }
 export interface RemoteReply {
   eventAck: number;

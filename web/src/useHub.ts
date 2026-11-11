@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
 import { mergeEvents, mergeTaskEvents } from './posts.ts';
-import { assignProjectColors } from './projects.ts';
+import { assignProjectColors, forgetProjectColors } from './projects.ts';
+import { compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
+import { confirmedMissingTask } from './draftRetention.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
 import type { AccessView } from '../../shared/api.ts';
 
@@ -37,7 +39,9 @@ export function useHub() {
   const [synced, setSynced] = useState(0);
   // Tasks deleted while this page is open: their events, wherever cached, are no longer shown.
   const [gone, setGone] = useState<Set<string>>(new Set());
+  const [availableSources, setAvailableSources] = useState<Set<string>>(new Set());
   const deleted = useRef(new Set<string>());
+  const deletedProjects = useRef(new Set<string>());
   const knownTasks = useRef(new Set<string>());
   const taskRefresh = useRef<Map<string, TaskView | null> | null>(null);
 
@@ -60,21 +64,26 @@ export function useHub() {
     }
     // SSE can add/update/delete tasks while the full snapshot is in flight.
     for (const [id, task] of taskUpdates) { if (task && !deleted.current.has(id)) nextTasks.set(id, task); else nextTasks.delete(id); }
-    const missing = [...knownTasks.current].filter(id => !nextTasks.has(id));
+    // A plain ID missing after a snapshot may be an old remote task awaiting its new link.
+    // Only a successful read of an identified source proves a scoped task was deleted.
+    const available = new Set(s.availableSources ?? []);
+    const missing = [...knownTasks.current].filter(id => confirmedMissingTask(id,nextTasks.has(id),available));
     if (missing.length) {
       deleted.current = new Set([...deleted.current, ...missing]);
       setGone(deleted.current);
     }
     knownTasks.current = new Set(nextTasks.keys());
     setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)), feed.filter(e => !deleted.current.has(e.task_id)), FEED_CAP));
-    assignProjectColors(s.projects);
-    setProjects(s.projects);
+    const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
+    assignProjectColors(nextProjects);
+    setProjects(nextProjects);
     if (channelRefresh.current === channelUpdates) {
       const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
       for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
       setChannels(next);
     }
     setTasks(nextTasks);
+    setAvailableSources(new Set(s.availableSources ?? []));
     const allApprovals=new Map(s.approvals.map(a=>[a.id,a]));for(const [id,a] of approvalUpdates)allApprovals.set(id,a);
     setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
     const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
@@ -135,6 +144,8 @@ export function useHub() {
         } else if (m.type === 'event') {
           events.push(m.event);
         } else if (m.type === 'removed') {
+          for (const id of m.projectIds) deletedProjects.current.add(id);
+          forgetProjectColors(m.projectIds);
           const ids = new Set(m.taskIds);
           const keep = <T extends { task_id: string }>(prev: Map<string, T>) => new Map([...prev].filter(([, x]) => !ids.has(x.task_id)));
           deleted.current = new Set([...deleted.current, ...ids]);
@@ -205,7 +216,7 @@ export function useHub() {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, refresh, onEvent };
+  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, availableSources, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */
@@ -249,14 +260,14 @@ const COUNT_EVERY = 3000;
  * missed some and fetches its newest page again when shown. `at`: the state reload (`synced`) its
  * newest page is from.
  */
-interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean }
+interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; token: object }
 
 /**
  * Each feed column's events, filtered by the hub to what the column shows, newest page first and
  * older pages on request (`loadEarlier`), kept live. Events are kept per query, not per column:
  * a view switch shows the queries it had at once and only fetches their newest page quietly.
- * `kept`: the columns of every view (F1–F4); a hidden query is dropped, with the older pages
- * loaded for it, only once none of them uses it (a deleted column, a changed filter).
+ * Hidden queries keep a bounded recent-page LRU. A shown column being read keeps its older
+ * pages until it returns to the top; trimmed records can always be paged from the hub again.
  */
 export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks: Map<string, TaskView>,
   onEvent: (fn: (e: HubEvent) => void) => () => void, synced: number, gone: Set<string> = new Set()) {
@@ -264,14 +275,32 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.filter((d) => !d.channelId).map((d) => [d.id, feedQuery(d.filter, tasks)]));
   const sig = JSON.stringify([...queries]);
-  const current = useRef({ tasks, kept });
-  current.current = { tasks, kept };
+  const current = useRef({ tasks, kept, gone });
+  current.current = { tasks, kept, gone };
   // The query each column showed last: a column whose query changes starts from those events.
   const shown = useRef(new Map<string, string>());
+  const reading = useRef(new Set<string>());
+  const requests = useRef(new Map<string, Set<AbortController>>());
+  const protectedQuery = (key: string) => [...reading.current].some(id => shown.current.get(id) === key);
 
   const set = (key: string, f: (e: FeedEntry) => FeedEntry) => {
     const e = cache.current.get(key);
-    if (e) { cache.current.set(key, f(e)); bump(); }
+    if (e) {
+      cache.current.set(key, compactFeed(f(e), e.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+      bump();
+    }
+  };
+  const request = <T,>(key: string, load: (signal: AbortSignal) => Promise<T>, done: (value: T) => void, failed: () => void = () => {}) => {
+    const token = cache.current.get(key)?.token;
+    if (!token) return;
+    const controller = new AbortController();
+    let pending = requests.current.get(key);
+    if (!pending) requests.current.set(key, pending = new Set());
+    pending.add(controller);
+    const group = pending;
+    const currentRequest = () => !controller.signal.aborted && cache.current.get(key)?.token === token;
+    void load(controller.signal).then(value => { if (currentRequest()) done(value); }, () => { if (currentRequest()) failed(); })
+      .finally(() => { group.delete(controller); if (!group.size && requests.current.get(key) === group) requests.current.delete(key); });
   };
   // Counts waiting to be fetched, by query key.
   const counting = useRef(new Map<string, number>());
@@ -281,10 +310,23 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       counting.current.delete(key);
       const e = cache.current.get(key);
       // A hub not yet restarted has no count: the column shows only what it loaded.
-      if (e) api.feedCount(e.q).then((total) => set(key, (x) => ({ ...x, total })), () => {});
+      if (e) request(key, signal => api.feedCount(e.q, signal), total => set(key, x => ({ ...x, total })));
     }, delay));
   };
-  useEffect(() => () => { for (const t of counting.current.values()) clearTimeout(t); }, []);
+  const drop = (key: string) => {
+    cache.current.delete(key);
+    clearTimeout(counting.current.get(key)); counting.current.delete(key);
+    for (const controller of requests.current.get(key) ?? []) controller.abort();
+    requests.current.delete(key);
+  };
+  useEffect(() => () => {
+    for (const t of counting.current.values()) clearTimeout(t);
+    counting.current.clear();
+    for (const pending of requests.current.values()) for (const controller of pending) controller.abort();
+    requests.current.clear();
+    // The StrictMode remount must reload requests cancelled by cleanup.
+    cache.current.clear(); shown.current.clear(); reading.current.clear();
+  }, []);
 
   useEffect(() => {
     const want = JSON.parse(sig) as [string, FeedQuery][];
@@ -295,25 +337,31 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       const key = JSON.stringify(q);
       const cur = c.get(key);
       const prev = shown.current.get(id);
+      if (prev !== key) reading.current.delete(id);
       shown.current.set(id, key);
       if (cur?.live && cur.at === synced) continue;
-      if (cur) c.set(key, { ...cur, live: true });
+      if (cur) { c.delete(key); c.set(key, { ...cur, live: true }); }
       else {
         // Narrowed to the new query, the column's events stay up while the page comes.
         const seed = prev ? c.get(prev)?.events.filter((e) => accepts(q, e, current.current.tasks.get(e.task_id))) ?? [] : [];
-        c.set(key, { q, events: seed, more: false, loading: true, at: synced, live: true });
+        c.set(key, { q, events: seed, more: false, loading: true, at: synced, live: true, token: {} });
       }
       c.set(key, { ...c.get(key)!, at: synced });
       count(key);
-      api.feed(FEED_PAGE, undefined, q).then((page) => set(key, (e) => {
+      request(key, signal => api.feed(FEED_PAGE, undefined, q, signal), page => set(key, (e) => {
         // A reload after a reconnect or a view switch keeps the older pages already shown.
         const keepsOlder = e.events.length > 0 && page.length > 0 && compareEvents(e.events[0], page[0]) < 0;
         return { ...e, events: mergeEvents(e.events, page), more: keepsOlder ? e.more : page.length >= FEED_PAGE, loading: false };
       }), () => set(key, (e) => ({ ...e, loading: false })));
     }
-    for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) shown.current.delete(id);
+    for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) { shown.current.delete(id); reading.current.delete(id); }
     const used = new Set(current.current.kept().filter((d) => !d.channelId).map((d) => JSON.stringify(feedQuery(d.filter, current.current.tasks))));
-    for (const [k, e] of c) if (!e.live && !used.has(k)) c.delete(k);
+    for (const [k, e] of c) {
+      if (!e.live && !used.has(k)) drop(k);
+      else c.set(k, compactFeed(e, e.live ? protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+    }
+    const idle = [...c].filter(([, e]) => !e.live);
+    for (const [key] of idle.slice(0, Math.max(0, idle.length - IDLE_QUERY_LIMIT))) drop(key);
     bump();
   }, [sig, synced]);
 
@@ -321,13 +369,35 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     const task = current.current.tasks.get(e.task_id);
     let any = false;
     for (const [k, f] of cache.current) {
-      if (!f.live || !accepts(f.q, e, task)) continue;
-      cache.current.set(k, { ...f, events: mergeEvents(f.events, [e]) });
+      if (!f.live || current.current.gone.has(e.task_id) || !accepts(f.q, e, task)) continue;
+      cache.current.set(k, compactFeed({ ...f, events: mergeEvents(f.events, [e]) }, protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT, current.current.gone));
       count(k, COUNT_EVERY);
       any = true;
     }
     if (any) bump();
   }), [onEvent]);
+
+  useEffect(() => {
+    if (!gone.size) return;
+    let changed = false;
+    for (const [key, entry] of cache.current) {
+      const next = compactFeed(entry, Infinity, gone);
+      if (next !== entry) { cache.current.set(key, next); changed = true; }
+    }
+    if (changed) bump();
+  }, [gone]);
+
+  const setReading = useCallback((id: string, keep: boolean) => {
+    if (keep) reading.current.add(id);
+    else if (reading.current.delete(id)) {
+      const key = shown.current.get(id);
+      const entry = key ? cache.current.get(key) : undefined;
+      if (key && entry && !protectedQuery(key)) {
+        const next = compactFeed(entry, LIVE_FEED_LIMIT, current.current.gone);
+        if (next !== entry) { cache.current.set(key, next); bump(); }
+      }
+    }
+  }, []);
 
   // Events without the deleted tasks', the same array while neither changes: posts are built per array.
   const withoutGone = useRef(new WeakMap<HubEvent[], { gone: Set<string>; events: HubEvent[] }>());
@@ -349,13 +419,14 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     const cur = key ? cache.current.get(key) : undefined;
     const oldest = cur?.events[0];
     if (!key || !cur || !oldest || !cur.more || cur.loading) return;
+    reading.current.add(id);
     set(key, (e) => ({ ...e, loading: true }));
-    api.feed(FEED_PAGE, oldest, cur.q).then(
+    request(key, signal => api.feed(FEED_PAGE, oldest, cur.q, signal),
       (page) => set(key, (e) => ({ ...e, events: mergeEvents(e.events, page), more: page.length >= FEED_PAGE, loading: false })),
       () => set(key, (e) => ({ ...e, loading: false })));
   }, []);
 
-  return { feeds, loadEarlier };
+  return { feeds, loadEarlier, setReading };
 }
 
 /** Full event history of one task (the feed only keeps recent events), kept live. */
@@ -369,6 +440,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
   const [loaded, setLoaded] = useState<string | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const earlierRequest = useRef(false);
+  const earlierAbort = useRef<AbortController | null>(null);
   const shown = useRef<string | null>(null);
   /** Bumped on every (re)load, so an earlier page asked for meanwhile is dropped. */
   const gen = useRef(0);
@@ -382,8 +454,9 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     gen.current++;
     if (!taskId) return;
     let alive = true;
+    const controller = new AbortController();
     const key = `${taskId}:${since ?? ''}`;
-    api.events(taskId, { since }).then((page) => {
+    api.events(taskId, { since }, controller.signal).then((page) => {
       if (!alive) return;
       // Older events kept from before (pages loaded earlier) keep their own `more`.
       setHistory((prev) => ({
@@ -399,7 +472,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       timer = undefined;
       const ids = [...cut];
       cut.clear();
-      api.events(taskId, { ids }).then((page) => {
+      api.events(taskId, { ids }, controller.signal).then((page) => {
         if (alive) setHistory((prev) => ({ ...prev, events: mergeTaskEvents(prev.events, page.events) }));
       }).catch(() => {});
     };
@@ -411,7 +484,10 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
         timer ??= setTimeout(fetchWhole, WHOLE_DELAY_MS);
       }
     });
-    return () => { alive = false; off(); clearTimeout(timer); gen.current++; };
+    return () => {
+      alive = false; off(); clearTimeout(timer); gen.current++;
+      controller.abort(); earlierAbort.current?.abort(); earlierAbort.current = null;
+    };
   }, [taskId, since, onEvent, reload]);
   const loadEarlier = useCallback(() => {
     const oldest = events[0];
@@ -419,10 +495,13 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     const g = gen.current;
     earlierRequest.current = true;
     setLoadingEarlier(true);
-    api.events(taskId, { before: oldest.id }).then((page) => {
+    const controller = new AbortController();
+    earlierAbort.current = controller;
+    api.events(taskId, { before: oldest.id }, controller.signal).then((page) => {
       if (gen.current !== g) return;
       setHistory((prev) => ({ events: mergeTaskEvents(prev.events, page.events), more: page.more }));
     }).catch(() => {}).finally(() => {
+      if (earlierAbort.current === controller) earlierAbort.current = null;
       if (gen.current === g) { earlierRequest.current = false; setLoadingEarlier(false); }
     });
   }, [taskId, events, more, loadingEarlier]);

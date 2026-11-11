@@ -22,8 +22,8 @@ export function linkTarget(href: string, cwd: string | undefined): LinkTarget {
   let path: string;
   try { path = /^file:/i.test(href) ? new URL(href).pathname : href; path = decodeURIComponent(path); }
   catch { throw new HttpError(400, `열 수 없는 링크입니다: ${href}`); }
-  if (/^[a-z][a-z0-9+.-]*:/i.test(path)) throw new HttpError(400, `열 수 없는 링크입니다: ${href}`);
   path = path.replace(/#L\d+(-L?\d+)?$/, '').replace(/:\d+(:\d+)?(-\d+)?$/, '');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path)) throw new HttpError(400, `열 수 없는 링크입니다: ${href}`);
   path = expandHome(path);
   if (!isAbsolute(path)) {
     if (!cwd) throw new HttpError(400, `상대 경로의 기준 폴더를 알 수 없습니다: ${href}`);

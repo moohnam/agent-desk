@@ -57,7 +57,7 @@ export class RemoteAgent {
         const live = this.runner.snapshot().find(s=>s.sessionId===checked.sessionId);
         // A restored hub may not yet know that this session survived. Never replace its process.
         if (checked.type === 'start' && live) {
-          this.runner.handle({type:'send',sessionId:checked.sessionId,text:checked.prompt,skills:checked.skills});
+          this.runner.handle({type:'send',sessionId:checked.sessionId,text:checked.prompt,skills:checked.skills,skillSnapshot:checked.skillSnapshot});
         } else {
           if (checked.type === 'close' && !live) { this.journal.dispatched(item.seq); continue; }
           if (checked.type !== 'start' && !live) throw new Error('대상 세션이 종료되어 명령을 적용하지 못했습니다');

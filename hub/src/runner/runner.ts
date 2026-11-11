@@ -4,6 +4,7 @@ import { startClaude } from './claude.ts';
 import type { StartEngine } from './engine.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
+import { materializeSkillSnapshot, pruneSkillSnapshots } from './skill-input.ts';
 
 
 const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
@@ -12,6 +13,8 @@ interface Entry {
   adapter: EngineAdapter | null;
   live: LiveSession;
   idleTimer: NodeJS.Timeout | null;
+  skillsHome?: string;
+  snapshotHomes: Set<string>;
 }
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const idle = (e: Entry) => !e.live.busy && !e.live.approvals.length && !e.live.background?.length;
@@ -34,7 +37,7 @@ export class Runner {
   }
 
   /** `close`: understands the close command (older runners ignore it). */
-  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true }; }
+  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true }; }
 
   /** Sessions still running, so a reconnecting hub can learn what is busy and awaiting approval. */
   snapshot(): LiveSession[] {
@@ -119,15 +122,18 @@ export class Runner {
       case 'start': {
         const old = this.sessions.get(cmd.sessionId);
         if (old) { this.drop(cmd.sessionId, old); old.adapter?.close(); }
-        const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null };
+        const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null, skillsHome: cmd.skillsHome, snapshotHomes: new Set() };
         this.sessions.set(cmd.sessionId, entry);
         // An engine this runner doesn't know (a newer hub talking to an older daemon) must not run as another engine.
         const start = this.start ?? (Object.hasOwn(ENGINES, cmd.engine) ? ENGINES[cmd.engine] : null);
         try {
           if (!start) throw new Error(`이 러너는 ${cmd.engine} 엔진을 모릅니다. 러너를 다시 시작하세요`);
+          const skillSnapshotHome = cmd.skillSnapshot
+            ? materializeSkillSnapshot(cmd.skillsHome ?? config.skillsHome, cmd.skillSnapshot, this.protectedHomes()) : undefined;
+          if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
           entry.adapter = start({
             sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome,
+            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {
@@ -136,11 +142,28 @@ export class Runner {
           break;
         }
         if (this.sessions.get(cmd.sessionId) === entry) this.schedule(cmd.sessionId, entry);
+        if (entry.snapshotHomes.size) this.prune(entry.skillsHome ?? config.skillsHome);
         break;
       }
-      case 'send':
-        this.sessions.get(cmd.sessionId)?.adapter?.send(cmd.text, cmd.skills, cmd.steer);
+      case 'send': {
+        const entry = this.sessions.get(cmd.sessionId);
+        if (!entry?.adapter) break;
+        let skillSnapshotHome: string | undefined;
+        try {
+          skillSnapshotHome = cmd.skillSnapshot
+            ? materializeSkillSnapshot(entry.skillsHome ?? config.skillsHome, cmd.skillSnapshot, this.protectedHomes()) : undefined;
+        } catch (err) {
+          this.emit({ type: 'event', sessionId: cmd.sessionId, event: { kind: 'status', state: 'error', detail: {
+            message: `스킬 스냅샷 준비 실패: ${errorText(err)}`,
+          } } });
+          if (!entry.live.busy) this.emit({ type: 'busy', sessionId: cmd.sessionId, busy: false });
+          break;
+        }
+        if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
+        entry.adapter.send(cmd.text, cmd.skills, cmd.steer, skillSnapshotHome);
+        if (skillSnapshotHome) this.prune(entry.skillsHome ?? config.skillsHome);
         break;
+      }
       case 'set_mode':
         this.attempt(cmd.sessionId, '모드 변경 실패', (a) => a.setMode(cmd.permissionMode));
         break;
@@ -168,4 +191,10 @@ export class Runner {
       }
     }
   }
+
+  private prune(skillsHome: string) {
+    pruneSkillSnapshots(skillsHome, this.protectedHomes());
+  }
+
+  private protectedHomes() { return [...this.sessions.values()].flatMap(entry => [...entry.snapshotHomes]); }
 }

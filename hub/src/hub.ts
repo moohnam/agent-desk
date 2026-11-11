@@ -21,7 +21,8 @@ import { config } from './config.ts';
 import { RemoteRunners } from './runner/remote-hub.ts';
 import { remoteLocation } from '../../shared/remote.ts';
 import { steeringSkillText } from './runner/skill-input.ts';
-import { ASK_USER, type Answers, type LiveSession, type RunnerToHub } from '../../shared/protocol.ts';
+import { collectSkillBundle } from './shared-skill-sync.ts';
+import { ASK_USER, type Answers, type LiveSession, type RunnerToHub, type SkillSnapshot } from '../../shared/protocol.ts';
 
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
 const RUNNER_GRACE_MS = 5000;
@@ -48,11 +49,13 @@ export class Hub extends DeskCore {
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
   private pathAddress?: string;
+  private inboundSkillSnapshot?: SkillSnapshot;
   /**
    * Sessions shown as lost because no runner connected in time after startup. Their queued messages
    * and open requests wait for the runner's actual report: it may still have them.
    */
   private presumedLost = new Set<string>();
+  private graceTimer: NodeJS.Timeout;
 
   /**
    * `runner`: makes the runner connection (by default the daemon's, started if need be).
@@ -76,11 +79,41 @@ export class Hub extends DeskCore {
         this.publish({ type: 'runners', runners: this.remotes.list() });
       }, this.skills);
     this.runner = this.remotes;
-    setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS).unref();
+    this.graceTimer = setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS);
+    this.graceTimer.unref();
+  }
+
+  /** Stops timers and read-only sources before the owning store is closed. */
+  dispose() {
+    clearTimeout(this.graceTimer);
+    this.remotes.close();
+    this.channels.stop();
   }
 
   /** Compose syntax with the desk's skills as known #tags; `route`: the compose box's leading @mention. */
-  parse(text: string, route = false) { return parseCompose(text ?? '', this.skills.names(), route); }
+  parse(text: string, route = false) { return parseCompose(text ?? '', this.inboundSkillSnapshot?.selected ?? this.skills.names(), route); }
+
+  /** The received workspace operation keeps its own accepted skill version through synchronous routing. */
+  withSkillSnapshot<T>(snapshot: SkillSnapshot, work: () => T): T {
+    const previous = this.inboundSkillSnapshot;
+    this.inboundSkillSnapshot = snapshot;
+    try { return work(); } finally { this.inboundSkillSnapshot = previous; }
+  }
+
+  private skillSnapshot(names: string[]): SkillSnapshot | undefined {
+    if (!names.length) return undefined;
+    if (this.inboundSkillSnapshot) {
+      if (JSON.stringify(names) !== JSON.stringify(this.inboundSkillSnapshot.selected))
+        throw new HttpError(400, '입력에서 선택한 스킬과 전송 스냅샷이 다릅니다');
+      return this.inboundSkillSnapshot;
+    }
+    return collectSkillBundle(this.skills, names) ?? undefined;
+  }
+
+  private requireSkillSnapshotRunner(snapshot?: SkillSnapshot, sessionId?: string, rootPath?: string) {
+    if (snapshot && !(rootPath ? this.remotes.canSnapshotForPath(rootPath) : this.remotes.canSnapshot(sessionId)))
+      throw new HttpError(409, '대상 러너가 고정 스킬 버전을 지원하지 않습니다. 실행 중인 세션과 대기 메시지는 유지되며, 러너가 업데이트된 뒤 다시 보내주세요');
+  }
 
   /**
    * Applies the runner's view of live sessions after a (re)connect. `presumed`: no runner has
@@ -246,6 +279,8 @@ export class Hub extends DeskCore {
     if (!project) throw new HttpError(404, 'project not found');
     const c = this.parse(text, routed);
     const engine = this.checkNewTask(c, engine0, project.root_path);
+    const skillSnapshot = this.skillSnapshot(c.skills);
+    this.requireSkillSnapshotRunner(skillSnapshot, undefined, project.root_path);
     const prompt = channelPrompt(c.body, context);
     if (this.remotes.forPath(project.root_path) && prompt.includes(config.uploadsDir + '/')) throw new HttpError(400, '첨부 파일은 허브 머신에 있습니다. 원격 머신에 파일을 옮긴 뒤 해당 경로를 입력하세요');
     const permissionMode = c.mode ?? mode;
@@ -268,7 +303,7 @@ export class Hub extends DeskCore {
     });
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: project.root_path, prompt, permissionMode,
-      model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home,
+      model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
     });
     this.busy.add(sessionId);
     return this.taskView(task);
@@ -304,6 +339,8 @@ export class Hub extends DeskCore {
     if (problem) throw new HttpError(400, problem);
     this.requireRunner(session.id);
     if (c.delivery === 'fork') return this.fork(taskId, session, c, text);
+    const skillSnapshot = this.skillSnapshot(c.skills);
+    this.requireSkillSnapshotRunner(skillSnapshot, session.id);
     if (c.body || c.skills.length) c.body = channelPrompt(c.body, context);
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
@@ -344,14 +381,14 @@ export class Hub extends DeskCore {
       const id = randomUUID();
       this.store.enqueue({
         id, task_id: taskId, session_id: session.id, text: text.trim(), body: c.body,
-        skills: c.skills, mode: c.mode ?? null, created_at: now(),
+        skills: c.skills, skill_snapshot: skillSnapshot, mode: c.mode ?? null, created_at: now(),
         ...(context && { channel_context: context }),
       });
       if (receipt) receipt.queued_id = id;
       this.publishTask(taskId);
       this.drain(session.id);
     } else {
-      this.dispatch(session.id, c.body, c.skills, busy && c.delivery === 'now');
+      this.dispatch(session.id, c.body, c.skills, busy && c.delivery === 'now', skillSnapshot);
     }
     return taskId;
   }
@@ -380,22 +417,22 @@ export class Hub extends DeskCore {
   }
 
   /** Hands a message to the session: to the live one, or by resuming the conversation. */
-  private dispatch(sessionId: string, body: string, skills: string[], steer = false) {
+  private dispatch(sessionId: string, body: string, skills: string[], steer = false, skillSnapshot?: SkillSnapshot) {
     const session = this.store.getSession(sessionId)!;
     // Also protect already-running local daemons: updating their module would end live engines.
     // Remote runners choose their own skills path and add this in the adapter instead.
-    if (steer && session.engine === 'codex' && !this.remotes.canQueue(sessionId)) {
+    if (steer && !skillSnapshot && session.engine === 'codex' && !this.remotes.canQueue(sessionId)) {
       body = steeringSkillText(body, skills, this.skills.home);
     }
     if (this.runner.has(sessionId)) {
-      this.runner.handle({ type: 'send', sessionId, text: body, skills, steer });
+      this.runner.handle({ type: 'send', sessionId, text: body, skills, steer, skillSnapshot });
     } else {
       // A new engine process: whatever ran in the background before went with the old one.
       this.background.delete(sessionId);
       this.runner.handle({
         type: 'start', sessionId, engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
         resume: session.engine_session_id ?? undefined, permissionMode: session.permission_mode,
-        model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home,
+        model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home, skillSnapshot,
       });
     }
     this.busy.add(sessionId);
@@ -407,9 +444,10 @@ export class Hub extends DeskCore {
   private drainInner(sessionId: string) {
     if (!this.remotes.ready(sessionId) || this.busy.has(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
+    if (next?.skill_snapshot && !this.remotes.canSnapshot(sessionId)) return;
     if (!next || !this.store.dequeue(next.id)) return;
     if (next.kind === 'reset') { this.reset(this.store.getSession(sessionId)!, next.body, next.created_at); return; }
-    this.atTime(undefined, () => { this.sendQueued(next, 'later'); this.dispatch(sessionId, next.body, next.skills); });
+    this.atTime(undefined, () => { this.sendQueued(next, 'later'); this.dispatch(sessionId, next.body, next.skills, false, next.skill_snapshot); });
   }
 
   /** Records a waiting message as sent; one carrying an agent's request starts that request's answer. */
@@ -454,11 +492,12 @@ export class Hub extends DeskCore {
     if (!q) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     if (q.kind === 'reset') throw new HttpError(409, '컨텍스트 재구성은 지금 턴이 끝난 뒤에 실행됩니다');
     this.requireRunner(q.session_id);
+    this.requireSkillSnapshotRunner(q.skill_snapshot, q.session_id);
     if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
     if (!this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const steer = this.runner.has(q.session_id) && this.busy.has(q.session_id);
     this.sendQueued(q, steer ? 'now' : 'later');
-    this.dispatch(q.session_id, q.body, q.skills, steer);
+    this.dispatch(q.session_id, q.body, q.skills, steer, q.skill_snapshot);
     this.publishTask(taskId);
   }
 
@@ -479,6 +518,8 @@ export class Hub extends DeskCore {
     if (!c.body && !c.skills.length) throw new HttpError(400, '#fork로 맡길 지시를 함께 쓰세요');
     if (!parent.engine_session_id) throw new HttpError(409, '아직 포크할 대화가 없습니다. 첫 응답이 시작된 뒤 다시 시도하세요');
     const parentTask = this.store.getTask(parentId)!;
+    const skillSnapshot = this.skillSnapshot(c.skills);
+    this.requireSkillSnapshotRunner(skillSnapshot, parent.id);
     const permissionMode = c.mode ?? parent.permission_mode;
     const model = c.model ?? parent.model, effort = c.effort ?? parent.effort;
     const ts = now();
@@ -499,7 +540,7 @@ export class Hub extends DeskCore {
     this.addEvent(parent.id, parentId, 'status', { kind: 'status', state: 'forked', detail: { task_id: task.id, title: task.title, seq: task.seq } });
     this.runner.handle({
       type: 'start', sessionId, engine, cwd: parent.cwd, prompt: c.body, resume: parent.engine_session_id, fork: true,
-      permissionMode, model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home,
+      permissionMode, model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
     });
     this.busy.add(sessionId);
     return task.id;

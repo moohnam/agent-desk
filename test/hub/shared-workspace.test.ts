@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, truncateSync, symlinkSync, existsSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { request, type Server } from 'node:http';
+import { createServer, request, type Server } from 'node:http';
 import { SharedRuntime } from '../../hub/src/runner/shared-runtime.ts';
 import { Store } from '../../hub/src/db.ts';
 import { Hub } from '../../hub/src/hub.ts';
@@ -13,13 +13,120 @@ import { Access } from '../../hub/src/access.ts';
 import { createHttpServer } from '../../hub/src/http.ts';
 import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
+import { ENGINES } from '../../shared/compose.ts';
 import type { StartOptions } from '../../hub/src/runner/engine.ts';
+import { TemporaryFiles } from '../../hub/src/shared-files.ts';
+import type { LinkTarget } from '../../hub/src/open.ts';
 
 const delay=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 const listen=(server:Server,port=0)=>new Promise<string>(r=>server.listen(port,'127.0.0.1',()=>r(`http://127.0.0.1:${(server.address() as {port:number}).port}`)));
 const stop=(server:Server)=>new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());});
 const wait=async(check:()=>boolean|Promise<boolean>)=>{const end=Date.now()+9000;while(!await check()){if(Date.now()>end)throw Error('wait timeout');await delay(30);}};
 
+test('shared file links stream from the task runner to a private local copy and preserve reveal rules',async()=>{
+ const f=fixture(),runner=f.runtime.workspace.server();let gateway:Server|undefined;
+ const runnerUrl=await listen(runner),peer=f.runtime.workspace.grant('file-test');
+ const store=new Store(join(f.dir,'gateway.db'));
+ const hub=new Hub(store,{skills:new SkillStore(join(f.dir,'skills')),runner:()=>({connected:true,id:'gateway',engines:new Set(),has:()=>false,handle:()=>{throw Error('unexpected gateway execution');}})});
+ const opened:LinkTarget[]=[];let failOpen=false;
+ const link=new WorkspaceLinks(store);
+ const headers={authorization:`Bearer ${peer.token}`,'x-workspace-id':f.runtime.workspace.id};
+ try {
+  const workspace=await link.attach({name:'runner',url:runnerUrl,token:peer.token});
+  const task=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@file:shared@worker:${f.project} #claude open test`}}).body;
+  assert.ok(task.id);
+  writeFileSync(join(f.project,'report.html'),'<h1>shared report</h1>');
+  writeFileSync(join(f.project,'run.sh'),'#!/bin/sh\n');
+  writeFileSync(join(f.project,'exact.bin'),'');truncateSync(join(f.project,'exact.bin'),50*1024*1024);
+  writeFileSync(join(f.project,'too-large.bin'),'');truncateSync(join(f.project,'too-large.bin'),50*1024*1024+1);
+  symlinkSync('/etc/hosts',join(f.project,'outside'));
+  gateway=createHttpServer(hub,new Access(join(f.dir,'access-token'),4317),join(f.dir,'uploads'),{openTarget:async target=>{opened.push(target);if(failOpen)throw Error('default app failed');}});
+  const gatewayUrl=await listen(gateway);
+  const open=async(href:string)=>{
+   const response=await fetch(`${gatewayUrl}/api/workspaces/${workspace.id}/open`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({task_id:task.id,href})});
+   return {status:response.status,body:await response.json() as any};
+  };
+  assert.equal((await fetch(`${runnerUrl}/v1/file?task_id=${task.id}&href=report.html`)).status,401);
+  assert.equal((await fetch(`${runnerUrl}/v1/file?task_id=${task.id}&href=report.html`,{headers:{...headers,'x-workspace-id':'wrong'}})).status,409);
+  assert.equal((await fetch(`${runnerUrl}/v1/file?task_id=other&href=report.html`,{headers})).status,404);
+  const ordinary=await open('report.html:12');assert.equal(ordinary.status,200,JSON.stringify(ordinary.body));
+  assert.equal(ordinary.body.kind,'file');assert.equal(ordinary.body.reveal,false);
+  assert.equal(readFileSync(ordinary.body.path,'utf8'),'<h1>shared report</h1>');
+  assert.notEqual(ordinary.body.path,join(f.project,'report.html'));
+  assert.equal(opened.length,1);
+  const absolute=await open(join(f.project,'report.html')+'#L2');assert.equal(absolute.status,200);
+  const fileUrl=await open(new URL('file://'+join(f.project,'report.html')).href);assert.equal(fileUrl.status,200);
+  const executable=await open('run.sh');assert.equal(executable.status,200);assert.equal(executable.body.reveal,true);
+  const exact=await open('exact.bin');assert.equal(exact.status,200);assert.equal(statSync(exact.body.path).size,50*1024*1024);
+  assert.equal((await open('too-large.bin')).status,413);
+  assert.equal((await open('outside')).status,403);
+  assert.equal((await open('.')).status,400);
+  assert.equal((await open('missing.txt')).status,404);
+  assert.equal((await open('https://example.com')).status,400);
+  assert.equal(opened.length,5);
+  failOpen=true;
+  assert.equal((await open('report.html')).status,500);
+  const failedTarget=opened.at(-1)!;assert.equal(failedTarget.kind,'file');
+  if(failedTarget.kind==='file')assert.ok(!existsSync(failedTarget.path));
+ } finally {await link.close();if(gateway)await stop(gateway);hub.remotes.close();store.database.close();await stop(runner);f.close();}
+});
+
+test('temporary receiver rejects hostile names, oversized and cut off streams, then removes partial copies',async()=>{
+ const files=new TemporaryFiles();
+ let savedPath:string|undefined;
+ try {
+  const response=(name:string,length:number,body:Uint8Array)=>new Response(Buffer.from(body),{headers:{'x-desk-filename':name,'content-length':String(length)}});
+  await assert.rejects(files.receive(response('..%2Fescape',1,new Uint8Array([1]))),/파일 이름/);
+  await assert.rejects(files.receive(response('%ZZ',1,new Uint8Array([1]))),/파일 이름/);
+  await assert.rejects(files.receive(response('large.bin',50*1024*1024+1,new Uint8Array([1]))),/50 MB/);
+  await assert.rejects(files.receive(response('short.bin',2,new Uint8Array([1]))),/끝까지/);
+  await assert.rejects(files.receive(response('long.bin',1,new Uint8Array([1,2]))),/크기가/);
+  const good=await files.receive(response('safe.txt',2,new Uint8Array([3,4])));
+  assert.equal(good.kind,'file');
+  if(good.kind==='file'){
+   savedPath=good.path;assert.deepEqual(readFileSync(good.path),Buffer.from([3,4]));
+   await files.discard(join(tmpdir(),'not-owned.txt'));assert.ok(existsSync(good.path));
+   await files.discard(good.path);assert.ok(!existsSync(good.path));
+  }
+ } finally {await files.close();}
+ assert.ok(savedPath && !existsSync(savedPath));
+});
+
+test('temporary receiver reaps only its own expired directories after a restart',async()=>{
+ const base=mkdtempSync(join(tmpdir(),'desk-file-recovery-'));
+ const old=join(base,'agent-desk-file-ABC123'),fresh=join(base,'agent-desk-file-DEF456');
+ const unrelated=join(base,'other-file-ABC123'),symlink=join(base,'agent-desk-file-GHI789');
+ mkdirSync(old,0o700);mkdirSync(fresh,0o700);mkdirSync(unrelated,0o700);
+ writeFileSync(join(old,'old.txt'),'old');writeFileSync(join(fresh,'new.txt'),'new');
+ symlinkSync(unrelated,symlink);
+ const expired=new Date(Date.now()-25*60*60*1000);utimesSync(old,expired,expired);
+ const files=new TemporaryFiles(base);
+ try {
+  const response=new Response(Buffer.from('x'),{headers:{'x-desk-filename':'trigger.txt','content-length':'1'}});
+  await files.receive(response);
+  assert.ok(!existsSync(old));assert.ok(existsSync(fresh));assert.ok(existsSync(unrelated));assert.ok(existsSync(symlink));
+ } finally {await files.close();rmSync(base,{recursive:true,force:true});}
+});
+
+test('shared file request times out on headers and honors cancellation',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'desk-file-timeout-'));
+ const server=createServer((req,res)=>{
+  if(req.url==='/v1/identity'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({version:1,workspace_id:'timeout-workspace'}));return;}
+  // Never send response headers; the caller must stop waiting on its own.
+  void res;
+ });
+ const url=await listen(server),store=new Store(join(dir,'gateway.db')),links=new WorkspaceLinks(store);
+ try {
+  const link=await links.attach({name:'stalled runner',url,token:'x'.repeat(32)});
+  const canceled=new AbortController();canceled.abort();
+  await assert.rejects(links.fetchFile(link.id,'task','file.txt',canceled.signal),(e:any)=>e.status===499);
+  const started=Date.now();
+  await assert.rejects(links.fetchFile(link.id,'task','file.txt'),(e:any)=>e.status===504);
+  assert.ok(Date.now()-started>=2500);
+ } finally {await links.close();store.database.close();await stop(server);rmSync(dir,{recursive:true,force:true});}
+});
+
+// Exercise each engine's hub/journal contract without a model call. CLI protocols are tested separately.
 function fixture(){
  const dir=mkdtempSync(join(tmpdir(),'desk-workspace-'));const project=join(dir,'project');mkdirSync(project);
  const starts:StartOptions[]=[],sends:string[]=[],approved:string[]=[];let interrupts=0;
@@ -30,7 +137,7 @@ function fixture(){
  return {dir,project,runtime,starts,sends,approved,finish,interrupts:()=>interrupts,close:()=>{runtime.close();rmSync(dir,{recursive:true,force:true});}};
 }
 
-test('two ordinary hub APIs share one runner: history, commands, approvals, offline input and restart',async()=>{
+for (const engine of ENGINES) test(`${engine}: two ordinary hub APIs share history, commands, approvals, offline input and restart`,async()=>{
  const f=fixture(),authority=f.runtime.workspace.server();const runnerUrl=await listen(authority);const port=Number(new URL(runnerUrl).port);
  const gateways:{store:Store;hub:Hub;server:Server;url:string;id:string;dir:string}[]=[];
  const make=async(name:string,existing?:string)=>{
@@ -50,8 +157,10 @@ test('two ordinary hub APIs share one runner: history, commands, approvals, offl
  try {
   const a=await make('a');let b=await make('b');
   assert.equal((await api(a,'/compose','POST',{text:'@bad:worker:relative #claude invalid'})).status,400);
-  const task=(await api(a,'/compose','POST',{text:`@test:shared@worker:${f.project} #claude #ask initial`})).body;
-  assert.ok(task.id);await wait(()=>f.starts.length===1);
+  const task=(await api(a,'/compose','POST',{text:`@test:shared@worker:${f.project} #${engine} #ask initial`})).body;
+  assert.ok(task.id);assert.equal(task.engine,engine);await wait(()=>f.starts.length===1);
+  assert.deepEqual([...f.runtime.hub.remotes.list()[0].engines].sort(),[...f.runtime.agent.runner.capabilities.engines].sort());
+  assert.equal(f.runtime.hub.store.latestSession(task.id)!.engine,engine);
   assert.equal((await api(b,'/state')).body.tasks[0].id,task.id);
   assert.deepEqual((await api(a,'/state')).body.projects,(await api(b,'/state')).body.projects);
   assert.equal(a.store.listTasks().length,0);assert.equal(b.store.listTasks().length,0);
@@ -82,10 +191,10 @@ test('two ordinary hub APIs share one runner: history, commands, approvals, offl
   assert.equal((await api(b,`/delivery/${offlineId}`)).body.status,202);
   const list=await fetch(b.url+'/api/workspaces').then(r=>r.json()) as any[];assert.ok(!JSON.stringify(list).includes('token'));
   assert.equal((await api(a,'/access')).status,404);assert.equal((await api(a,'/skills','POST',{name:'x'})).status,400);
-  const implicit=(await api(a,'/compose','POST',{text:`@implicit:${f.project} #claude runner-local-path`}));
+  const implicit=(await api(a,'/compose','POST',{text:`@implicit:${f.project} #${engine} runner-local-path`}));
   assert.equal(implicit.status,201);assert.equal(implicit.body.runner_id,task.runner_id);
   await wait(()=>f.starts.some(o=>o.prompt==='runner-local-path'));assert.equal(f.starts.find(o=>o.prompt==='runner-local-path')!.cwd,f.project);
-  const home=await api(a,'/compose','POST',{text:'@home:~/ #claude runner-home-path'});assert.equal(home.status,201);
+  const home=await api(a,'/compose','POST',{text:`@home:~/ #${engine} runner-home-path`});assert.equal(home.status,201);
   await wait(()=>f.starts.some(o=>o.prompt==='runner-home-path'));assert.equal(f.starts.find(o=>o.prompt==='runner-home-path')!.cwd,homedir());
  }finally{streamController?.abort();for(const g of [...gateways])await closeGateway(g);await stop(authority);f.close();}
 });
@@ -183,13 +292,13 @@ test('shutdown leaves an undispatched start for exactly one execution after runt
  }finally{restarted?.close();f.close();}
 });
 
-test('runtime restart reports the interrupted turn and resumes queued input once in order',()=>{
+for (const engine of ENGINES) test(`${engine}: runtime restart reports interrupted turn and resumes queued input once in order`,()=>{
  const f=fixture();let restarted:SharedRuntime|undefined;
  const resumed:StartOptions[]=[],sent:string[]=[];
  try{
   const peer=f.runtime.workspace.grant('restart');
   const execute=(path:string,body:Record<string,unknown>)=>f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path,body});
-  const task=execute('/compose',{text:`@restart:shared@worker:${f.project} #claude interrupted-current-turn`}).body;
+  const task=execute('/compose',{text:`@restart:shared@worker:${f.project} #${engine} interrupted-current-turn`}).body;
   f.runtime.exchange();
   execute(`/tasks/${task.id}/messages`,{text:'queued-first'});
   execute(`/tasks/${task.id}/messages`,{text:'queued-second'});
@@ -199,6 +308,7 @@ test('runtime restart reports the interrupted turn and resumes queued input once
    resumed.push(o);o.emit({type:'busy',sessionId:o.sessionId,busy:true});
    return {send:text=>{sent.push(text);o.emit({type:'busy',sessionId:o.sessionId,busy:true});},close:()=>{},resolveApproval:()=>{},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{}};
   }});
+  assert.equal(restarted.hub.store.latestSession(task.id)!.engine,engine);
   assert.equal(resumed.length,1);assert.equal(resumed[0].prompt,'queued-first');assert.equal(resumed[0].resume,'fixture');
   assert.deepEqual(restarted.hub.store.queued().map(q=>q.text),['queued-second']);
   const statuses=restarted.hub.store.listEvents(task.id).filter(e=>e.kind==='status').map(e=>e.payload as {state?:string;detail?:{reason?:string}});

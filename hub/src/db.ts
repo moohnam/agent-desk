@@ -93,6 +93,7 @@ function feedWhere(f: FeedFilter): { where: string; args: string[] } {
 export interface Queued {
   id: string; task_id: string; session_id: string; text: string; body: string; skills: string[];
   mode: PermissionMode | null; created_at: string; kind?: QueuedKind | null;
+  skill_snapshot?: import('../../shared/protocol.ts').SkillSnapshot;
   channel_context?: ChannelContext;
 }
 /**
@@ -188,6 +189,7 @@ export class Store {
     }
     if (!queuedCols.some((c) => c.name === 'kind')) this.db.exec('ALTER TABLE queued ADD COLUMN kind TEXT');
     if (!queuedCols.some((c) => c.name === 'channel_context_json')) this.db.exec('ALTER TABLE queued ADD COLUMN channel_context_json TEXT');
+    if (!queuedCols.some((c) => c.name === 'skill_snapshot_json')) this.db.exec('ALTER TABLE queued ADD COLUMN skill_snapshot_json TEXT');
     const channelCols = this.db.prepare('PRAGMA table_info(channel)').all() as { name: string }[];
     if (!channelCols.some((c) => c.name === 'conversation_task_id')) this.db.exec('ALTER TABLE channel ADD COLUMN conversation_task_id TEXT REFERENCES task(id) ON DELETE SET NULL');
     // After the migrations above, since some index columns they add.
@@ -580,9 +582,9 @@ export class Store {
   }
 
   enqueue(q: Queued) {
-    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, channel_context_json, ord)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
-      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null, q.channel_context ? JSON.stringify(q.channel_context) : null);
+    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, channel_context_json, skill_snapshot_json, ord)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
+      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null, q.channel_context ? JSON.stringify(q.channel_context) : null, q.skill_snapshot ? JSON.stringify(q.skill_snapshot) : null);
   }
   /** Hands a session's waiting messages to the session that replaced it. */
   moveQueued(fromSession: string, toSession: string) {
@@ -592,8 +594,8 @@ export class Store {
   queued(by: { sessionId?: string; taskId?: string } = {}): Queued[] {
     const [where, arg] = by.sessionId ? ['WHERE session_id = ?', by.sessionId] : by.taskId ? ['WHERE task_id = ?', by.taskId] : ['', null];
     const stmt = this.db.prepare(`SELECT * FROM queued ${where} ORDER BY ord, created_at, rowid`);
-    const rows = (arg ? stmt.all(arg) : stmt.all()) as unknown as (Omit<Queued, 'skills'> & { skills_json: string; channel_context_json: string | null; ord: number })[];
-    return rows.map(({ skills_json, channel_context_json, ord: _, ...q }) => ({ ...q, skills: JSON.parse(skills_json), ...(channel_context_json ? { channel_context: JSON.parse(channel_context_json) } : {}) }));
+    const rows = (arg ? stmt.all(arg) : stmt.all()) as unknown as (Omit<Queued, 'skills' | 'skill_snapshot'> & { skills_json: string; channel_context_json: string | null; skill_snapshot_json: string | null; ord: number })[];
+    return rows.map(({ skills_json, channel_context_json, skill_snapshot_json, ord: _, ...q }) => ({ ...q, skills: JSON.parse(skills_json), ...(channel_context_json ? { channel_context: JSON.parse(channel_context_json) } : {}), ...(skill_snapshot_json ? { skill_snapshot: JSON.parse(skill_snapshot_json) } : {}) }));
   }
   /** Puts waiting messages in the order of `ids` (all of one task's), reusing their order slots. */
   reorderQueued(ids: string[]) {

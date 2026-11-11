@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -27,6 +27,7 @@ function setup() {
   const makeHub=()=>new Hub(store,{skills,runner:onMessage=>{localSay=onMessage;return local;},graceMs:60_000});
   const hub=makeHub();
   const registered=hub.remotes.register('moohnam@ws20');
+  store.database.prepare('UPDATE remote_runner SET skill_snapshot=1 WHERE id=?').run(registered.runner.id);
   const journal=new RemoteJournal(join(dir,'runner.db'));
   const starts:StartOptions[]=[],sent:string[]=[];
   const agent=new RemoteAgent(journal,registered.runner.id,join(dir,'remote-skills'),opts=>{
@@ -36,7 +37,7 @@ function setup() {
   });
   function request():RemoteExchange {
     const events=journal.events();
-    return {version:1,journalId:journal.id,commandAck:journal.commandAck,events,more:journal.lastEvent>(events.at(-1)?.seq??journal.eventAck),sessions:agent.runner.snapshot(),engines:['codex']};
+    return {version:1,journalId:journal.id,commandAck:journal.commandAck,events,more:journal.lastEvent>(events.at(-1)?.seq??journal.eventAck),sessions:agent.runner.snapshot(),engines:['codex'],skillSnapshot:true};
   }
   function exchange(target=hub) {
     const input=request();
@@ -133,9 +134,59 @@ test('remote project starts on its registered runner; skills and session owner s
     assert.equal(t.hub.taskView(t.store.getTask(task.id)!).delivery_pending,1);
     t.exchange();assert.equal(t.starts.length,1);assert.equal(t.starts[0].cwd,t.dir);
     assert.notEqual(t.starts[0].skillsHome,t.skills.home);
-    assert.ok(new SkillStore(t.starts[0].skillsHome).get('child'));
+    assert.ok(t.starts[0].skillSnapshotHome);
+    assert.ok(new SkillStore(t.starts[0].skillSnapshotHome).get('child'));
     t.exchange();assert.equal(t.hub.remotes.list()[0].pending,0);
     assert.equal(t.store.latestSession(task.id)!.engine_session_id,'engine-1');
+  }finally{t.cleanup();}
+});
+
+test('remote command keeps the accepted skill version while delivery waits',()=>{
+  const t=setup();try{
+    t.skills.writeFile('child','scripts/run.sh','#!/bin/sh\necho one\n',true);
+    t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex #parent start`);
+    t.skills.writeFile('child','scripts/run.sh','#!/bin/sh\necho two\n',true);
+    const command=t.exchange().commands.find(item=>item.value.type==='start')?.value;
+    assert.equal(command?.type,'start');
+    if(command?.type==='start')assert.match(command.skillSnapshot?.files.find(f=>f.name==='child'&&f.path==='scripts/run.sh')?.content??'',/echo one/);
+    assert.ok(t.starts[0].skillSnapshotHome);
+    assert.match(readFileSync(join(t.starts[0].skillSnapshotHome!,'skills','child','scripts','run.sh'),'utf8'),/echo one/);
+  }finally{t.cleanup();}
+});
+
+test('an old remote runner accepts plain work but cannot receive pinned skill commands',()=>{
+  const t=setup();try{
+    const old=t.hub.remotes.register('old@ws20');
+    const plain=t.hub.compose(`@old:old@ws20:${t.dir} #codex plain`);
+    assert.equal(t.store.latestSession(plain.id)?.runner_id,old.runner.id);
+    assert.throws(()=>t.hub.compose(`@old:old@ws20:${t.dir} #codex #parent pinned`),/고정 스킬 버전/);
+    assert.equal(t.store.listTasks().filter(task=>task.project_id===plain.project_id).length,1);
+    const pinned=t.hub.compose(`@new:moohnam@ws20:${t.dir} #codex #parent pinned`);
+    const oldExchange={...t.request(),skillSnapshot:false};
+    const reply=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,oldExchange));
+    assert.deepEqual(reply.commands,[]);
+    assert.equal(t.hub.remotes.pendingFor(t.store.latestSession(pinned.id)!.id),1);
+    assert.throws(()=>t.hub.sendMessage(pinned.id,'#parent next'),/고정 스킬 버전/);
+    t.exchange();
+    assert.equal(t.starts.length,1);
+  }finally{t.cleanup();}
+});
+
+test('a queued skill input stays queued across an old remote exchange and drains after an upgrade',()=>{
+  const t=setup();try{
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex plain`);
+    t.exchange();t.exchange();
+    t.hub.sendMessage(task.id,'#parent queued');
+    assert.equal(t.store.queued({taskId:task.id}).length,1);
+    t.finish();
+    const input={...t.request(),skillSnapshot:false};
+    const old=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,input));
+    assert.deepEqual(old.commands,[]);
+    assert.equal(t.store.queued({taskId:task.id}).length,1);
+    t.exchange();
+    assert.equal(t.store.queued({taskId:task.id}).length,0);
+    t.exchange();
+    assert.deepEqual(t.sent,['queued']);
   }finally{t.cleanup();}
 });
 

@@ -1,16 +1,17 @@
 import { remoteLocation } from '../../shared/remote.ts';
-import { ArrowLeft, Ellipsis, ListRestart, Pin } from 'lucide-react';
+import { ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { modelShort, projectColor } from './projects.ts';
 import type { HubEvent, Project, TaskView } from './types.ts';
 import { DraftBadge, StatusBadge, TerminalBadge } from './badges.tsx';
 
-export function ThreadHead({ task, project, model, events, now, draft, handoff, onClose, onPin, onHandoff, onMenu }: {
+export function ThreadHead({ task, project, model, events, now, draft, handoff, references, onReferences, onClose, onPin, onHandoff, onMenu }: {
   task: TaskView | undefined; project: Project | undefined; model: string | undefined; events: HubEvent[];
   now: number; draft: boolean; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
   /** Context reset: its panel is open, or closed with work kept; null: none. */
   handoff: 'open' | 'kept' | null; onHandoff: () => void;
+  references?: { open: boolean; count: number }; onReferences?: () => void;
 }) {
   const turns = events.filter((e) => e.kind === 'status' && e.payload.state === 'turn_done').length;
   return (
@@ -22,6 +23,8 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         {task?.source === 'external' && <TerminalBadge />}
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
+        {references && <button className="icon-btn" aria-label="고정한 글 창" aria-pressed={references.open}
+          title="왼쪽에 고정한 글 보기 · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
         {task?.source === 'app' && (
           <button className={`icon-btn${handoff === 'kept' ? ' kept' : ''}`} aria-pressed={handoff === 'open'}
             title={handoff === 'kept' ? '컨텍스트 재구성 이어서 하기 (X) · 쓰던 정리본이 있습니다' : handoff === 'open' ? '컨텍스트 재구성 패널 닫기 (X)' : '컨텍스트 재구성: 글을 골라 정리본을 만들고 새 세션으로 넘기기 (X)'}

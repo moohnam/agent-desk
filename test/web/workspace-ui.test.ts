@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import * as federation from '../../web/src/federation.ts';
+import * as draftRetention from '../../web/src/draftRetention.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -9,7 +10,7 @@ import * as compose from '../../shared/compose.ts';
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
-  imports={ './federation.ts':federation,'./Workspaces.tsx':{useSources:()=>[]},...imports};
+  imports={ './federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
@@ -169,4 +170,31 @@ test('approval and question SSE updates survive a delayed feed during state refr
  for(const [type,value] of [['approval',request('old','allowed')],['approval',request('new','pending')],['question',request('old','answered')],['question',request('new','pending')]] as const)streams[0].onmessage({data:JSON.stringify({type,[type]:value})});
  await new Promise(r=>setTimeout(r,65));let result=h.render(()=>module.useHub());assert.deepEqual([...result.approvals.keys()],['new']);assert.deepEqual([...result.questions.keys()],['new']);
  finish([]);await new Promise(r=>setTimeout(r,0));result=h.render(()=>module.useHub());assert.deepEqual([...result.approvals.keys()],['new']);assert.deepEqual([...result.questions.keys()],['new']);h.unmount();
+});
+
+test('an empty shared project deleted during a delayed feed does not reappear', async () => {
+  const h = hooks(), streams: any[] = [];
+  let finish: (events: any[]) => void = () => {};
+  const feed = new Promise<any[]>(resolve => { finish = resolve; });
+  const project = { id: federation.scopeId('shared-a', 'project'), name: 'shared-test' };
+  const module = load('useHub.ts', {
+    react: h.react,
+    './api.ts': { api: { state: async () => ({ projects: [project], tasks: [], approvals: [], questions: [] }), feed: () => feed, remember() {} }, FEED_PAGE: 1000 },
+    './federation.ts': { ...federation, discoverSources: async () => {}, getSources: () => [], subscribeSources: () => () => {} },
+    './posts.ts': { mergeEvents: (_a: any, b: any) => b },
+    './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} }, './feedCache.ts': {},
+  }, {
+    EventSource: class { onopen: any; onmessage: any; constructor() { streams.push(this); } close() {} },
+    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
+  });
+  try {
+    h.render(() => module.useHub()); streams[0].onopen();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    streams[0].onmessage({ data: JSON.stringify({ type: 'removed', taskIds: [], projectIds: [project.id] }) });
+    await new Promise(resolve => setTimeout(resolve, 65));
+    finish([]); await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(h.render(() => module.useHub()).projects.length, 0);
+    await h.render(() => module.useHub()).refresh();
+    assert.equal(h.render(() => module.useHub()).projects.length, 0);
+  } finally { h.unmount(); }
 });

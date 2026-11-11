@@ -19,6 +19,7 @@ import { createInterface } from 'node:readline';
 import type { Effort, ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
+import { steeringSkillText } from './skill-input.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
@@ -103,7 +104,7 @@ function listModels(): Promise<string[]> {
 }
 
 /** A message waiting for its turn. */
-interface Turn { text: string; skills?: string[] }
+interface Turn { text: string; skills?: string[]; skillSnapshotHome?: string }
 
 /** An approval the user answers: the hook's held HTTP response. */
 interface Pending { res: ServerResponse; timer: NodeJS.Timeout }
@@ -290,7 +291,8 @@ export const startAgy: StartEngine = (opts) => {
 
   const turnText = (turn: Turn) => {
     let text = turn.text || '(추가 지시 없음)';
-    if (turn.skills?.length && opts.skillsHome) {
+    if (turn.skillSnapshotHome) text = steeringSkillText(text, turn.skills, turn.skillSnapshotHome);
+    else if (turn.skills?.length && opts.skillsHome) {
       const files = turn.skills.map((s) => join(opts.skillsHome!, 'skills', s, 'SKILL.md')).join(', ');
       text = `[데스크 스킬] 이 메시지에는 먼저 다음 스킬 파일을 읽고 그 지침을 따르세요: ${files}\n\n${text}`;
     }
@@ -322,11 +324,11 @@ export const startAgy: StartEngine = (opts) => {
     event({ kind: 'status', state: 'warning', detail: { message: 'agy는 대화 복제(#fork)를 지원하지 않아 새 대화로 시작합니다' } });
   }
 
-  const send = (text: string, skills?: string[]) => {
+  const send = (text: string, skills?: string[], _steer?: boolean, skillSnapshotHome?: string) => {
     if (closing) return;
     emit({ type: 'busy', sessionId, busy: true });
     // #now waits like #later (see turns).
-    turns.push({ text, skills });
+    turns.push({ text, skills, skillSnapshotHome });
   };
   listening.catch((err: Error) => {
     if (closing) return;
@@ -334,7 +336,7 @@ export const startAgy: StartEngine = (opts) => {
     emit({ type: 'busy', sessionId, busy: false });
     emit({ type: 'closed', sessionId, error: `agy 승인 서버를 열지 못했습니다: ${err.message}` });
   });
-  send(opts.prompt, opts.skills);
+  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
 
   return {
     send,

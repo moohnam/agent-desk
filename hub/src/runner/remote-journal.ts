@@ -51,8 +51,36 @@ export class RemoteJournal {
     if (this.get('binding') && this.get('binding') !== binding) throw new Error('전달 DB는 다른 허브·러너에 연결할 수 없습니다. 별도 DB를 사용하세요');
     this.set('binding', binding);
   }
+  /** A migrated workspace keeps the original journal and its acknowledged sequence. */
+  assertRunner(runnerId: string) {
+    const binding=this.get('binding');
+    if (!binding) throw new Error('기존 원격 전달 DB의 연결 기록이 없습니다');
+    let id: string;
+    try { id=(JSON.parse(binding) as [string,string])[1]; }
+    catch { throw new Error('원격 전달 DB 연결 기록이 손상되었습니다'); }
+    if (id!==runnerId) throw new Error('원격 전달 DB의 러너 ID가 이관 대상과 다릅니다');
+  }
   get commandAck() { return Number(this.get('commandAck') ?? 0); }
   get eventAck() { return Number(this.get('eventAck') ?? 0); }
+  get hasUndeliveredCommands() {
+    return !!this.db.prepare("SELECT 1 FROM inbox WHERE state IN ('pending','dispatching') LIMIT 1").get();
+  }
+  /** Reject an old copy with the same journal UUID but missing acknowledged history. */
+  assertTransferState(eventAck:number,sentThrough:number) {
+    if(!Number.isSafeInteger(eventAck)||eventAck<0||!Number.isSafeInteger(sentThrough)||sentThrough<0)
+      throw new Error('원본 원격 확인 번호가 잘못되었습니다');
+    // A lost command reply can leave retained commands on the source, but without a
+    // per-runner historical command index a lower copied ACK cannot be proved complete.
+    if(this.commandAck!==sentThrough)throw new Error('원격 전달 DB의 명령 확인 번호가 원본과 다릅니다. 기존 러너의 교환을 먼저 완료하세요');
+    if(this.eventAck>eventAck||this.lastEvent<eventAck)
+      throw new Error('원격 전달 DB에 원본 허브가 확인한 출력 이력이 없습니다');
+    if(this.eventAck<eventAck){
+      const rows=this.db.prepare('SELECT count(*) n,min(seq) first,max(seq) last FROM outbox WHERE seq>? AND seq<=?')
+        .get(this.eventAck,eventAck) as {n:number;first:number|null;last:number|null};
+      if(rows.n!==eventAck-this.eventAck||rows.first!==this.eventAck+1||rows.last!==eventAck)
+        throw new Error('원격 전달 DB에서 원본 허브가 확인한 출력 일부를 다시 보낼 수 없습니다');
+    }
+  }
   receive(commands: Sequenced<HubToRunner>[]) {
     if (!Array.isArray(commands) || commands.length > 16) throw new Error('invalid remote command batch');
     const ack = this.commandAck;

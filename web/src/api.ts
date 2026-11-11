@@ -30,10 +30,9 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
     }
   }
   if(source&&route.startsWith('/channels/'))throw new Error('채널 대화는 같은 허브의 프로젝트를 선택하세요');
-  if(source&&route==='/open')throw new Error('공유 러너의 파일은 실행 머신에서 열어주세요');
   path=url.pathname+url.search;
   // getRandomValues also works on phones using an HTTP LAN address (randomUUID requires HTTPS).
-  const requestId = source && method !== 'GET' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
+  const requestId = source && method !== 'GET' && route !== '/open' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
   const init:RequestInit = {
     method,
     headers: { ...(input ? { 'content-type': 'application/json' } : {}), ...(requestId ? {'x-desk-operation-id':requestId} : {}) },
@@ -63,6 +62,8 @@ export interface FeedQuery extends FeedFilter { members?: string[] }
 
 const feedSearch = (q: FeedQuery) => new URLSearchParams(feedParams(q));
 const snapshots=new Map<string,DeskState>();
+class LocalUnavailable extends Error {}
+const removedProjects=new Set<string>();
 /** Keep the last remote snapshot current so a disconnect cannot erase SSE-only tasks/answers. */
 const refreshing=new Map<string,Set<HubMessage[]>>();
 function applyMessage(s:DeskState,m:HubMessage) {
@@ -77,20 +78,49 @@ function applyMessage(s:DeskState,m:HubMessage) {
 function remember(source:string,m:HubMessage) {
   if(!['task','approval','question','removed'].includes(m.type))return;
   const s=snapshots.get(source);if(s)applyMessage(s,m);
+  if(m.type==='removed'){
+    for(const id of m.projectIds)removedProjects.add(id);
+    projects=projects.filter(p=>!removedProjects.has(p.id));
+  }
   for(const updates of refreshing.get(source)??[])updates.push(m);
 }
 let projects:Project[]=[];
 async function state():Promise<DeskState> {
   await discoverSources();
-  const local=await call<DeskState>('GET','/state');
   const unavailableSources:string[]=[];
+  const availableSources:string[]=[];
+  const localUpdates:HubMessage[]=[];
+  let localRefresh=refreshing.get('');if(!localRefresh)refreshing.set('',localRefresh=new Set());localRefresh.add(localUpdates);
+  let local:DeskState;
+  try {
+    let response:Response;
+    try {response=await fetch('/api/state');}
+    catch {throw new LocalUnavailable();}
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok) {
+      if(response.status>=500)throw new LocalUnavailable();
+      throw new Error(data.error??`HTTP ${response.status}`);
+    }
+    local=data as DeskState;
+    availableSources.push('');
+    for(const update of localUpdates)applyMessage(local,update);
+    snapshots.set('',local);
+  }catch(error){
+    if(!(error instanceof LocalUnavailable))throw error;
+    unavailableSources.push('');
+    const held=snapshots.get('');
+    local=held?{...held,runner:{connected:false},tasks:held.tasks.map(t=>({...t,runner_connected:false}))}
+      :{projects:[],tasks:[],approvals:[],questions:[],channels:[],runner:{connected:false}};
+  }finally{localRefresh.delete(localUpdates);if(!localRefresh.size)refreshing.delete('');}
   const linked=await Promise.all(getSources().map(async source=>{
     const updates:HubMessage[]=[];
     let active=refreshing.get(source.id);if(!active)refreshing.set(source.id,active=new Set());active.add(updates);
     try {
       const r=await fetch(sourceBase(source.id)+'/state');if(!r.ok)throw Error('offline');
       const value=mapState(source.id,source.view_index,await r.json());
+      availableSources.push(source.id);
       for(const update of updates)applyMessage(value,update);
+      value.projects=value.projects.filter(p=>!removedProjects.has(p.id));
       snapshots.set(source.id,value);sourceConnected(source.id,true);return value;
     }catch {
       unavailableSources.push(source.id);sourceConnected(source.id,false);
@@ -98,9 +128,9 @@ async function state():Promise<DeskState> {
       return held&&{...held,tasks:held.tasks.map(t=>({...t,runner_connected:false}))};
     }finally{active.delete(updates);if(!active.size)refreshing.delete(source.id);}
   }));
-  for(const id of snapshots.keys())if(!getSources().some(s=>s.id===id))snapshots.delete(id);
+  for(const id of snapshots.keys())if(id&&!getSources().some(s=>s.id===id))snapshots.delete(id);
   const all=[local,...linked.filter((s):s is DeskState=>!!s)];
-  const combined={...local,unavailableSources,projects:all.flatMap(s=>s.projects),tasks:all.flatMap(s=>s.tasks),approvals:all.flatMap(s=>s.approvals),questions:all.flatMap(s=>s.questions)};
+  const combined={...local,unavailableSources,availableSources,projects:all.flatMap(s=>s.projects).filter(p=>!removedProjects.has(p.id)),tasks:all.flatMap(s=>s.tasks),approvals:all.flatMap(s=>s.approvals),questions:all.flatMap(s=>s.questions)};
   projects=combined.projects;return combined;
 }
 async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal) {
@@ -114,9 +144,10 @@ async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:
     const index=before?eventSourceIndex(before.id):0;
     p.set('cursor_id',String(!before||source.view_index<index?Number.MAX_SAFE_INTEGER:source.view_index>index?0:nativeEventId(before.id)));
     try {
-      const r=await fetch(sourceBase(source.id)+'/feed?'+p,{signal});if(!r.ok)throw Error('글을 불러오지 못했습니다');
+      const r=await fetch(sourceBase(source.id)+'/feed?'+p,{signal});
+      if(!r.ok){if(!source.id&&!before&&r.status>=500)return [];throw Error('글을 불러오지 못했습니다');}
       return (await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e));
-    }catch(e){if(before||!source.id||signal?.aborted)throw e;return [];}
+    }catch(e){if(before||signal?.aborted)throw e;if(source.id||e instanceof TypeError)return [];throw e;}
   }));
   return pages.flat().sort(compareEvents).slice(-limit);
 }
@@ -124,7 +155,10 @@ async function feedCount(q:FeedQuery,signal?:AbortSignal) {
   await discoverSources();
   const counts=await Promise.all([{id:''},...getSources()].map(async source=>{
     const filter=sourceFilter(source.id,q);if(!filter)return {posts:0,tasks:0};
-    const r=await fetch(sourceBase(source.id)+'/feed/count?'+feedSearch(filter),{signal});if(!r.ok)throw Error('글 수를 불러오지 못했습니다');
+    let r:Response;
+    try {r=await fetch(sourceBase(source.id)+'/feed/count?'+feedSearch(filter),{signal});}
+    catch(error){if(!source.id&&!signal?.aborted)return {posts:0,tasks:0};throw error;}
+    if(!r.ok){if(!source.id&&r.status>=500)return {posts:0,tasks:0};throw Error('글 수를 불러오지 못했습니다');}
     return await r.json() as {posts:number;tasks:number};
   }));
   return counts.reduce((a,b)=>({posts:a.posts+b.posts,tasks:a.tasks+b.tasks}),{posts:0,tasks:0});

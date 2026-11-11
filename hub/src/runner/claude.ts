@@ -3,6 +3,7 @@ import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } fr
 import type { Effort } from '../../../shared/compose.ts';
 import { clipResult, type StartEngine } from './engine.ts';
 import { deskInstructions } from './instructions.ts';
+import { steeringSkillText } from './skill-input.ts';
 import type { BackgroundTask } from '../../../shared/protocol.ts';
 
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */
@@ -155,12 +156,12 @@ export const startClaude: StartEngine = (opts) => {
     }
   })();
 
-  const send = (text: string, skills?: string[], steer?: boolean) => {
+  const send = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
     busy = true;
     emit({ type: 'busy', sessionId, busy: true });
-    prompts.push(withSkills(text, skills), steer ? 'next' : 'later');
+    prompts.push(skillSnapshotHome ? steeringSkillText(text, skills, skillSnapshotHome) : withSkills(text, skills), steer ? 'next' : 'later');
   };
-  send(opts.prompt, opts.skills);
+  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
 
   return {
     send,

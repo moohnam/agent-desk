@@ -14,7 +14,8 @@ import { readEngineUsage, readUsage } from './usage.ts';
 import { remoteLocation } from '../../shared/remote.ts';
 import { workspaceApi, workspaceRoute } from './workspace-api.ts';
 import { WorkspaceLinks } from './workspace-links.ts';
-import { ENGINES, type EngineName } from '../../shared/compose.ts';
+import { handleBrokerMcp } from './request-broker.ts';
+import { ENGINES, parseCompose, type EngineName } from '../../shared/compose.ts';
 
 const WEB_DIST = config.webDist;
 const MIME: Record<string, string> = {
@@ -40,15 +41,6 @@ async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
   if (b === undefined) return {};
   if (!b || typeof b !== 'object' || Array.isArray(b)) throw new HttpError(400, 'JSON 객체가 필요합니다');
   return b as Record<string, any>;
-}
-
-/** A positive integer query parameter at most `max`, else `fallback` when absent; anything else is a 400. */
-function intParam(url: URL, name: string, fallback: number | undefined, max = Number.MAX_SAFE_INTEGER): number | undefined {
-  const raw = url.searchParams.get(name);
-  if (raw === null || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new HttpError(400, `${name}는 1 이상 ${max} 이하의 정수여야 합니다`);
-  return n;
 }
 
 /** The page's own path for a redirect: one leading slash, so `//host` can't send it to another site. */
@@ -97,8 +89,9 @@ $('send').onclick = async () => {
 </script></body></html>`;
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
-export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
-  const workspaces = new WorkspaceLinks(hub.store);
+export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string } = {}) {
+  const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
+  const localAuthorityId = options.localAuthorityId;
   access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -111,8 +104,12 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       try {
         if (!sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
         const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
-        if (!hub.remotes.accepts(id, token)) throw new HttpError(401, '이 러너의 연결 토큰이 필요합니다');
         const input = await readJson(req);
+        if (localAuthorityId) {
+          const reply=await workspaces.trustedCall(localAuthorityId,`/v1/runner-exchange/${encodeURIComponent(id)}`,input,{'x-runner-token':token??''});
+          return send(res,reply.status,reply.body);
+        }
+        if (!hub.remotes.accepts(id, token)) throw new HttpError(401, '이 러너의 연결 토큰이 필요합니다');
         return send(res, 200, hub.atomic(() => hub.remotes.exchange(id, input as any)));
       } catch (error) {
         return send(res, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
@@ -131,8 +128,12 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       try {
         if (!sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
         const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
-        if (!hub.channels.acceptsToken(id, token)) throw new HttpError(401, '이 채널의 입력 토큰이 필요합니다');
         const b = await readJson(req);
+        if (localAuthorityId) {
+          const reply=await workspaces.trustedCall(localAuthorityId,`/v1/channel-ingest/${encodeURIComponent(id)}`,b,{'x-channel-token':token??''});
+          return send(res,reply.status,reply.body);
+        }
+        if (!hub.channels.acceptsToken(id, token)) throw new HttpError(401, '이 채널의 입력 토큰이 필요합니다');
         return send(res, 200, hub.channels.ingest(id, b.entries === undefined ? b : b.entries));
       } catch (error) {
         return send(res, error instanceof HttpError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
@@ -180,24 +181,44 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
 
     try {
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
-      if (url.pathname === '/mcp') return await handleMcp(hub, req, res);
+      if (url.pathname === '/mcp') {
+        if(!localAuthorityId)return await handleMcp(hub,req,res);
+        const body=await readBody(req);
+        if(await handleBrokerMcp(workspaces,localAuthorityId,body,req,res))return;
+        return await workspaces.proxyMcp(localAuthorityId,req,res,body);
+      }
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
       if (parts[1] === 'workspaces') {
-        if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list());
+        if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list().filter(link=>link.id!==localAuthorityId));
         if (parts.length === 2 && req.method === 'POST') {
           if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 등록할 수 있습니다');
           return send(res,201,await workspaces.attach(await readJson(req)));
         }
         if (parts.length === 3 && req.method === 'PUT') {
           if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 변경할 수 있습니다');
+          if (id === localAuthorityId) throw new HttpError(403,'로컬 작업공간 연결은 서버 설정에서 관리합니다');
           return send(res,200,await workspaces.attach(await readJson(req),id));
         }
         if (parts.length === 3 && req.method === 'DELETE') {
           if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 제거할 수 있습니다');
+          if (id === localAuthorityId) throw new HttpError(403,'로컬 작업공간 연결은 서버 설정에서 관리합니다');
           workspaces.remove(id);return send(res,200,{ok:true});
         }
         if (parts.length >= 4) {
+          if (id === localAuthorityId) throw new HttpError(404,'이 연결은 기본 작업공간입니다');
           const path='/'+parts.slice(3).join('/')+url.search;
+          if (req.method === 'POST' && path === '/open') {
+            if (!local || !localOrigin(req.headers.origin)) throw new HttpError(403, '이 기기에서는 열 수 없습니다. 허브 머신에서 열어 주세요.');
+            const b = await readJson(req);
+            if (typeof b.href !== 'string' || !b.href || typeof b.task_id !== 'string' || !b.task_id) throw new HttpError(400, '파일 링크와 작업 ID가 필요합니다');
+            const controller = new AbortController();
+            res.once('close', () => controller.abort());
+            const target = /^(akb|lectern):/i.test(b.href) ? linkTarget(b.href, undefined) : await workspaces.fetchFile(id, b.task_id, b.href, controller.signal);
+            if (controller.signal.aborted) { await workspaces.discardFile(target); return; }
+            try { await (options.openTarget ?? openTarget)(target); }
+            catch(error) { await workspaces.discardFile(target); throw error; }
+            return send(res, 200, { ok: true, ...target });
+          }
           const leave = client.kind === 'device' ? access.connect(client.device.id,ipOf(req),()=>res.destroy()) : ()=>{};
           res.on('close',leave);
           return await workspaces.proxy(id,path,req,res);
@@ -206,37 +227,61 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       }
       const workspaceUrl = new URL(url); workspaceUrl.pathname = url.pathname.slice(4);
       if (workspaceRoute(req.method ?? '', workspaceUrl.pathname)) {
+        if (!local && (route === 'POST /runners' || route === 'POST /runners/:id/token'))
+          throw new HttpError(403, '러너 관리는 허브 머신에서만 할 수 있습니다');
+        if (localAuthorityId) {
+          let owner:string|undefined;
+          const kind=parts[1]==='projects'?'project':parts[1]==='tasks'?'task':parts[1]==='approvals'?'approval':parts[1]==='questions'?'question':undefined;
+          if(kind&&id)owner=workspaces.legacyOwner(kind,id);
+          let body:Record<string,any>|undefined;
+          if(req.method!=='GET'&&req.method!=='HEAD'&&['/projects','/tasks','/compose'].includes(workspaceUrl.pathname)){
+            body=await readJson(req);
+            if(workspaceUrl.pathname==='/tasks'&&typeof body.project_id==='string')owner=workspaces.legacyOwner('project',body.project_id)??owner;
+            if(workspaceUrl.pathname==='/projects'&&typeof body.root_path==='string'){
+              const location=remoteLocation(body.root_path);
+              if(location)owner=workspaces.remoteOwner(location.address)??owner;
+            }
+            if(workspaceUrl.pathname==='/compose'&&typeof body.text==='string'){
+              const mention=parseCompose(body.text).mention;
+              const path=mention?.path;
+              const location=path&&remoteLocation(path);
+              if(location)owner=workspaces.remoteOwner(location.address)??owner;
+              else if(mention)owner=workspaces.projectOwner(mention.name)??owner;
+            }
+          }
+          return await workspaces.proxy(owner??localAuthorityId,workspaceUrl.pathname+url.search,req,res,undefined,body);
+        }
         const result = workspaceApi(hub, req.method!, workspaceUrl, req.method === 'GET' ? {} : await readJson(req));
         return send(res, result.status, result.body);
       }
+      if (localAuthorityId && req.method === 'GET' && url.pathname === '/api/state') {
+        const remote=await workspaces.read(localAuthorityId,'/state').catch(()=>{throw new HttpError(503,'로컬 작업공간 연결이 끊겼습니다');});
+        return send(res,remote.status,remote.status===200?{...remote.body,client:{local},...(local&&{access:access.view()})}:remote.body);
+      }
+      if (localAuthorityId && req.method === 'POST' && route === 'POST /channels/:id/refresh') {
+        const reply=await workspaces.trustedCall(localAuthorityId,`/v1/channel-refresh/${encodeURIComponent(id)}`,{});
+        return send(res,reply.status,reply.body);
+      }
+      if (localAuthorityId && req.method === 'GET' && url.pathname === '/api/stream') {
+        let opened=false;
+        const pending:HubMessage[]=[];
+        const onAccess=(message:HubMessage)=>{
+          if(!local || message.type!=='access' || res.destroyed)return;
+          if(!opened){pending.push(message);return;}
+          res.write(`data: ${JSON.stringify(message)}\n\n`);
+        };
+        const leave=client.kind==='device'?access.connect(client.device.id,ipOf(req),()=>res.end()):()=>{};
+        hub.bus.on('message',onAccess);
+        res.on('close',()=>{hub.bus.off('message',onAccess);leave();});
+        return await workspaces.proxy(localAuthorityId,'/stream',req,res,()=>{
+          opened=true;
+          for(const message of pending)onAccess(message);
+          pending.length=0;
+        });
+      }
       switch (route) {
-        case 'GET /runners':
-          return send(res, 200, hub.remotes.list());
-        case 'POST /runners':
-          if (!local) throw new HttpError(403, '러너 등록은 허브 머신에서만 할 수 있습니다');
-          return send(res, 201, hub.remotes.register((await readJson(req)).address));
-        case 'POST /runners/:id/token':
-          if (!local) throw new HttpError(403, '러너 토큰 재발급은 허브 머신에서만 할 수 있습니다');
-          return send(res, 200, hub.remotes.rotate(id));
-        case 'GET /channels':
-          return send(res, 200, hub.channels.list());
-        case 'POST /channels':
-          return send(res, 201, hub.channels.create(await readJson(req) as any));
-        case 'PATCH /channels/:id':
-          return send(res, 200, hub.channels.update(id, await readJson(req)));
-        case 'DELETE /channels/:id':
-          hub.channels.remove(id);
-          return send(res, 200, { ok: true });
-        case 'POST /channels/:id/token':
-          return send(res, 200, hub.channels.rotateToken(id));
-        case 'GET /channels/:id/entries':
-          return send(res, 200, hub.channels.entries(id, intParam(url, 'limit', 60, 200), intParam(url, 'before', undefined), url.searchParams.get('q') ?? ''));
-        case 'POST /channels/:id/read':
-          return send(res, 200, hub.channels.read(id, (await readJson(req)).through_id));
         case 'POST /channels/:id/refresh':
           return send(res, 200, await hub.channels.refresh(id));
-        case 'POST /channels/:id/messages':
-          return send(res, 200, hub.sendChannelMessage(id, await readJson(req) as any));
         case 'GET /state':
           return send(res, 200, { ...hub.state(), client: { local }, ...(local && { access: access.view() }) });
         case 'GET /access': {
@@ -308,31 +353,18 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
           if (!localOrigin(req.headers.origin)) throw new HttpError(403, 'forbidden');
           const b = await readJson(req);
           if (typeof b.href !== 'string' || !b.href) throw new HttpError(400, 'href is required');
-          if (typeof b.task_id === 'string' && remoteLocation(hub.cwdOf(b.task_id) ?? '') && !/^(akb|lectern):/i.test(b.href)) throw new HttpError(409, '원격 머신의 파일입니다. 해당 머신에서 이 경로를 열어 주세요');
-          const target = linkTarget(b.href, typeof b.task_id === 'string' ? hub.cwdOf(b.task_id) : undefined);
-          await openTarget(target);
+          if (!localAuthorityId && typeof b.task_id === 'string' && remoteLocation(hub.cwdOf(b.task_id) ?? '') && !/^(akb|lectern):/i.test(b.href)) throw new HttpError(409, '원격 머신의 파일입니다. 해당 머신에서 이 경로를 열어 주세요');
+          const target = localAuthorityId
+            ? await (async()=>{
+              const path='/open-target?'+new URLSearchParams({href:b.href,...(typeof b.task_id==='string'?{task_id:b.task_id}:{})});
+              const response=await workspaces.read(localAuthorityId,path);
+              if(response.status!==200)throw new HttpError(response.status,response.body?.error??'링크를 열지 못했습니다');
+              return response.body as ReturnType<typeof linkTarget>;
+            })()
+            : linkTarget(b.href, typeof b.task_id === 'string' ? hub.cwdOf(b.task_id) : undefined);
+          await (options.openTarget ?? openTarget)(target);
           return send(res, 200, { ok: true, ...target });
         }
-        case 'GET /skills':
-          return send(res, 200, hub.skills.list());
-        case 'POST /skills': {
-          const b = await readJson(req);
-          return send(res, 201, hub.skills.create(String(b.name ?? ''), b.description ?? ''));
-        }
-        case 'GET /skills/:id':
-          return send(res, 200, hub.skills.get(id));
-        case 'DELETE /skills/:id':
-          hub.skills.remove(id);
-          return send(res, 200, { ok: true });
-        // A file inside a skill: ?path=SKILL.md, ?path=scripts/run.sh, …
-        case 'GET /skills/:id/file':
-          return send(res, 200, hub.skills.readFile(id, url.searchParams.get('path') ?? ''));
-        case 'PUT /skills/:id/file': {
-          const b = await readJson(req);
-          return send(res, 200, hub.skills.writeFile(id, url.searchParams.get('path') ?? '', b.content, b.executable));
-        }
-        case 'DELETE /skills/:id/file':
-          return send(res, 200, hub.skills.deleteFile(id, url.searchParams.get('path') ?? ''));
         default:
           throw new HttpError(404, `no route for ${route}`);
       }
@@ -342,7 +374,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string) {
       send(res, status, { error: err instanceof Error ? err.message : String(err) });
     }
   });
-  server.on('listening', () => hub.channels.start());
+  server.on('listening', () => { if(!localAuthorityId)hub.channels.start(); });
   server.on('close', () => { hub.channels.stop(); void workspaces.close(); });
   return server;
 }

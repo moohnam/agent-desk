@@ -49,12 +49,44 @@ const routes = [
   'POST /tasks/:id/close',
   'POST /approvals/:id',
   'POST /questions/:id',
+  'GET /runners',
+  'POST /runners',
+  'POST /runners/:id/token',
+  'GET /channels',
+  'POST /channels',
+  'PATCH /channels/:id',
+  'DELETE /channels/:id',
+  'POST /channels/:id/token',
+  'GET /channels/:id/entries',
+  'POST /channels/:id/read',
+  'POST /channels/:id/messages',
+  'GET /skills',
+  'POST /skills',
+  'GET /skills/:id',
+  'DELETE /skills/:id',
+  'GET /skills/:id/file',
+  'PUT /skills/:id/file',
+  'DELETE /skills/:id/file',
 ];
 export function workspaceRoute(method: string, pathname: string) {
+  if (!pathname.startsWith('/') || pathname.startsWith('//')) return undefined;
+  const url=new URL(pathname,'http://workspace');
+  if(url.origin!=='http://workspace')return undefined;
+  pathname = url.pathname;
   return routes.find(route => {
     const [m, path] = route.split(' ');
     return m === method && new RegExp('^' + path.replaceAll(':id', '[^/]+') + '$').test(pathname);
   });
+}
+const localAuthorityRoutes = new Set([
+  'POST /runners','POST /runners/:id/token',
+  'POST /channels','PATCH /channels/:id','DELETE /channels/:id','POST /channels/:id/token',
+  'GET /channels/:id/entries','POST /channels/:id/read','POST /channels/:id/messages',
+  'POST /skills','GET /skills/:id','DELETE /skills/:id',
+  'GET /skills/:id/file','PUT /skills/:id/file','DELETE /skills/:id/file',
+]);
+export function localAuthorityRoute(method:string,pathname:string) {
+  return localAuthorityRoutes.has(workspaceRoute(method,pathname) ?? '');
 }
 export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<string, any> = {}): WorkspaceResult {
   const parts = ['api', ...url.pathname.split('/').filter(Boolean)];
@@ -161,6 +193,25 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
           hub.external.answerQuestion(id, b.answer);
           return reply(200, { ok: true });
         }
+        case 'GET /runners': return reply(200, hub.remotes.list());
+        case 'POST /runners': return reply(201, hub.remotes.register(body.address));
+        case 'POST /runners/:id/token': return reply(200, hub.remotes.rotate(id));
+        case 'GET /channels': return reply(200, hub.channels.list());
+        case 'POST /channels': return reply(201, hub.channels.create(body as any));
+        case 'PATCH /channels/:id': return reply(200, hub.channels.update(id, body));
+        case 'DELETE /channels/:id': hub.channels.remove(id); return reply(200, {ok:true});
+        case 'POST /channels/:id/token': return reply(200, hub.channels.rotateToken(id));
+        case 'GET /channels/:id/entries': return reply(200, hub.channels.entries(id,
+          intParam(url,'limit',60,200), intParam(url,'before',undefined), url.searchParams.get('q') ?? ''));
+        case 'POST /channels/:id/read': return reply(200, hub.channels.read(id,body.through_id));
+        case 'POST /channels/:id/messages': return reply(200, hub.sendChannelMessage(id,body as any));
+        case 'GET /skills': return reply(200, hub.skills.list());
+        case 'POST /skills': return reply(201, hub.skills.create(String(body.name ?? ''),body.description ?? ''));
+        case 'GET /skills/:id': return reply(200, hub.skills.get(id));
+        case 'DELETE /skills/:id': hub.skills.remove(id); return reply(200, {ok:true});
+        case 'GET /skills/:id/file': return reply(200, hub.skills.readFile(id,url.searchParams.get('path') ?? ''));
+        case 'PUT /skills/:id/file': return reply(200, hub.skills.writeFile(id,url.searchParams.get('path') ?? '',body.content,body.executable));
+        case 'DELETE /skills/:id/file': return reply(200, hub.skills.deleteFile(id,url.searchParams.get('path') ?? ''));
 
     default: throw new HttpError(404, '공유 작업공간에서 지원하지 않는 요청입니다');
   }

@@ -1,4 +1,4 @@
-import { scopeId, splitId } from './federation.ts';
+import { legacySourceId, legacyTaskId, scopeId, splitId } from './federation.ts';
 // OS notifications for what needs the user while the desk is not in front: approval requests, agent
 // questions, and tasks that finished or failed. The desktop app shows them through its own commands
 // (macOS UserNotifications, granted to the hub page only; a click opens the thread); a browser through
@@ -158,12 +158,15 @@ const interrupted = (t: TaskView) => {
  * `open`: the task's thread, for a click on a browser notification.
  */
 export function useDeskNotifications(hub: { synced: number; tasks: Map<string, TaskView>; approvals: Map<string, Approval>; questions: Map<string, Question>;
-  onEvent: (fn: (e: HubEvent) => void) => () => void; access: AccessView | null }, open: (taskId: string) => void) {
+  onEvent: (fn: (e: HubEvent) => void) => () => void; access: AccessView | null; gone: Set<string> }, open: (taskId: string) => void) {
   const prev = useRef<{ access: Set<string>; approvals: Set<string>; questions: Set<string>; tasks: Map<string, { status: string; ask: number | null }> } | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
   /** Each task's latest agent message seen live; events reach this before the state they come with renders. */
   const said = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (hub.synced) for (const id of said.current.keys()) if (!hub.tasks.has(id)) said.current.delete(id);
+  }, [hub.synced, hub.tasks]);
   useEffect(trackFront, []);
   // The desktop app: a clicked notification opens its task's thread.
   useEffect(() => {
@@ -172,21 +175,22 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
       if (!raw) return;
       const parsed = /^workspace:([a-zA-Z0-9-]*):([a-zA-Z0-9-]+)$/.exec(raw);
       const workspace = parsed?.[1] ?? '', task = parsed?.[2] ?? raw;
-      openRef.current(scopeId(workspace,task));
+      openRef.current(workspace ? scopeId(legacySourceId(workspace),task) : legacyTaskId(task));
     };
     window.addEventListener('desk-notification-open', onOpen);
     return () => window.removeEventListener('desk-notification-open', onOpen);
   }, []);
   useEffect(() => {
     const url = new URL(location.href), rawTask = url.searchParams.get('openTask');
-    const task=rawTask?(splitId(rawTask)[0]?rawTask:scopeId(legacyWorkspaceId,rawTask)):null;
+    const task=rawTask?(splitId(rawTask)[0]?rawTask:legacyWorkspaceId?scopeId(legacySourceId(legacyWorkspaceId),rawTask):legacyTaskId(rawTask)):null;
     if (!task || !hub.tasks.has(task)) return;
     openRef.current(task);url.searchParams.delete('openTask');history.replaceState(null,'',url);
   }, [hub.synced, hub.tasks]);
   useEffect(() => hub.onEvent((e) => {
+    if (hub.gone.has(e.task_id)) return;
     const text = e.kind === 'assistant' || e.kind === 'update' ? clip(e.payload?.text) : '';
     if (text) said.current.set(e.task_id, text);
-  }), [hub.onEvent]);
+  }), [hub.onEvent, hub.gone]);
   useEffect(() => {
     if (!hub.synced) return;
     const now = {

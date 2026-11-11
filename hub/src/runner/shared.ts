@@ -23,7 +23,9 @@ if(command==='grant'||command==='revoke'||command==='peers') {
 }else {
   if(command)throw new Error('지원하지 않는 공유 러너 명령입니다');
   if(!config.shared.address)throw new Error('AGENT_DESK_SHARED_ADDRESS에 사용자@호스트 표기를 지정하세요');
-  const runtime=new SharedRuntime(dir,config.shared.address);
+  const runtime=new SharedRuntime(dir,config.shared.address,config.shared.migrationRunnerId?{
+    migration:{runnerId:config.shared.migrationRunnerId,journalPath:config.remote.dbPath,skillsHome:config.skillsHome},
+  }:{});
   const server=runtime.workspace.server();
   server.listen(config.shared.port,'127.0.0.1',()=>console.log(`공유 러너: http://127.0.0.1:${config.shared.port} (workspace ${runtime.workspace.id})`));
   let stopping=false;
