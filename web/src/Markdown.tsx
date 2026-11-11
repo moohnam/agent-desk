@@ -2,12 +2,13 @@ import { memo, useLayoutEffect, useRef, useState, type ComponentProps, type Reac
 import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MermaidBlock } from './MermaidBlock.tsx';
+import { remarkKoreanSuffixStrong } from './markdownKoreanStrong.ts';
 import { mermaidSource } from './mermaid.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
 // Strikethrough only with ~~two~~ tildes: a single one is common in prose ("1~2개", "~/path").
-const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm, { singleTilde: boolean }]];
+const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm, { singleTilde: boolean }], remarkKoreanSuffixStrong];
 
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
