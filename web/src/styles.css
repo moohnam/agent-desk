@@ -266,7 +266,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
   border-radius: 4px; padding: 0 5px; line-height: 17px; white-space: nowrap; }
 .ph .tag.err { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-border); }
 .ph .tag.stop { color: var(--muted); background: var(--hover); border-color: var(--border); }
-.replying { font-size: 12px; color: var(--faint); margin-top: 1px; }
+.replying { font-size: 12px; color: var(--faint); margin-top: 1px; overflow-wrap: anywhere; }
 .replying b { color: var(--accent); font-weight: 500; }
 .body { white-space: pre-wrap; word-break: break-word; margin-top: 2px; font-size: 14px; line-height: 1.75; }
 .body.clamp { max-height: 16em; overflow: hidden;
