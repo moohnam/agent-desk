@@ -5,6 +5,7 @@ import { clipResult, type StartEngine } from './engine.ts';
 import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
 import type { BackgroundTask } from '../../../shared/protocol.ts';
+import { claudeMcpOptions } from './managed-mcp.ts';
 
 /** #ultra is Codex's; the hub refuses it for Claude, and anything that slips through runs as max. */
 const claudeEffort = (e: Effort | undefined) => (e === 'ultra' ? 'max' : e);
@@ -82,6 +83,7 @@ export const startClaude: StartEngine = (opts) => {
       model: opts.model,
       effort: claudeEffort(opts.effort),
       plugins: opts.skillsHome ? [{ type: 'local', path: opts.skillsHome }] : undefined,
+      ...(opts.mcp ? claudeMcpOptions(opts.mcp) : {}),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: deskInstructions(opts.skillsHome) },
       canUseTool: (toolName, input, { signal }) => new Promise<PermissionResult>((resolve) => {
         const approvalId = randomUUID();

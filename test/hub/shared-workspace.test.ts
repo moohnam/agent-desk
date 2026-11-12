@@ -137,6 +137,22 @@ function fixture(){
  return {dir,project,runtime,starts,sends,approved,finish,interrupts:()=>interrupts,close:()=>{runtime.close();rmSync(dir,{recursive:true,force:true});}};
 }
 
+test('shared runtime waits for its MCP listener before dispatching queued starts',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'desk-runtime-ready-'));
+ const starts:StartOptions[]=[];
+ const runtime=new SharedRuntime(dir,'shared@worker',{autoStart:false,start:o=>{starts.push(o);return {
+  send:()=>{},resolveApproval:()=>{},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{},close:()=>{},
+ };}});
+ const server=runtime.workspace.server();
+ try{
+  runtime.hub.compose(`@ready:shared@worker:${dir} #codex begin`);
+  assert.equal(starts.length,0);
+  await listen(server);
+  runtime.start();
+  assert.equal(starts.length,1);
+ }finally{await stop(server);runtime.close();rmSync(dir,{recursive:true,force:true});}
+});
+
 for (const engine of ENGINES) test(`${engine}: two ordinary hub APIs share history, commands, approvals, offline input and restart`,async()=>{
  const f=fixture(),authority=f.runtime.workspace.server();const runnerUrl=await listen(authority);const port=Number(new URL(runnerUrl).port);
  const gateways:{store:Store;hub:Hub;server:Server;url:string;id:string;dir:string}[]=[];

@@ -8,15 +8,16 @@ import { RemoteJournal } from './remote-journal.ts';
 import type { StartEngine } from './engine.ts';
 import { createHash } from 'node:crypto';
 import { SkillStore } from '../skills.ts';
+import type { RunnerMcp } from './managed-mcp.ts';
 
 /** The connection never owns the engine process: disconnecting just leaves more output on disk. */
 export class RemoteAgent {
   readonly runner: Runner;
   readonly journal: RemoteJournal;
   private skillsHome: string;
-  constructor(journal: RemoteJournal, id: string, skillsHome: string, start?: StartEngine) {
+  constructor(journal: RemoteJournal, id: string, skillsHome: string, start?: StartEngine, mcp?: RunnerMcp) {
     this.journal=journal; this.skillsHome=skillsHome;
-    this.runner = new Runner(id, m => journal.emit(m), { start });
+    this.runner = new Runner(id, m => journal.emit(m), { start, mcp });
     journal.recoverAmbiguous();
   }
   pump() {

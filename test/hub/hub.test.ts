@@ -247,6 +247,25 @@ test('an approved request steers a busy target and only its receiving session ca
   assert.equal(hub.store.getRequest(request.id)?.answer, '정확한 답');
 });
 
+test('an Antigravity target is rejected before a local request is created', () => {
+  const { hub, taskId, dir } = started(setup(), '#agy 진행');
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '질문', cwd: dir });
+  assert.throws(() => hub.requests.request({ to: taskId, text: '질문', fromTaskId: asker.id }), /desk_reply 연결을 지원하지 않아/);
+  assert.equal(hub.store.openRequests().length, 0);
+});
+
+test('a project request does not silently target an older Codex task when the newest runs Antigravity', () => {
+  const { hub, taskId, dir } = started(setup(), '#codex 첫 작업');
+  const project = hub.store.getTask(taskId)!;
+  const newest = hub.createTask(project.project_id, '새 작업', '#agy 다음 작업');
+  hub.store.database.prepare('UPDATE task SET updated_at=? WHERE id=?').run('2026-01-01T00:00:00.000Z', taskId);
+  hub.store.database.prepare('UPDATE task SET updated_at=? WHERE id=?').run('2026-12-01T00:00:00.000Z', newest.id);
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '질문', cwd: dir });
+  assert.throws(() => hub.requests.request({ to: '@web', text: '질문', fromTaskId: asker.id }), /desk_reply 연결을 지원하지 않아/);
+  assert.throws(() => hub.requests.request({ to: newest.id, text: '질문', fromTaskId: asker.id }), /desk_reply 연결을 지원하지 않아/);
+  assert.equal(hub.store.openRequests().length, 0);
+});
+
 test('repeating a request after an inbound agent prompt reuses it; a new user message may ask again', () => {
   const { hub, taskId: target, dir } = started();
   const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
@@ -319,6 +338,20 @@ test('an independent request with mixed input fails instead of taking an unrelat
   runner.say({ type: 'busy', sessionId, busy: false });
   assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
   assert.notEqual(hub.store.getRequest(r.id)?.answer, '다른 지시의 답');
+});
+
+test('an idle request without desk_reply cannot use its final message as the answer', () => {
+  const { hub, runner, taskId: target, sessionId, dir } = started();
+  runner.say({ type: 'busy', sessionId, busy: false });
+  const asker = hub.external.attachExternal({ title: 'asker', summary: '묻는 쪽', cwd: dir });
+  const r = hub.requests.request({ to: target, text: '질문', fromTaskId: asker.id });
+  hub.resolveApproval(r.approval_id!, true);
+  assert.equal(runner.last('send')?.steer, false);
+  hub.addEvent(sessionId, target, 'assistant', { text: 'READY' });
+  hub.addEvent(sessionId, target, 'status', { kind: 'status', state: 'turn_done' });
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(hub.store.getRequest(r.id)?.status, 'failed');
+  assert.notEqual(hub.store.getRequest(r.id)?.answer, 'READY');
 });
 
 test('an interrupted steered turn fails without starting a new request turn', () => {

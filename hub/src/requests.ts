@@ -108,6 +108,7 @@ export class AgentRequests {
         throw new HttpError(409, '같은 요청 ID의 내용이 바뀌었습니다');
       return old;
     }
+    if (session.engine === 'agy') throw new HttpError(409, 'Antigravity 작업은 desk_reply 연결을 지원하지 않아 문의를 받을 수 없습니다');
     this.core.requireRunner(session.id);
     const r: AgentRequest = { id, from_task_id: a.from.task_id, from_session_id: a.from.session_id,
       to_task_id: task.id, to_session_id: session.id, text: a.text.trim(), status: 'queued', answer: null,
@@ -214,6 +215,7 @@ export class AgentRequests {
     if (session.source !== 'app') {
       throw new HttpError(409, `@${this.core.taskLabel(task)}는 터미널에서 붙은 작업이라 데스크가 질문을 넣을 수 없습니다. 데스크가 실행하는 작업을 지정하세요`);
     }
+    if (session.engine === 'agy') throw new HttpError(409, `@${this.core.taskLabel(task)}는 desk_reply 연결을 지원하지 않아 문의를 받을 수 없습니다`);
     return { task, session };
   }
 
@@ -298,12 +300,9 @@ export class AgentRequests {
     this.core.store.updateRequest(r.id, { status: 'running', prompt_event_id: e.id, to_session_id: sessionId });
   }
 
-  /**
-   * Legacy fallback only for one independent request turn. Steered requests require desk_reply.
-   */
+  /** Every request is answered by its own desk_reply, never by unrelated turn output. */
   answerRequests(sessionId: string, endedWhy?: string) {
-    const running = this.core.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId);
-    for (const r of running) {
+    for (const r of this.core.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId)) {
       if (endedWhy) { this.settleRequest(r, 'failed', `${endedWhy} 답을 받지 못했습니다.`); continue; }
       const prompt = r.prompt_event_id ? this.core.store.eventsByIds(r.to_task_id, [r.prompt_event_id])[0] : undefined;
       if (!prompt || prompt.session_id !== sessionId) {
@@ -316,18 +315,8 @@ export class AgentRequests {
         this.settleRequest(r, 'failed', `대상 작업이 ${(stopped.payload as { state: string }).state === 'error' ? '오류로 멈춰' : '중단되어'} 답을 받지 못했습니다.`);
         continue;
       }
-      if ((prompt.payload as { delivery?: string }).delivery === 'now') {
-        // Codex may turn a failed steer into a separate turn; a second delivery could duplicate it.
-        this.settleRequest(r, 'failed', '대상 에이전트가 이 턴에서 desk_reply로 답하지 않았습니다.');
-        continue;
-      }
-      if (running.length !== 1 || after.some((e) => e.kind === 'user')) {
-        this.settleRequest(r, 'failed', '다른 입력과 함께 진행되어 질문의 답을 구분할 수 없었습니다.');
-        continue;
-      }
-      const reply = after.filter((e) => e.kind === 'assistant').at(-1)?.payload as { text?: string } | undefined;
-      if (reply?.text?.trim()) this.settleRequest(r, 'answered', reply.text.trim());
-      else this.settleRequest(r, 'failed', '대상 에이전트가 답 없이 턴을 마쳤습니다.');
+      // Codex may turn a failed steer into a separate turn; a second delivery could duplicate it.
+      this.settleRequest(r, 'failed', '대상 에이전트가 이 턴에서 desk_reply로 답하지 않았습니다.');
     }
   }
 

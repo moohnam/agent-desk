@@ -25,9 +25,13 @@ if(command==='grant'||command==='revoke'||command==='peers') {
   if(!config.shared.address)throw new Error('AGENT_DESK_SHARED_ADDRESS에 사용자@호스트 표기를 지정하세요');
   const runtime=new SharedRuntime(dir,config.shared.address,config.shared.migrationRunnerId?{
     migration:{runnerId:config.shared.migrationRunnerId,journalPath:config.remote.dbPath,skillsHome:config.skillsHome},
-  }:{});
+    autoStart:false,
+  }:{autoStart:false});
   const server=runtime.workspace.server();
-  server.listen(config.shared.port,'127.0.0.1',()=>console.log(`공유 러너: http://127.0.0.1:${config.shared.port} (workspace ${runtime.workspace.id})`));
+  server.listen(config.shared.port,'127.0.0.1',()=>{
+    runtime.start();
+    console.log(`공유 러너: http://127.0.0.1:${config.shared.port} (workspace ${runtime.workspace.id})`);
+  });
   let stopping=false;
   const stop=()=>{if(stopping)return;stopping=true;server.closeAllConnections();server.close(()=>{runtime.close();});};
   process.on('SIGTERM',stop);process.on('SIGINT',stop);

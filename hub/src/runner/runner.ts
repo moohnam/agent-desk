@@ -5,6 +5,7 @@ import type { StartEngine } from './engine.ts';
 import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 import { materializeSkillSnapshot, pruneSkillSnapshots } from './skill-input.ts';
+import type { RunnerMcp } from './managed-mcp.ts';
 
 
 const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
@@ -28,12 +29,14 @@ export class Runner {
   private idleMs: number;
   /** Test override: one start function for every engine. */
   private start: StartEngine | null;
+  private mcp?: RunnerMcp;
 
-  constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine } = {}) {
+  constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine; mcp?: RunnerMcp } = {}) {
     this.id = id;
     this.emit = emit;
     this.idleMs = opts.idleMs ?? config.runner.idleMs;
     this.start = opts.start ?? null;
+    this.mcp = opts.mcp;
   }
 
   /** `close`: understands the close command (older runners ignore it). */
@@ -133,7 +136,7 @@ export class Runner {
           if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
           entry.adapter = start({
             sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome,
+            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: this.mcp,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {

@@ -245,6 +245,25 @@ test('a hub restart preserves commands and never marks another runner session lo
   }finally{next?.remotes.close();t.cleanup();}
 });
 
+test('a missing remote session settles its running question while pending starts stay protected',()=>{
+  const t=setup();try{
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex first`);t.exchange();t.exchange();
+    const asker=t.hub.external.attachExternal({title:'asker',summary:'question',cwd:t.dir});
+    const question=t.hub.requests.request({to:task.id,text:'status?',fromTaskId:asker.id});
+    t.hub.resolveApproval(question.approval_id!,true);
+    t.exchange();t.exchange();
+    assert.equal(t.store.getRequest(question.id)?.status,'running');
+    const missing={...t.request(),sessions:[]};
+    t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,missing));
+    assert.equal(t.store.getRequest(question.id)?.status,'failed');
+    assert.equal(t.store.getTask(task.id)?.status,'error');
+    const pending=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex second`);
+    const beforeStart={...t.request(),sessions:[]};
+    t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,beforeStart));
+    assert.equal(t.store.getTask(pending.id)?.status,'running');
+  }finally{t.cleanup();}
+});
+
 test('runner receipts survive restart, duplicates execute once, and ambiguous dispatch is not repeated',()=>{
   const dir=mkdtempSync(join(tmpdir(),'desk-inbox-'));const path=join(dir,'runner.db');
   let journal=new RemoteJournal(path);

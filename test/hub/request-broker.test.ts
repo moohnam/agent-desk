@@ -151,6 +151,29 @@ test('cross-source approval denial never reaches target; only a verified user me
   } finally { from.close(); to.close(); }
 });
 
+test('cross-source receive rejects an Antigravity target before storing a question', () => {
+  const from = owner('agy-asker'), to = owner('agy-target');
+  try {
+    to.store.database.prepare('UPDATE session SET engine=? WHERE id=?').run('agy', to.session.id);
+    const id = randomUUID();
+    assert.throws(() => to.hub.requests.receiveCross(id, { text: '질문', from: peer(from), toTaskId: to.task.id }), /desk_reply 연결을 지원하지 않아/);
+    assert.equal(to.store.getRequest(id), undefined);
+  } finally { from.close(); to.close(); }
+});
+
+test('cross-source receive replays a matching old request even after its target changes to Antigravity', () => {
+  const from = owner('agy-replay-asker'), to = owner('agy-replay-target');
+  try {
+    const id = randomUUID();
+    const input = { text: '기존 질문', from: peer(from), toTaskId: to.task.id };
+    const original = to.hub.requests.receiveCross(id, input);
+    to.store.database.prepare('UPDATE session SET engine=? WHERE id=?').run('agy', to.session.id);
+    assert.deepEqual(to.hub.requests.receiveCross(id, input), original);
+    assert.throws(() => to.hub.requests.receiveCross(id, { ...input, text: '바뀐 질문' }), /같은 요청 ID의 내용이 바뀌었습니다/);
+    assert.throws(() => to.hub.requests.receiveCross(randomUUID(), input), /desk_reply 연결을 지원하지 않아/);
+  } finally { from.close(); to.close(); }
+});
+
 test('a later user mention does not approve an earlier cross-source request', async () => {
   const from = owner('mention-race-origin'), to = owner('mention-race-target'), gateway = new Store(':memory:');
   let addedLaterMention = false;
@@ -239,6 +262,7 @@ test('approval-time cross requests are checked again before first delivery', asy
 
 test('a lost receive reply reuses the delivered target request', async () => {
   const from = owner('lost-reply-origin'), to = owner('lost-reply-target'), gateway = new Store(':memory:');
+  to.store.updateSession(to.session.id, { engine_session_id: 'lost-reply-engine' });
   let loseReply = true;
   const links = { database: gateway.database, list: () => [{ id: 'origin' }, { id: 'target' }],
     trustedCall: async (id: string, path: string, body: Record<string, unknown>) => {
@@ -262,7 +286,7 @@ test('a lost receive reply reuses the delivered target request', async () => {
     assert.equal(to.store.listEvents(to.task.id).filter(e => e.kind === 'user' && (e.payload as any).request?.id === id).length, 1);
     const waiting = rpc(links, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'desk_wait_answer',
       arguments: { question_id: id, timeout_sec: 2 } } });
-    to.hub.addEvent(to.session.id, to.task.id, 'assistant', { text: '한 번 보낸 답' });
+    to.hub.requests.replyRequest(id, '한 번 보낸 답', 'lost-reply-engine');
     to.hub.requests.answerRequests(to.session.id);
     assert.match((await waiting).content[0].text, /한 번 보낸 답/);
     assert.equal(from.store.getRequest(id)?.status, 'answered');
@@ -289,6 +313,7 @@ test('ambiguous @project target is rejected before any approval card is created'
 
 test('target outage leaves a durable pending request and wait delivers it after reconnect', async () => {
   const from = owner('outage-origin'), to = owner('outage-target'), gateway = new Store(':memory:');
+  to.store.updateSession(to.session.id, { engine_session_id: 'outage-engine' });
   let targetOnline = false;
   const links = { database: gateway.database, list: () => [{ id: 'origin' }, { id: 'target' }],
     trustedCall: async (id: string, path: string, body: Record<string, unknown>) => {
@@ -315,7 +340,7 @@ test('target outage leaves a durable pending request and wait delivers it after 
         else if (Date.now() > until) reject(Error('delivery did not recover')); else setTimeout(check, 10); };
       check();
     });
-    to.hub.addEvent(to.session.id, to.task.id, 'assistant', { text: '복구 후 답변' });
+    to.hub.requests.replyRequest(id, '복구 후 답변', 'outage-engine');
     to.hub.requests.answerRequests(to.session.id);
     assert.match((await waiting).content[0].text, /복구 후 답변/);
     assert.equal(from.store.getRequest(id)?.status, 'answered');
@@ -364,8 +389,9 @@ test('closing the broker releases an active long MCP wait before its database cl
   } finally { await closeRequestBroker(links); gateway.database.close(); from.close(); to.close(); }
 });
 
-test('HTTP gateway sends a cross-source MCP request through authenticated workspaces and returns the last reply', async () => {
+test('HTTP gateway sends a cross-source MCP request through authenticated workspaces and returns its explicit reply', async () => {
   const from = owner('http-origin'), to = owner('http-target'), offline = owner('http-offline');
+  to.store.updateSession(to.session.id, { engine_session_id: 'http-target-engine' });
   const gatewayDir = mkdtempSync(join(tmpdir(), 'desk-broker-gateway-'));
   const gatewayStore = new Store(join(gatewayDir, 'gateway.db'));
   const gatewayHub = new Hub(gatewayStore, { skills: new SkillStore(join(gatewayDir, 'skills')),
@@ -415,11 +441,11 @@ test('HTTP gateway sends a cross-source MCP request through authenticated worksp
         else if (Date.now() > until) reject(Error('HTTP broker did not deliver')); else setTimeout(check, 20); };
       check();
     });
-    to.hub.addEvent(to.session.id, to.task.id, 'assistant', { text: 'HTTP 경유 마지막 답변' });
+    to.hub.requests.replyRequest(id, 'HTTP 경유 명시 답변', 'http-target-engine');
     to.hub.requests.answerRequests(to.session.id);
     const answered = await waiting;
     assert.equal(answered.status, 200);
-    assert.match(answered.body.result.content[0].text, /HTTP 경유 마지막 답변/);
+    assert.match(answered.body.result.content[0].text, /HTTP 경유 명시 답변/);
     assert.equal(from.store.getRequest(id)?.status, 'answered');
     assert.equal(gatewayStore.listTasks().length, 0, 'gateway never owns a canonical task');
     const offlineUrl = await listen(offlineServer); offlineListening = true;

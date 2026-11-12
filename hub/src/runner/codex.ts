@@ -11,6 +11,7 @@ import type { ModelName, PermissionMode } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
+import { codexMcpProcess } from './managed-mcp.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
@@ -79,7 +80,8 @@ export const startCodex: StartEngine = (opts) => {
   const fileChanges = new Map<string, Json>();
   const stderrTail = new StderrTail();
 
-  const child = spawn(CODEX_BIN, ['app-server'], { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  const mcpProcess = opts.mcp ? codexMcpProcess(opts.mcp) : { args: ['app-server'], env: process.env };
+  const child = spawn(CODEX_BIN, mcpProcess.args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: mcpProcess.env });
 
   const closed = (error?: string) => {
     if (closedEmitted) return;

@@ -11,7 +11,8 @@ import type { Hub } from './hub.ts';
 /**
  * MCP server (Streamable HTTP, JSON responses only) through which a terminal Claude Code or Codex
  * session attaches its work to the desk: it reports progress and asks the user questions, and the
- * app only answers. Registered globally as `agent-desk`; agents use it only when the user asks.
+ * app only answers. Terminal sessions may register it globally as `agent-desk`; the app starts
+ * managed engine sessions with a separate `agent-desk-runtime` namespace.
  */
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -132,6 +133,9 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { cwd: str('작업 디렉터리 절대 경로') } },
   },
 ];
+
+/** Keep the runner-managed Codex namespace usable despite stale per-server filters. */
+export const DESK_TOOL_NAMES = TOOLS.map(tool => tool.name);
 
 const PROMPTS = [{
   name: 'desk',

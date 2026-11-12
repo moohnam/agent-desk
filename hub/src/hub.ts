@@ -153,7 +153,7 @@ export class Hub extends DeskCore {
       }
       for (const id of this.presumedLost) if (ownedSession(id)) this.presumedLost.delete(id);
     }
-    for (const r of (runnerId ? [] : gone)) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
+    for (const r of gone) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어'); }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }

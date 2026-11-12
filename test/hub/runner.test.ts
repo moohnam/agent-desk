@@ -43,6 +43,17 @@ test('an adapter that throws on start closes its session', () => {
   assert.deepEqual(runner.snapshot(), []);
 });
 
+test('the runner passes only its managed MCP connection into engine start options', () => {
+  const mcp = { url: 'http://127.0.0.1:4321/v1/mcp', workspaceId: 'fixture', token: 'fixture-token' };
+  let received: unknown;
+  const runner = new Runner('test', () => {}, { mcp, start: options => {
+    received = options.mcp;
+    return { send() {}, interrupt: async () => {}, setMode: async () => {}, setModel: async () => {}, resolveApproval() {}, close() {} };
+  } });
+  runner.handle(start('mcp-session'));
+  assert.equal(received, mcp);
+});
+
 test('a rejected interrupt becomes a warning on the session, not an unhandled rejection', async () => {
   const { runner, out } = setup({ interrupt: () => Promise.reject(new Error('turn ended')) });
   runner.handle(start('s1'));

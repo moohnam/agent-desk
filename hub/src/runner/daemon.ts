@@ -32,7 +32,7 @@ const runner = new Runner(`local-${hostname()}`, (m) => {
     const [gone] = buffer.splice(i >= 0 ? i : 0, 1);
     bufferSize -= gone.line.length;
   }
-});
+}, { mcp: { url: `http://127.0.0.1:${config.port}/mcp` } });
 
 // A failure in one session's adapter must not end the daemon and every other session with it.
 process.on('unhandledRejection', (err) => console.error('runner: unhandled rejection', err));

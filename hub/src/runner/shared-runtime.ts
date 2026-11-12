@@ -6,6 +6,8 @@ import { SharedWorkspace } from '../shared-workspace.ts';
 import { RemoteAgent } from './remote-agent.ts';
 import { RemoteJournal } from './remote-journal.ts';
 import type { StartEngine } from './engine.ts';
+import { sharedRunnerMcp } from './managed-mcp.ts';
+import { config } from '../config.ts';
 
 /** Owns both the authoritative task store and one durable engine runner on this machine. */
 export class SharedRuntime {
@@ -13,12 +15,12 @@ export class SharedRuntime {
   readonly workspace:SharedWorkspace;
   readonly journal:RemoteJournal;
   readonly agent:RemoteAgent;
-  private timer:NodeJS.Timeout;
+  private timer:NodeJS.Timeout|undefined;
   private runnerId:string;
   private exchangedAt=0;
   private snapshot='';
   private stopped=false;
-  constructor(dir:string,address:string,opts:{start?:StartEngine;skills?:SkillStore;
+  constructor(dir:string,address:string,opts:{start?:StartEngine;skills?:SkillStore;autoStart?:boolean;
     migration?:{runnerId:string;journalPath:string;skillsHome:string}}={}) {
     this.journal=new RemoteJournal(opts.migration?.journalPath??join(dir,'delivery.db'));
     try {this.journal.claim();} catch(e) {this.journal.close();throw e;}
@@ -42,14 +44,20 @@ export class SharedRuntime {
       }
       this.runnerId=opts.migration?.runnerId??peers[0]?.id??this.hub.remotes.register(address).runner.id;
       if(!opts.migration)this.journal.bind('workspace:'+this.workspace.id,this.runnerId);
-      this.agent=agent=new RemoteAgent(this.journal,this.runnerId,opts.migration?.skillsHome??join(dir,'engine-skills'),opts.start);
-      this.exchange();
-      this.timer=setInterval(()=>this.exchange(),250);this.timer.unref();
+      const mcp = sharedRunnerMcp(this.workspace, dir, config.shared.port);
+      this.agent=agent=new RemoteAgent(this.journal,this.runnerId,opts.migration?.skillsHome??join(dir,'engine-skills'),opts.start,mcp);
+      if(opts.autoStart!==false)this.start();
     }catch(error){
       for(const s of agent?.runner.snapshot()??[])try{agent!.runner.handle({type:'close',sessionId:s.sessionId});}catch{/* Preserve the startup error while releasing the remaining resources. */}
       hub?.dispose();store?.database.close();this.journal.close();
       throw error;
     }
+  }
+  /** The production server calls this only after the loopback MCP listener is ready. */
+  start() {
+    if(this.stopped||this.timer)return;
+    this.exchange();
+    this.timer=setInterval(()=>this.exchange(),250);this.timer.unref();
   }
   exchange() {
     if(this.stopped)return;
@@ -70,7 +78,7 @@ export class SharedRuntime {
   close() {
     if(this.stopped)return;
     this.stopped=true;
-    clearInterval(this.timer);
+    if(this.timer)clearInterval(this.timer);
     this.agent.runner.shutdown();
     // Closing events are already durable in the journal. Deliver them on restart;
     // exchanging here would also dispatch pending commands and start new engines.
