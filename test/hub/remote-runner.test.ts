@@ -71,6 +71,7 @@ test('a host-only project path selects its registered account and pins it across
     const project=t.store.getProject(task.project_id)!;
     assert.equal(project.root_path,`moohnam@ws20:${t.dir}`);
     assert.equal(t.store.latestSession(task.id)!.runner_id,t.registered.runner.id);
+    assert.equal(task.runner_label,'moohnam@ws20','registered address identifies an offline remote runner');
     assert.equal(t.localSent.length,0);
     t.exchange();t.exchange();assert.equal(t.starts[0].cwd,t.dir);
     t.finish();t.exchange();

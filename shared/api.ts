@@ -77,7 +77,7 @@ export interface TaskView<E = WireEvent> extends Task {
   model: ModelName | null;
   effort: Effort | null;
   live: boolean;
-  runner_id?: string; runner_connected?: boolean; delivery_pending?: number;
+  runner_id?: string; runner_label?: string; runner_connected?: boolean; delivery_pending?: number;
   /** 'external': a terminal session attached over MCP; the app only answers its questions. */
   source: 'app' | 'external' | null;
   /** The newest event, for its time and kind; its payload is left out (null) to keep the task list light. */

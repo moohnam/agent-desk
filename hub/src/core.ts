@@ -70,7 +70,7 @@ export class DeskCore {
   }
 
   taskView(task: Task): TaskView {
-    const session = this.store.latestSession(task.id);
+    const session = this.store.latestSessionWithRunnerLabel(task.id);
     return {
       ...task,
       project_name: this.store.getProject(task.project_id)?.name ?? '?',
@@ -79,6 +79,7 @@ export class DeskCore {
       model: session?.model ?? null,
       effort: session?.effort ?? null,
       runner_id: session?.runner_id,
+      runner_label: session?.source === 'app' ? session.runner_label ?? undefined : undefined,
       runner_connected: session ? (this.runner.ready?.(session.id) ?? this.runner.connected) : false,
       delivery_pending: session ? (this.runner as RunnerPort & { pendingFor?: (id: string) => number }).pendingFor?.(session.id) ?? 0 : 0,
       live: session ? (session.source === 'external' ? task.status !== 'done' : this.runner.has(session.id)) : false,

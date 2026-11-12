@@ -373,6 +373,14 @@ export class Store {
     return this.db.prepare('SELECT * FROM session WHERE task_id = ? ORDER BY created_at DESC LIMIT 1')
       .get(taskId) as unknown as Session | undefined;
   }
+  /** The latest session and its stored runner host/address, including an offline runner. */
+  latestSessionWithRunnerLabel(taskId: string): (Session & { runner_label: string | null }) | undefined {
+    return this.db.prepare(`SELECT s.*, COALESCE(remote.address, local.host) AS runner_label
+      FROM session s LEFT JOIN remote_runner remote ON remote.id = s.runner_id
+      LEFT JOIN runner local ON local.id = s.runner_id
+      WHERE s.task_id = ? ORDER BY s.created_at DESC LIMIT 1`)
+      .get(taskId) as unknown as (Session & { runner_label: string | null }) | undefined;
+  }
   updateSession(id: string, fields: Partial<Pick<Session, 'status' | 'engine_session_id' | 'permission_mode' | 'model' | 'effort'>>) {
     for (const [k, v] of Object.entries(fields)) {
       this.db.prepare(`UPDATE session SET ${k} = ? WHERE id = ?`).run(v as string | null, id);

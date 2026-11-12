@@ -1,4 +1,3 @@
-import { remoteLocation } from '../../shared/remote.ts';
 import { ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
@@ -44,7 +43,9 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
             {task.effort ? ` · effort ${task.effort}` : ''}</span>
           {turns > 0 && <span>턴 {turns}</span>}
           {task.permission_mode && task.source !== 'external' && <span>{task.permission_mode === 'auto' ? '자동 승인' : '매번 확인'} ({MODE_LABEL[task.permission_mode]})</span>}
-          {project && remoteLocation(project.root_path) && <span title={project.root_path}>{remoteLocation(project.root_path)!.address} · {task.runner_connected ? '연결됨' : '연결 대기 · 마지막 확인 상태'}</span>}
+          {task.source === 'external' ? <span>외부 세션</span>
+            : task.runner_id ? <span title={`러너 ID: ${task.runner_id}`}>러너 {task.runner_label ?? task.runner_id} · {task.runner_connected ? '연결됨' : '연결 대기 · 마지막 확인 상태'}</span>
+            : <span>러너 {task.source === null ? '미지정' : '정보 없음'}</span>}
           {!!task.delivery_pending && <span>러너 미수신 {task.delivery_pending}개</span>}
           {!task.live && !task.delivery_pending && task.runner_connected !== false && task.source !== 'external' && <span title="세션이 닫혀 있습니다. 답글을 보내면 이어서 다시 시작합니다.">세션 닫힘</span>}
         </div>

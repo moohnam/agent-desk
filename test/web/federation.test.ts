@@ -9,8 +9,10 @@ const event=(id:number,ts='2026-11-10T00:00:00.000Z'):HubEvent=>({id,ts,task_id:
 const state=():DeskState=>({projects:[{id:'project',name:'same',root_path:'/tmp/project',created_at:''}],tasks:[{id:'task',project_id:'project',seq:1,title:'task',status:'done',checkpoint_md:null,created_by:'me',created_at:'',updated_at:'',project_name:'same',engine:'claude',permission_mode:'default',model:null,effort:null,live:false,source:'app',last_event:event(1),pending_approvals:1,pending_questions:1,pending_ask:{event_id:1,text:'ask',ts:''},queued:[{id:'queue',text:'later',created_at:''}],background:[]}],approvals:[{id:'approval',task_id:'task',session_id:'session',status:'pending',tool_name:'Bash',input:{},created_at:''}],questions:[{id:'question',task_id:'task',session_id:'session',status:'pending',text:'?',answer:null,created_at:'',answered_at:null}],runner:{connected:true}});
 
 test('source identities isolate tasks, events, approvals, questions and queues without changing local IDs',()=>{
- const a=mapState('a',1,state()),b=mapState('b',2,state());
+ const input=state();input.tasks[0].runner_id='runner';input.tasks[0].runner_label='person@worker';
+ const a=mapState('a',1,input),b=mapState('b',2,input);
  assert.notEqual(a.tasks[0].id,b.tasks[0].id);assert.notEqual(a.tasks[0].last_event!.id,b.tasks[0].last_event!.id);
+ assert.equal(a.tasks[0].runner_id,scopeId('a','runner'));assert.equal(a.tasks[0].runner_label,'person@worker');
  assert.equal(a.tasks[0].pending_ask!.event_id,eventId(1,1));assert.equal(a.tasks[0].queued[0].id,scopeId('a','queue'));
  assert.equal(a.approvals[0].task_id,a.tasks[0].id);assert.equal(a.questions[0].id,scopeId('a','question'));
  const e=mapEvent('a',1,{...event(1),kind:'approval',payload:{approvalId:'approval',answers:'question'}});

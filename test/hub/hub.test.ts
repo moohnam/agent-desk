@@ -75,6 +75,29 @@ test('compose starts a task in a new project and sends the runner a start', () =
   assert.deepEqual([start.engine, start.model, start.prompt, start.cwd], ['codex', 'astra', '테스트 고쳐 줘', dir]);
 });
 
+test('task views keep the stored local runner host when disconnected and distinguish missing sessions', () => {
+  const { hub, runner, dir } = setup();
+  const local = hub.compose(`@web:${dir} #codex 시작`);
+  assert.equal(local.runner_id, 'fake');
+  assert.equal(local.runner_label, 'test', 'the saved hello host identifies the runner');
+  runner.connected = false;
+  runner.id = null;
+  const offline = hub.taskView(hub.store.getTask(local.id)!);
+  assert.equal(offline.runner_label, 'test', 'the label survives a lost connection');
+  assert.equal(offline.runner_connected, false);
+  const unstarted = hub.store.createTask({
+    id: 'not-started', project_id: local.project_id, title: '아직 시작하지 않음', status: 'done',
+    checkpoint_md: null, created_by: 'local', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+  });
+  const empty = hub.taskView(unstarted);
+  assert.equal(empty.source, null);
+  assert.equal(empty.runner_id, undefined);
+  assert.equal(empty.runner_label, undefined);
+  const external = hub.external.attachExternal({ title: '외부', summary: '외부 세션', cwd: dir });
+  assert.equal(external.source, 'external');
+  assert.equal(external.runner_label, undefined);
+});
+
 test('a finished turn marks the task done; a warning on the way does not fail it', () => {
   const { hub, runner, taskId, sessionId } = started();
   runner.say({ type: 'event', sessionId, event: { kind: 'status', state: 'warning', detail: { message: '스킬 등록 실패' } } });
