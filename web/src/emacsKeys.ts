@@ -37,6 +37,42 @@ function wordBack(v: string, i: number) {
 
 function moveTo(el: Field, i: number) {
   el.setSelectionRange(i, i);
+  revealCaret(el);
+}
+
+/** Custom selection changes do not reliably scroll a text control like native key movement. */
+function revealCaret(el: Field) {
+  if (el.scrollHeight <= el.clientHeight && el.scrollWidth <= el.clientWidth) return;
+  const doc = el.ownerDocument, style = getComputedStyle(el);
+  const mirror = doc.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.style.cssText = 'position:fixed;left:0;top:0;visibility:hidden;pointer-events:none;border:0;box-sizing:border-box';
+  for (const property of ['font', 'line-height', 'letter-spacing', 'word-spacing', 'tab-size', 'text-indent', 'text-transform', 'direction', 'padding']) {
+    mirror.style.setProperty(property, style.getPropertyValue(property));
+  }
+  mirror.style.width = `${el.clientWidth}px`;
+  mirror.style.whiteSpace = el instanceof HTMLTextAreaElement && el.wrap !== 'off' ? 'pre-wrap' : 'pre';
+  mirror.style.overflowWrap = 'break-word';
+  // Password fields must never copy their clear text into the document.
+  const value = el instanceof HTMLInputElement && el.type === 'password' ? '•'.repeat(el.value.length) : el.value;
+  const at = el.selectionDirection === 'backward' ? el.selectionStart ?? 0 : el.selectionEnd ?? 0;
+  mirror.textContent = value.slice(0, at);
+  const marker = doc.createElement('span');
+  marker.textContent = value.slice(at) || '\u200b';
+  mirror.append(marker);
+  doc.body.append(mirror);
+  try {
+    const box = mirror.getBoundingClientRect(), caret = marker.getClientRects()[0];
+    if (!caret) return;
+    const top = caret.top - box.top, left = caret.left - box.left;
+    const bottom = top + caret.height;
+    const padTop = parseFloat(style.paddingTop) || 0, padBottom = parseFloat(style.paddingBottom) || 0;
+    const padLeft = parseFloat(style.paddingLeft) || 0, padRight = parseFloat(style.paddingRight) || 0;
+    if (top < el.scrollTop + padTop) el.scrollTop = top - padTop;
+    else if (bottom > el.scrollTop + el.clientHeight - padBottom) el.scrollTop = bottom - el.clientHeight + padBottom;
+    if (left < el.scrollLeft + padLeft) el.scrollLeft = left - padLeft;
+    else if (left + 1 > el.scrollLeft + el.clientWidth - padRight) el.scrollLeft = left + 1 - el.clientWidth + padRight;
+  } finally { mirror.remove(); }
 }
 
 /** Replaces from..to as typing would: undo works and React's onChange sees it. */
@@ -48,6 +84,7 @@ function replace(el: Field, from: number, to: number, text: string) {
     el.setRangeText(text, from, to, 'end');
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  revealCaret(el);
 }
 
 /** Ctrl+N / Ctrl+P: the field's completion list if one is open (or the field is one line), else a line. */
