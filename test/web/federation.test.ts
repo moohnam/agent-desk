@@ -210,3 +210,30 @@ test('thread pagination keeps ID order when a disconnected runner reports older 
  assert.deepEqual(mergeTaskEvents([],[earlier,delayed]).map(e=>e.id),[1,2]);
  assert.deepEqual(mergeTaskEvents([delayed],[earlier]).map(e=>e.id),[1,2]);
 });
+
+test('a failed remote feed marks a partial newest page without discarding local posts',async()=>{
+ const original=globalThis.fetch;
+ let remoteFailure=true;
+ const sourceRows=[{id:'a',view_index:1,name:'remote',url:'',workspace_id:'uuid',pending:0}];
+ globalThis.fetch=async(input)=>{
+   const path=String(input),url=new URL(path,'http://desk');
+   if(path==='/api/workspaces')return Response.json(sourceRows);
+   if(url.pathname.endsWith('/feed')){
+     if(path.startsWith('/api/workspaces/a/'))return remoteFailure
+       ? Response.json({error:'temporary'},{status:503}) : Response.json([event(2)]);
+     return Response.json([event(1)]);
+   }
+   return Response.json({ok:true});
+ };
+ try{
+   await discoverSources(true);
+   const partial=await api.feedPage();
+   assert.equal(partial.complete,false);
+   assert.equal(partial.events.map(e=>e.id).join(','),'1');
+   assert.equal((await api.feed()).map(e=>e.id).join(','),'1','the existing partial-results API remains usable');
+   remoteFailure=false;
+   const recovered=await api.feedPage();
+   assert.equal(recovered.complete,true);
+   assert.equal(recovered.events.map(e=>e.id).join(','),`1,${eventId(1,2)}`);
+ }finally{globalThis.fetch=original;}
+});

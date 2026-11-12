@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import * as federation from '../../web/src/federation.ts';
 import * as draftRetention from '../../web/src/draftRetention.ts';
+import * as posts from '../../web/src/posts.ts';
+import * as feedCache from '../../web/src/feedCache.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -32,6 +34,11 @@ function hooks() {
       return [slots[i], (value: any) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
     },
     useRef(value: any) { const i = cursor++; return slots[i] ??= { current: value }; },
+    useReducer(reduce: (state: number) => number, initial: number) {
+      const i = cursor++;
+      if (!(i in slots)) slots[i] = initial;
+      return [slots[i], () => { slots[i] = reduce(slots[i]); }];
+    },
     useMemo(fn: () => any) { return fn(); },
     useCallback(fn:any,deps:any[]) {const i=cursor++,old=slots[i];if(!old||!deps.every((v,j)=>Object.is(v,old.deps[j])))slots[i]={deps,fn};return slots[i].fn;},
     useEffect(fn: () => any, deps: any[]) {
@@ -349,5 +356,185 @@ test('an empty shared project deleted during a delayed feed does not reappear', 
     assert.equal(h.render(() => module.useHub()).projects.length, 0);
     await h.render(() => module.useHub()).refresh();
     assert.equal(h.render(() => module.useHub()).projects.length, 0);
+  } finally { h.unmount(); }
+});
+
+test('a project column receives the first event of a task created in the same SSE batch', async () => {
+  const h = hooks(), streams: any[] = [];
+  const project = { id: 'project', name: 'project' };
+  const task = { id: 'new-task', project_id: project.id, title: 'new', status: 'running', title_revision: 0 };
+  const event = { id: 1, task_id: task.id, session_id: 'session', kind: 'user', ts: '2026-11-12T00:00:00Z', payload: { text: 'first' } };
+  const defs = [{ id: 'project-column', filter: { projectIds: [project.id] } }];
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: {
+      state: async () => ({ projects: [project], tasks: [], approvals: [], questions: [], channels: [] }),
+      feed: async () => [], feedPage: async () => ({ events: [], complete: true }),
+      feedCount: async () => ({ posts: 0, tasks: 0 }), remember() {},
+    }, FEED_PAGE: 1000 },
+    './federation.ts': { ...federation, discoverSources: async () => {}, getSources: () => [], subscribeSources: () => () => {} },
+    './posts.ts': posts, './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} },
+    './feedCache.ts': feedCache,
+  }, { EventSource: class { onmessage: any; constructor() { streams.push(this); } close() {} },
+    AbortController, window: { setTimeout }, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {} });
+  const render = () => h.render(() => {
+    const hub = module.useHub();
+    const columns = module.useColumnFeeds(defs, () => defs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
+    return { hub, columns };
+  });
+  try {
+    await render().hub.refresh();
+    render();
+    await Promise.resolve();
+    streams[0].onmessage({ data: JSON.stringify({ type: 'event', event }) });
+    streams[0].onmessage({ data: JSON.stringify({ type: 'task', task }) });
+    await new Promise(resolve => setTimeout(resolve, 65));
+    const result = render();
+    assert.equal(result.hub.tasks.has(task.id), true);
+    assert.equal(result.columns.feeds.get('project-column')?.events.map((e: any) => e.id).join(','), String(event.id));
+  } finally { h.unmount(); }
+});
+
+test('an incomplete newest page preserves cached posts and retries until every source responds', async () => {
+  const h = hooks();
+  const events = [1, 2, 3].map(id => ({ id, task_id: 'task', session_id: 'session', kind: 'assistant',
+    ts: `2026-11-12T00:00:0${id}Z`, payload: { text: String(id) } }));
+  const pages = [
+    { events: [events[0]], complete: true },
+    { events: [events[1]], complete: false },
+    { events: [events[1]], complete: false },
+    { events, complete: true },
+    { events: [], complete: false },
+    { events, complete: true },
+    { events: [], complete: false },
+    { events, complete: true },
+    { events: [], complete: false },
+  ];
+  let calls = 0;
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let nextTimer = 0;
+  const setTimer = (fn: () => void, ms: number) => { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; };
+  const clearTimer = (id: number) => { timers.delete(id); };
+  const defs: any[] = [{ id: 'column', filter: {} }];
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: { feed: async () => pages[calls++].events, feedPage: async () => pages[calls++],
+      feedCount: async () => ({ posts: 3, tasks: 1 }) }, FEED_PAGE: 1000 },
+    './federation.ts': federation, './posts.ts': posts, './feedCache.ts': feedCache,
+    './projects.ts': {}, './draftRetention.ts': draftRetention,
+  }, { AbortController, window: { setTimeout: setTimer }, setTimeout: setTimer, clearTimeout: clearTimer });
+  let synced = 0;
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), () => () => {}, synced));
+  const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
+  try {
+    render(); await settle();
+    assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '1');
+    synced = 1;
+    render(); await settle();
+    assert.equal(calls, 2);
+    assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '1,2');
+    assert.equal(render().feeds.get('column')?.loading, false);
+    const retry = [...timers].find(([, timer]) => timer.ms >= 1000);
+    assert.ok(retry, 'a failed source must schedule a bounded retry');
+    assert.equal(retry[1].ms, 1000);
+    timers.delete(retry[0]); retry[1].fn(); await settle();
+    assert.equal(calls, 3);
+    const secondRetry = [...timers].find(([, timer]) => timer.ms >= 1000);
+    assert.equal(secondRetry?.[1].ms, 2000);
+    timers.delete(secondRetry![0]); secondRetry![1].fn(); await settle();
+    assert.equal(calls, 4);
+    assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '1,2,3');
+    assert.equal([...timers.values()].filter(timer => timer.ms >= 1000).length, 0);
+    synced = 2;
+    render(); await settle();
+    const staleRetry = [...timers].find(([, timer]) => timer.ms >= 1000);
+    assert.ok(staleRetry);
+    synced = 3;
+    render(); await settle();
+    assert.equal(timers.has(staleRetry[0]), false, 'a new sync cancels the old retry');
+    synced = 4;
+    render(); await settle();
+    const oldQueryRetry = [...timers].find(([, timer]) => timer.ms >= 1000);
+    assert.ok(oldQueryRetry);
+    defs[0] = { id: 'column', filter: { projectIds: ['other'] } };
+    render(); await settle();
+    assert.equal(timers.has(oldQueryRetry[0]), false, 'a query change cancels the old retry');
+    synced = 5;
+    render(); await settle();
+    assert.ok([...timers.values()].some(timer => timer.ms >= 1000));
+  } finally { h.unmount(); }
+  assert.equal(timers.size, 0, 'unmount cancels every remaining timer');
+});
+
+test('a recovered full newest page paginates the gap before an older cached post', async () => {
+  const h = hooks();
+  const event = (id: number) => ({ id, task_id: 'task', session_id: 'session', kind: 'assistant',
+    ts: String(id).padStart(4, '0'), payload: { text: String(id) } });
+  const localOld = event(1);
+  const newest = Array.from({ length: 1000 }, (_, i) => event(i + 1001));
+  const middle = Array.from({ length: 100 }, (_, i) => event(i + 901));
+  const pages = [{ events: [localOld], complete: false }, { events: newest, complete: true }];
+  const cursors: number[] = [];
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  const setTimer = (fn: () => void) => { const id = ++nextTimer; timers.set(id, fn); return id; };
+  const clearTimer = (id: number) => { timers.delete(id); };
+  const defs = [{ id: 'column', filter: {} }];
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: {
+      feedPage: async () => pages.shift(),
+      feed: async (_limit: number, before: any) => { cursors.push(before.id); return middle; },
+      feedCount: async () => ({ posts: 1101, tasks: 1 }),
+    }, FEED_PAGE: 1000 },
+    './federation.ts': federation, './posts.ts': posts, './feedCache.ts': feedCache,
+    './projects.ts': {}, './draftRetention.ts': draftRetention,
+  }, { AbortController, window: { setTimeout: setTimer }, setTimeout: setTimer, clearTimeout: clearTimer });
+  let synced = 0;
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), () => () => {}, synced));
+  const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
+  try {
+    render(); await settle();
+    synced = 1;
+    render(); await settle();
+    let column = render().feeds.get('column');
+    assert.equal(column?.events.length, 1001);
+    assert.equal(column?.more, true, 'a full newest page still has earlier posts despite an older cached post');
+    render().loadEarlier('column'); await settle();
+    column = render().feeds.get('column');
+    assert.equal(cursors.join(','), '1001', 'pagination must start at the recovered page, not the old local post');
+    assert.equal(column?.events.length, 1101);
+    assert.equal(column?.events[0].id, 1, 'the old cached post remains visible');
+    assert.equal(column?.events.some((e: any) => e.id === 901), true, 'the missing middle was fetched');
+    assert.equal(column?.more, false);
+  } finally { h.unmount(); }
+});
+
+test('pagination resumes at the oldest retained post after live compaction', async () => {
+  const h = hooks(), listeners = new Set<(e: any) => void>();
+  const event = (id: number) => ({ id, task_id: 'task', session_id: 'session', kind: 'assistant',
+    ts: String(id).padStart(4, '0'), payload: { text: String(id) } });
+  const cursors: number[] = [];
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  const setTimer = (fn: () => void) => { const id = ++nextTimer; timers.set(id, fn); return id; };
+  const clearTimer = (id: number) => { timers.delete(id); };
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: {
+      feedPage: async () => ({ events: [event(1), event(2)], complete: true }),
+      feed: async (_limit: number, before: any) => { cursors.push(before.id); return [event(1)]; },
+      feedCount: async () => ({ posts: 4, tasks: 1 }),
+    }, FEED_PAGE: 2 },
+    './federation.ts': federation, './posts.ts': posts, './feedCache.ts': { ...feedCache, LIVE_FEED_LIMIT: 3 },
+    './projects.ts': {}, './draftRetention.ts': draftRetention,
+  }, { AbortController, window: { setTimeout: setTimer }, setTimeout: setTimer, clearTimeout: clearTimer });
+  const defs = [{ id: 'column', filter: {} }];
+  const onEvent = (fn: (e: any) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), onEvent, 0));
+  try {
+    render(); await Promise.resolve(); await Promise.resolve();
+    for (const id of [3, 4]) for (const listener of listeners) listener(event(id));
+    assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '2,3,4');
+    render().loadEarlier('column');
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(cursors.join(','), '2', 'the evicted first page must be fetched again');
+    assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '1,2,3,4');
   } finally { h.unmount(); }
 });

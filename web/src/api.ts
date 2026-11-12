@@ -137,7 +137,7 @@ async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:
   await discoverSources();
   const all=[{id:'',view_index:0},...getSources()];
   const pages=await Promise.all(all.map(async source=>{
-    const filter=sourceFilter(source.id,q);if(!filter)return [];
+    const filter=sourceFilter(source.id,q);if(!filter)return {events:[] as HubEvent[],complete:true};
     const p=feedSearch(filter);p.set('limit',String(limit));
     // A stable timestamp + source index + native ID cursor prevents cross-store gaps/ties.
     p.set('before_ts',before?.ts??'9999-12-31T23:59:59.999Z');
@@ -145,11 +145,11 @@ async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:
     p.set('cursor_id',String(!before||source.view_index<index?Number.MAX_SAFE_INTEGER:source.view_index>index?0:nativeEventId(before.id)));
     try {
       const r=await fetch(sourceBase(source.id)+'/feed?'+p,{signal});
-      if(!r.ok){if(!source.id&&!before&&r.status>=500)return [];throw Error('글을 불러오지 못했습니다');}
-      return (await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e));
-    }catch(e){if(before||signal?.aborted)throw e;if(source.id||e instanceof TypeError)return [];throw e;}
+      if(!r.ok){if(!source.id&&!before&&r.status>=500)return {events:[],complete:false};throw Error('글을 불러오지 못했습니다');}
+      return {events:(await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e)),complete:true};
+    }catch(e){if(before||signal?.aborted)throw e;if(source.id||e instanceof TypeError)return {events:[],complete:false};throw e;}
   }));
-  return pages.flat().sort(compareEvents).slice(-limit);
+  return {events:pages.flatMap(page=>page.events).sort(compareEvents).slice(-limit),complete:pages.every(page=>page.complete)};
 }
 async function feedCount(q:FeedQuery,signal?:AbortSignal) {
   await discoverSources();
@@ -191,7 +191,8 @@ export const api = {
    * The newest `limit` events, oldest first; `before`: those before that event id; `q`: only those a
    * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
    */
-  feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal),
+  feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal).then(page=>page.events),
+  feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal),
   feedCount,
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
