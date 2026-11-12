@@ -4,6 +4,7 @@ import { MAX_DIAGRAM_TEXT, type DiagramReply } from './mermaidProtocol.ts';
 
 let library: Promise<typeof import('mermaid')['default']> | undefined;
 let nextId = 0;
+class LibraryLoadError extends Error {}
 // Mermaid's diagram identifiers sometimes differ from their config keys.
 const CONFIG_KEYS: Record<string, keyof MermaidConfig> = {
   'flowchart-v2': 'flowchart', 'flowchart-elk': 'flowchart', classDiagram: 'class', stateDiagram: 'state',
@@ -14,7 +15,7 @@ const CONFIG_KEYS: Record<string, keyof MermaidConfig> = {
 async function renderDiagram(source: string): Promise<{ image: string; background: string }> {
   if (source.length > MAX_DIAGRAM_TEXT) throw new Error('도표가 너무 커서 원문으로 표시합니다.');
   library ??= import('mermaid').then((m) => m.default)
-    .catch((error: unknown) => { library = undefined; throw error; });
+    .catch(() => { library = undefined; throw new LibraryLoadError('도표 라이브러리를 불러오지 못했습니다.'); });
   const mermaid = await library;
   const render = async () => {
     // Configuration is global in Mermaid: change it only inside our serial render queue.
@@ -76,7 +77,11 @@ const connect = (event: MessageEvent) => {
     if (!Number.isSafeInteger(data?.id) || typeof data.source !== 'string') return;
     let reply: DiagramReply;
     try { reply = { id: data.id, result: await renderDiagram(data.source) }; }
-    catch (error) { reply = { id: data.id, error: error instanceof Error ? error.message : String(error) }; }
+    catch (error) { reply = {
+      id: data.id,
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof LibraryLoadError ? { errorKind: 'infrastructure' as const } : {}),
+    }; }
     port.postMessage(reply);
   };
   port.postMessage({ ready: true });

@@ -140,3 +140,100 @@ test('an inert reading pane pauses diagrams even when its geometry stays in the 
   hidden = false;view.dispatchEvent(new Event('desk-pane-visibility'));assert.equal(attempts.length, 2, 'a completed image is retained');
   stop();
 });
+
+test('renderer load and library import failures retry once with a fresh, released iframe', async t => {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  t.after(() => {
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
+    if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation); else Reflect.deleteProperty(globalThis, 'location');
+  });
+  let scenario: 'load' | 'import' | 'exhaust' = 'load';
+  let cleanup: AbortController | undefined;
+  const frames: { removed: boolean; onload: (() => void) | null; onerror: (() => void) | null }[] = [];
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { href: 'http://localhost/', origin: 'http://localhost' } });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    createElement: () => {
+      const index = frames.length;
+      const frame = {
+        removed: false, onload: null as (() => void) | null, onerror: null as (() => void) | null,
+        style: { cssText: '' }, setAttribute() {}, remove() { frame.removed = true; },
+        contentWindow: { postMessage(_message: unknown, _origin: string, [port]: MessagePort[]) {
+          port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
+            if (data.source === 'cleanup') { cleanup?.abort(); return; }
+            port.postMessage(scenario === 'import' && index === 2
+              ? { id: data.id, error: '도표 라이브러리를 불러오지 못했습니다.', errorKind: 'infrastructure' }
+              : { id: data.id, result: { image: 'data:image/svg+xml,ok', background: '#fff' } });
+          };
+          port.postMessage({ ready: true });
+        } },
+      };
+      frames.push(frame);
+      return frame;
+    },
+    body: { append(frame: typeof frames[number]) {
+      const index = frames.indexOf(frame);
+      queueMicrotask(() => { if ((scenario === 'load' && index === 0) || scenario === 'exhaust') frame.onerror?.(); else frame.onload?.(); });
+    } },
+  } });
+
+  assert.equal((await renderMermaid('graph LR\nA-->B')).image, 'data:image/svg+xml,ok');
+  assert.equal(frames.length, 2);
+  assert.equal(frames[0].removed, true, 'failed iframe is released before retry');
+  cleanup = new AbortController();
+  await assert.rejects(renderMermaid('cleanup', cleanup.signal), { name: 'AbortError' });
+  assert.equal(frames[1].removed, true, 'abort releases successful iframe and its pending request');
+
+  scenario = 'import';
+  assert.equal((await renderMermaid('graph LR\nA-->B')).image, 'data:image/svg+xml,ok');
+  assert.equal(frames.length, 4);
+  assert.equal(frames[2].removed, true, 'failed import releases its module realm before retry');
+  cleanup = new AbortController();
+  await assert.rejects(renderMermaid('cleanup', cleanup.signal), { name: 'AbortError' });
+  assert.equal(frames[3].removed, true);
+
+  scenario = 'exhaust';
+  await assert.rejects(renderMermaid('graph LR\nA-->B'), /렌더러를 불러오지 못했습니다/);
+  assert.equal(frames.length, 6, 'two infrastructure failures stop after one retry');
+  assert.equal(frames[4].removed && frames[5].removed, true);
+});
+
+test('diagram syntax errors and aborts do not retry or leave a live renderer', async t => {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  t.after(() => {
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
+    if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation); else Reflect.deleteProperty(globalThis, 'location');
+  });
+  let cleanup: AbortController | undefined;
+  let frames = 0;
+  let removed = 0;
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { href: 'http://localhost/', origin: 'http://localhost' } });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    createElement: () => {
+      frames++;
+      const frame = {
+        onload: null as (() => void) | null, onerror: null as (() => void) | null,
+        style: { cssText: '' }, setAttribute() {}, remove() { removed++; },
+        contentWindow: { postMessage(_message: unknown, _origin: string, [port]: MessagePort[]) {
+          port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
+            if (data.source === 'cleanup' || data.source === 'abort') { cleanup?.abort(); return; }
+            port.postMessage({ id: data.id, error: '구문 오류' });
+          };
+          port.postMessage({ ready: true });
+        } },
+      };
+      return frame;
+    },
+    body: { append(frame: { onload: (() => void) | null }) { queueMicrotask(() => frame.onload?.()); } },
+  } });
+  await assert.rejects(renderMermaid('invalid syntax'), /구문 오류/);
+  assert.equal(frames, 1, 'syntax error is not retried');
+  cleanup = new AbortController();
+  await assert.rejects(renderMermaid('cleanup', cleanup.signal), { name: 'AbortError' });
+  assert.equal(removed, 1);
+  cleanup = new AbortController();
+  await assert.rejects(renderMermaid('abort', cleanup.signal), { name: 'AbortError' });
+  assert.equal(frames, 2, 'abort is not retried');
+  assert.equal(removed, 2, 'abort releases the iframe');
+});

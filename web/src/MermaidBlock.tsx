@@ -14,8 +14,9 @@ export const MermaidBlock = memo(function MermaidBlock({ source }: { source: str
       try {
         const rendered = await renderMermaid(source, signal);
         if (!signal.aborted) setResult({ source, ...rendered });
-      } catch {
-        if (!signal.aborted) setResult({ source, error: '도표를 그리지 못했습니다. 아래 원문을 확인해 주세요.' });
+      } catch (error) {
+        const cause = (error instanceof Error ? error.message : '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120).replace(/[.!?]+$/, '');
+        if (!signal.aborted) setResult({ source, error: `도표를 그리지 못했습니다.${cause ? ` 원인: ${cause}.` : ''} 아래 원문을 확인해 주세요.` });
       }
     });
   }, [source]);

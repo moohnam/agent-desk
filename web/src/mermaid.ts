@@ -51,6 +51,7 @@ export function mermaidSource(node: Element | undefined): string | null {
 /** A short-lived document lets the browser reclaim Mermaid's private module/DOM caches. */
 const RENDERER_IDLE_MS = 5000;
 const RENDERER_TIMEOUT_MS = 30_000;
+class RendererInfrastructureError extends Error {}
 interface Renderer {
   frame: HTMLIFrameElement;
   port: MessagePort;
@@ -85,17 +86,19 @@ function getRenderer(): Renderer {
       fail(reason); state.pending?.reject(reason); state.pending = undefined;
     },
   };
-  const loading = setTimeout(() => state.stop(new Error('도표 렌더러를 불러오는 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
+  const loading = setTimeout(() => state.stop(new RendererInfrastructureError('도표 렌더러를 불러오는 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
   state.port.onmessage = ({ data }: MessageEvent<DiagramReply & { ready?: boolean }>) => {
     if (data.ready) { clearTimeout(loading); ready(); return; }
     const pending = state.pending;
     if (!pending || data.id !== pending.id) return;
     state.pending = undefined;
     if (data.result) pending.resolve(data.result);
-    else pending.reject(new Error(data.error || '도표를 그리지 못했습니다.'));
+    else pending.reject(data.errorKind === 'infrastructure'
+      ? new RendererInfrastructureError(data.error || '도표 라이브러리를 불러오지 못했습니다.')
+      : new Error(data.error || '도표를 그리지 못했습니다.'));
   };
   frame.onload = () => frame.contentWindow?.postMessage({ type: 'desk-mermaid-connect' }, location.origin, [channel.port2]);
-  frame.onerror = () => state.stop(new Error('도표 렌더러를 불러오지 못했습니다.'));
+  frame.onerror = () => state.stop(new RendererInfrastructureError('도표 렌더러를 불러오지 못했습니다.'));
   frame.src = new URL('/mermaid-renderer.html', location.href).href;
   renderer = state;
   document.body.append(frame);
@@ -107,25 +110,32 @@ export async function renderMermaid(source: string, signal?: AbortSignal): Promi
   if (source.length > MAX_DIAGRAM_TEXT) throw new Error('도표가 너무 커서 원문으로 표시합니다.');
   signal?.throwIfAborted();
   const render = async () => {
-    signal?.throwIfAborted();
-    const state = getRenderer();
-    const abort = () => state.stop(new DOMException('도표 렌더링을 취소했습니다.', 'AbortError'));
-    signal?.addEventListener('abort', abort, { once: true });
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await state.ready;
+    for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted();
-      return await new Promise<DiagramResult>((resolve, reject) => {
-        const id = ++requestId;
-        state.pending = { id, resolve, reject };
-        deadline = setTimeout(() => state.stop(new Error('도표 렌더링 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
-        state.port.postMessage({ id, source });
-      });
-    } finally {
-      clearTimeout(deadline);
-      signal?.removeEventListener('abort', abort);
-      if (renderer === state) state.idle = setTimeout(() => state.stop(new Error('idle')), RENDERER_IDLE_MS);
+      const state = getRenderer();
+      const abort = () => state.stop(new DOMException('도표 렌더링을 취소했습니다.', 'AbortError'));
+      signal?.addEventListener('abort', abort, { once: true });
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await state.ready;
+        signal?.throwIfAborted();
+        return await new Promise<DiagramResult>((resolve, reject) => {
+          const id = ++requestId;
+          state.pending = { id, resolve, reject };
+          deadline = setTimeout(() => state.stop(new Error('도표 렌더링 시간이 초과되었습니다.')), RENDERER_TIMEOUT_MS);
+          state.port.postMessage({ id, source });
+        });
+      } catch (error) {
+        if (!(error instanceof RendererInfrastructureError) || attempt > 0 || signal?.aborted) throw error;
+        // A failed import stays cached in its iframe realm. Release it before retrying once.
+        if (renderer === state) state.stop(error);
+      } finally {
+        clearTimeout(deadline);
+        signal?.removeEventListener('abort', abort);
+        if (renderer === state) state.idle = setTimeout(() => state.stop(new Error('idle')), RENDERER_IDLE_MS);
+      }
     }
+    throw new Error('도표를 그리지 못했습니다.');
   };
   const result = rendering.then(render);
   // Queue completion must not retain the last image as a fulfilled Promise's value.
