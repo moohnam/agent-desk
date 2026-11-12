@@ -73,6 +73,7 @@ export class DeskCore {
     const session = this.store.latestSessionWithRunnerLabel(task.id);
     return {
       ...task,
+      title_revision: (task as Task & { title_revision?: number }).title_revision ?? 0,
       project_name: this.store.getProject(task.project_id)?.name ?? '?',
       engine: session?.engine ?? null,
       permission_mode: session?.permission_mode ?? null,

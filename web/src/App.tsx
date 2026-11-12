@@ -1208,7 +1208,7 @@ export function App() {
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
           references={canReference ? { open: references.open, count: references.ids.length } : undefined}
           onReferences={() => { if (!references.open) setDrawer(false); references.show(!references.open); }}
-          onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} />
+          onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
         <div className="feed thread-feed"
           onScroll={(e) => {
             const f = e.currentTarget;

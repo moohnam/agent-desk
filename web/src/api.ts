@@ -46,7 +46,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   if (data.shared_pending) throw new SharedPending();
   if(!source)return data as T;
   const index=sourceIndex(source);
-  if(route==='/compose'||route==='/tasks'&&method==='POST')return mapTask(source,index,data) as T;
+  if(route==='/compose'||route==='/tasks'&&method==='POST'||method==='PATCH'&&/^\/tasks\/[^/]+$/.test(route))return mapTask(source,index,data) as T;
   if(route==='/projects'&&method==='POST')return {...data,id:scopeId(source,data.id)} as T;
   if(route.endsWith('/events')) {
     if(Array.isArray(data))return data.map(e=>mapEvent(source,index,e)) as T;
@@ -225,6 +225,7 @@ export const api = {
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
   send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
+  renameTask: (taskId: string, title: string) => call<TaskView>('PATCH', `/tasks/${taskId}`, { title }),
   cancelQueued: (taskId: string, queuedId: string) => call('DELETE', `/tasks/${taskId}/queue/${queuedId}`),
   /** Sends a waiting message at once: into the running turn, like #now. */
   sendQueuedNow: (taskId: string, queuedId: string) => call('POST', `/tasks/${taskId}/queue/${queuedId}/send`),

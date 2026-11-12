@@ -275,6 +275,17 @@ export class Hub extends DeskCore {
   createTask(projectId: string, title: string, text: string, mode: PermissionMode = DEFAULT_MODE, engine0?: EngineName, routed = false, context?: ChannelContext): TaskView {
     return this.atomic(() => this.createTaskInner(projectId, title, text, mode, engine0, routed, context));
   }
+  renameTask(taskId: string, title: unknown): TaskView {
+    return this.atomic(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw new HttpError(404, '작업을 찾을 수 없습니다');
+      if (typeof title !== 'string' || !title.trim()) throw new HttpError(400, '작업 제목을 입력하세요');
+      const next = title.trim();
+      this.store.setTaskTitle(taskId, next, true);
+      this.publishTask(taskId);
+      return this.taskView(this.store.getTask(taskId)!);
+    });
+  }
   private createTaskInner(projectId: string, title: string, text: string, mode: PermissionMode, engine0?: EngineName, routed = false, context?: ChannelContext) {
     const project = this.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'project not found');

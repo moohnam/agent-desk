@@ -31,6 +31,14 @@ test('local authority preserves task, session, queue and runner IDs across resta
     first.activate();
     const peer = first.workspace.grant('gateway');
     const task = first.workspace.execute(peer.id, {id:randomUUID(),method:'POST',path:'/compose',body:{text:`@one:${project} #claude first`}}).body;
+    const rename = {id:randomUUID(),method:'PATCH',path:`/tasks/${task.id}`,body:{title:'  새 제목  '}};
+    assert.equal(first.workspace.execute(peer.id, rename).body.title, '새 제목');
+    assert.equal(first.workspace.execute(peer.id, rename).body.title, '새 제목', 'the shared operation receipt is reusable');
+    assert.equal(first.workspace.execute(peer.id, {id:randomUUID(),method:'PATCH',path:`/tasks/${task.id}`,body:{title:'  '}}).status, 400);
+    assert.equal(first.workspace.execute(peer.id, {id:randomUUID(),method:'PATCH',path:'/tasks/missing',body:{title:'새 제목'}}).status, 404);
+    const revoked = first.workspace.grant('revoked');
+    first.workspace.revoke(revoked.id);
+    assert.throws(() => first!.workspace.execute(revoked.id, {id:randomUUID(),method:'PATCH',path:`/tasks/${task.id}`,body:{title:'거부'}}), {status:401});
     const session = first.hub.store.latestSession(task.id)!;
     assert.equal(session.runner_id, 'local-existing-runner');
     assert.ok(commands.some(command => command.type === 'start' && command.sessionId === session.id));

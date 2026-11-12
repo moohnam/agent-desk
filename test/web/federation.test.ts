@@ -25,6 +25,27 @@ test('source identities isolate tasks, events, approvals, questions and queues w
  assert.equal(composeSource('@same hello',a.projects),'a');assert.equal(composeSource('#claude @same hello',a.projects),'a');assert.equal(composeSource('@same hello',a.projects,''),'');
 });
 
+test('renaming a shared task routes to its source and scopes the returned task', async () => {
+ const original=globalThis.fetch;
+ const source='rename-source', id=scopeId(source,'task');
+ const requests:{path:string;method:string;body:any;operation:string|null}[]=[];
+ globalThis.fetch=async(input,init)=>{
+   const path=String(input);
+   if(path==='/api/workspaces')return Response.json([{id:source,view_index:3,name:'workspace',url:'',workspace_id:'uuid',pending:0}]);
+   requests.push({path,method:init?.method??'GET',body:JSON.parse(String(init?.body)),operation:new Headers(init?.headers).get('x-desk-operation-id')});
+   return Response.json({...state().tasks[0],title:'새 제목',title_revision:1});
+ };
+ try {
+   const updated=await api.renameTask(id,'새 제목');
+   assert.equal(updated.id,id);
+   assert.equal(updated.project_id,scopeId(source,'project'));
+   assert.equal(updated.title,'새 제목');
+   assert.equal(updated.title_revision,1);
+   assert.deepEqual(requests.map(r=>[r.path,r.method,r.body.title]),[[`/api/workspaces/${source}/tasks/task`,'PATCH','새 제목']]);
+   assert.ok(requests[0].operation,'shared writes use a stable operation ID');
+ }finally{globalThis.fetch=original;}
+});
+
 test('migrated remote records appear once, old task links resolve, and offline snapshots respect removal',async()=>{
  const original=globalThis.fetch;
  const source='remote-runner', task='moved-task', project='moved-project';

@@ -38,7 +38,7 @@ export class ExternalSessions {
     const engine = engineOf(a.engine);
     if (a.taskId) {
       const session = this.externalSession(a.taskId);
-      if (a.title?.trim()) this.core.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
+      if (a.title?.trim() && this.core.store.taskTitleRevision(a.taskId) === 0) this.core.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
       this.core.addEvent(session.id, a.taskId, 'status', { kind: 'status', state: 'started', detail: { source: 'external', engine, cwd } });
       this.core.addEvent(session.id, a.taskId, 'assistant', { text: a.summary.trim(), via: 'mcp' });
       this.core.setStatus(a.taskId, session.id, 'running');
@@ -158,7 +158,7 @@ export class ExternalSessions {
         this.core.addEvent(old.id, a.taskId, 'question', { questionId: q.id, text: q.text, decision: 'cancelled' });
       }
       this.core.store.updateSession(old.id, { status: 'done' });
-      if (a.title?.trim()) this.core.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
+      if (a.title?.trim() && this.core.store.taskTitleRevision(a.taskId) === 0) this.core.store.setTaskTitle(a.taskId, a.title.trim().slice(0, 120));
       task = this.core.store.getTask(a.taskId)!;
     } else {
       const project = this.core.store.projectsContaining(cwd)[0] ?? this.createProject(this.freeProjectName(basename(cwd) || 'root'), cwd);

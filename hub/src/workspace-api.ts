@@ -37,6 +37,7 @@ const routes = [
   'GET /feed',
   'GET /feed/:id',
   'GET /tasks/:id/events',
+  'PATCH /tasks/:id',
   'POST /tasks/:id/messages',
   'DELETE /tasks/:id/queue/:id',
   'POST /tasks/:id/queue/:id/send',
@@ -142,6 +143,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
           const events = hub.store.listEvents(id, 500, intParam(url, 'since', undefined), intParam(url, 'before', undefined));
           return reply(200, { events, more: events.length > 0 && hub.store.hasEventsBefore(id, events[0].id) });
         }
+        case 'PATCH /tasks/:id':
+          return reply(200, hub.renameTask(id, body.title));
         case 'POST /tasks/:id/messages': {
           const b = body;
           const receipt: MessageReceipt = {};

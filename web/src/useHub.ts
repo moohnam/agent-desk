@@ -44,6 +44,19 @@ export function useHub() {
   const deletedProjects = useRef(new Set<string>());
   const knownTasks = useRef(new Set<string>());
   const taskRefresh = useRef<Map<string, TaskView | null> | null>(null);
+  const updateTaskTitle = useCallback((taskId: string, title: string, revision: number) => {
+    if (deleted.current.has(taskId)) return;
+    setTasks((prev) => {
+      const current = prev.get(taskId);
+      if (!current || deleted.current.has(taskId)) return prev;
+      if ((current.title_revision ?? 0) > revision) return prev;
+      if (current.title === title && current.title_revision === revision) return prev;
+      const updated = { ...current, title, title_revision: revision };
+      api.remember(splitId(taskId)[0], { type: 'task', task: updated });
+      taskRefresh.current?.set(taskId, updated);
+      return new Map(prev).set(taskId, updated);
+    });
+  }, []);
 
   const approvalRefresh=useRef<Map<string,Approval>|null>(null);
   const questionRefresh=useRef<Map<string,Question>|null>(null);
@@ -216,7 +229,7 @@ export function useHub() {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, availableSources, refresh, onEvent };
+  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, availableSources, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */

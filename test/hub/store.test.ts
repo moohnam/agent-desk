@@ -1,11 +1,38 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { EventKind } from '../../shared/events.ts';
 import { Store } from '../../hub/src/db.ts';
 import { buildPosts } from '../../web/src/posts.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 
 const TS = '2026-10-29T10:00:00.000Z';
+
+test('old task rows gain a persistent title revision with the same column order as fresh stores', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'desk-title-migrate-'));
+  const path = join(dir, 'desk.db');
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE task (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, status TEXT,
+    checkpoint_md TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, seq INTEGER);
+    INSERT INTO task VALUES ('old','project','자동 제목','done',NULL,'local','${TS}','${TS}',1);`);
+  old.close();
+  try {
+    const migrated = new Store(path), fresh = new Store(':memory:');
+    const columns = (db: Store) => (db.database.prepare('PRAGMA table_info(task)').all() as { name: string }[]).map(c => c.name);
+    assert.deepEqual(columns(migrated), columns(fresh), 'remote transfer compares complete task rows in column order');
+    assert.equal(migrated.taskTitleRevision('old'), 0);
+    migrated.setTaskTitle('old', '수동 제목', true);
+    migrated.setTaskTitle('old', '수동 제목', true);
+    assert.equal(migrated.taskTitleRevision('old'), 2);
+    migrated.database.close(); fresh.database.close();
+    const reopened = new Store(path);
+    assert.equal(reopened.taskTitleRevision('old'), 2);
+    reopened.database.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 /** A store with one project and one task (and its session) per id in `tasks`. */
 function store(tasks = ['t1']) {

@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS project (
 CREATE TABLE IF NOT EXISTS task (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), title TEXT NOT NULL,
   status TEXT NOT NULL, checkpoint_md TEXT, created_by TEXT NOT NULL,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, seq INTEGER,
+  title_revision INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS session (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id), engine TEXT NOT NULL,
   engine_session_id TEXT, cwd TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
@@ -182,6 +183,7 @@ export class Store {
         UPDATE task SET seq = (SELECT count(*) FROM task t WHERE t.project_id = task.project_id
           AND (t.created_at < task.created_at OR (t.created_at = task.created_at AND t.id <= task.id)));`);
     }
+    if (!taskCols.some((c) => c.name === 'title_revision')) this.db.exec('ALTER TABLE task ADD COLUMN title_revision INTEGER NOT NULL DEFAULT 0');
     const queuedCols = this.db.prepare('PRAGMA table_info(queued)').all() as { name: string }[];
     if (!queuedCols.some((c) => c.name === 'ord')) {
       // The order messages are sent in; the user can change it. Existing ones keep theirs.
@@ -331,8 +333,12 @@ export class Store {
   setCheckpoint(id: string, md: string) {
     this.db.prepare('UPDATE task SET checkpoint_md = ?, updated_at = ? WHERE id = ?').run(md, now(), id);
   }
-  setTaskTitle(id: string, title: string) {
-    this.db.prepare('UPDATE task SET title = ?, updated_at = ? WHERE id = ?').run(title, now(), id);
+  taskTitleRevision(id: string): number {
+    return (this.db.prepare('SELECT title_revision FROM task WHERE id = ?').get(id) as { title_revision: number } | undefined)?.title_revision ?? 0;
+  }
+  setTaskTitle(id: string, title: string, manual = false) {
+    this.db.prepare('UPDATE task SET title = ?, title_revision = title_revision + ?, updated_at = ? WHERE id = ?')
+      .run(title, manual ? 1 : 0, now(), id);
   }
 
   /**

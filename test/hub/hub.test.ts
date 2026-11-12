@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,6 +7,7 @@ import type { HubToRunner, LiveSession, RunnerToHub } from '../../shared/protoco
 import { Store, feedEvent } from '../../hub/src/db.ts';
 import { CHANNEL_CONTEXT_MAX_ENTRIES } from '../../shared/api.ts';
 import { Hub } from '../../hub/src/hub.ts';
+import { workspaceApi } from '../../hub/src/workspace-api.ts';
 import type { RunnerPort } from '../../hub/src/runner/client.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
 
@@ -73,6 +74,63 @@ test('compose starts a task in a new project and sends the runner a start', () =
   assert.equal(hub.store.listProjects()[0].root_path, dir);
   const start = runner.last('start')!;
   assert.deepEqual([start.engine, start.model, start.prompt, start.cwd], ['codex', 'astra', '테스트 고쳐 줘', dir]);
+});
+
+test('task title updates trim, publish, reject empty or missing tasks, and keep long explicit titles', () => {
+  const { hub, dir } = setup();
+  const task = hub.compose(`@title:${dir} #codex 시작`);
+  const published: string[] = [];
+  hub.bus.on('message', (message) => { if (message.type === 'task') published.push(message.task.title); });
+  const changed = workspaceApi(hub, 'PATCH', new URL(`/tasks/${task.id}`, 'http://workspace'), { title: '  바꾼 제목  ' });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.body.title, '바꾼 제목');
+  assert.equal(changed.body.title_revision, 1);
+  assert.equal(hub.store.getTask(task.id)?.title, '바꾼 제목');
+  assert.deepEqual(published, ['바꾼 제목']);
+  const same = workspaceApi(hub, 'PATCH', new URL(`/tasks/${task.id}`, 'http://workspace'), { title: '바꾼 제목' });
+  assert.equal(same.body.title, '바꾼 제목');
+  assert.equal(same.body.title_revision, 2, 'saving the same title still advances its version');
+  assert.deepEqual(published, ['바꾼 제목', '바꾼 제목']);
+  assert.throws(() => hub.renameTask(task.id, '  '), { status: 400 });
+  assert.throws(() => hub.renameTask('missing', '제목'), { status: 404 });
+  assert.equal(hub.store.getTask(task.id)?.title, '바꾼 제목');
+  const long = '긴'.repeat(150);
+  assert.equal(hub.renameTask(task.id, long).title, long);
+});
+
+test('external titles update on reattach until a user pins one, including an unchanged title and handoff', () => {
+  const { hub, dir } = setup();
+  const external = hub.external.attachExternal({ title: '자동 제목', summary: '시작', cwd: dir });
+  assert.equal(hub.external.attachExternal({ taskId: external.id, title: '새 자동 제목', summary: '재연결', cwd: dir }).title, '새 자동 제목');
+  hub.renameTask(external.id, '새 자동 제목');
+  assert.equal(hub.store.taskTitleRevision(external.id), 1, 'explicitly saving the same title pins it');
+  assert.equal(hub.external.attachExternal({ taskId: external.id, title: '다른 자동 제목', summary: '재연결', cwd: dir }).title, '새 자동 제목');
+  assert.equal(hub.taskView(hub.store.getTask(external.id)!).title_revision, 1);
+
+  const oldConfig = process.env.CLAUDE_CONFIG_DIR;
+  const configDir = mkdtempSync(join(tmpdir(), 'desk-handoff-title-'));
+  const sessionId = 'session1234';
+  const sessionDir = join(configDir, 'projects', dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, `${sessionId}.jsonl`), JSON.stringify({
+    type: 'user', sessionId, cwd: dir, timestamp: '2026-01-01T00:00:00.000Z', message: { content: '처음 지시' },
+  }) + '\n');
+  const otherSessionId = 'session5678';
+  writeFileSync(join(sessionDir, `${otherSessionId}.jsonl`), JSON.stringify({
+    type: 'user', sessionId: otherSessionId, cwd: dir, timestamp: '2026-01-01T00:00:01.000Z', message: { content: '다음 지시' },
+  }) + '\n');
+  process.env.CLAUDE_CONFIG_DIR = configDir;
+  try {
+    const handed = hub.external.handoff({ taskId: external.id, title: '인계 제목', cwd: dir, engine: 'claude', sessionId });
+    assert.equal(handed.task.title, '새 자동 제목');
+    assert.equal(handed.task.source, 'app');
+    const unpinned = hub.external.attachExternal({ title: '인계 전 제목', summary: '시작', cwd: dir });
+    const ordinary = hub.external.handoff({ taskId: unpinned.id, title: '인계에서 지정한 제목', cwd: dir, engine: 'claude', sessionId: otherSessionId });
+    assert.equal(ordinary.task.title, '인계에서 지정한 제목', 'explicit handoff titles still update unpinned tasks');
+  } finally {
+    if (oldConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldConfig;
+    rmSync(configDir, { recursive: true, force: true });
+  }
 });
 
 test('task views keep the stored local runner host when disconnected and distinguish missing sessions', () => {

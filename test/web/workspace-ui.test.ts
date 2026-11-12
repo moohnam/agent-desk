@@ -49,6 +49,159 @@ function workspace(id: string) {
   return { workspaceId: id, workspaceKey: (key: string) => id ? `${key}.workspace.${id}` : key };
 }
 
+function threadTitleHarness() {
+  const h = hooks();
+  const requests: { id: string; title: string; resolve: (task: any) => void; reject: (error: Error) => void }[] = [];
+  const renamed: { id: string; title: string; revision: number }[] = [], notices: string[] = [];
+  class SharedPending extends Error {}
+  const jsx = (type: any, props: any) => ({ type, props });
+  const module = load('ThreadHead.tsx', {
+    react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
+    '../../shared/compose.ts': compose,
+    './projects.ts': { modelShort: (s: string) => s, projectColor: () => '#123456' },
+    './badges.tsx': { DraftBadge: 'DraftBadge', StatusBadge: 'StatusBadge', TerminalBadge: 'TerminalBadge' },
+    './api.ts': { api: { renameTask: (id: string, title: string) => new Promise((resolve, reject) => requests.push({ id, title, resolve, reject })) } },
+    './workspace.ts': { SharedPending },
+  });
+  const task = (id: string) => ({ id, title: `기존 ${id}`, project_id: 'project', project_name: 'project', seq: 1,
+    status: 'done', engine: 'codex', source: 'app', live: false, runner_connected: true });
+  const render = (current: any) => h.render(() => module.ThreadHead({ task: current, project: undefined, model: undefined,
+    events: [], now: 0, draft: false, handoff: null, onClose() {}, onPin() {}, onHandoff() {}, onMenu() {},
+    onNotice: (message: string) => notices.push(message), onRenamed: (id: string, title: string, revision: number) => renamed.push({ id, title, revision }) }));
+  const find = (node: any, match: (node: any) => boolean): any => {
+    if (!node || typeof node !== 'object') return undefined;
+    if (match(node)) return node;
+    for (const child of [node.props?.children].flat(Infinity)) { const found = find(child, match); if (found) return found; }
+  };
+  const titleButton = (tree: any) => find(tree, node => node.type === 'button' && node.props?.title === '제목 바꾸기');
+  const input = (tree: any) => find(tree, node => node.type === 'input' && node.props?.['aria-label'] === '작업 제목');
+  const alert = (tree: any) => find(tree, node => node.props?.role === 'alert');
+  const key = (name: string, composing = false) => ({ key: name, nativeEvent: { isComposing: composing }, preventDefault() {}, stopPropagation() {} });
+  return { h, requests, renamed, notices, SharedPending, task, render, titleButton, input, alert, key };
+}
+const settleTitle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test('thread title Enter and blur save once; Escape, IME Enter and empty input do not save', async () => {
+  const x = threadTitleHarness(), task = x.task('one');
+  x.titleButton(x.render(task)).props.onClick();
+  let input = x.input(x.render(task));
+  input.props.onChange({ target: { value: '  새 제목  ' } });
+  input = x.input(x.render(task));
+  input.props.onKeyDown(x.key('Enter', true));
+  assert.equal(x.requests.length, 0, 'IME confirmation does not submit');
+  input.props.onKeyDown(x.key('Enter'));
+  input.props.onBlur();
+  assert.deepEqual(x.requests.map(r => [r.id, r.title]), [['one', '새 제목']]);
+  x.requests[0].resolve({ ...task, title: '새 제목', title_revision: 1 });
+  await settleTitle();
+  assert.equal(x.input(x.render({ ...task, title: '새 제목' })), undefined);
+  assert.deepEqual(x.renamed, [{ id: 'one', title: '새 제목', revision: 1 }]);
+
+  x.titleButton(x.render(task)).props.onClick();
+  input = x.input(x.render(task));
+  input.props.onChange({ target: { value: '취소' } });
+  input = x.input(x.render(task));
+  input.props.onKeyDown(x.key('Escape'));
+  input.props.onBlur();
+  assert.equal(x.requests.length, 1, 'Escape suppresses the following blur');
+  assert.equal(x.input(x.render(task)), undefined);
+
+  x.titleButton(x.render(task)).props.onClick();
+  input = x.input(x.render(task));
+  input.props.onChange({ target: { value: '  ' } });
+  x.input(x.render(task)).props.onBlur();
+  assert.equal(x.requests.length, 1);
+  assert.match(x.alert(x.render(task)).props.children, /제목을 입력/);
+});
+
+test('thread title failures stay editable, durable pending closes, and old completions preserve the next task draft', async () => {
+  const x = threadTitleHarness(), first = x.task('first'), next = x.task('next');
+  x.titleButton(x.render(first)).props.onClick();
+  x.input(x.render(first)).props.onChange({ target: { value: '실패 제목' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.requests[0].reject(new Error('저장 실패'));
+  await settleTitle();
+  assert.match(x.alert(x.render(first)).props.children, /저장 실패/);
+  x.input(x.render(first)).props.onChange({ target: { value: '보관 제목' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.requests[1].reject(new x.SharedPending('전달 대기'));
+  await settleTitle();
+  assert.equal(x.input(x.render(first)), undefined);
+  assert.deepEqual(x.notices, ['전달 대기']);
+
+  x.titleButton(x.render(first)).props.onClick();
+  x.input(x.render(first)).props.onChange({ target: { value: '첫 작업 제목' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.titleButton(x.render(next)).props.onClick();
+  x.input(x.render(next)).props.onChange({ target: { value: '다음 작업 초안' } });
+  x.requests[2].resolve({ ...first, title: '첫 작업 제목' });
+  await settleTitle();
+  assert.equal(x.input(x.render(next)).props.value, '다음 작업 초안');
+  assert.deepEqual(x.renamed, [], 'a response for a left task does not change another draft');
+});
+
+test('late title responses from an earlier edit or unmounted head do not reverse a newer title', async () => {
+  const x = threadTitleHarness(), first = x.task('first'), other = x.task('other');
+  x.titleButton(x.render(first)).props.onClick();
+  x.input(x.render(first)).props.onChange({ target: { value: '오래된 제목' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.render(other);
+  x.titleButton(x.render(first)).props.onClick();
+  x.input(x.render(first)).props.onChange({ target: { value: '최신 제목' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.requests[1].resolve({ ...first, title: '최신 제목', title_revision: 2 });
+  await settleTitle();
+  x.requests[0].resolve({ ...first, title: '오래된 제목' });
+  await settleTitle();
+  assert.deepEqual(x.renamed, [{ id: 'first', title: '최신 제목', revision: 2 }]);
+
+  x.titleButton(x.render(first)).props.onClick();
+  x.input(x.render(first)).props.onChange({ target: { value: '언마운트 뒤 응답' } });
+  x.input(x.render(first)).props.onKeyDown(x.key('Enter'));
+  x.h.unmount();
+  x.requests[2].resolve({ ...first, title: '언마운트 뒤 응답' });
+  await settleTitle();
+  assert.deepEqual(x.renamed, [{ id: 'first', title: '최신 제목', revision: 2 }]);
+});
+
+test('a late rename response preserves SSE metadata and cannot reverse an ABA title change', async () => {
+  const h = hooks(), streams: any[] = [], remembered: any[] = [];
+  const task = { id: 'task', project_id: 'project', title: '기존 제목', title_revision: 0, status: 'running', updated_at: 'old', live: true };
+  const module = load('useHub.ts', {
+    react: h.react,
+    './api.ts': { api: { state: async () => ({ projects: [{ id: 'project', name: 'project' }], tasks: [task],
+      approvals: [], questions: [], channels: [], runner: { connected: true } }), feed: async () => [],
+      remember: (_source: string, message: any) => remembered.push(message) }, FEED_PAGE: 1000 },
+    './federation.ts': { ...federation, discoverSources: async () => {}, getSources: () => [], subscribeSources: () => () => {} },
+    './posts.ts': { mergeEvents: (_a: any, b: any) => b }, './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} },
+    './feedCache.ts': {},
+  }, { EventSource: class { onmessage: any; constructor() { streams.push(this); } close() {} },
+    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {} });
+  const render = () => h.render(() => module.useHub());
+  await render().refresh();
+  const latest = { ...task, status: 'waiting', updated_at: 'newer', pending_questions: 1 };
+  streams[0].onmessage({ data: JSON.stringify({ type: 'task', task: latest }) });
+  await new Promise(resolve => setTimeout(resolve, 70));
+  render().updateTaskTitle('task', '바꾼 제목', 1);
+  const updated = render().tasks.get('task');
+  assert.equal(updated.title, '바꾼 제목');
+  assert.equal(updated.status, 'waiting');
+  assert.equal(updated.pending_questions, 1);
+  assert.equal(updated.updated_at, 'newer');
+  assert.equal(remembered.at(-1).task.status, 'waiting');
+  assert.equal(remembered.at(-1).task.title, '바꾼 제목');
+  const otherHub = { ...latest, title: '기존 제목', title_revision: 2, updated_at: 'newest' };
+  streams[0].onmessage({ data: JSON.stringify({ type: 'task', task: otherHub }) });
+  await new Promise(resolve => setTimeout(resolve, 70));
+  const cacheCount = remembered.length;
+  render().updateTaskTitle('task', '바꾼 제목', 1);
+  assert.equal(render().tasks.get('task').title, '기존 제목', 'the other hub restored the original title at revision 2');
+  assert.equal(render().tasks.get('task').title_revision, 2);
+  assert.equal(render().tasks.get('task').updated_at, 'newest');
+  assert.equal(remembered.length, cacheCount, 'a stale response cannot replace the cached task');
+  h.unmount();
+});
+
 test('different workspaces neither claim each other’s questions nor suppress background notifications', () => {
   const stored = new Map<string, string>();
   const localStorage = { getItem: (k: string) => stored.get(k) ?? null, setItem: (k: string, v: string) => stored.set(k, v) };
