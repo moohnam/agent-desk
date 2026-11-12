@@ -97,7 +97,12 @@ function getRenderer(): Renderer {
       ? new RendererInfrastructureError(data.error || '도표 라이브러리를 불러오지 못했습니다.')
       : new Error(data.error || '도표를 그리지 못했습니다.'));
   };
-  frame.onload = () => frame.contentWindow?.postMessage({ type: 'desk-mermaid-connect' }, location.origin, [channel.port2]);
+  frame.onload = () => {
+    const target = frame.contentWindow;
+    // Use the parent's function realm: WebKit can otherwise report the iframe itself as
+    // event.source, causing the renderer's parent/origin validation to reject the connection.
+    if (target) Reflect.apply(window.postMessage, target, [{ type: 'desk-mermaid-connect' }, location.origin, [channel.port2]]);
+  };
   frame.onerror = () => state.stop(new RendererInfrastructureError('도표 렌더러를 불러오지 못했습니다.'));
   frame.src = new URL('/mermaid-renderer.html', location.href).href;
   renderer = state;

@@ -144,28 +144,39 @@ test('an inert reading pane pauses diagrams even when its geometry stays in the 
 test('renderer load and library import failures retry once with a fresh, released iframe', async t => {
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
   const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   t.after(() => {
     if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
     if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation); else Reflect.deleteProperty(globalThis, 'location');
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow); else Reflect.deleteProperty(globalThis, 'window');
   });
   let scenario: 'load' | 'import' | 'exhaust' = 'load';
   let cleanup: AbortController | undefined;
   const frames: { removed: boolean; onload: (() => void) | null; onerror: (() => void) | null }[] = [];
   Object.defineProperty(globalThis, 'location', { configurable: true, value: { href: 'http://localhost/', origin: 'http://localhost' } });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    postMessage(this: { receive: (message: unknown, origin: string, ports: MessagePort[]) => void }, message: unknown, origin: string, ports: MessagePort[]) {
+      assert.equal(origin, 'http://localhost');
+      assert.deepEqual(message, { type: 'desk-mermaid-connect' });
+      this.receive(message, origin, ports);
+    },
+  } });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: {
     createElement: () => {
       const index = frames.length;
       const frame = {
         removed: false, onload: null as (() => void) | null, onerror: null as (() => void) | null,
         style: { cssText: '' }, setAttribute() {}, remove() { frame.removed = true; },
-        contentWindow: { postMessage(_message: unknown, _origin: string, [port]: MessagePort[]) {
-          port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
-            if (data.source === 'cleanup') { cleanup?.abort(); return; }
-            port.postMessage(scenario === 'import' && index === 2
-              ? { id: data.id, error: '도표 라이브러리를 불러오지 못했습니다.', errorKind: 'infrastructure' }
-              : { id: data.id, result: { image: 'data:image/svg+xml,ok', background: '#fff' } });
-          };
-          port.postMessage({ ready: true });
+        contentWindow: {
+          postMessage() { assert.fail('use the parent function realm; WebKit otherwise reports the child as event.source'); },
+          receive(_message: unknown, _origin: string, [port]: MessagePort[]) {
+            port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
+              if (data.source === 'cleanup') { cleanup?.abort(); return; }
+              port.postMessage(scenario === 'import' && index === 2
+                ? { id: data.id, error: '도표 라이브러리를 불러오지 못했습니다.', errorKind: 'infrastructure' }
+                : { id: data.id, result: { image: 'data:image/svg+xml,ok', background: '#fff' } });
+            };
+            port.postMessage({ ready: true });
         } },
       };
       frames.push(frame);
@@ -201,26 +212,37 @@ test('renderer load and library import failures retry once with a fresh, release
 test('diagram syntax errors and aborts do not retry or leave a live renderer', async t => {
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
   const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   t.after(() => {
     if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else Reflect.deleteProperty(globalThis, 'document');
     if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation); else Reflect.deleteProperty(globalThis, 'location');
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow); else Reflect.deleteProperty(globalThis, 'window');
   });
   let cleanup: AbortController | undefined;
   let frames = 0;
   let removed = 0;
   Object.defineProperty(globalThis, 'location', { configurable: true, value: { href: 'http://localhost/', origin: 'http://localhost' } });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    postMessage(this: { receive: (message: unknown, origin: string, ports: MessagePort[]) => void }, message: unknown, origin: string, ports: MessagePort[]) {
+      assert.equal(origin, 'http://localhost');
+      assert.deepEqual(message, { type: 'desk-mermaid-connect' });
+      this.receive(message, origin, ports);
+    },
+  } });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: {
     createElement: () => {
       frames++;
       const frame = {
         onload: null as (() => void) | null, onerror: null as (() => void) | null,
         style: { cssText: '' }, setAttribute() {}, remove() { removed++; },
-        contentWindow: { postMessage(_message: unknown, _origin: string, [port]: MessagePort[]) {
-          port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
-            if (data.source === 'cleanup' || data.source === 'abort') { cleanup?.abort(); return; }
-            port.postMessage({ id: data.id, error: '구문 오류' });
-          };
-          port.postMessage({ ready: true });
+        contentWindow: {
+          postMessage() { assert.fail('use the parent function realm; WebKit otherwise reports the child as event.source'); },
+          receive(_message: unknown, _origin: string, [port]: MessagePort[]) {
+            port.onmessage = ({ data }: MessageEvent<{ id: number; source: string }>) => {
+              if (data.source === 'cleanup' || data.source === 'abort') { cleanup?.abort(); return; }
+              port.postMessage({ id: data.id, error: '구문 오류' });
+            };
+            port.postMessage({ ready: true });
         } },
       };
       return frame;
