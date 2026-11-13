@@ -38,6 +38,8 @@ export const config = {
   /** The desk plugin directory engines load desk skills from (skills.ts). */
   skillsHome: env.AGENT_DESK_SKILLS_HOME ?? join(DATA_DIR, 'desk-plugin'),
   webDist: join(REPO, 'web', 'dist'),
+  /** Optional Chrome/Chromium executable for hub-side Mermaid rendering. */
+  diagramBrowser: env.AGENT_DESK_DIAGRAM_BROWSER,
   runner: {
     host: '127.0.0.1',
     port: positive(env.RUNNER_PORT, 4318),

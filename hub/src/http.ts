@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { DocumentPreviews } from './document-previews.ts';
+import { DiagramBrowser } from './diagram-browser.ts';
+import { DiagramCache } from './diagram-cache.ts';
 import { workspaceFile } from './shared-files.ts';
 import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
@@ -94,6 +96,8 @@ $('send').onclick = async () => {
 export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string } = {}) {
   const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
   const localAuthorityId = options.localAuthorityId;
+  const diagramBrowser=new DiagramBrowser(WEB_DIST,config.diagramBrowser);
+  const diagrams=new DiagramCache((source,signal)=>diagramBrowser.render(source,signal));
   const previews = new DocumentPreviews(async(source,task,href,base,receive)=>{
     if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive);
     const {file,stat,target}=await workspaceFile(hub,task,href,base);
@@ -210,10 +214,23 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         return await workspaces.proxyMcp(localAuthorityId,req,res,body);
       }
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
+      if(req.method==='POST'&&url.pathname==='/api/diagram') {
+        const body=await readJson(req);
+        if(typeof body.source!=='string')throw new HttpError(400,'도표 원문이 필요합니다');
+        const controller=new AbortController();const abort=()=>controller.abort();res.once('close',abort);
+        try {
+          const result=await diagrams.render(body.source,await diagramBrowser.version(),controller.signal);
+          if(!res.destroyed){res.setHeader('cache-control','no-store');return send(res,200,result);}
+          return;
+        }finally{res.off('close',abort);}
+      }
       if((req.method==='DELETE'||req.method==='PUT')&&url.pathname==='/api/preview') {
         const b=await readJson(req);
         if(typeof b.id!=='string')throw new HttpError(400,'문서 ID가 필요합니다');
-        if(req.method==='PUT')previews.renew(b.id);else await previews.release(b.id);
+        if(req.method==='PUT'){
+          try{previews.renew(b.id);}
+          catch(error){if(error instanceof HttpError&&error.status===404)return send(res,409,{error:error.message});throw error;}
+        }else await previews.release(b.id);
         return send(res,200,{ok:true});
       }
       if (req.method === 'POST' && url.pathname === '/api/preview') {
@@ -415,6 +432,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     }
   });
   server.on('listening', () => { if(!localAuthorityId)hub.channels.start(); });
-  server.on('close', () => { hub.channels.stop(); void previews.close(); void workspaces.close(); });
+  server.on('close', () => { hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
   return server;
 }

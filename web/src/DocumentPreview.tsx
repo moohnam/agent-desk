@@ -37,7 +37,8 @@ export function DocumentPreview({taskId,href,visible,onRemove,onError}:{taskId:s
       pending=true;
       try {
         const response=await fetch('/api/preview',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({id:preview.url.split('/')[2]}),signal:controller.signal});
-        if(response.status===404&&!controller.signal.aborted){
+        // Older hubs have no lease endpoint (404); only a known expired lease (409) needs renewal.
+        if(response.status===409&&!controller.signal.aborted){
           expired=true;setRequest(value=>({revision:value.revision+1,refresh:false}));
         }
       }catch{/* Reconnection or returning to this tab retries the lease. */}

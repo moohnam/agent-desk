@@ -110,10 +110,15 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
   // Real device credentials create the grant; subsequent opaque-frame resource requests need no cookies.
   access.isLocal=()=>false;access.hostAllowed=()=>true;
   assert.equal((await prepare('docs/note.md')).status,401);
+  assert.equal((await fetch(url+'/api/diagram',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:'flowchart LR\nA-->B'})})).status,401);
+
   const cookie=access.addDevice('phone','test')[0].split(';')[0];
   const device=access.view().devices[0];
   const remote=await prepare('docs/index.html',false,{cookie});assert.equal(remote.status,200);
   assert.equal((await fetch(url+remote.body.url,{headers:{origin:'null'}})).status,200);
+  const renew=()=>fetch(url+'/api/preview',{method:'PUT',headers:{'content-type':'application/json',cookie},body:JSON.stringify({id:remote.body.url.split('/')[2]})});
+  assert.equal((await renew()).status,200);
+  assert.equal((await fetch(url+'/api/preview',{method:'PUT',headers:{'content-type':'application/json',cookie},body:JSON.stringify({id:'expired'})})).status,409);
   access.removeDevice(device.id);
   assert.equal((await fetch(url+remote.body.url)).status,404);
  } finally {await stop(server);await links.close();hub.remotes.close();store.database.close();await stop(runner);f.close();}

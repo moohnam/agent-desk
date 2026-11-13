@@ -1,7 +1,8 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Modal } from './Modal.tsx';
-import { renderMermaid, renderWhenVisible } from './mermaid.ts';
+import { renderWhenVisible } from './mermaid.ts';
+import { renderDiagram } from './hubDiagram.ts';
 
 export const MermaidBlock = memo(function MermaidBlock({ source }: { source: string }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -12,7 +13,7 @@ export const MermaidBlock = memo(function MermaidBlock({ source }: { source: str
     if (!ref.current) return;
     return renderWhenVisible(ref.current, async (signal) => {
       try {
-        const rendered = await renderMermaid(source, signal);
+        const rendered = await renderDiagram(source, signal);
         if (!signal.aborted) setResult({ source, ...rendered });
       } catch (error) {
         const cause = (error instanceof Error ? error.message : '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120).replace(/[.!?]+$/, '');
