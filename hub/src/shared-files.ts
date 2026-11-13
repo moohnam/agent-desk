@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, mkdtemp, open, opendir, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, open, opendir, realpath, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { Readable, Transform } from 'node:stream';
@@ -62,19 +62,38 @@ export class TemporaryFiles {
   private current?: Promise<LinkTarget>;
   private expiring: Promise<void> = Promise.resolve();
   private readonly baseDir: string;
+  private readonly options: { managed?: boolean; maxBytes?: number; maxFiles?: number };
   private timer = setInterval(() => { if (!this.active) void this.expire().catch(() => {}); }, 60_000);
-  constructor(baseDir = tmpdir()) { this.baseDir = baseDir; this.timer.unref(); }
+  constructor(baseDir = tmpdir(), options: { managed?: boolean; maxBytes?: number; maxFiles?: number } = {}) {
+    this.baseDir = baseDir; this.options = options; this.timer.unref();
+  }
+  private get prefix() { return this.options.managed ? 'agent-desk-preview-' : 'agent-desk-file-'; }
+  canReceive(size: number) {
+    return this.entries.length < (this.options.maxFiles ?? 100)
+      && this.entries.reduce((sum, e) => sum + e.size, size) <= (this.options.maxBytes ?? CACHE_LIMIT);
+  }
   private expire(all = false) {
     const run = this.expiring.then(async () => {
-      for (const entry of [...this.entries]) if (all || Date.now() - entry.at >= TTL) {
-        await rm(entry.dir, { recursive: true, force: true });
-        this.entries = this.entries.filter(e => e !== entry);
+      for (const entry of [...this.entries]) {
+        if (all || (!this.options.managed && Date.now() - entry.at >= TTL)) {
+          await rm(entry.dir, { recursive: true, force: true });
+          this.entries = this.entries.filter(e => e !== entry);
+        } else if (this.options.managed) {
+          // The document owner decides expiry. Keep live copies distinct from crash leftovers.
+          const now = new Date();
+          try { await utimes(entry.dir, now, now); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            this.entries = this.entries.filter(e => e !== entry);
+          }
+        }
       }
       // Recover old copies after a crash without touching another hub's fresh files.
       const directory = await opendir(this.baseDir);
       for await (const item of directory) {
-        if (!/^agent-desk-file-[A-Za-z0-9]{6}$/.test(item.name)) continue;
+        if (!item.name.startsWith(this.prefix) || !/^[A-Za-z0-9]{6}$/.test(item.name.slice(this.prefix.length))) continue;
         const path = join(this.baseDir, item.name);
+        if (this.entries.some(e => e.dir === path)) continue;
         try {
           const stat = await lstat(path);
           if (stat.isDirectory() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0
@@ -105,9 +124,9 @@ export class TemporaryFiles {
       if (!name || name === '.' || name === '..' || /[/\\\x00-\x1f\x7f]/.test(name) || name.length > 240) throw new HttpError(502, '러너가 잘못된 파일 이름을 보냈습니다');
       const raw = response.headers.get('content-length'), size = Number(raw);
       if (raw === null || !Number.isSafeInteger(size) || size < 0 || size > SHARED_FILE_LIMIT) throw new HttpError(413, '파일은 50 MB까지 가져올 수 있습니다');
-      if (this.entries.length >= 100 || this.entries.reduce((sum, e) => sum + e.size, size) > CACHE_LIMIT) throw new HttpError(413, '임시 파일 보관 한도에 도달했습니다');
+      if (!this.canReceive(size)) throw new HttpError(413, '임시 파일 보관 한도에 도달했습니다');
       if (!response.body) throw new HttpError(502, '파일 본문이 없습니다');
-      dir = await mkdtemp(join(this.baseDir, 'agent-desk-file-'));
+      dir = await mkdtemp(join(this.baseDir, this.prefix));
       const path = join(dir, name), file = await open(path, 'wx', 0o600);
       let received = 0;
       try {

@@ -210,10 +210,11 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         return await workspaces.proxyMcp(localAuthorityId,req,res,body);
       }
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
-      if(req.method==='DELETE'&&url.pathname==='/api/preview') {
+      if((req.method==='DELETE'||req.method==='PUT')&&url.pathname==='/api/preview') {
         const b=await readJson(req);
         if(typeof b.id!=='string')throw new HttpError(400,'문서 ID가 필요합니다');
-        await previews.release(b.id);return send(res,200,{ok:true});
+        if(req.method==='PUT')previews.renew(b.id);else await previews.release(b.id);
+        return send(res,200,{ok:true});
       }
       if (req.method === 'POST' && url.pathname === '/api/preview') {
         const b=await readJson(req);
