@@ -597,3 +597,57 @@ test('partial column pages remain visible and do not move the paging cursor befo
     requests[1].finish({events:[],complete:true});await new Promise(r=>setTimeout(r,0));
   }finally{h.unmount();}
 });
+
+test('SSE connects after a snapshot starts always recovers changes missed before connection', async()=> {
+ const h=hooks(), streams:any[]=[], reads:any[]=[];
+ const source={id:'a',view_index:1};
+ const stale={projects:[{id:'w:a:p'}],tasks:[{id:'w:a:t',project_id:'w:a:p',status:'running',queued:[{id:'old-queue'}]}],approvals:[],questions:[],availableSources:['','a'],unavailableSources:[]};
+ const module=load('useHub.ts', {
+  react:h.react,'./api.ts':{api:{state:(progress:any)=>new Promise(resolve=>reads.push({progress,finish:resolve})),remember(){}},FEED_PAGE:1000},
+  './federation.ts':{...federation,discoverSources:async()=>{},getSources:()=>[source],subscribeSources:()=>()=>{},sourceConnected(){}},
+  './posts.ts':posts,'./projects.ts':{assignProjectColors(){},forgetProjectColors(){}},'./feedCache.ts':{},
+ }, {EventSource:class{onopen:any;onerror:any;constructor(){streams.push(this);}close(){}},setTimeout,clearTimeout,setInterval:()=>0,clearInterval(){}});
+ const render=()=>h.render(()=>module.useHub());
+ try {
+  render(); streams[0].onopen(); streams[1].onopen();
+  // The server has already produced stale, but response delivery remains pending.
+  // The remote SSE disconnects; task finishes/queue drains while disconnected.
+  streams[1].onerror(); streams[1].onopen();
+  reads[0].finish(stale); await new Promise(r=>setTimeout(r,0));
+  assert.equal(reads.length,2,'late connections coalesce into one mandatory catch-up');
+  assert.equal(render().tasks.get('w:a:t').status,'running');
+  assert.equal(render().tasks.get('w:a:t').queued[0].id,'old-queue');
+  reads[1].finish({...stale,tasks:[{...stale.tasks[0],status:'done',queued:[]}]});
+  await new Promise(r=>setTimeout(r,0));
+  assert.equal(render().tasks.get('w:a:t').status,'done');
+  assert.equal(render().tasks.get('w:a:t').queued.length,0);
+ } finally { h.unmount(); }
+});
+
+
+test('editing a durably pending queue deletion preserves text and drafts after leaving the thread', async()=>{
+ const h=hooks();let draft:any={text:'existing draft',pick:null};let reject!:(e:Error)=>void;
+ class SharedPending extends Error {}
+ const jsx=(type:any,props:any)=>({type,props});
+ const module=load('Compose.tsx',{
+  react:{...h.react,Fragment:'fragment'},'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},
+  '../../shared/compose.ts':compose,'./api.ts':{api:{cancelQueued:()=>new Promise((_resolve,r)=>{reject=r;})}},
+  './workspace.ts':{SharedPending},'./drafts.ts':{getDraft:()=>draft,setDraft:(_key:string,value:any)=>{draft=value;},useDraftSync(){}},
+  './files.ts':{},'./projects.ts':{},'./settings.ts':{},'./skills.ts':{useSkills:()=>[]},'./Modal.tsx':{},
+  './queuedShortcut.ts':{QueuedShortcut:class{reset(){}}},
+ },{requestAnimationFrame(){}});
+ const task={id:'task',engine:'claude',status:'running',queued:[{id:'q',text:'queued original'}]};
+ const render=()=>h.render(()=>module.ReplyBox({task,projects:[],tasks:[],inputRef:{current:null},onError(){}}));
+ const find=(node:any):any=>{
+  if(!node||typeof node!=='object')return;
+  if(node.props?.title==='대기열에서 빼서 입력창에서 고치기')return node;
+  for(const child of [node.props?.children].flat(Infinity)){const result=find(child);if(result)return result;}
+ };
+ try {
+  find(render()).props.onClick();
+  assert.equal(draft.text,'queued original\nexisting draft','original is saved before DELETE responds');
+  draft={text:draft.text+'\nnewer draft',pick:'now'};h.unmount();
+  reject(new SharedPending());await new Promise(r=>setTimeout(r,0));
+  assert.equal(draft.text,'queued original\nexisting draft\nnewer draft');assert.equal(draft.pick,'now');
+ } finally {h.unmount();}
+});

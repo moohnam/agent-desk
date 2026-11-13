@@ -50,6 +50,7 @@ export class WorkspaceLinks {
       CREATE TABLE IF NOT EXISTS workspace_view_index(seq INTEGER PRIMARY KEY AUTOINCREMENT,link_id TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS remote_legacy(runner_id TEXT PRIMARY KEY,link_id TEXT NOT NULL,address TEXT NOT NULL,fingerprint TEXT NOT NULL,legacy_json TEXT NOT NULL);
       INSERT INTO workspace_view_index(link_id) SELECT id FROM workspace_link l WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index v WHERE v.link_id=l.id);
+      CREATE TABLE IF NOT EXISTS workspace_delivery_attempt (id TEXT PRIMARY KEY, accepted_at TEXT, attempted_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, failure TEXT, failed_at TEXT, completed_at TEXT);
       CREATE INDEX IF NOT EXISTS workspace_delivery_pending ON workspace_delivery(link_id,status,seq);`);
     if(!(this.db.prepare('PRAGMA table_info(remote_legacy)').all() as {name:string}[]).some(c=>c.name==='link_id'))
       this.db.exec('ALTER TABLE remote_legacy ADD COLUMN link_id TEXT; UPDATE remote_legacy SET link_id=runner_id WHERE link_id IS NULL');
@@ -335,12 +336,19 @@ export class WorkspaceLinks {
       this.db.prepare('INSERT INTO workspace_delivery(id,link_id,digest,payload,prepared_payload) VALUES(?,?,?,?,?)')
         .run(op.id,id,hash,JSON.stringify(op),prepared);
     }
+    this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id,accepted_at) VALUES(?,?)').run(op.id,new Date().toISOString());
     return op.id;
   }
   flush(id:string):Promise<void> {
     const old=this.flushing.get(id);if(old)return old;
     const pending=(async()=>{
-      for(const row of this.db.prepare('SELECT * FROM workspace_delivery WHERE link_id=? AND status IS NULL ORDER BY seq LIMIT 32').all(id) as Delivery[]){
+      // Pick the next row after each response, including commands accepted during this flush.
+      while (!this.stopped) {
+        const row=this.db.prepare('SELECT * FROM workspace_delivery WHERE link_id=? AND status IS NULL ORDER BY seq LIMIT 1').get(id) as Delivery|undefined;
+        if(!row)break;
+        this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id) VALUES(?)').run(row.id);
+        const failure=(value:string)=>this.db.prepare('UPDATE workspace_delivery_attempt SET failure=?,failed_at=? WHERE id=?').run(value,new Date().toISOString(),row.id);
+        this.db.prepare('UPDATE workspace_delivery_attempt SET attempted_at=?,attempts=attempts+1 WHERE id=?').run(new Date().toISOString(),row.id);
         if(this.stopped)break;
         try {
           const op=JSON.parse(row.payload) as WorkspaceOperation;
@@ -354,7 +362,7 @@ export class WorkspaceLinks {
           const bundle=saved?.version===1?saved as SkillBundle:saved?.body?.__desk_skill_bundle as SkillBundle|undefined;
           if(bundle){
             const supported=await this.supportsSkillSnapshots(id);
-            if(supported===null)break;
+            if(supported===null){failure('skill_manifest_unavailable');break;}
             if(!supported){
               this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
                 .run(JSON.stringify({error:'공유 러너가 스킬 스냅샷을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내세요'}),row.id);
@@ -367,16 +375,17 @@ export class WorkspaceLinks {
           if(bundle&&'status' in r&&r.status===409&&r.body?.code==='skill_missing'){
             const prepared=await this.request(this.link(id),'/v1/skills/prepare',
               {method:'POST',body:JSON.stringify({op_id:op.id,bundle})},false,10_000);
-            if(!('status' in prepared)||prepared.status>=500)break;
+            if(!('status' in prepared)||prepared.status>=500){failure('skill_prepare_unavailable');break;}
             if(prepared.status!==200)r=prepared;
             else r=await this.request(this.link(id),'/v1/operation',{method:'POST',body:requestBody});
           }
           if(this.stopped)break;
-          if(!('status' in r)||r.status>=500||r.status===401||r.status===403||(r.status===409&&r.body?.code==='workspace_mismatch'))break;
+          if(!('status' in r)||r.status>=500||r.status===401||r.status===403||(r.status===409&&r.body?.code==='workspace_mismatch')){failure('status' in r?`http_${r.status}`:'invalid_response');break;}
+          this.db.prepare('UPDATE workspace_delivery_attempt SET completed_at=? WHERE id=?').run(new Date().toISOString(),row.id);
           // Drop prompts and secret answers once delivery is confirmed. Keep the receipt and digest.
           this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
             .run(r.status,JSON.stringify(r.body),r.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
-        }catch{break;}
+        }catch(error){failure(error instanceof Error ? error.name : 'request_failed');break;}
       }
     })().finally(()=>this.flushing.delete(id));
     this.flushing.set(id,pending);return pending;
@@ -408,7 +417,10 @@ export class WorkspaceLinks {
     }
     const requestId=req.headers['x-desk-operation-id'];
     const op={id:typeof requestId==='string'?requestId:randomUUID(),method:req.method!,path,body:(suppliedBody??await readBody(req))??{}};
-    this.enqueue(id,op);await this.flush(id);
+    this.enqueue(id,op);
+    let timer:NodeJS.Timeout|undefined;
+    try { await Promise.race([this.flush(id),new Promise<void>(resolve=>{timer=setTimeout(resolve,3500);})]); }
+    finally {if(timer)clearTimeout(timer);}
     const held=this.result(op.id)!;
     if(id==='local-authority'&&path.startsWith('/skills')&&held.status!==null&&held.status<400)
       this.skillChanged();

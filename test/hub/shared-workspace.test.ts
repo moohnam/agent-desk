@@ -411,3 +411,34 @@ test('workspace view indices survive restarts without consuming sequence numbers
    await links.close();links=new WorkspaceLinks(store);assert.equal(links.list().find(l=>l.id==='c')!.view_index,3);
  }finally{await links.close();store.database.close();}
 });
+
+
+test('delivery drains requests accepted during an in-flight operation without the retry timer', async()=>{
+ const f=fixture(),store=new Store(join(f.dir,'drain.db')),links=new WorkspaceLinks(store);
+ let release:()=>void=()=>{};
+ const barrier=new Promise<void>(resolve=>{release=resolve;});
+ let entered:()=>void=()=>{};
+ const started=new Promise<void>(resolve=>{entered=resolve;});
+ const attempted:string[]=[];
+ try {
+  store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('test','test','http://localhost/','workspace','hidden');
+  (links as any).request=async(_link:unknown,_path:string,init:RequestInit)=>{
+   const op=JSON.parse(init.body as string);attempted.push(op.id);
+   if(attempted.length===1){entered();await barrier;}
+   return {status:200,body:{ok:true}};
+  };
+  const first={id:randomUUID(),method:'POST',path:'/compose',body:{text:'first'}};
+  const second={...first,id:randomUUID(),body:{text:'second'}};
+  links.enqueue('test',first);const flushing=links.flush('test');await started;
+  links.enqueue('test',second);const joined=links.flush('test');release();
+  await Promise.all([flushing,joined]);
+  assert.deepEqual(attempted,[first.id,second.id]);
+  assert.equal(store.database.prepare('SELECT count(*) n FROM workspace_delivery WHERE status IS NULL').get()!.n,0);
+  const stats=store.database.prepare('SELECT attempts,failure FROM workspace_delivery_attempt WHERE id=?').get(second.id)!;
+  assert.equal(stats.attempts,1);assert.equal(stats.failure,null);
+  const third={...first,id:randomUUID()};links.enqueue('test',third);
+  (links as any).request=async()=>{throw new TypeError('sensitive details must not be stored');};
+  await links.flush('test');
+  assert.equal(store.database.prepare('SELECT failure FROM workspace_delivery_attempt WHERE id=?').get(third.id)!.failure,'TypeError');
+ } finally {release();await links.close();store.database.close();f.close();}
+});

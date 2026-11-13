@@ -66,7 +66,6 @@ export function useHub() {
   const questionRefresh=useRef<Map<string,Question>|null>(null);
   const refreshingState = useRef<Promise<void> | null>(null);
   const refreshAgain = useRef(false);
-  const refreshPendingSources = useRef(new Set<string>());
   const subscribed = useRef(true);
   const refresh = useCallback((repeat = true): Promise<void> => {
     if (refreshingState.current) {
@@ -76,7 +75,6 @@ export function useHub() {
     const run = async () => {
       do {
         refreshAgain.current = false;
-        refreshPendingSources.current = new Set(['', ...getSources().map(source => source.id)]);
         const channelUpdates = new Map<string, Channel | null>();
         const taskUpdates = new Map<string, TaskView | null>();
         const approvalUpdates=new Map<string,Approval>(),questionUpdates=new Map<string,Question>();
@@ -86,7 +84,6 @@ export function useHub() {
         try {
           const apply = (s: Awaited<ReturnType<typeof api.state>>) => {
             if (!subscribed.current || channelRefresh.current !== channelUpdates) return;
-            for (const source of [...(s.availableSources ?? []), ...(s.unavailableSources ?? [])]) refreshPendingSources.current.delete(source);
             const nextTasks = new Map(s.tasks.filter(t => !deleted.current.has(t.id)).map(t => [t.id, t]));
             for(const [id,task] of currentTasks.current) {
               const source = splitId(id)[0];
@@ -231,7 +228,8 @@ export function useHub() {
       for(const source of sources) {
         if(streams.has(source.id))continue;
         const es=new EventSource(sourceBase(source.id)+'/stream');streams.set(source.id,es);
-        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh(!refreshPendingSources.current.has(source.id)).catch(()=>{});};
+        // A pending snapshot may predate this connection. Always queue one recovery read.
+        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh().catch(()=>{});};
         es.onerror=()=>{
           if(source.id){sourceConnected(source.id,false);commitTasks(prev=>new Map([...prev].map(([id,t])=>[id,id.startsWith(`w:${source.id}:`)?{...t,runner_connected:false}:t])));}
           else {setConnected(false);fetch('/api/state',{method:'HEAD'}).then(r=>{if(r.status===401)location.reload();},()=>{});}

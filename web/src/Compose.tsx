@@ -465,11 +465,17 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   /** Takes a queued message out of the queue into the box, above anything already typed there. */
   const editQueued = async (q: { id: string; text: string }) => {
     edited();
-    try { await api.cancelQueued(task.id, q.id); }
-    catch (e) { onError(e instanceof Error ? e.message : String(e)); return; }
+    // Preserve the original before any durable DELETE, including thread switches and timeouts.
     const next = text.trim() ? `${q.text}\n${text}` : q.text;
+    setDraft(draftKey, { text: next, pick }, { taskId: task.id, empty: false });
     setText(next); setSent(null);
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(q.text.length, q.text.length); });
+    try { await api.cancelQueued(task.id, q.id); }
+    catch (e) {
+      onError(e instanceof SharedPending
+        ? '편집할 내용을 입력창에 보존했습니다. 대기열 삭제는 전달 대기 중이니 항목이 사라진 뒤 다시 보내 주세요.'
+        : `편집할 내용은 보존했지만 대기열에서 빼지 못했습니다: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const how = content ? deliveryText(task, delivery) : null;
