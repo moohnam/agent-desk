@@ -314,12 +314,12 @@ test('a new shared project draft keeps its execution target after closing and re
 });
 
 
-test('approval and question SSE updates survive a delayed feed during state refresh',async()=>{
+test('approval and question SSE updates survive delayed workspace snapshots',async()=>{
  const h=hooks();const streams:any[]=[];let finish:(events:any[])=>void=()=>{};
  const feed=new Promise<any[]>(r=>{finish=r;});
  const request=(id:string,status:string)=>({id,task_id:'task',session_id:'session',status,created_at:'',text:'?',answer:null,answered_at:null,tool_name:'Bash',input:{}});
  const module=load('useHub.ts',{
-   react:h.react,'./api.ts':{api:{state:async()=>({projects:[],tasks:[],approvals:[request('old','pending')],questions:[request('old','pending')],runner:{connected:true}}),feed:()=>feed,remember(){}},FEED_PAGE:1000},
+   react:h.react,'./api.ts':{api:{state:async(progress:any)=>{const value={projects:[],tasks:[],approvals:[request('old','pending')],questions:[request('old','pending')],runner:{connected:true}};progress?.(value);await feed;return value;},feed:()=>{throw Error('global feed should not be fetched');},remember(){}},FEED_PAGE:1000},
    './federation.ts':{...federation,discoverSources:async()=>{},getSources:()=>[],subscribeSources:()=>()=>{}},
    './posts.ts':{mergeEvents:(_a:any,b:any)=>b},'./projects.ts':{assignProjectColors(){},forgetProjectColors(){}},'./feedCache.ts':{},
  },{
@@ -332,14 +332,14 @@ test('approval and question SSE updates survive a delayed feed during state refr
  finish([]);await new Promise(r=>setTimeout(r,0));result=h.render(()=>module.useHub());assert.deepEqual([...result.approvals.keys()],['new']);assert.deepEqual([...result.questions.keys()],['new']);h.unmount();
 });
 
-test('an empty shared project deleted during a delayed feed does not reappear', async () => {
+test('an empty shared project deleted during a delayed workspace read does not reappear', async () => {
   const h = hooks(), streams: any[] = [];
   let finish: (events: any[]) => void = () => {};
   const feed = new Promise<any[]>(resolve => { finish = resolve; });
   const project = { id: federation.scopeId('shared-a', 'project'), name: 'shared-test' };
   const module = load('useHub.ts', {
     react: h.react,
-    './api.ts': { api: { state: async () => ({ projects: [project], tasks: [], approvals: [], questions: [] }), feed: () => feed, remember() {} }, FEED_PAGE: 1000 },
+    './api.ts': { api: { state: async (progress:any) => { const value={ projects: [project], tasks: [], approvals: [], questions: [] };progress?.(value);await feed;return value; }, feed: () => { throw Error('global feed should not be fetched'); }, remember() {} }, FEED_PAGE: 1000 },
     './federation.ts': { ...federation, discoverSources: async () => {}, getSources: () => [], subscribeSources: () => () => {} },
     './posts.ts': { mergeEvents: (_a: any, b: any) => b },
     './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} }, './feedCache.ts': {},
@@ -537,4 +537,63 @@ test('pagination resumes at the oldest retained post after live compaction', asy
     assert.equal(cursors.join(','), '2', 'the evicted first page must be fetched again');
     assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '1,2,3,4');
   } finally { h.unmount(); }
+});
+
+test('workspace connections share one refresh and partial state becomes usable before it finishes', async () => {
+  const h=hooks(),streams:any[]=[],reads:{progress:(s:any)=>void;finish:(s:any)=>void}[]=[];
+  const sources=[{id:'a'},{id:'b'}];
+  const value={projects:[{id:'project'}],tasks:[{id:'local-task',project_id:'project'},{id:'w:a:task',project_id:'project'}],approvals:[],questions:[],availableSources:[''],unavailableSources:[]};
+  const module=load('useHub.ts',{
+    react:h.react,'./api.ts':{api:{state:(progress:any)=>new Promise(resolve=>reads.push({progress,finish:resolve})),
+      feed:()=>{throw Error('columns own feed requests');},remember(){}},FEED_PAGE:1000},
+    './federation.ts':{...federation,discoverSources:async()=>{},getSources:()=>sources,subscribeSources:()=>()=>{},sourceConnected(){}},
+    './posts.ts':posts,'./projects.ts':{assignProjectColors(){},forgetProjectColors(){}},'./feedCache.ts':{},
+  },{EventSource:class{onopen:any;constructor(){streams.push(this);}close(){}},setTimeout,clearTimeout,setInterval:()=>0,clearInterval(){}});
+  const render=()=>h.render(()=>module.useHub());
+  try {
+    render();for(const stream of streams)stream.onopen();
+    assert.equal(reads.length,1,'three SSE connections must not start three state reads');
+    reads[0].progress(value);
+    assert.ok(render().tasks.has('local-task'),'the remote state is still pending');
+    const refresh=render().refresh();render().refresh();
+    streams[0].onopen(); // A reconnect after this source's snapshot also requires a follow-up.
+    sources.splice(0,1);
+    const current={...value,tasks:value.tasks.slice(0,1)};
+    reads[0].finish(current);await new Promise(r=>setTimeout(r,0));
+    assert.equal(reads.length,2,'explicit refreshes during a read coalesce into one follow-up');
+    reads[1].finish(current);await refresh;
+    assert.equal(render().synced,2);
+    assert.equal(render().tasks.has('w:a:task'),false,'detaching a source must not retain its old tasks');
+  }finally{h.unmount();}
+});
+
+test('partial column pages remain visible and do not move the paging cursor before completion', async () => {
+  const h=hooks();const requests:any[]=[],older:any[]=[];
+  const event=(id:number)=>({id,task_id:'t',session_id:'s',ts:String(id).padStart(4,'0'),kind:'assistant',payload:{text:String(id)}});
+  const defs:any[]=[{id:'column',filter:{}}];
+  const module=load('useHub.ts',{
+    react:h.react,'./api.ts':{api:{
+      feedPage:(limit:number,_before:any,_q:any,signal:AbortSignal,progress:any)=>new Promise(resolve=>requests.push({limit,signal,progress,finish:resolve})),
+      feed:async(limit:number,before:any)=>{older.push({limit,before});return[event(0)];},feedCount:async()=>({posts:500,tasks:1})},FEED_PAGE:1000},
+    './posts.ts':posts,'./feedCache.ts':feedCache,'./projects.ts':{},
+  },{AbortController,window:{setTimeout:()=>0},setTimeout:()=>0,clearTimeout(){}});
+  const render=()=>h.render(()=>module.useColumnFeeds(defs,()=>defs,new Map(),()=>()=>{},0));
+  try {
+    render();assert.equal(requests[0].limit,200,'initial pages have a smaller transfer budget');
+    requests[0].progress({events:[event(150)],complete:false});
+    const partial=render();assert.equal(partial.feeds.get('column').events[0].id,150);
+    assert.equal(partial.feeds.get('column').loading,true);
+    partial.loadEarlier('column');assert.equal(older.length,0);
+    defs.push({id:'other',filter:{projectIds:['other']}});render();
+    assert.equal(requests[0].signal.aborted,false,'another workspace arriving must not restart this read');
+    requests[0].finish({events:Array.from({length:200},(_,i)=>event(i+1)),complete:true});
+    await new Promise(r=>setTimeout(r,0));
+    const complete=render();assert.equal(complete.feeds.get('column').more,true);
+    complete.loadEarlier('column');await new Promise(r=>setTimeout(r,0));
+    assert.equal(older[0].before.id,1);
+    assert.equal(render().feeds.get('column').events[0].id,0);
+    h.unmount();requests[1].progress({events:[event(999)],complete:false});
+    assert.equal(requests[1].signal.aborted,true);
+    requests[1].finish({events:[],complete:true});await new Promise(r=>setTimeout(r,0));
+  }finally{h.unmount();}
 });

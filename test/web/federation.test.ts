@@ -237,3 +237,75 @@ test('a failed remote feed marks a partial newest page without discarding local 
    assert.equal(recovered.events.map(e=>e.id).join(','),`1,${eventId(1,2)}`);
  }finally{globalThis.fetch=original;}
 });
+
+test('state publishes a fast workspace while preserving a pending workspace and its live updates', async () => {
+ const original=globalThis.fetch;
+ const source='progress-state';let release:()=>void=()=>{},entered:()=>void=()=>{};
+ let wait:Promise<void>|undefined;
+ const remoteEntered=new Promise<void>(r=>{entered=r;});
+ globalThis.fetch=async input=>{
+   const path=String(input);
+   if(path==='/api/workspaces')return Response.json([{id:source,view_index:8,name:'remote',url:'',workspace_id:'uuid',pending:0}]);
+   if(path.includes('/workspaces/')){entered();await wait;}
+   const value=state();value.tasks[0].id='progress-task';value.tasks[0].runner_connected=true;
+   return Response.json(value);
+ };
+ try {
+   await discoverSources(true);await api.state();
+   wait=new Promise<void>(r=>{release=r;});
+   const partial:DeskState[]=[];
+   let progress:()=>void=()=>{};const ready=new Promise<void>(r=>{progress=r;});
+   const pending=api.state(s=>{partial.push(s);progress();});
+   await remoteEntered;await ready;
+   assert.deepEqual(partial[0].availableSources,['']);
+   assert.deepEqual(partial[0].unavailableSources,[],'still loading is not a disconnection');
+   assert.equal(partial[0].tasks.find(t=>t.id===scopeId(source,'progress-task'))?.runner_connected,true);
+   const live={...state().tasks[0],id:scopeId(source,'live-progress-task')};
+   api.remember(source,{type:'task',task:live});
+   release();const complete=await pending;
+   assert.ok(complete.tasks.some(t=>t.id===live.id));
+   assert.equal(complete.availableSources?.length,2);
+ }finally{release();globalThis.fetch=original;}
+});
+
+test('a fast remote state does not wait for the local authority', async () => {
+ const original=globalThis.fetch;let release:()=>void=()=>{};
+ const gate=new Promise<void>(r=>{release=r;});
+ globalThis.fetch=async input=>{
+   if(String(input)==='/api/workspaces')return Response.json([{id:'fast-remote',view_index:9,name:'remote',url:'',workspace_id:'uuid',pending:0}]);
+   if(String(input)==='/api/state')await gate;
+   return Response.json(state());
+ };
+ try {
+   await discoverSources(true);
+   let first:DeskState|undefined,progress:()=>void=()=>{};const ready=new Promise<void>(r=>{progress=r;});
+   const pending=api.state(s=>{first=s;progress();});await ready;
+   assert.deepEqual(first?.availableSources,['fast-remote']);
+   assert.ok(first?.tasks.some(t=>t.id===scopeId('fast-remote','task')));
+   release();await pending;
+ }finally{release();globalThis.fetch=original;}
+});
+
+test('newest feed publishes partial results and suppresses late progress after cancellation', async () => {
+ const original=globalThis.fetch;let release:()=>void=()=>{};
+ let gate=new Promise<void>(r=>{release=r;});
+ globalThis.fetch=async input=>{
+   if(String(input)==='/api/workspaces')return Response.json([{id:'slow-feed',view_index:10,name:'remote',url:'',workspace_id:'uuid',pending:0}]);
+   if(String(input).includes('/workspaces/')){await gate;return Response.json([event(2)]);}
+   return Response.json([event(1)]);
+ };
+ try {
+   await discoverSources(true);
+   const controller=new AbortController();const seen:{events:HubEvent[];complete:boolean}[]=[];
+   let progress:()=>void=()=>{};const ready=new Promise<void>(r=>{progress=r;});
+   const pending=api.feedPage(200,undefined,{},controller.signal,page=>{seen.push(page);progress();});
+   await ready;
+   assert.deepEqual(seen[0].events.map(e=>e.id),[1]);assert.equal(seen[0].complete,false);
+   controller.abort();release();
+   await assert.rejects(pending,{name:'AbortError'});
+   assert.equal(seen.length,1,'an old request cannot write into a different column');
+   gate=Promise.resolve();const complete=await api.feedPage(200);
+   assert.equal(complete.complete,true);
+   assert.deepEqual(complete.events.map(e=>e.id),[1,eventId(10,2)]);
+ }finally{release();globalThis.fetch=original;}
+});

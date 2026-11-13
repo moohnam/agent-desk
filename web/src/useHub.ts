@@ -64,60 +64,85 @@ export function useHub() {
 
   const approvalRefresh=useRef<Map<string,Approval>|null>(null);
   const questionRefresh=useRef<Map<string,Question>|null>(null);
-  const refresh = useCallback(async () => {
-    const channelUpdates = new Map<string, Channel | null>();
-    const taskUpdates = new Map<string, TaskView | null>();
-    const approvalUpdates=new Map<string,Approval>(),questionUpdates=new Map<string,Question>();
-    approvalRefresh.current=approvalUpdates;questionRefresh.current=questionUpdates;
-    channelRefresh.current = channelUpdates;
-    taskRefresh.current = taskUpdates;
-    try {
-    const s = await api.state();
-    const feed = await api.feed();
-    if (channelRefresh.current !== channelUpdates) return;
-    const nextTasks = new Map(s.tasks.filter(t => !deleted.current.has(t.id)).map(t => [t.id, t]));
-    for(const [id,task] of currentTasks.current) {
-      if(s.unavailableSources?.includes(splitId(id)[0])&&!nextTasks.has(id)&&!deleted.current.has(id))nextTasks.set(id,{...task,runner_connected:false});
+  const refreshingState = useRef<Promise<void> | null>(null);
+  const refreshAgain = useRef(false);
+  const refreshPendingSources = useRef(new Set<string>());
+  const subscribed = useRef(true);
+  const refresh = useCallback((repeat = true): Promise<void> => {
+    if (refreshingState.current) {
+      if (repeat) refreshAgain.current = true;
+      return refreshingState.current;
     }
-    // SSE can add/update/delete tasks while the full snapshot is in flight.
-    for (const [id, task] of taskUpdates) { if (task && !deleted.current.has(id)) nextTasks.set(id, task); else nextTasks.delete(id); }
-    // A plain ID missing after a snapshot may be an old remote task awaiting its new link.
-    // Only a successful read of an identified source proves a scoped task was deleted.
-    const available = new Set(s.availableSources ?? []);
-    const missing = [...knownTasks.current].filter(id => confirmedMissingTask(id,nextTasks.has(id),available));
-    if (missing.length) {
-      deleted.current = new Set([...deleted.current, ...missing]);
-      setGone(deleted.current);
-    }
-    knownTasks.current = new Set(nextTasks.keys());
-    setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)), feed.filter(e => !deleted.current.has(e.task_id)), FEED_CAP));
-    const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
-    assignProjectColors(nextProjects);
-    setProjects(nextProjects);
-    if (channelRefresh.current === channelUpdates) {
-      const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
-      for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
-      setChannels(next);
-    }
-    commitTasks(() => nextTasks);
-    setAvailableSources(new Set(s.availableSources ?? []));
-    const allApprovals=new Map(s.approvals.map(a=>[a.id,a]));for(const [id,a] of approvalUpdates)allApprovals.set(id,a);
-    setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
-    const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
-    setQuestions(new Map([...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))));
-    if (s.runner) setRunnerConnected(s.runner.connected);
-    if (s.client) setLocal(s.client.local);
-    setAccess(s.access ?? null);
-    setSynced((n) => n + 1);
-    } finally {
-      if (channelRefresh.current === channelUpdates) channelRefresh.current = null;
-      if (taskRefresh.current === taskUpdates) taskRefresh.current = null;
-      if(approvalRefresh.current===approvalUpdates)approvalRefresh.current=null;
-      if(questionRefresh.current===questionUpdates)questionRefresh.current=null;
-    }
+    const run = async () => {
+      do {
+        refreshAgain.current = false;
+        refreshPendingSources.current = new Set(['', ...getSources().map(source => source.id)]);
+        const channelUpdates = new Map<string, Channel | null>();
+        const taskUpdates = new Map<string, TaskView | null>();
+        const approvalUpdates=new Map<string,Approval>(),questionUpdates=new Map<string,Question>();
+        approvalRefresh.current=approvalUpdates;questionRefresh.current=questionUpdates;
+        channelRefresh.current = channelUpdates;
+        taskRefresh.current = taskUpdates;
+        try {
+          const apply = (s: Awaited<ReturnType<typeof api.state>>) => {
+            if (!subscribed.current || channelRefresh.current !== channelUpdates) return;
+            for (const source of [...(s.availableSources ?? []), ...(s.unavailableSources ?? [])]) refreshPendingSources.current.delete(source);
+            const nextTasks = new Map(s.tasks.filter(t => !deleted.current.has(t.id)).map(t => [t.id, t]));
+            for(const [id,task] of currentTasks.current) {
+              const source = splitId(id)[0];
+              if ((!source || getSources().some(s => s.id === source)) && !s.availableSources?.includes(source)
+                && !nextTasks.has(id) && !deleted.current.has(id))
+                nextTasks.set(id, s.unavailableSources?.includes(source) ? {...task,runner_connected:false} : task);
+            }
+            // SSE can add/update/delete tasks while the full snapshot is in flight.
+            for (const [id, task] of taskUpdates) { if (task && !deleted.current.has(id)) nextTasks.set(id, task); else nextTasks.delete(id); }
+            // A plain ID missing after a snapshot may be an old remote task awaiting its new link.
+            // Only a successful read of an identified source proves a scoped task was deleted.
+            const available = new Set(s.availableSources ?? []);
+            const missing = [...knownTasks.current].filter(id => confirmedMissingTask(id,nextTasks.has(id),available));
+            if (missing.length) {
+              deleted.current = new Set([...deleted.current, ...missing]);
+              setGone(deleted.current);
+            }
+            knownTasks.current = new Set(nextTasks.keys());
+            // Columns own history paging; the global stream needs only task previews and live events.
+            const previews = [...nextTasks.values()].flatMap(task => task.last_event ?? []);
+            setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)), previews.filter(e => !deleted.current.has(e.task_id)), FEED_CAP));
+            const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
+            assignProjectColors(nextProjects);
+            setProjects(nextProjects);
+            if (channelRefresh.current === channelUpdates) {
+              const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
+              for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
+              setChannels(next);
+            }
+            commitTasks(() => nextTasks);
+            setAvailableSources(new Set(s.availableSources ?? []));
+            const allApprovals=new Map(s.approvals.map(a=>[a.id,a]));for(const [id,a] of approvalUpdates)allApprovals.set(id,a);
+            setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
+            const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
+            setQuestions(new Map([...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))));
+            if (s.runner) setRunnerConnected(s.runner.connected);
+            if (s.client) setLocal(s.client.local);
+            setAccess(s.access ?? null);
+          };
+          apply(await api.state(apply));
+          if (subscribed.current) setSynced((n) => n + 1);
+        } finally {
+          if (channelRefresh.current === channelUpdates) channelRefresh.current = null;
+          if (taskRefresh.current === taskUpdates) taskRefresh.current = null;
+          if(approvalRefresh.current===approvalUpdates)approvalRefresh.current=null;
+          if(questionRefresh.current===questionUpdates)questionRefresh.current=null;
+        }
+      } while (refreshAgain.current && subscribed.current);
+    };
+    const pending = run().finally(() => { refreshingState.current = null; });
+    refreshingState.current = pending;
+    return pending;
   }, [commitTasks]);
 
   useEffect(() => {
+    subscribed.current = true;
     // Messages are handled in batches: each event also brings its task's update, and several busy
     // agents send many a second; one render per batch instead of one per message.
     let batch: HubMessage[] = [];
@@ -206,7 +231,7 @@ export function useHub() {
       for(const source of sources) {
         if(streams.has(source.id))continue;
         const es=new EventSource(sourceBase(source.id)+'/stream');streams.set(source.id,es);
-        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh().catch(()=>{});};
+        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh(!refreshPendingSources.current.has(source.id)).catch(()=>{});};
         es.onerror=()=>{
           if(source.id){sourceConnected(source.id,false);commitTasks(prev=>new Map([...prev].map(([id,t])=>[id,id.startsWith(`w:${source.id}:`)?{...t,runner_connected:false}:t])));}
           else {setConnected(false);fetch('/api/state',{method:'HEAD'}).then(r=>{if(r.status===401)location.reload();},()=>{});}
@@ -221,7 +246,7 @@ export function useHub() {
     update();
     const poll=setInterval(()=>{void discoverSources(true).catch(()=>{});},5000);
     void discoverSources(true).then(update,()=>{});
-    return()=>{unsubscribe();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
+    return()=>{subscribed.current=false;unsubscribe();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
   }, [refresh, commitTasks]);
 
   const onEvent = useCallback((fn: (e: HubEvent, task?: TaskView) => void) => {
@@ -270,6 +295,8 @@ export interface ColumnFeed { events: HubEvent[]; more: boolean; loading: boolea
 
 /** A query's total is counted again at most this often (ms) while its events arrive. */
 const COUNT_EVERY = 3000;
+/** Small newest pages keep startup/reconnect transfers bounded; older reads use FEED_PAGE. */
+const NEWEST_FEED_PAGE = 200;
 
 
 /**
@@ -277,7 +304,7 @@ const COUNT_EVERY = 3000;
  * missed some and fetches its newest page again when shown. `at`: the state reload (`synced`) its
  * newest page is from.
  */
-interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; token: object; olderCursor?: HubEvent }
+interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; token: object; requestedAt?: number; olderCursor?: HubEvent }
 
 /**
  * Each feed column's events, filtered by the hub to what the column shows, newest page first and
@@ -346,7 +373,8 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     const entry = cache.current.get(key);
     if (!entry) return;
     const token = entry.token;
-    set(key, e => ({ ...e, loading: true }));
+    const limit = NEWEST_FEED_PAGE;
+    set(key, e => ({ ...e, loading: true, requestedAt: epoch }));
     const retry = () => {
       if (retries.current.has(key)) return;
       const attempt = (retryAttempts.current.get(key) ?? 0) + 1;
@@ -357,11 +385,15 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
         if (latest?.live && latest.token === token && latest.at !== epoch) loadNewest(key, epoch);
       }, Math.min(1000 * 2 ** (attempt - 1), 10000)));
     };
-    request(key, signal => api.feedPage(FEED_PAGE, undefined, entry.q, signal), page => {
+    request(key, signal => api.feedPage(limit, undefined, entry.q, signal, page => {
+      if (signal.aborted || cache.current.get(key)?.token !== token) return;
+      // Partial pages never advance the paging boundary or replace already visible posts.
+      set(key, e => ({ ...e, events: mergeEvents(e.events, page.events) }));
+    }), page => {
       set(key, e => {
         // Keep every readable source's posts while an unavailable source catches up.
         return { ...e, events: mergeEvents(e.events, page.events),
-          more: page.complete ? page.events.length >= FEED_PAGE : e.more,
+          more: page.complete ? page.events.length >= limit : e.more,
           olderCursor: page.complete ? page.events[0] : e.olderCursor,
           loading: false, at: page.complete ? epoch : e.at };
       });
@@ -403,7 +435,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       shown.current.set(id, key);
       if (started.has(key)) continue;
       started.add(key);
-      if (cur?.live && cur.at === synced) continue;
+      if (cur?.live && (cur.at === synced || cur.loading && cur.requestedAt === synced)) continue;
       cancelRetry(key); abortRequests(key);
       if (cur) { c.delete(key); c.set(key, { ...cur, live: true, token: {} }); }
       else {

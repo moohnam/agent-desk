@@ -85,71 +85,90 @@ function remember(source:string,m:HubMessage) {
   for(const updates of refreshing.get(source)??[])updates.push(m);
 }
 let projects:Project[]=[];
-async function state():Promise<DeskState> {
+/** Publish each workspace as it arrives; pending/offline workspaces retain their last snapshot. */
+async function state(onProgress?: (value: DeskState) => void): Promise<DeskState> {
   await discoverSources();
-  const unavailableSources:string[]=[];
-  const availableSources:string[]=[];
-  const localUpdates:HubMessage[]=[];
-  let localRefresh=refreshing.get('');if(!localRefresh)refreshing.set('',localRefresh=new Set());localRefresh.add(localUpdates);
-  let local:DeskState;
-  try {
-    let response:Response;
-    try {response=await fetch('/api/state');}
-    catch {throw new LocalUnavailable();}
-    const data=await response.json().catch(()=>({}));
-    if(!response.ok) {
-      if(response.status>=500)throw new LocalUnavailable();
-      throw new Error(data.error??`HTTP ${response.status}`);
-    }
-    local=data as DeskState;
-    availableSources.push('');
-    for(const update of localUpdates)applyMessage(local,update);
-    snapshots.set('',local);
-  }catch(error){
-    if(!(error instanceof LocalUnavailable))throw error;
-    unavailableSources.push('');
-    const held=snapshots.get('');
-    local=held?{...held,runner:{connected:false},tasks:held.tasks.map(t=>({...t,runner_connected:false}))}
-      :{projects:[],tasks:[],approvals:[],questions:[],channels:[],runner:{connected:false}};
-  }finally{localRefresh.delete(localUpdates);if(!localRefresh.size)refreshing.delete('');}
-  const linked=await Promise.all(getSources().map(async source=>{
-    const updates:HubMessage[]=[];
-    let active=refreshing.get(source.id);if(!active)refreshing.set(source.id,active=new Set());active.add(updates);
-    try {
-      const r=await fetch(sourceBase(source.id)+'/state');if(!r.ok)throw Error('offline');
-      const value=mapState(source.id,source.view_index,await r.json());
-      availableSources.push(source.id);
-      for(const update of updates)applyMessage(value,update);
-      value.projects=value.projects.filter(p=>!removedProjects.has(p.id));
-      snapshots.set(source.id,value);sourceConnected(source.id,true);return value;
-    }catch {
-      unavailableSources.push(source.id);sourceConnected(source.id,false);
-      const held=snapshots.get(source.id);
-      return held&&{...held,tasks:held.tasks.map(t=>({...t,runner_connected:false}))};
-    }finally{active.delete(updates);if(!active.size)refreshing.delete(source.id);}
+  const sources = [{ id: '', view_index: 0 }, ...getSources()];
+  const available = new Set<string>();
+  const unavailable = new Set<string>();
+  const values = new Map(sources.flatMap(source => {
+    const held = snapshots.get(source.id);
+    return held ? [[source.id, held] as const] : [];
   }));
-  for(const id of snapshots.keys())if(id&&!getSources().some(s=>s.id===id))snapshots.delete(id);
-  const all=[local,...linked.filter((s):s is DeskState=>!!s)];
-  const combined={...local,unavailableSources,availableSources,projects:all.flatMap(s=>s.projects).filter(p=>!removedProjects.has(p.id)),tasks:all.flatMap(s=>s.tasks),approvals:all.flatMap(s=>s.approvals),questions:all.flatMap(s=>s.questions)};
-  projects=combined.projects;return combined;
+  let failed = false;
+  const combined = (): DeskState => {
+    const local = values.get('') ?? { projects: [], tasks: [], approvals: [], questions: [], channels: [], runner: { connected: false } };
+    const current = sources.filter(source => !source.id || getSources().some(s => s.id === source.id));
+    const all = current.flatMap(source => values.get(source.id) ?? []);
+    projects = all.flatMap(s => s.projects).filter(p => !removedProjects.has(p.id));
+    return { ...local, projects, tasks: all.flatMap(s => s.tasks), approvals: all.flatMap(s => s.approvals),
+      questions: all.flatMap(s => s.questions), availableSources: current.filter(s => available.has(s.id)).map(s => s.id),
+      unavailableSources: current.filter(s => unavailable.has(s.id)).map(s => s.id) };
+  };
+  await Promise.all(sources.map(async source => {
+    const updates: HubMessage[] = [];
+    let active = refreshing.get(source.id);
+    if (!active) refreshing.set(source.id, active = new Set());
+    active.add(updates);
+    try {
+      let response: Response;
+      try { response = await fetch(sourceBase(source.id) + '/state'); }
+      catch { throw new LocalUnavailable(); }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (!source.id && response.status < 500) { failed = true; throw new Error(data.error ?? `HTTP ${response.status}`); }
+        throw new LocalUnavailable();
+      }
+      const value = source.id ? mapState(source.id, source.view_index, data) : data as DeskState;
+      for (const update of updates) applyMessage(value, update);
+      values.set(source.id, value); snapshots.set(source.id, value); available.add(source.id);
+      if (source.id) sourceConnected(source.id, true);
+    } catch (error) {
+      if (failed) throw error;
+      unavailable.add(source.id);
+      if (source.id) sourceConnected(source.id, false);
+      const held = snapshots.get(source.id);
+      if (held) values.set(source.id, { ...held, runner: { connected: false }, tasks: held.tasks.map(t => ({ ...t, runner_connected: false })) });
+    } finally {
+      active.delete(updates);
+      if (!active.size) refreshing.delete(source.id);
+    }
+    if (!failed && available.size + unavailable.size < sources.length) onProgress?.(combined());
+  }));
+  for (const id of snapshots.keys()) if (id && !getSources().some(s => s.id === id)) snapshots.delete(id);
+  return combined();
 }
-async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal) {
+export interface FeedPage { events: HubEvent[]; complete: boolean }
+async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal,onProgress?: (page: FeedPage) => void) {
   await discoverSources();
+  signal?.throwIfAborted();
   const all=[{id:'',view_index:0},...getSources()];
-  const pages=await Promise.all(all.map(async source=>{
-    const filter=sourceFilter(source.id,q);if(!filter)return {events:[] as HubEvent[],complete:true};
+  const pages = new Map<string, FeedPage>();
+  let failed = false;
+  const combined = (): FeedPage => ({ events: [...pages.values()].flatMap(page => page.events).sort(compareEvents).slice(-limit),
+    complete: pages.size === all.length && [...pages.values()].every(page => page.complete) });
+  await Promise.all(all.map(async source=>{
+    const filter=sourceFilter(source.id,q);
+    if(!filter) { pages.set(source.id, {events:[],complete:true}); return; }
     const p=feedSearch(filter);p.set('limit',String(limit));
     // A stable timestamp + source index + native ID cursor prevents cross-store gaps/ties.
     p.set('before_ts',before?.ts??'9999-12-31T23:59:59.999Z');
     const index=before?eventSourceIndex(before.id):0;
     p.set('cursor_id',String(!before||source.view_index<index?Number.MAX_SAFE_INTEGER:source.view_index>index?0:nativeEventId(before.id)));
+    let page: FeedPage;
     try {
       const r=await fetch(sourceBase(source.id)+'/feed?'+p,{signal});
-      if(!r.ok){if(!source.id&&!before&&r.status>=500)return {events:[],complete:false};throw Error('글을 불러오지 못했습니다');}
-      return {events:(await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e)),complete:true};
-    }catch(e){if(before||signal?.aborted)throw e;if(source.id||e instanceof TypeError)return {events:[],complete:false};throw e;}
+      if(!r.ok){if(!source.id&&!before&&r.status>=500)page={events:[],complete:false};else throw Error('글을 불러오지 못했습니다');}
+      else page={events:(await r.json() as HubEvent[]).map(e=>mapEvent(source.id,source.view_index,e)),complete:true};
+    }catch(e){
+      if(before||signal?.aborted||(!source.id&&!(e instanceof TypeError))){failed=true;throw e;}
+      page={events:[],complete:false};
+    }
+    pages.set(source.id,page);
+    if(!failed&&!signal?.aborted)onProgress?.(combined());
   }));
-  return {events:pages.flatMap(page=>page.events).sort(compareEvents).slice(-limit),complete:pages.every(page=>page.complete)};
+  signal?.throwIfAborted();
+  return combined();
 }
 async function feedCount(q:FeedQuery,signal?:AbortSignal) {
   await discoverSources();
@@ -192,7 +211,7 @@ export const api = {
    * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
    */
   feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal).then(page=>page.events),
-  feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal),
+  feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal, onProgress?: (page: FeedPage) => void) => feeds(limit,before,q,signal,onProgress),
   feedCount,
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
