@@ -88,7 +88,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
         {references && <button className="icon-btn" aria-label="고정한 글 창" aria-pressed={references.open}
-          title="왼쪽에 고정한 글 보기 · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
+          title="고정 글·문서 창 열기 / 닫기 (Ctrl ;) · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
         {task?.source === 'app' && (
           <button className={`icon-btn${handoff === 'kept' ? ' kept' : ''}`} aria-pressed={handoff === 'open'}
             title={handoff === 'kept' ? '컨텍스트 재구성 이어서 하기 (X) · 쓰던 정리본이 있습니다' : handoff === 'open' ? '컨텍스트 재구성 패널 닫기 (X)' : '컨텍스트 재구성: 글을 골라 정리본을 만들고 새 세션으로 넘기기 (X)'}

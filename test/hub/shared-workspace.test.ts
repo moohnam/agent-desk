@@ -91,6 +91,9 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
    return {status:r.status,body:await r.json() as any};
   };
   const html=await prepare('docs/index.html');assert.equal(html.status,200,JSON.stringify(html.body));
+  symlinkSync('/etc/hosts',join(f.project,'docs','outside.md'));
+  const denied=await prepare('docs/outside.md');assert.equal(denied.status,403);
+  assert.match(denied.body.error,/허용 범위|읽기 권한/);
   assert.equal(html.body.kind,'html');assert.ok(!html.body.text);
   const content=await fetch(url+html.body.url);assert.equal(content.status,200);
   assert.match(content.headers.get('content-security-policy')!,/sandbox allow-scripts;/);

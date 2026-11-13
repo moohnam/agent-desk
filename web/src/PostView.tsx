@@ -106,7 +106,7 @@ function PostViewInner(props: Props) {
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' ? <Markdown text={p.text} onLocalLink={onLocalLink} />
+  ) : post.kind === 'assistant' ? <Markdown text={p.text} taskId={post.taskId} onLocalLink={onLocalLink} />
     : richText(String(p.text ?? '')), [post.kind, p, onLocalLink]);
   const engine = task?.engine ?? 'claude';
   const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
@@ -284,7 +284,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
 }) {
   const p = post.event.payload;
   const onLocalLink = useMemo(() => openLink(post.taskId, onError), [post.taskId, onError]);
-  const body = useMemo(() => <Markdown text={String(p.text ?? '')} onLocalLink={onLocalLink} />, [p.text, onLocalLink]);
+  const body = useMemo(() => <Markdown text={String(p.text ?? '')} taskId={post.taskId} onLocalLink={onLocalLink} />, [p.text, post.taskId, onLocalLink]);
   const r = post.resolution;
   // An unsent answer is kept as a draft (drafts.ts) while the question waits.
   const draftKey = `question:${p.questionId}`;

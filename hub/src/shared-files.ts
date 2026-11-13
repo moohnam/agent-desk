@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, opendir, realpath, rm, utimes } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ServerResponse } from 'node:http';
@@ -16,7 +16,17 @@ const CACHE_LIMIT = 250 * 1024 * 1024;
 const TTL = 24 * 60 * 60 * 1000;
 const inside = (root: string, path: string) => { const rel = relative(root, path); return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../')); };
 
-/** Only task files and temporary artifacts, never arbitrary paths outside those roots. */
+/** Claude stores project notes outside the checkout. Only that project's Markdown notes qualify. */
+export async function isProjectMemoryFile(root: string, path: string, config = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')) {
+  if (!['.md', '.markdown'].includes(extname(path).toLowerCase())) return false;
+  try {
+    const directory = join(await realpath(config), 'projects', root.replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+    // A redirected memory directory must not grant access to unrelated files.
+    return inside(directory, path) && await realpath(directory) === directory;
+  } catch { return false; }
+}
+
+/** Task files, temporary artifacts, and task-scoped Claude Markdown notes only. */
 export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string) {
   const cwd = hub.cwdOf(taskId);
   if (!cwd) throw new HttpError(404, '파일의 작업을 찾을 수 없습니다');
@@ -24,7 +34,8 @@ export async function workspaceFile(hub: Hub, taskId: string, href: string, base
   const target = linkTarget(href, root);
   if (target.kind !== 'file') throw new HttpError(400, '파일 링크가 필요합니다');
   const path = await realpath(target.path), temp = await realpath(tmpdir());
-  if (!inside(root, path) && !inside(temp, path)) throw new HttpError(403, '프로젝트 또는 임시 폴더에 있는 파일만 가져올 수 있습니다');
+  if (!inside(root, path) && !inside(temp, path) && !await isProjectMemoryFile(root, path))
+    throw new HttpError(403, '프로젝트·임시 폴더 또는 해당 프로젝트의 Claude 메모리 문서만 가져올 수 있습니다');
   if (base) {
     const document = linkTarget(base, root);
     if (document.kind !== 'file') throw new HttpError(400, '문서 경로가 필요합니다');

@@ -1,5 +1,5 @@
 import { workspaceKey } from './workspace.ts';
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { HubEvent } from './types.ts';
 
 export const REFERENCES_KEY = workspaceKey('agent-desk.threadReferences');
@@ -16,7 +16,7 @@ export function readReferences(raw: string | null): ThreadReferences {
       if (!value || typeof value !== 'object' || !Array.isArray(value.ids)) return [];
       const ids = [...new Set<number>(value.ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))];
       const files=Array.isArray(value.files)?[...new Set<string>(value.files.filter((f:unknown):f is string=>typeof f==='string'&&f.length<=4096))].slice(0,20):[];
-      return [[task, { ids, open: (ids.length > 0 || files.length > 0) && value.open === true, ...(files.length?{files}:{}) }] as const];
+      return [[task, { ids, open: false, ...(files.length?{files}:{}) }] as const];
     });
     return Object.fromEntries(entries);
   } catch { return {}; }
@@ -36,18 +36,10 @@ export function referenceEvents(task: string, ids: number[], events: HubEvent[])
 }
 
 export function useThreadReferences(taskId: string | null, gone: Set<string>) {
+  const [fileFocus, setFileFocus] = useState<{taskId:string;href:string;revision:number}>();
   const [state, setState] = useState<ThreadReferences>(() => {
     try { return readReferences(localStorage.getItem(REFERENCES_KEY)); } catch { return {}; }
   });
-  // An empty pane may be opened explicitly, but should not reopen with the thread.
-  useLayoutEffect(() => {
-    if (!taskId) return;
-    setState(previous => {
-      const selected = Object.hasOwn(previous, taskId) ? previous[taskId] : undefined;
-      return selected?.open && !selected.ids.length && !selected.files?.length
-        ? { ...previous, [taskId]: { ...selected, open: false } } : previous;
-    });
-  }, [taskId]);
   useEffect(() => { try { localStorage.setItem(REFERENCES_KEY, JSON.stringify(state)); } catch { /* private mode or full storage */ } }, [state]);
   useEffect(() => {
     if (!gone.size) return;
@@ -59,11 +51,18 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
   const selected = taskId && Object.hasOwn(state, taskId) ? state[taskId] : EMPTY;
   return {
     ...selected,
-    addFile: (task:string,href:string) => setState(s=>{
-      const current=Object.hasOwn(s,task)?s[task]:EMPTY;
-      const files=current.files??[];
-      return {...s,[task]:{...current,open:true,files:files.includes(href)?files:[...files,href].slice(-20)}};
-    }),
+    fileFocus: fileFocus?.taskId === taskId ? fileFocus : undefined,
+    // Called before opening a different thread. A subsequent addFile in the same event wins.
+    enter: (task: string) => setState(s => Object.hasOwn(s, task) && s[task].open
+      ? { ...s, [task]: { ...s[task], open: false } } : s),
+    addFile: (task:string,href:string) => {
+      setFileFocus(previous=>({taskId:task,href,revision:(previous?.revision??0)+1}));
+      setState(s=>{
+        const current=Object.hasOwn(s,task)?s[task]:EMPTY;
+        const files=current.files??[];
+        return {...s,[task]:{...current,open:true,files:files.includes(href)?files:[...files,href].slice(-20)}};
+      });
+    },
     removeFile: (href:string) => {if(taskId)setState(s=>({...s,[taskId]:{...s[taskId],files:s[taskId]?.files?.filter(f=>f!==href)}}));},
     toggle: (id: number) => { if (taskId) setState(s => toggleReference(s, taskId, id)); },
     show: (open: boolean) => { if (taskId) setState(s => ({ ...s, [taskId]: { ...(Object.hasOwn(s, taskId) ? s[taskId] : EMPTY), open } })); },

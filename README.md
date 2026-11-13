@@ -174,6 +174,12 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | `RUNNER_TOKEN_FILE` | `data/runner-token` | 허브가 러너에 붙을 때 보이는 토큰 |
 | `CODEX_BIN` / `AGY_BIN` | `codex` / `agy` | Codex, Antigravity 실행 파일 |
 
+### 기본 데스크 스킬
+
+새 허브를 처음 실행하면 `docufy`(설명형 문서), `adre`(독립 적대적 리뷰), `eli5`(쉬운 HTML 그림 설명), `remote-runner`(SSH로 원격 러너 설치·기동·허브 연결)를 설치합니다. 원본은 `hub/skills/`에 있으며 실행 시 사용하는 사본은 `AGENT_DESK_SKILLS_HOME/skills/`에 둡니다.
+
+이미 스킬 저장소가 있으면 기본 스킬을 추가하거나 덮어쓰지 않습니다. 사용자가 수정하거나 삭제한 스킬도 재시작으로 복원하지 않습니다. 기존 `remote-agent`의 기본 배포본은 설치·연결을 담당하는 `remote-runner`로 바뀌었으며, 기존 설치의 사용자 스킬 이름을 자동 변경하지는 않습니다. 원격 러너는 연결한 허브의 스킬 동기화를 이용합니다.
+
 ### 원격 러너에서 작업하기
 
 허브 하나에 로컬 러너와 여러 원격 러너를 함께 연결할 수 있습니다. 기존 `runner:remote` 인스턴스는 허브 하나에 연결합니다. 같은 작업·대화를 여러 허브에서 공동 조작하려면 아래의 별도 `runner:shared` 모드를 사용합니다.

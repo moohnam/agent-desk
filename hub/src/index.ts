@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { importLegacyWorkspaceLinks } from './runner/local-migration.ts';
 import { importRemoteManifests } from './runner/remote-migration.ts';
 import { ensureGatewayLocalAuthority } from './runner/local-launch.ts';
+import { installDefaultSkills } from './default-skills.ts';
 
 const { port: PORT, host: HOST, dbPath: DB_PATH, uploadsDir: UPLOADS_DIR, accessTokenFile: TOKEN_FILE } = config;
 
@@ -20,6 +21,7 @@ if (authorityTokenFile && (resolve(config.gatewayDbPath) === resolve(DB_PATH)
     const a=statSync(config.gatewayDbPath),b=statSync(DB_PATH);
     return a.dev===b.dev&&a.ino===b.ino;
   })()))) throw new Error('게이트웨이 DB와 로컬 작업공간 DB를 분리하세요');
+installDefaultSkills(config.skillsHome);
 if (authorityTokenFile) await ensureGatewayLocalAuthority({
   dbPath: DB_PATH,
   gatewayDbPath: config.gatewayDbPath,

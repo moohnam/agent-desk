@@ -4,11 +4,13 @@ import remarkGfm from 'remark-gfm';
 import { MermaidBlock } from './MermaidBlock.tsx';
 import { remarkKoreanSuffixStrong } from './markdownKoreanStrong.ts';
 import { mermaidSource } from './mermaid.ts';
+import { documentHref, documentPath, isDocumentLink } from './documentLinks.ts';
+import { remarkLineBreaks } from './markdownLineBreaks.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
 // Strikethrough only with ~~two~~ tildes: a single one is common in prose ("1~2개", "~/path").
-const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm, { singleTilde: boolean }], remarkKoreanSuffixStrong];
+const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm, { singleTilde: boolean }], remarkKoreanSuffixStrong, remarkLineBreaks];
 
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
@@ -22,7 +24,7 @@ function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraPr
  * Agent replies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
  * go to `onLocalLink` (the hub opens them, since a web page can't reach local apps or files).
  */
-export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase }: { text: string; onLocalLink?: (href: string) => void; resourceBase?: string }) {
+export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase }: { text: string; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
   return (
     <ReactMarkdown remarkPlugins={REMARK_PLUGINS}
       urlTransform={(url) => (APP_LINK.test(url) ? url : defaultUrlTransform(url))}
@@ -34,10 +36,16 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
             ? resourceBase.replace(/[^/]*$/,'')+src : undefined;
           return path?<img {...props} src={path} loading="lazy"/>:<span>{props.alt??'이미지 경로를 지원하지 않습니다'}</span>;
         }} : {}),
-        a: ({ node: _, ...props }) => onLocalLink && isLocalLink(props.href)
-          ? <a {...props} className="local-link" title={`로컬 앱으로 열기: ${props.href}`}
-              onClick={(e) => { e.preventDefault(); onLocalLink(props.href!); }} />
-          : <a {...props} target="_blank" rel="noreferrer" />,
+        a: ({ node: _, ...props }) => {
+          if (!onLocalLink || !isLocalLink(props.href)) return <a {...props} target="_blank" rel="noreferrer" />;
+          const path=documentPath(props.href!,linkBase), document=!!taskId&&isDocumentLink(path);
+          return <a {...props} href={document?documentHref(taskId!,path):props.href} className="local-link"
+            title={`${document?'문서 미리보기':'로컬 앱으로 열기'}: ${path}`}
+            onClick={(e) => {
+              if(document&&(e.metaKey||e.ctrlKey||e.shiftKey||e.altKey))return;
+              e.preventDefault();onLocalLink(path);
+            }} />;
+        },
       }}>
       {text}
     </ReactMarkdown>

@@ -33,6 +33,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     [';', '컬럼 찾기', '아직 표시하지 않은 컬럼도 검색합니다. ↑↓ 또는 Ctrl N/P로 고르고 Enter로 이동합니다.'],
     ['/', '내용 검색', '스레드 선택 시 해당 작업만 검색합니다. #task: 필터를 지우면 전체 검색으로 바뀝니다. PC 화면에서 사용합니다.'],
     ['Enter', '선택한 글의 스레드 열기'],
+    ['Ctrl ;', '고정 글·문서 창 열기 / 닫기', '스레드에 입력하는 중에도 사용할 수 있습니다.'],
     ['q / Esc', '스레드·검색·작성 서랍 닫기', '현재 검색 컬럼을 먼저 닫고, 스레드와 작성 서랍 순으로 닫습니다. 열린 창은 Esc로 닫습니다.'],
     ['f', '스레드를 분할 / 컬럼으로 보기', '분할 화면의 경계선을 끌어 폭을 조절합니다.'],
     ['t', '스레드 / 이전 컬럼으로 이동', '분할 화면에서 h/l은 스레드를 건너뜁니다.'],
@@ -113,6 +114,7 @@ export interface DeckKeyContext {
   closeThread: () => void;
   toggleThreadFocus: () => void;
   toggleFloat: () => void;
+  toggleReferences?: () => void;
   openSearch: () => void;
   closeSearch: () => void;
   setDrawer: (open: boolean) => void;
@@ -141,8 +143,16 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     } = c;
     // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
     const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
+    const references = ev.ctrlKey && !ev.shiftKey && !ev.metaKey && !ev.altKey && ev.code === 'Semicolon';
     // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
-    if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine) || ev.altKey) return;
+    if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine && !references) || ev.altKey) return;
+    if (references) {
+      if (!help && threadTask && c.toggleReferences && !ev.isComposing && !ev.defaultPrevented) {
+        ev.preventDefault();
+        if (!ev.repeat) c.toggleReferences();
+      }
+      return;
+    }
     // F1–F4: the deck's views, also while typing.
     const fv = !ev.ctrlKey && !ev.shiftKey && VIEWS.find((x) => x.key === ev.key);
     if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }

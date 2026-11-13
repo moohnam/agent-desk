@@ -1,4 +1,4 @@
-import { DOCUMENT_OPEN } from './documentLinks.ts';
+import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
@@ -686,7 +686,7 @@ export function App() {
    */
   const openThread = (taskId: string, at: { from?: string; post?: number } = {}) => {
     const after = at.from && at.from !== THREAD ? at.from : threadAfter;
-    if (threadTask !== taskId) setThreadTask(taskId);
+    if (threadTask !== taskId) { references.enter(taskId); setThreadTask(taskId); }
     setThreadAfter(after);
     setThreadFocus(at.post ?? null);
     setSelection((s) => { const { [THREAD]: _, ...rest } = s; return rest; });
@@ -705,6 +705,13 @@ export function App() {
     window.addEventListener(DOCUMENT_OPEN,receive);
     return()=>window.removeEventListener(DOCUMENT_OPEN,receive);
   });
+  useEffect(()=>{
+    const url=new URL(location.href),taskId=url.searchParams.get('documentTask'),href=url.searchParams.get('documentPath');
+    if(!taskId||!href||!hub.tasks.has(taskId)||!isDocumentLink(href))return;
+    url.searchParams.delete('documentTask');url.searchParams.delete('documentPath');
+    history.replaceState(history.state,'',url);
+    setDrawer(false);openThread(taskId);references.addFile(taskId,href);
+  },[hub.tasks]);
   const dropThread = () => {
     setThreadTask(null);
     if (activeCol?.id === THREAD) setActive(Math.max(threadSlot(threadAfter) - 1, 0));
@@ -1088,6 +1095,11 @@ export function App() {
     setToast('검색을 컬럼으로 저장했습니다.');
   };
 
+  const toggleReferences = () => {
+    if (!canRead || !threadTask) return;
+    if (!references.open) { setDrawer(false); setActive(threadSlot(threadAfter)); }
+    references.show(!references.open);
+  };
   // The deck's keys (deckKeys.ts). Registered again each render, so the handler sees the current state.
   useEffect(() => {
     const keys: DeckKeyContext = {
@@ -1096,7 +1108,7 @@ export function App() {
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
-      setWidth, widthOf,
+      setWidth, widthOf, toggleReferences: canRead ? toggleReferences : undefined,
     };
     const onKey = (ev: KeyboardEvent) => onDeckKey(ev, keys);
     window.addEventListener('keydown', onKey);
@@ -1221,7 +1233,7 @@ export function App() {
           onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
           references={canRead ? { open: references.open, count: references.ids.length+(references.files?.length??0) } : undefined}
-          onReferences={() => { if (!references.open) setDrawer(false); references.show(!references.open); }}
+          onReferences={toggleReferences}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
         <div className="feed thread-feed"
           onScroll={(e) => {
@@ -1260,7 +1272,13 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand"><img className="logo" src="/favicon.png?v=sage-20261103" alt="" /><span className="word">Agent Desk</span></div>
+        <div className="brand">
+          <button type="button" className="icon-btn brand-refresh" title="앱 새로고침" aria-label="앱 새로고침" onClick={() => window.location.reload()}
+            onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); }}>
+            <img className="logo" src="/favicon.png?v=sage-20261103" alt="" />
+          </button>
+          <span className="word">Agent Desk</span>
+        </div>
         <span className="conns">
           <span className={`conn${hub.connected ? ' on' : ''}`} title={hub.connected ? '허브 연결됨' : '허브 연결 끊김'} />
           <span className={`conn${hub.connected && runnerOk ? ' on' : ''}`}
@@ -1337,7 +1355,7 @@ export function App() {
         <div className="deck-space">
         {canRead && threadTaskView && (referencesVisible || (referenceTask === threadTask && (references.ids.length > 0 || !!references.files?.length))) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
           visible={referencesVisible}
-          ids={references.ids} files={references.files} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
+          ids={references.ids} files={references.files} fileFocus={references.fileFocus} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}

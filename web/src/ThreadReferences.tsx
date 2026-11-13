@@ -20,7 +20,7 @@ const ReferenceCard = memo(function ReferenceCard({ event, task, onError }: {
       <time dateTime={event.ts}>{new Date(event.ts).toLocaleString('ko-KR')}</time>
     </div>
     {event.kind === 'assistant' || event.kind === 'update'
-      ? <div className="body md"><Markdown text={String(p.text ?? '')} onLocalLink={open} /></div>
+      ? <div className="body md"><Markdown text={String(p.text ?? '')} taskId={task.id} onLocalLink={open} /></div>
       : event.kind === 'approval'
         ? <><strong>{p.toolName}</strong><pre>{JSON.stringify(p.input, null, 2)}</pre></>
         : <div className="body">{String(p.text ?? p.detail?.message ?? '')}</div>}
@@ -44,10 +44,11 @@ const ReferenceBody = memo(function ReferenceBody({ visible, ...props }: { visib
   return <div className="reference-body" ref={ref}>{ready ? <ReferenceCard {...props} /> : <p className="muted">본문을 준비하고 있습니다…</p>}</div>;
 });
 
-export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids && a.files === b.files);
+export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids && a.files === b.files && a.fileFocus === b.fileFocus);
 
-function ThreadReferencesInner({ visible, task, ids, files, events, reload, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
+function ThreadReferencesInner({ visible, task, ids, files, fileFocus, events, reload, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
   visible: boolean; files?: string[]; onRemoveFile: (href:string)=>void;
+  fileFocus?: {href:string;revision:number};
   task: TaskView; ids: number[]; events: HubEvent[]; reload: number;
   onRemove: (id: number) => void; onClear: () => void; onClose: () => void;
   onReveal: (id: number) => void; onError: (message: string) => void;
@@ -94,7 +95,7 @@ function ThreadReferencesInner({ visible, task, ids, files, events, reload, onRe
     <div className="reference-feed">
       {error && <p className="error" role="alert">글을 불러오지 못했습니다. <button className="link" onClick={() => setRetry(n => n + 1)}>다시 시도</button></p>}
       {ids.length === 0 && !files?.length && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
-      {files?.map(href=><DocumentPreview key={href} taskId={task.id} href={href} visible={visible} onRemove={()=>onRemoveFile(href)} onError={onError}/>)}
+      {files?.map(href=><DocumentPreview key={href} taskId={task.id} href={href} visible={visible} focusRevision={fileFocus?.href===href?fileFocus.revision:0} onRemove={()=>onRemoveFile(href)} onError={onError}/>)}
       {ids.map((id, index) => <section className="reference-card" key={id} data-reference={id}>
         <div className="reference-tools"><span>{index + 1}</span><span className="spacer" />
           <button className="icon-btn" title="오른쪽 스레드에서 원문 보기" aria-label={`고정한 글 ${index + 1} 원문 보기`} onClick={() => onReveal(id)}><ArrowUpRight /></button>

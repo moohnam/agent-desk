@@ -1,16 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FileText, RotateCw, X } from 'lucide-react';
 import { api } from './api.ts';
 import { Markdown } from './Markdown.tsx';
-import { previewLink } from './documentLinks.ts';
+import { DOCUMENT_OPEN, previewLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 
 const releasePreview=(url:string)=>fetch('/api/preview',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id:url.split('/')[2]}),keepalive:true}).catch(()=>{});
 type Preview = {name:string;url:string;kind:'html'|'markdown';text?:string};
-export function DocumentPreview({taskId,href,visible,onRemove,onError}:{taskId:string;href:string;visible:boolean;onRemove:()=>void;onError:(message:string)=>void}) {
+export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,onError}:{taskId:string;href:string;visible:boolean;focusRevision?:number;onRemove:()=>void;onError:(message:string)=>void}) {
   const [preview,setPreview]=useState<Preview|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(false);
   const [request,setRequest]=useState({revision:0,refresh:false}),[ready,setReady]=useState(false),[near,setNear]=useState(false);
   const ref=useRef<HTMLElement>(null);
+  const revealed=useRef(0),pendingReveal=useRef(0);
+  // Reveal only on an explicit open, then once more when the fetched body has its height.
+  // Panel toggles and unrelated thread updates retain the reader's scroll position.
+  useLayoutEffect(()=>{
+    if(!visible||!focusRevision||!ref.current)return;
+    const opening=revealed.current!==focusRevision;
+    if(!opening&&pendingReveal.current!==focusRevision)return;
+    const card=ref.current,feed=card.closest<HTMLElement>('.reference-feed');
+    if(!feed)return;
+    feed.scrollTo({top:feed.scrollTop+card.getBoundingClientRect().top-feed.getBoundingClientRect().top-feed.clientTop,behavior:'instant'});
+    revealed.current=focusRevision;
+    pendingReveal.current=preview||(error&&!opening)?0:focusRevision;
+    setReady(true);
+  },[focusRevision,visible,preview,error]);
   useEffect(()=>{
     if(!visible){setNear(false);return;}
     if(!ref.current)return;
@@ -28,6 +42,17 @@ export function DocumentPreview({taskId,href,visible,onRemove,onError}:{taskId:s
       .finally(()=>{if(alive)setLoading(false);});
     return()=>{alive=false;controller.abort();};
   },[taskId,href,ready,request]);
+  // Reopening an existing failed card must retry; successful cards keep their cached preview.
+  useEffect(()=>{
+    if(!error)return;
+    const reopen=(event:Event)=>{
+      const detail=(event as CustomEvent<{taskId:string;href:string}>).detail;
+      if(detail.taskId===taskId&&detail.href===href)
+        setRequest(value=>({revision:value.revision+1,refresh:false}));
+    };
+    window.addEventListener(DOCUMENT_OPEN,reopen);
+    return()=>window.removeEventListener(DOCUMENT_OPEN,reopen);
+  },[error,taskId,href]);
   useEffect(()=>()=>{if(preview)void releasePreview(preview.url);},[preview]);
   useEffect(()=>{
     if(!preview||!visible)return;
@@ -48,10 +73,6 @@ export function DocumentPreview({taskId,href,visible,onRemove,onError}:{taskId:s
     const resume=()=>{void renew();};document.addEventListener('visibilitychange',resume);window.addEventListener('online',resume);
     return()=>{controller.abort();clearInterval(timer);document.removeEventListener('visibilitychange',resume);window.removeEventListener('online',resume);};
   },[preview,visible]);
-  const relative=(value:string)=>{
-    if(/^[a-z][a-z\d+.-]*:/i.test(value)||value.startsWith('//')||value.startsWith('/')||value.startsWith('~'))return value;
-    return href.replace(/[^/]*$/,'')+value;
-  };
   return <section ref={ref} className="reference-card document-card">
     <div className="reference-tools"><FileText/><strong title={href}>{preview?.name??href.split('/').at(-1)}</strong><span className="spacer"/>
       <button className="icon-btn" title="원본 파일 다시 가져오기" aria-label="문서 새로고침" disabled={loading} onClick={()=>{setReady(true);setRequest(value=>({revision:value.revision+1,refresh:true}));}}><RotateCw/></button>
@@ -61,7 +82,7 @@ export function DocumentPreview({taskId,href,visible,onRemove,onError}:{taskId:s
     {error&&<p className="error" role="alert">{error}</p>}
     {preview?.kind==='html'&&visible&&near&&<iframe title={preview.name} src={preview.url} sandbox="allow-scripts" referrerPolicy="no-referrer" className="document-frame"/>}
     {preview?.kind==='html'&&(!visible||!near)&&<div className="document-frame"/>}
-    {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url}
-      onLocalLink={value=>{const path=relative(value);if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));}}/></div>}
+    {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url} taskId={taskId} linkBase={href}
+      onLocalLink={path=>{if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));}}/></div>}
   </section>;
 }

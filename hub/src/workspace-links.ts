@@ -210,7 +210,15 @@ export class WorkspaceLinks {
     if(!('response' in reply))throw new HttpError(502,'파일 응답을 받지 못했습니다');
     const timer=setTimeout(reply.release,30_000);
     try {
-      if(!reply.response.ok)throw new HttpError(reply.response.status,'문서 파일을 가져오지 못했습니다');
+      if(!reply.response.ok) {
+        const status=reply.response.status;
+        // Do not buffer or display arbitrary runner error bodies.
+        const reason=status===403?'문서 경로가 허용 범위 밖이거나 읽기 권한이 없습니다'
+          :status===404?'문서 파일이나 작업을 찾을 수 없습니다'
+          :status===413?'문서 파일은 50 MB까지 가져올 수 있습니다'
+          :`문서 파일을 가져오지 못했습니다 (HTTP ${status})`;
+        throw new HttpError(status,reason);
+      }
       return await receive(reply.response);
     } finally { clearTimeout(timer);reply.release(); }
   }

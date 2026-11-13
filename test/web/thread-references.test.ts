@@ -8,8 +8,8 @@ test('each thread keeps its own chosen order across storage reload and removal',
   state = toggleReference(state, 'thread-a', 20);
   state = toggleReference(state, 'thread-b', 70);
   state = readReferences(JSON.stringify(state));
-  assert.deepEqual(state['thread-a'], { ids: [90, 20], open: true });
-  assert.deepEqual(state['thread-b'], { ids: [70], open: true });
+  assert.deepEqual(state['thread-a'], { ids: [90, 20], open: false });
+  assert.deepEqual(state['thread-b'], { ids: [70], open: false });
   state = toggleReference(state, 'thread-a', 90);
   state = toggleReference(state, 'thread-a', 90);
   assert.deepEqual(state['thread-a'].ids, [20, 90], 're-adding goes to the end of the reading stack');
@@ -28,7 +28,7 @@ test('closing the reading window retains choices; selecting another post opens i
 test('damaged preferences cannot introduce invalid IDs or inherited thread keys', () => {
   for (const raw of ['null', '[]', 'wrong json', '"text"']) assert.deepEqual(readReferences(raw), {});
   const state = readReferences('{"a":{"ids":[3,3,0,-1,1.5,"4",7],"open":true},"b":null}');
-  assert.deepEqual(state, { a: { ids: [3, 7], open: true } });
+  assert.deepEqual(state, { a: { ids: [3, 7], open: false } });
   assert.equal(toggleReference(state, 'a', NaN), state);
   assert.equal(toggleReference(state, 'a', -1), state);
   assert.deepEqual(toggleReference({}, 'constructor', 42).constructor, { ids: [42], open: true });
