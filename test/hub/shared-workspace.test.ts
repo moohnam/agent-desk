@@ -71,6 +71,54 @@ test('shared file links stream from the task runner to a private local copy and 
  } finally {await link.close();if(gateway)await stop(gateway);hub.remotes.close();store.database.close();await stop(runner);f.close();}
 });
 
+test('document previews serve isolated cached HTML and Markdown with bounded relative resources and revocable access',async()=>{
+ const f=fixture(),runner=f.runtime.workspace.server(),runnerUrl=await listen(runner);
+ const store=new Store(join(f.dir,'preview-gateway.db')),links=new WorkspaceLinks(store);
+ const hub=new Hub(store,{skills:new SkillStore(join(f.dir,'preview-skills')),runner:()=>({connected:true,id:'gateway',engines:new Set(),has:()=>false,handle:()=>{throw Error('unexpected execution');}})});
+ const access=new Access(join(f.dir,'preview-access-token'),4317);
+ const server=createHttpServer(hub,access,join(f.dir,'uploads'),{workspaces:links});
+ const url=await listen(server);
+ try {
+  const peer=f.runtime.workspace.grant('preview');const source=await links.attach({name:'runner',url:runnerUrl,token:peer.token});
+  const task=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@preview:shared@worker:${f.project} #claude view`}}).body;
+  mkdirSync(join(f.project,'docs'));mkdirSync(join(f.project,'docs','assets'));
+  writeFileSync(join(f.project,'docs','index.html'),'<link rel="stylesheet" href="assets/style.css"><script src="assets/app.js"></script><h1>preview</h1>');
+  writeFileSync(join(f.project,'docs','note.md'),'# Markdown\n\n**굵게**');
+  writeFileSync(join(f.project,'docs','assets','style.css'),'h1{color:red}');writeFileSync(join(f.project,'docs','assets','app.js'),'window.ready=true;');
+  writeFileSync(join(f.project,'secret.js'),'secret');symlinkSync(join(f.project,'secret.js'),join(f.project,'docs','escape.js'));
+  const prepare=async(href:string,refresh=false,headers:Record<string,string>={})=>{
+   const r=await fetch(url+'/api/preview',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify({source:source.id,task_id:task.id,href,refresh})});
+   return {status:r.status,body:await r.json() as any};
+  };
+  const html=await prepare('docs/index.html');assert.equal(html.status,200,JSON.stringify(html.body));
+  assert.equal(html.body.kind,'html');assert.ok(!html.body.text);
+  const content=await fetch(url+html.body.url);assert.equal(content.status,200);
+  assert.match(content.headers.get('content-security-policy')!,/sandbox allow-scripts;/);
+  assert.ok(!content.headers.get('content-security-policy')!.includes('allow-same-origin'));
+  assert.equal(content.headers.get('referrer-policy'),'no-referrer');
+  const base=html.body.url.replace(/[^/]*$/,'');
+  const resources=await Promise.all(['assets/style.css','assets/app.js','assets/style.css'].map(p=>fetch(url+base+p)));
+  assert.deepEqual(resources.map(r=>r.status),[200,200,200]);
+  assert.equal((await fetch(url+base+'escape.js')).status,403);
+  assert.equal((await fetch(url+base+'%252e%252e/secret.js')).status,403);
+  assert.equal((await fetch(url+base+'.env')).status,403);
+  const md=await prepare('docs/note.md');assert.equal(md.body.text,'# Markdown\n\n**굵게**');
+  writeFileSync(join(f.project,'docs','note.md'),'changed');
+  assert.equal((await prepare('docs/note.md')).body.text,md.body.text,'cache remains stable until explicit refresh');
+  assert.equal((await prepare('docs/note.md',true)).body.text,'changed');
+  assert.equal((await prepare('secret.js')).status,400);
+  // Real device credentials create the grant; subsequent opaque-frame resource requests need no cookies.
+  access.isLocal=()=>false;access.hostAllowed=()=>true;
+  assert.equal((await prepare('docs/note.md')).status,401);
+  const cookie=access.addDevice('phone','test')[0].split(';')[0];
+  const device=access.view().devices[0];
+  const remote=await prepare('docs/index.html',false,{cookie});assert.equal(remote.status,200);
+  assert.equal((await fetch(url+remote.body.url,{headers:{origin:'null'}})).status,200);
+  access.removeDevice(device.id);
+  assert.equal((await fetch(url+remote.body.url)).status,404);
+ } finally {await stop(server);await links.close();hub.remotes.close();store.database.close();await stop(runner);f.close();}
+});
+
 test('temporary receiver rejects hostile names, oversized and cut off streams, then removes partial copies',async()=>{
  const files=new TemporaryFiles();
  let savedPath:string|undefined;

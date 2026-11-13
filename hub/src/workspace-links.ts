@@ -200,6 +200,20 @@ export class WorkspaceLinks {
     }else await this.attach({name:'local',url,token},id);
     return id;
   }
+  /** A bounded preview transfer; the runner must enforce the document-directory boundary. */
+  async previewFile(id:string, taskId:string, href:string, base:string|undefined, receive:(r:Response)=>Promise<string>) {
+    const link=this.link(id);
+    const identity=await this.request(link,'/v1/identity');
+    if(!('status' in identity)||identity.status!==200||identity.body.capabilities?.file_preview!==1)
+      throw new HttpError(409,'문서 미리보기를 사용하려면 해당 러너를 업데이트해야 합니다');
+    const reply=await this.request(link,'/v1/file?'+new URLSearchParams({task_id:taskId,href,...(base?{base}:{})}),{},true);
+    if(!('response' in reply))throw new HttpError(502,'파일 응답을 받지 못했습니다');
+    const timer=setTimeout(reply.release,30_000);
+    try {
+      if(!reply.response.ok)throw new HttpError(reply.response.status,'문서 파일을 가져오지 못했습니다');
+      return await receive(reply.response);
+    } finally { clearTimeout(timer);reply.release(); }
+  }
   async fetchFile(id: string, taskId: string, href: string, signal?: AbortSignal) {
     let reply: Awaited<ReturnType<WorkspaceLinks['request']>>;
     try { reply = await this.request(this.link(id), '/v1/file?' + new URLSearchParams({task_id: taskId, href}), {signal}, true); }

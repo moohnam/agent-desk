@@ -1,3 +1,5 @@
+import { DocumentPreview } from './DocumentPreview.tsx';
+import { previewLink } from './documentLinks.ts';
 import { ArrowUpRight, Bookmark, PanelLeftClose, X } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
@@ -11,7 +13,7 @@ const ReferenceCard = memo(function ReferenceCard({ event, task, onError }: {
   event: HubEvent; task: TaskView; onError: (message: string) => void;
 }) {
   const p = event.payload;
-  const open = useMemo(() => (href: string) => { void api.open(href, task.id).catch((e: Error) => onError(e.message)); }, [task.id, onError]);
+  const open = useMemo(() => (href: string) => { if(previewLink(task.id,href))return; void api.open(href, task.id).catch((e: Error) => onError(e.message)); }, [task.id, onError]);
   return <>
     <div className="reference-author">
       <b>{event.kind === 'user' ? '나' : event.kind === 'assistant' || event.kind === 'update' ? ENGINE_LABEL[engineOf(task.engine)] : event.kind === 'status' ? '알림' : '질문·승인'}</b>
@@ -42,10 +44,10 @@ const ReferenceBody = memo(function ReferenceBody({ visible, ...props }: { visib
   return <div className="reference-body" ref={ref}>{ready ? <ReferenceCard {...props} /> : <p className="muted">본문을 준비하고 있습니다…</p>}</div>;
 });
 
-export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids);
+export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids && a.files === b.files);
 
-function ThreadReferencesInner({ visible, task, ids, events, reload, onRemove, onClear, onClose, onReveal, onError }: {
-  visible: boolean;
+function ThreadReferencesInner({ visible, task, ids, files, events, reload, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
+  visible: boolean; files?: string[]; onRemoveFile: (href:string)=>void;
   task: TaskView; ids: number[]; events: HubEvent[]; reload: number;
   onRemove: (id: number) => void; onClear: () => void; onClose: () => void;
   onReveal: (id: number) => void; onError: (message: string) => void;
@@ -85,13 +87,14 @@ function ThreadReferencesInner({ visible, task, ids, events, reload, onRemove, o
   useEffect(() => { setAbsent(previous => previous.size ? new Set() : previous); }, [reload, retry]);
   return <aside className={`thread-references${visible ? '' : ' reading-hidden'}`} aria-label="고정한 글" aria-hidden={!visible} inert={!visible}>
     <header className="reference-head">
-      <div><h2><Bookmark /> 고정한 글 <span>{ids.length}</span></h2><p>{task.project_name}#{task.seq} · 선택한 순서</p></div>
-      {ids.length > 0 && <button className="link" onClick={onClear}>모두 해제</button>}
+      <div><h2><Bookmark /> 고정한 글·문서 <span>{ids.length+(files?.length??0)}</span></h2><p>{task.project_name}#{task.seq} · 선택한 순서</p></div>
+      {(ids.length > 0 || !!files?.length) && <button className="link" onClick={onClear}>모두 해제</button>}
       <button className="icon-btn" title="고정한 글 창 닫기 · 선택은 유지" aria-label="고정한 글 창 닫기" onClick={onClose}><PanelLeftClose /></button>
     </header>
     <div className="reference-feed">
       {error && <p className="error" role="alert">글을 불러오지 못했습니다. <button className="link" onClick={() => setRetry(n => n + 1)}>다시 시도</button></p>}
-      {ids.length === 0 && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
+      {ids.length === 0 && !files?.length && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
+      {files?.map(href=><DocumentPreview key={href} taskId={task.id} href={href} visible={visible} onRemove={()=>onRemoveFile(href)} onError={onError}/>)}
       {ids.map((id, index) => <section className="reference-card" key={id} data-reference={id}>
         <div className="reference-tools"><span>{index + 1}</span><span className="spacer" />
           <button className="icon-btn" title="오른쪽 스레드에서 원문 보기" aria-label={`고정한 글 ${index + 1} 원문 보기`} onClick={() => onReveal(id)}><ArrowUpRight /></button>

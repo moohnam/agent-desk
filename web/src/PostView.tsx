@@ -1,3 +1,4 @@
+import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
@@ -60,7 +61,7 @@ function author(post: Post, task: TaskView | undefined) {
 /** @mentions and #tags in my own posts stand out, as in the compose box. */
 /** Opens a local link from a post through the hub. A hub without the route still hands app URLs to the browser. */
 const openLink = (taskId: string, onError?: (msg: string) => void) => (href: string) =>
-  api.open(href, taskId).catch((e: Error) => {
+  previewLink(taskId,href) ? Promise.resolve() : api.open(href, taskId).catch((e: Error) => {
     if (e.message.startsWith('no route') && /^(akb|lectern):/i.test(href)) window.location.href = href;
     else onError?.(e.message);
   });

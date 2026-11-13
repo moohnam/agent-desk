@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, opendir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ServerResponse } from 'node:http';
@@ -17,7 +17,7 @@ const TTL = 24 * 60 * 60 * 1000;
 const inside = (root: string, path: string) => { const rel = relative(root, path); return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../')); };
 
 /** Only task files and temporary artifacts, never arbitrary paths outside those roots. */
-export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse) {
+export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string) {
   const cwd = hub.cwdOf(taskId);
   if (!cwd) throw new HttpError(404, '파일의 작업을 찾을 수 없습니다');
   const root = await realpath(expandHome(remoteLocation(cwd)?.path ?? cwd));
@@ -25,11 +25,24 @@ export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, 
   if (target.kind !== 'file') throw new HttpError(400, '파일 링크가 필요합니다');
   const path = await realpath(target.path), temp = await realpath(tmpdir());
   if (!inside(root, path) && !inside(temp, path)) throw new HttpError(403, '프로젝트 또는 임시 폴더에 있는 파일만 가져올 수 있습니다');
+  if (base) {
+    const document = linkTarget(base, root);
+    if (document.kind !== 'file') throw new HttpError(400, '문서 경로가 필요합니다');
+    const directory = dirname(await realpath(document.path));
+    if (!inside(directory, path)) throw new HttpError(403, '문서 폴더 안의 부속 파일만 볼 수 있습니다');
+  }
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile()) throw new HttpError(400, '일반 파일만 가져올 수 있습니다');
     if (stat.size > SHARED_FILE_LIMIT) throw new HttpError(413, '파일은 50 MB까지 가져올 수 있습니다');
+    return { file, stat, target };
+  } catch (error) { await file.close(); throw error; }
+}
+
+export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string) {
+  const { file, stat, target } = await workspaceFile(hub, taskId, href, base);
+  try {
     res.writeHead(200, {
       'content-type': 'application/octet-stream', 'cache-control': 'no-store',
       'content-length': stat.size,

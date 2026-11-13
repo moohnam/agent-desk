@@ -1,3 +1,4 @@
+import { DOCUMENT_OPEN } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
@@ -475,7 +476,9 @@ export function App() {
   const paneWidth = Math.max(Math.round(workspaceWidth * split / 100), PANE_MIN_PX);
   const paneCover = workspaceWidth - paneWidth < DECK_MIN_PX;
   const canReference = floatThread && !paneCover;
-  const referencesVisible = canReference && references.open && !!threadTask && hub.tasks.has(threadTask);
+  const documentOverlay = !canReference && !!references.files?.length;
+  const canRead = canReference || documentOverlay;
+  const referencesVisible = canRead && references.open && !!threadTask && hub.tasks.has(threadTask);
   useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible]);
   useEffect(() => {
     setReferenceTask(previous => referencesVisible ? threadTask : canReference && previous === threadTask ? previous : null);
@@ -483,7 +486,7 @@ export function App() {
   useEffect(() => {
     // A deck reorder briefly changes the column at the active index before the layout effect
     // restores focus by column ID. Only a settled move away from the thread closes this pane.
-    if (referencesVisible && activeCol?.id !== THREAD && activeId.current === activeCol?.id) references.show(false);
+    if (!references.files?.length && !documentOverlay && referencesVisible && activeCol?.id !== THREAD && activeId.current === activeCol?.id) references.show(false);
   }, [referencesVisible, activeCol?.id]);
   /**
    * Glides the deck sideways just enough to show column `id` whole, and the column before it too
@@ -691,6 +694,17 @@ export function App() {
     // On a phone the thread fills the screen, so the system back gesture should close it.
     if (phone && !history.state?.thread) history.pushState({ thread: true }, '');
   };
+  useEffect(()=>{
+    const receive=(event:Event)=>{
+      const {taskId,href}=(event as CustomEvent<{taskId:string;href:string}>).detail;
+      if(!hub.tasks.has(taskId))return;
+      setDrawer(false);
+      if(threadTask!==taskId)openThread(taskId);
+      references.addFile(taskId,href);
+    };
+    window.addEventListener(DOCUMENT_OPEN,receive);
+    return()=>window.removeEventListener(DOCUMENT_OPEN,receive);
+  });
   const dropThread = () => {
     setThreadTask(null);
     if (activeCol?.id === THREAD) setActive(Math.max(threadSlot(threadAfter) - 1, 0));
@@ -1206,7 +1220,7 @@ export function App() {
           model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
           onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
-          references={canReference ? { open: references.open, count: references.ids.length } : undefined}
+          references={canRead ? { open: references.open, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={() => { if (!references.open) setDrawer(false); references.show(!references.open); }}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
         <div className="feed thread-feed"
@@ -1308,7 +1322,7 @@ export function App() {
       <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
-      <div className="workspace" ref={workspaceRef}>
+      <div className={`workspace${documentOverlay&&referencesVisible?' document-overlay':''}`} ref={workspaceRef}>
         {drawer && (
           <ComposeDrawer projects={hub.projects} tasks={taskList} inputRef={composeRef}
             onClose={() => setDrawer(false)}
@@ -1321,9 +1335,9 @@ export function App() {
             }} />
         )}
         <div className="deck-space">
-        {canReference && threadTaskView && (referencesVisible || (referenceTask === threadTask && references.ids.length > 0)) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
+        {canRead && threadTaskView && (referencesVisible || (referenceTask === threadTask && (references.ids.length > 0 || !!references.files?.length))) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
           visible={referencesVisible}
-          ids={references.ids} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
+          ids={references.ids} files={references.files} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}
@@ -1341,7 +1355,7 @@ export function App() {
         </div>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
-          <div className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
+          <div inert={documentOverlay && referencesVisible} className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
             style={paneCover ? undefined : { flexBasis: paneWidth }}>
             {!paneCover && <SplitHandle split={split} onResize={resizeSplit} />}
             {renderColumn(deck[threadIdx], threadIdx)}

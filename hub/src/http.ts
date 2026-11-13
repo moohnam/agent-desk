@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
+import { DocumentPreviews } from './document-previews.ts';
+import { workspaceFile } from './shared-files.ts';
 import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import type { HubMessage } from '../../shared/api.ts';
@@ -92,6 +94,12 @@ $('send').onclick = async () => {
 export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string } = {}) {
   const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
   const localAuthorityId = options.localAuthorityId;
+  const previews = new DocumentPreviews(async(source,task,href,base,receive)=>{
+    if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive);
+    const {file,stat,target}=await workspaceFile(hub,task,href,base);
+    try {return await receive(new Response(await file.readFile(),{headers:{'content-length':String(stat.size),'x-desk-filename':encodeURIComponent(target.path.split('/').at(-1)!)}}));}
+    finally {await file.close();}
+  });
   access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -120,6 +128,20 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     if (!access.isLocal(req) && !access.hostAllowed(req)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       return res.end('이 주소로는 데스크에 접속할 수 없습니다. Mac의 IP 주소나 이름.local로 여세요 (다른 이름은 AGENT_DESK_HOSTS에 추가).');
+    }
+
+    // Only an authenticated prepare call grants this narrow read capability. Sandboxed frames
+    // have an opaque origin and cannot rely on device cookies. Revocation is checked per file.
+    if (parts[0] === '_preview') {
+      try {
+        if(req.method!=='GET'||parts.length<3)throw new HttpError(404,'문서가 없습니다');
+        if(!/^[a-zA-Z0-9.:[\]-]+$/.test(req.headers.host??''))throw new HttpError(400,'잘못된 호스트입니다');
+        await previews.serve(parts[1],parts.slice(2).join('/'),res,`http://${req.headers.host}`);
+      } catch(error) {
+        if(!res.headersSent)send(res,error instanceof HttpError?error.status:500,{error:error instanceof Error?error.message:'문서를 읽지 못했습니다'});
+        else res.destroy();
+      }
+      return;
     }
 
     // Producers can only write their own push channel. Even loopback/admin callers need its token;
@@ -188,6 +210,23 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         return await workspaces.proxyMcp(localAuthorityId,req,res,body);
       }
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
+      if(req.method==='DELETE'&&url.pathname==='/api/preview') {
+        const b=await readJson(req);
+        if(typeof b.id!=='string')throw new HttpError(400,'문서 ID가 필요합니다');
+        await previews.release(b.id);return send(res,200,{ok:true});
+      }
+      if (req.method === 'POST' && url.pathname === '/api/preview') {
+        const b=await readJson(req);
+        if(typeof b.task_id!=='string'||!b.task_id||typeof b.href!=='string'||b.href.length>4096||typeof b.source!=='string')throw new HttpError(400,'작업과 파일 링크가 필요합니다');
+        const source=b.source||workspaces.legacyOwner('task',b.task_id)||'';
+        if(!source&&!localAuthorityId&&remoteLocation(hub.cwdOf(b.task_id)??''))throw new HttpError(409,'원격 작업공간 연결이 필요합니다');
+        const token=access.token;
+        const allowed=()=> (client.kind==='local'||client.kind==='device'&&access.view().devices.some(d=>d.id===client.device.id)||client.kind==='shared'&&access.matches(token))
+          && (!source||workspaces.list().some(w=>w.id===source));
+        const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed);
+        if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
+        return send(res,200,document);
+      }
       if (parts[1] === 'workspaces') {
         if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list().filter(link=>link.id!==localAuthorityId));
         if (parts.length === 2 && req.method === 'POST') {
@@ -375,6 +414,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     }
   });
   server.on('listening', () => { if(!localAuthorityId)hub.channels.start(); });
-  server.on('close', () => { hub.channels.stop(); void workspaces.close(); });
+  server.on('close', () => { hub.channels.stop(); void previews.close(); void workspaces.close(); });
   return server;
 }

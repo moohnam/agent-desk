@@ -691,3 +691,12 @@ textarea.input { resize: none; }
 .reference-body { min-height: 100px; }
 .ph .reference-button { flex: none; color: var(--faint); padding: 2px 4px; }
 .ph .reference-button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+
+/* Files share the existing reading stack; narrow screens cover the thread until closed. */
+.document-card { padding: 10px; }
+.document-card .reference-tools strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-frame { display: block; width: 100%; height: min(72vh, 900px); min-height: 300px; border: 0; background: white; }
+.document-overlay > .deck-space { position: absolute; inset: 0; z-index: 20; }
+.document-overlay > .thread-split { visibility: hidden; pointer-events: none; }
+.document-overlay .thread-references { z-index: 6; }
+.document-card .md img { max-width: 100%; height: auto; }

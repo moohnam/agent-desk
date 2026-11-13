@@ -160,7 +160,7 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
         if (req.method === 'GET' && url.pathname === '/v1/skills/manifest')
@@ -216,7 +216,7 @@ export class SharedWorkspace {
           },5000);
           ping.unref();
           res.on('close',()=>{clearInterval(ping);this.files.delete(res);});
-          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res);
+          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined);
         }
         if (req.method === 'GET' && url.pathname === '/v1/read') return json(res,200,this.read(url.searchParams.get('path')!,peer));
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
