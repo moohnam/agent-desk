@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { extname, join, normalize } from 'node:path';
+import { dirname, extname, join, normalize } from 'node:path';
+import { Connectors, type ConnectorService } from './connectors.ts';
 import { DocumentPreviews } from './document-previews.ts';
 import { DiagramBrowser } from './diagram-browser.ts';
 import { DiagramCache } from './diagram-cache.ts';
@@ -93,9 +94,11 @@ $('send').onclick = async () => {
 </script></body></html>`;
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
-export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string } = {}) {
+export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string; connectors?: Connectors } = {}) {
   const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
   const localAuthorityId = options.localAuthorityId;
+  const connectors = options.connectors ?? new Connectors({ directory: join(dirname(uploadsDir), 'connectors'),
+    slackClientFile: config.connectors.slackClientFile });
   const diagramBrowser=new DiagramBrowser(WEB_DIST,config.diagramBrowser);
   const diagrams=new DiagramCache((source,signal)=>diagramBrowser.render(source,signal));
   const previews = new DocumentPreviews(async(source,task,href,base,receive)=>{
@@ -206,6 +209,35 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     const local = client.kind === 'local';
 
     try {
+      if (parts[0] === 'api' && parts[1] === 'connectors') {
+        // Deliberately local-owner only until device ownership and task grants are implemented.
+        if (!local) throw new HttpError(403, '외부 서비스 연결은 현재 허브 머신에서만 사용할 수 있습니다');
+        const callback = req.method === 'GET' && parts.length === 4 && parts[3] === 'callback';
+        if (!callback && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+        res.setHeader('cache-control', 'no-store');
+        res.setHeader('referrer-policy', 'no-referrer');
+        if (req.method === 'GET' && parts.length === 2) return send(res, 200, connectors.list());
+        if (id !== 'slack' && id !== 'jira') throw new HttpError(404, '지원하지 않는 외부 서비스입니다');
+        const service: ConnectorService = id;
+        if (callback) {
+          await connectors.finish(service, url.searchParams.get('state') ?? '', url.searchParams.get('code') ?? '', url.searchParams.has('error'));
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+          return res.end('Agent Desk에 연결했습니다. 이 창을 닫아도 됩니다.');
+        }
+        if (req.method === 'POST' && parts.length === 4 && parts[3] === 'connect') {
+          await readJson(req);
+          return send(res, 200, await connectors.begin(service, `http://${req.headers.host}`));
+        }
+        if (req.method === 'DELETE' && parts.length === 3) return send(res, 200, connectors.disconnect(service));
+        if (req.method === 'GET' && parts.length === 4 && parts[3] === 'tools') return send(res, 200, await connectors.tools(service));
+        if (req.method === 'POST' && parts.length === 4 && parts[3] === 'read') {
+          const input = await readJson(req);
+          if (typeof input.tool !== 'string' || !input.arguments || typeof input.arguments !== 'object' || Array.isArray(input.arguments))
+            throw new HttpError(400, '읽기 도구 이름과 arguments 객체가 필요합니다');
+          return send(res, 200, await connectors.read(service, input.tool, input.arguments));
+        }
+        throw new HttpError(404, '외부 연결 요청을 찾을 수 없습니다');
+      }
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
       if (url.pathname === '/mcp') {
         if(!localAuthorityId)return await handleMcp(hub,req,res);
@@ -432,6 +464,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     }
   });
   server.on('listening', () => { if(!localAuthorityId)hub.channels.start(); });
-  server.on('close', () => { hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
+  server.on('close', () => { connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
   return server;
 }

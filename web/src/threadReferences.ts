@@ -3,9 +3,34 @@ import { useEffect, useState } from 'react';
 import type { HubEvent } from './types.ts';
 
 export const REFERENCES_KEY = workspaceKey('agent-desk.threadReferences');
-export interface ReferenceSelection { ids: number[]; open: boolean; files?: string[] }
+export type ReferenceEntry = { kind: 'file'; href: string } | { kind: 'event'; id: number };
+export interface ReferenceSelection { ids: number[]; open: boolean; files?: string[]; order?: ReferenceEntry[] }
 export type ThreadReferences = Record<string, ReferenceSelection>;
 const EMPTY: ReferenceSelection = { ids: [], open: false };
+const entryKey = (entry: ReferenceEntry) => entry.kind === 'file' ? `file:${entry.href}` : `event:${entry.id}`;
+
+/** Old preferences retain their displayed order; explicit choices then promote one mixed entry. */
+export function referenceOrder(selection: Pick<ReferenceSelection, 'ids' | 'files' | 'order'>): ReferenceEntry[] {
+  const entries: ReferenceEntry[] = [...(selection.files ?? []).map(href => ({ kind: 'file' as const, href })),
+    ...selection.ids.map(id => ({ kind: 'event' as const, id }))];
+  const remaining = new Map(entries.map(entry => [entryKey(entry), entry]));
+  const ordered: ReferenceEntry[] = [];
+  for (const entry of selection.order ?? []) {
+    if (!entry || typeof entry !== 'object' || !['file', 'event'].includes(entry.kind)) continue;
+    const key = entryKey(entry), found = remaining.get(key);
+    if (found) { ordered.push(found); remaining.delete(key); }
+  }
+  return [...ordered, ...remaining.values()];
+}
+
+export function openReferenceFile(state: ThreadReferences, task: string, href: string): ThreadReferences {
+  const current = Object.hasOwn(state, task) ? state[task] : EMPTY;
+  const files = [href, ...(current.files ?? []).filter(file => file !== href)].slice(0, 20);
+  const entry: ReferenceEntry = { kind: 'file', href };
+  const order = [entry, ...referenceOrder(current).filter(item => entryKey(item) !== entryKey(entry))];
+  const next = { ...current, open: true, files, order };
+  return { ...state, [task]: { ...next, order: referenceOrder(next) } };
+}
 
 /** Keep only source IDs, in the order chosen; never duplicate conversation text in storage. */
 export function readReferences(raw: string | null): ThreadReferences {
@@ -16,7 +41,9 @@ export function readReferences(raw: string | null): ThreadReferences {
       if (!value || typeof value !== 'object' || !Array.isArray(value.ids)) return [];
       const ids = [...new Set<number>(value.ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))];
       const files=Array.isArray(value.files)?[...new Set<string>(value.files.filter((f:unknown):f is string=>typeof f==='string'&&f.length<=4096))].slice(0,20):[];
-      return [[task, { ids, open: false, ...(files.length?{files}:{}) }] as const];
+      const selection: ReferenceSelection = { ids, open: false, ...(files.length?{files}:{}) };
+      if (Array.isArray(value.order)) selection.order = referenceOrder({ ...selection, order: value.order });
+      return [[task, selection] as const];
     });
     return Object.fromEntries(entries);
   } catch { return {}; }
@@ -26,7 +53,10 @@ export function toggleReference(state: ThreadReferences, task: string, id: numbe
   if (!Number.isSafeInteger(id) || id < 1) return state;
   const current = Object.hasOwn(state, task) ? state[task] : EMPTY;
   const held = current.ids.includes(id);
-  return { ...state, [task]: { ...current, ids: held ? current.ids.filter(n => n !== id) : [...current.ids, id], open: held ? current.open : true } };
+  const ids = held ? current.ids.filter(n => n !== id) : [id, ...current.ids];
+  const order = referenceOrder(current).filter(entry => entry.kind !== 'event' || entry.id !== id);
+  if (!held) order.unshift({ kind: 'event', id });
+  return { ...state, [task]: { ...current, ids, order, open: held ? current.open : true } };
 }
 
 /** Whole, task-scoped originals only; a live clipped event must be fetched before displaying it. */
@@ -57,11 +87,7 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
       ? { ...s, [task]: { ...s[task], open: false } } : s),
     addFile: (task:string,href:string) => {
       setFileFocus(previous=>({taskId:task,href,revision:(previous?.revision??0)+1}));
-      setState(s=>{
-        const current=Object.hasOwn(s,task)?s[task]:EMPTY;
-        const files=current.files??[];
-        return {...s,[task]:{...current,open:true,files:files.includes(href)?files:[...files,href].slice(-20)}};
-      });
+      setState(s => openReferenceFile(s, task, href));
     },
     removeFile: (href:string) => {if(taskId)setState(s=>({...s,[taskId]:{...s[taskId],files:s[taskId]?.files?.filter(f=>f!==href)}}));},
     toggle: (id: number) => { if (taskId) setState(s => toggleReference(s, taskId, id)); },

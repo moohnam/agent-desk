@@ -11,22 +11,18 @@ export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,on
   const [preview,setPreview]=useState<Preview|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(false);
   const [request,setRequest]=useState({revision:0,refresh:false}),[ready,setReady]=useState(false),[near,setNear]=useState(false);
   const ref=useRef<HTMLElement>(null);
-  const revealed=useRef(0),pendingReveal=useRef(0);
-  // Reveal only on an explicit open, then once more when the fetched body has its height.
-  // Panel toggles and unrelated thread updates retain the reader's scroll position.
+  const revealed=useRef(0);
+  const [frameRevision,setFrameRevision]=useState(0);
+  // The reading pane promotes explicit choices to the first card. Reload only the chosen
+  // sandboxed frame so its own scroll position also starts at the top.
   useLayoutEffect(()=>{
-    if(!visible||!focusRevision||!ref.current)return;
-    const opening=revealed.current!==focusRevision;
-    if(!opening&&pendingReveal.current!==focusRevision)return;
-    const card=ref.current,feed=card.closest<HTMLElement>('.reference-feed');
-    if(!feed)return;
-    feed.scrollTo({top:feed.scrollTop+card.getBoundingClientRect().top-feed.getBoundingClientRect().top-feed.clientTop,behavior:'instant'});
+    if(!visible||!focusRevision||revealed.current===focusRevision)return;
     revealed.current=focusRevision;
-    pendingReveal.current=preview||(error&&!opening)?0:focusRevision;
+    setFrameRevision(focusRevision);
     setReady(true);
-  },[focusRevision,visible,preview,error]);
+  },[focusRevision,visible]);
   useEffect(()=>{
-    if(!visible){setNear(false);return;}
+    if(!visible)return;
     if(!ref.current)return;
     if(typeof IntersectionObserver==='undefined'){setReady(true);setNear(true);return;}
     const observer=new IntersectionObserver(entries=>{const inside=entries.some(e=>e.isIntersecting);setNear(inside);if(inside)setReady(true);}, {root:ref.current.closest('.reference-feed'),rootMargin:'100px'});
@@ -80,8 +76,8 @@ export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,on
     </div>
     {loading&&<p className="muted" role="status">문서를 불러오는 중…</p>}
     {error&&<p className="error" role="alert">{error}</p>}
-    {preview?.kind==='html'&&visible&&near&&<iframe title={preview.name} src={preview.url} sandbox="allow-scripts" referrerPolicy="no-referrer" className="document-frame"/>}
-    {preview?.kind==='html'&&(!visible||!near)&&<div className="document-frame"/>}
+    {preview?.kind==='html'&&near&&<iframe key={frameRevision} title={preview.name} src={preview.url} sandbox="allow-scripts" referrerPolicy="no-referrer" className="document-frame"/>}
+    {preview?.kind==='html'&&!near&&<div className="document-frame"/>}
     {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url} taskId={taskId} linkBase={href}
       onLocalLink={path=>{if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));}}/></div>}
   </section>;

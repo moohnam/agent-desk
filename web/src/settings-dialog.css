@@ -1,0 +1,22 @@
+.settings-layout { display: grid; grid-template-columns: 150px minmax(0, 1fr); min-height: 340px; min-width: 0; overflow-y: auto; }
+.settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-right: 1px solid var(--border); background: var(--col-head); }
+.settings-nav .btn { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
+.settings-nav .btn[aria-pressed="true"] { background: var(--sel); color: var(--text); border-color: var(--line); }
+.settings-content { min-width: 0; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.settings-content h3 { font-size: 14px; }
+.settings-content > .form { padding: 0; }
+.settings-content .small { font-size: 12.5px; }
+.settings-content .row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.settings-content .field-group { min-width: 0; }
+.settings-content code, .settings-content .error { overflow-wrap: anywhere; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.settings-row strong { font-size: 13px; font-weight: 600; }
+.settings-row p { margin: 4px 0 0; }
+.settings-row > .btn { flex-shrink: 0; }
+.workspace-deliveries { display: flex; flex-direction: column; gap: 10px; }
+@media (max-width: 600px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .settings-nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); }
+  .settings-content { padding: 14px; }
+  .settings-row { gap: 8px; }
+}

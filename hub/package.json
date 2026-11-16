@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.295",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "fast-xml-parser": "5.11.2",
     "puppeteer-core": "25.17.0",
     "qrcode": "1.5.4"

@@ -1,11 +1,12 @@
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
-import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
+import { SettingsDialog } from './SettingsDialog.tsx';
 import { RunnersDialog } from './Runners.tsx';
 import { WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
 import { workspaceId } from './workspace.ts';
@@ -17,7 +18,6 @@ import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
-import { ENGINES, effortNote, modelTagsOf } from '../../shared/compose.ts';
 import { stalledMinutes } from './format.ts';
 import { HandoffPanel, pickable, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { PostView } from './PostView.tsx';
@@ -121,6 +121,7 @@ export function App() {
   const [accessOpen, setAccessOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [runnersOpen, setRunnersOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
@@ -973,6 +974,7 @@ export function App() {
   }, [deck, focusCol]);
   const openChannel = (channel: Channel) => {
     setChannelsOpen(false);
+    setSettingsOpen(false);
     setThreadTask(null);
     if (phone) { setPhoneChannel(channel.id); setActive(0); return; }
     switchView('custom');
@@ -1309,7 +1311,6 @@ export function App() {
           </button>
           <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
             onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
-          {!workspaceId && <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" onClick={() => setSkillsOpen(true)}><Puzzle /></button>}
           <button className="btn" aria-pressed={notifyState === 'on'} aria-label="알림"
             title={notifyState === 'on' ? '알림 켜짐: 데스크를 보고 있지 않을 때 승인 요청·질문·작업 끝남·오류를 OS 알림으로 (누르면 끄기)'
               : notifyState === 'blocked' ? '알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 이 사이트의 알림을 허용하세요'
@@ -1325,9 +1326,9 @@ export function App() {
               });
             }}>
             {notifyState === 'on' ? <Bell /> : <BellOff />}</button>
-          <button className="btn" title={`실행 위치 필터 · 공유 러너 전달 내역${locationFilter ? ' (필터 적용 중)' : ''}`} aria-label="실행 위치 및 전달 내역"
+          <button className="btn" title={`실행 위치 필터${locationFilter ? ' (필터 적용 중)' : ''}`} aria-label="실행 위치 필터"
             aria-haspopup="dialog" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)}><Network /></button>
-          <button className="btn" title={`새 작업의 엔진별 기본 모델과 effort: 작업마다 ${ENGINES.map(modelTagsOf).join(' · ')} · #low … #max (${effortNote()})`} aria-label="설정: 기본 모델" onClick={() => setModelOpen(true)}><Settings /></button>
+          <button className="btn" title="설정: 에이전트·연결·러너 관리" aria-label="설정" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="다른 기기 연결: 접속 요청, 연결한 기기, QR 코드" aria-label="다른 기기 연결" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
@@ -1355,7 +1356,7 @@ export function App() {
         <div className="deck-space">
         {canRead && threadTaskView && (referencesVisible || (referenceTask === threadTask && (references.ids.length > 0 || !!references.files?.length))) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
           visible={referencesVisible}
-          ids={references.ids} files={references.files} fileFocus={references.fileFocus} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
+          ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}
@@ -1430,10 +1431,13 @@ export function App() {
             setFocusCol(id);
           }} />
       )}
+      {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
+        onModels={() => setModelOpen(true)} onSkills={workspaceId ? undefined : () => setSkillsOpen(true)}
+        onChannels={workspaceId ? undefined : () => setChannelsOpen(true)} onRunners={() => setRunnersOpen(true)} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
-      {modelOpen && <ModelDialog onRunners={hub.local ? () => {setModelOpen(false);setRunnersOpen(true);} : undefined} onClose={() => setModelOpen(false)} onChannels={workspaceId ? undefined : () => { setModelOpen(false); setChannelsOpen(true); }} />}
+      {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
       {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
       {workspaceOpen && <WorkspaceDialog value={locationFilter} onChange={changeLocation} onClose={() => setWorkspaceOpen(false)} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}

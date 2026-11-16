@@ -24,10 +24,9 @@ export async function workspaceCall<T>(path:string,method='GET',body?:unknown):P
 export function WorkspaceDialog({value,onChange,onClose}:{value:string;onChange:(value:string)=>void;onClose:()=>void}) {
   const links=useSources();
   const [runners,setRunners]=useState<RemoteRunnerView[]>([]);
-  const [open,setOpen]=useState<string>();
   useEffect(()=>{let alive=true;const refresh=()=>api.runners().then(v=>{if(alive)setRunners(v);},()=>{});void refresh();const t=setInterval(refresh,5000);return()=>{alive=false;clearInterval(t);};},[]);
   const options=[{id:'local',name:'이 기기'},...runners.map(r=>({id:`runner:${r.id}`,name:r.address})),...links.map(l=>({id:`workspace:${l.id}`,name:`${l.name} · 공유${l.connected===false?' · 연결 끊김':''}`}))];
-  return <Modal title="실행 위치 및 전달 내역" onClose={onClose}><div className="form">
+  return <Modal title="실행 위치 필터" onClose={onClose}><div className="form">
     <label className="field"><span className="lbl">실행 위치 필터</span>
     <select className="input" autoFocus aria-label="실행 위치 필터" value={value} onChange={e=>onChange(e.target.value)}>
       <option value="">모든 실행 위치</option>
@@ -35,11 +34,18 @@ export function WorkspaceDialog({value,onChange,onClose}:{value:string;onChange:
       {options.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
     </select>
     <span className="muted small">모든 뷰와 검색 결과에 바로 적용합니다. 작업을 실행할 대상은 바뀌지 않습니다.</span></label>
-    {links.length>0&&<section className="form"><h3>공유 러너 전달 내역</h3>
-      {links.map(l=><button key={l.id} className="btn" onClick={()=>setOpen(l.id)} aria-label={`${l.name} 전달 내역`}>{l.name} · 전달{l.pending?` 대기 ${l.pending}`:''}</button>)}
-    </section>}
-    {open&&<Deliveries workspaceId={open} onClose={()=>setOpen(undefined)}/>}
   </div></Modal>;
+}
+export function WorkspaceDeliveries() {
+  const links=useSources();
+  const [open,setOpen]=useState<string>();
+  return <section className="workspace-deliveries">
+    <h3>공유 러너 전달 내역</h3>
+    {links.length ? links.map(l=><button key={l.id} className="btn" onClick={()=>setOpen(l.id)} aria-label={`${l.name} 전달 내역`}>
+      {l.name} · {l.pending ? `전달 대기 ${l.pending}개` : '전달 내역 보기'}
+    </button>) : <p className="muted small">연결한 공유 러너가 없습니다.</p>}
+    {open&&<Deliveries workspaceId={open} onClose={()=>setOpen(undefined)}/>}
+  </section>;
 }
 function Deliveries({workspaceId,onClose}:{workspaceId:string;onClose:()=>void}) {
   const [items,setItems]=useState<WorkspaceDelivery[]>([]),[error,setError]=useState('');
@@ -59,7 +65,7 @@ export function WorkspaceConnections() {
   useEffect(()=>{void refresh().catch(e=>setError(e.message));},[]);
   return <section className="form">
     <h3>같은 작업을 여러 허브에서 공유</h3>
-    <p className="small">공유 모드로 실행한 러너의 주소와 이 허브용 토큰을 등록합니다. 연결하면 기존 컬럼에 함께 표시되며, 다른 허브와 같은 대화·대기열·승인 상태를 보고 조작합니다. 우측 상단의 실행 위치 및 전달 내역 버튼에서 필터와 전달 내역을 확인할 수 있습니다.</p>
+    <p className="small">공유 모드로 실행한 러너의 주소와 이 허브용 토큰을 등록합니다. 연결하면 기존 컬럼에 함께 표시되며, 다른 허브와 같은 대화·대기열·승인 상태를 보고 조작합니다. 상단에서 실행 위치를 필터링하고 설정의 러너 항목에서 전달 내역을 확인할 수 있습니다.</p>
     {links.map(l=><div key={l.id} className="field-group"><strong>{l.name}</strong> · 미전달 {l.pending}개
       <div className="row">
       <button className="btn" onClick={()=>{setEdit(l.id);setName(l.name);setUrl(l.url);setToken('');}}>연결 갱신</button>

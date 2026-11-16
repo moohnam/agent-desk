@@ -40,6 +40,10 @@ export const config = {
   webDist: join(REPO, 'web', 'dist'),
   /** Optional Chrome/Chromium executable for hub-side Mermaid rendering. */
   diagramBrowser: env.AGENT_DESK_DIAGRAM_BROWSER,
+  connectors: {
+    // A private file avoids putting the client secret in the environment inherited by runners.
+    slackClientFile: env.AGENT_DESK_SLACK_CLIENT_FILE,
+  },
   runner: {
     host: '127.0.0.1',
     port: positive(env.RUNNER_PORT, 4318),

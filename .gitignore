@@ -4,6 +4,7 @@ data/
 *.db
 *.log
 .DS_Store
+/slack-info.json
 
 # 구현 외 자료는 로컬에만 둡니다.
 LOG/
