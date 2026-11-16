@@ -3,14 +3,21 @@ import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { request } from 'node:http';
+import { createServer, request, type Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { ConnectorVault } from '../../hub/src/connector-vault.ts';
+import { ConnectorAuthority } from '../../hub/src/connector-authority.ts';
+import { ConnectorBroker } from '../../hub/src/connector-broker.ts';
 import { Connectors, CONNECTOR_PROVIDERS, type ConnectorService } from '../../hub/src/connectors.ts';
 import { Access } from '../../hub/src/access.ts';
 import { Store } from '../../hub/src/db.ts';
 import { Hub } from '../../hub/src/hub.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
 import { createHttpServer } from '../../hub/src/http.ts';
+import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
+import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
+import type { HubToRunner, RunnerToHub } from '../../shared/protocol.ts';
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 function fixture() {
@@ -22,6 +29,7 @@ function fixture() {
   let failure = false;
   let unauthorized = 0;
   let limited = false;
+  let unavailable = false;
   let repeatedCursor = false;
   let toolError = false;
   let tokenOverride: Record<string, unknown> = {};
@@ -52,6 +60,7 @@ function fixture() {
     if (init?.method === 'GET' || init?.method === 'DELETE') return new Response(null, { status: 405 });
     if (unauthorized > 0) { unauthorized--; return json({ error: 'unauthorized' }, 401); }
     if (limited) return json({ error: 'rate limit' }, 429);
+    if (unavailable) return json({ error: 'service unavailable' }, 503);
     const rpc = JSON.parse(body);
     if (rpc.id == null) return new Response(null, { status: 202 });
     let result: unknown;
@@ -86,6 +95,7 @@ function fixture() {
     scope: (value: string) => { scope = value; }, expires: (value: number) => { expires = value; },
     foreign: () => { foreign = true; }, failure: () => { failure = true; },
     unauthorized: (count: number) => { unauthorized = count; }, limited: () => { limited = true; },
+    unavailable: () => { unavailable = true; },
     repeatedCursor: () => { repeatedCursor = true; }, toolError: () => { toolError = true; },
     token: (value: Record<string, unknown>, status = 200) => { tokenOverride = value; tokenStatus = status; },
     v2Issuer: () => { v2Issuer = true; },
@@ -254,6 +264,32 @@ test('401 refresh is bounded; rate limits and MCP error results are not disguise
   } finally { f.close(); }
 });
 
+test('non-refreshable tokens are erased after 401 but survive transient 429 and 503 responses', async () => {
+  for (const status of [401, 429, 503]) {
+    const f = fixture();
+    try {
+      f.token({ refresh_token: undefined, expires_in: undefined });
+      await f.connect('slack');
+      if (status === 401) f.unauthorized(1);
+      else if (status === 429) f.limited();
+      else f.unavailable();
+      await assert.rejects(f.connectors.tools('slack'), error => typeof error === 'object' && error !== null
+        && 'status' in error && error.status === (status === 401 ? 409 : status === 429 ? 429 : 502));
+      const saved = new ConnectorVault<Record<string, any>>(f.dir).read()!;
+      if (status === 401) {
+        assert.equal(f.connectors.list()[0].status, 'disconnected');
+        assert.equal(saved.slack.tokens, undefined);
+        const count = f.requests.length;
+        await assert.rejects(f.connectors.tools('slack'), /먼저/);
+        assert.equal(f.requests.length, count);
+      } else {
+        assert.equal(f.connectors.list()[0].status, 'connected');
+        assert.equal(saved.slack.tokens.access_token, 'test-access-SUPER_SECRET');
+      }
+    } finally { f.close(); }
+  }
+});
+
 test('incomplete catalogs fail instead of silently omitting pages; a lost key is never regenerated over ciphertext', async () => {
   const f = fixture();
   try {
@@ -411,4 +447,301 @@ test('repeated consent with unchanged scopes preserves registration metadata and
     assert.equal(f.requests.filter(r => r.url.pathname === '/v1/register').length, 1);
     assert.equal(new ConnectorVault<Record<string, any>>(f.dir).read()!.jira.registeredScope, CONNECTOR_PROVIDERS.jira.scope);
   } finally { f.close(); }
+});
+
+test('request grants bind once and deliver real MCP reads with schemas and idempotent results', async () => {
+  const f = fixture(), db = new DatabaseSync(':memory:');
+  const authority = new ConnectorAuthority(db, f.connectors);
+  try {
+    await f.connect();
+    const grant = authority.issue({ workspaceId: 'workspace-A', requestId: 'input-A' });
+    const context = { capability: grant.capability, workspaceId: grant.workspaceId, requestId: grant.requestId, taskId: 'task-A', sessionId: 'session-A' };
+    assert.throws(() => authority.list(context), /아직 결합/);
+    authority.bind(context);
+    assert.throws(() => authority.bind({ ...context, taskId: 'other-task' }), /문맥/);
+    assert.throws(() => authority.list({ ...context, workspaceId: 'workspace-B' }), /문맥/);
+    assert.throws(() => authority.list({ ...context, requestId: 'input-B' }), /문맥/);
+    assert.throws(() => authority.list({ ...context, sessionId: 'session-B' }), /문맥/);
+    assert.deepEqual(authority.list(context).connections.map(c => c.service), ['jira']);
+    assert.deepEqual((await authority.tools({ ...context, service: 'jira' }))[0].inputSchema, { type: 'object' });
+    const input = { ...context, callId: 'call-A', service: 'jira' as const, tool: 'getJiraIssue', arguments: { issue: 'TEST-1', nested: { b: 2, a: 1 } } };
+    const result = await authority.call(input);
+    assert.ok(JSON.stringify(result.result).includes('/browse/TEST-1'));
+    assert.ok(result.retrieved_at);
+    const count = f.requests.length;
+    assert.deepEqual(await authority.call({ ...input, arguments: { nested: { a: 1, b: 2 }, issue: 'TEST-1' } }), result);
+    const reopened = new ConnectorAuthority(db, f.connectors);
+    assert.equal(reopened.hubId, authority.hubId);
+    assert.deepEqual(await reopened.call(input), result);
+    await assert.rejects(authority.call({ ...input, arguments: { issue: 'TEST-2' } }), /내용/);
+    await assert.rejects(authority.call({ ...input, callId: 'write', tool: 'createJiraIssue' }), /읽기 도구/);
+    assert.equal(f.requests.length, count);
+    const stored = JSON.stringify(db.prepare('SELECT * FROM connector_grant').all());
+    assert.ok(!stored.includes(grant.capability));
+    assert.ok(!stored.includes('SUPER_SECRET'));
+    reopened.close();
+  } finally { authority.close(); db.close(); f.close(); }
+});
+
+test('connector account generations survive refresh and restart but invalidate grants after reconnect or disconnect', async () => {
+  const f = fixture(), db = new DatabaseSync(':memory:');
+  const authority = new ConnectorAuthority(db, f.connectors);
+  try {
+    f.expires(1); await f.connect();
+    const generation = f.connectors.connections()[0].generation;
+    const grant = authority.issue({ workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session' });
+    const context = { capability: grant.capability, workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session' };
+    f.expires(3600); await authority.tools({ ...context, service: 'jira' });
+    assert.equal(f.connectors.connections()[0].generation, generation);
+    const reopened = new Connectors({ directory: f.dir, fetch: f.fake });
+    assert.equal(reopened.connections()[0].generation, generation); reopened.close();
+    await f.connect();
+    assert.notEqual(f.connectors.connections()[0].generation, generation);
+    await assert.rejects(authority.tools({ ...context, service: 'jira' }), /교체·해제/);
+    const next = authority.issue({ workspaceId: 'workspace', requestId: 'next', taskId: 'task', sessionId: 'session' });
+    f.connectors.disconnect('jira');
+    await assert.rejects(authority.tools({ ...context, capability: next.capability, requestId: 'next', service: 'jira' }), /교체·해제/);
+  } finally { authority.close(); db.close(); f.close(); }
+});
+
+test('duplicate concurrent reads run once and revocation suppresses in-flight and cached results', async () => {
+  const f = fixture(), db = new DatabaseSync(':memory:');
+  const authority = new ConnectorAuthority(db, f.connectors);
+  let release!: () => void;
+  try {
+    await f.connect();
+    const grant = authority.issue({ workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session' });
+    const context = { capability: grant.capability, workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session' };
+    let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve; });
+    f.block(new Promise<void>(resolve => { release = resolve; }), started);
+    const input = { ...context, callId: 'call', service: 'jira' as const, tool: 'getJiraIssue', arguments: {} };
+    const first = authority.call(input);
+    await ready;
+    const duplicate = authority.call(input);
+    release();
+    assert.deepEqual(await first, await duplicate);
+    assert.equal(f.requests.filter(request => request.body.includes('"method":"tools/call"')).length, 1);
+    authority.revoke(grant.capability);
+    await assert.rejects(authority.call(input), /만료|문맥/);
+
+    const next = authority.issue({ workspaceId: 'workspace', requestId: 'next', taskId: 'task', sessionId: 'session' });
+    const nextReady = new Promise<void>(resolve => { started = resolve; });
+    f.block(new Promise<void>(resolve => { release = resolve; }), started);
+    const pending = authority.call({ ...input, capability: next.capability, requestId: 'next' });
+    const rejected = assert.rejects(pending, /만료|문맥/);
+    await nextReady;
+    authority.revokeWorkspace('workspace');
+    release(); await rejected;
+  } finally { release?.(); authority.close(); db.close(); f.close(); }
+});
+
+test('idle authority sweeps expired grant results without another user input and stops before DB close', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const db = new DatabaseSync(':memory:'); let now = 1000;
+  const connectors = { connections: () => [{ service: 'jira', generation: 'fixture-account' }],
+    read: async () => ({ result: 'private fixture only' }) } as unknown as Connectors;
+  const authority = new ConnectorAuthority(db, connectors, { now: () => now });
+  try {
+    const grant = authority.issue({ workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session', ttlMs: 100 });
+    await authority.call({ capability: grant.capability, workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session',
+      callId: 'call', service: 'jira', tool: 'getJiraIssue', arguments: {} });
+    assert.equal((db.prepare('SELECT count(*) n FROM connector_call').get() as { n: number }).n, 1);
+    now = 1100; t.mock.timers.tick(60_000);
+    assert.equal((db.prepare('SELECT count(*) n FROM connector_call').get() as { n: number }).n, 0);
+    assert.equal((db.prepare('SELECT count(*) n FROM connector_grant').get() as { n: number }).n, 0);
+  } finally { authority.close(); db.close(); assert.doesNotThrow(() => t.mock.timers.tick(60_000)); }
+});
+
+test('authority shutdown suppresses late provider results after its database is closed', async () => {
+  const db = new DatabaseSync(':memory:'); let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const connectors = { connections: () => [{ service: 'jira', generation: 'fixture-account' }],
+    read: async () => { await blocked; return { result: 'must not escape' }; } } as unknown as Connectors;
+  const authority = new ConnectorAuthority(db, connectors);
+  const grant = authority.issue({ workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session' });
+  const call = authority.call({ capability: grant.capability, workspaceId: 'workspace', requestId: 'input', taskId: 'task', sessionId: 'session',
+    callId: 'call', service: 'jira', tool: 'getJiraIssue', arguments: {} });
+  const rejected = assert.rejects(call, /권한 처리가 종료/);
+  authority.close(); db.close(); release(); await rejected;
+});
+
+test('connector grants enforce expiry, call size limits and remain empty when issued before login', async () => {
+  const f = fixture(), db = new DatabaseSync(':memory:');
+  let now = 1000;
+  const authority = new ConnectorAuthority(db, f.connectors, { now: () => now });
+  try {
+    const empty = authority.issue({ workspaceId: 'workspace', requestId: 'before', taskId: 'task', sessionId: 'session' });
+    await f.connect();
+    const context = { capability: empty.capability, workspaceId: 'workspace', requestId: 'before', taskId: 'task', sessionId: 'session' };
+    assert.deepEqual(authority.list(context).connections, []);
+    const grant = authority.issue({ workspaceId: 'workspace', requestId: 'after', taskId: 'task', sessionId: 'session', ttlMs: 100 });
+    const input = { ...context, capability: grant.capability, requestId: 'after', callId: 'call', service: 'jira' as const, tool: 'getJiraIssue', arguments: { value: 'x'.repeat(65 * 1024) } };
+    const count = f.requests.length;
+    await assert.rejects(authority.call(input), /인자가 너무/);
+    now += 100;
+    await assert.rejects(authority.call({ ...input, arguments: {} }), /만료/);
+    assert.equal(f.requests.length, count);
+  } finally { authority.close(); db.close(); f.close(); }
+});
+
+test('session MCP mailbox reaches the owning gateway grant and real provider read without forwarding OAuth', async () => {
+  const f = fixture(), ownerDb = new DatabaseSync(':memory:'), workspaceDb = new DatabaseSync(':memory:');
+  workspaceDb.exec(`CREATE TABLE session(id TEXT PRIMARY KEY,task_id TEXT,status TEXT);
+    INSERT INTO session VALUES ('session','task','running');
+    CREATE TABLE workspace_peer(id TEXT PRIMARY KEY,revoked INTEGER); INSERT INTO workspace_peer VALUES ('owner-peer',0);`);
+  const authority = new ConnectorAuthority(ownerDb, f.connectors), broker = new ConnectorBroker(workspaceDb, 'workspace');
+  try {
+    await f.connect();
+    const grant = authority.issue({ workspaceId: 'workspace', requestId: 'request' });
+    const token = broker.open('session', 'task', { ...grant, sourcePeerId: 'owner-peer' });
+    const pending = broker.invoke(token, 'read', { service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } });
+    const [job] = broker.poll('owner-peer');
+    authority.bind(job.context);
+    const result = await authority.call({ ...job.context, callId: job.callId, service: 'jira', tool: 'getJiraIssue', arguments: job.args.arguments as Record<string, unknown> });
+    broker.complete('owner-peer', job.callId, { result });
+    broker.ack('owner-peer', [job.callId]);
+    assert.deepEqual(await pending, result);
+    assert.ok(JSON.stringify(result).includes('/browse/TEST-1'));
+    const transferred = JSON.stringify({ grant, job, runtime: workspaceDb.prepare('SELECT * FROM connector_runtime').all(), jobs: workspaceDb.prepare('SELECT * FROM connector_job').all() });
+    assert.ok(!transferred.includes('SUPER_SECRET'));
+    assert.ok(!transferred.includes(token));
+  } finally { broker.close(); authority.close(); workspaceDb.close(); ownerDb.close(); f.close(); }
+});
+
+test('HTTP connector bridge binds gateway input to session MCP and returns a provider read through peer polling', async () => {
+  const f = fixture(), workspaceStore = new Store(':memory:'), gatewayStore = new Store(':memory:');
+  const commands: HubToRunner[] = [];
+  let say!: (message: RunnerToHub) => void;
+  const canonical = new Hub(workspaceStore, { skills: new SkillStore(join(f.dir, 'workspace-skills')),
+    runner: emit => { say=emit; return { connected: true, id: 'local-test', engines: new Set(['claude']), connectorMcpSupported: true, has: () => false, handle: command => { commands.push(command); } }; } });
+  const workspace = new SharedWorkspace(canonical, undefined, { localAuthority: true });
+  const remote = workspace.server();
+  const gateway = new Hub(gatewayStore, { skills: new SkillStore(join(f.dir, 'gateway-skills')),
+    runner: () => ({ connected: false, id: null, engines: new Set(), has: () => false, handle: () => { throw Error('unexpected gateway execution'); } }) });
+  const links = new WorkspaceLinks(gatewayStore);
+  const server = createHttpServer(gateway, new Access(join(f.dir, 'bridge-access'), 4317), join(f.dir, 'uploads'), { workspaces: links, connectors: f.connectors });
+  const listen = (server: Server) => new Promise<string>((resolve, reject) => {
+    server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(server.address() as { port: number }).port}`));
+  });
+  const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); });
+  try {
+    await f.connect();
+    const remoteUrl = await listen(remote), gatewayUrl = await listen(server);
+    const owner = workspace.grant('gateway'), other = workspace.grant('other-gateway');
+    const link = await links.attach({ name: 'workspace', url: remoteUrl, token: owner.token });
+    const project = canonical.createProject('connector', f.dir);
+    const submitted = await fetch(`${gatewayUrl}/api/workspaces/${link.id}/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude read TEST-1' }) });
+    assert.equal(submitted.status, 201, JSON.stringify(await submitted.clone().json()));
+    const command = commands.find((command): command is Extract<HubToRunner, { type: 'start' }> => command.type === 'start');
+    assert.ok(command?.connectorMcp);
+    assert.equal(command.connectorMcp.url, remoteUrl + '/v1/connector-mcp');
+    const rpc = (token: string, name: string, args: Record<string, unknown>) => fetch(command.connectorMcp!.url, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    });
+    assert.equal((await rpc(owner.token, 'desk_connector_list', {})).status, 403);
+    const pending = rpc(command.connectorMcp.token, 'desk_connector_read', { service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } });
+    const end = Date.now() + 2000;
+    while (!workspace.connectorBroker!.busy(command.sessionId) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(workspace.connectorBroker!.busy(command.sessionId), true);
+    const foreign = await fetch(remoteUrl + '/v1/connectors/poll', { headers: { authorization: `Bearer ${other.token}`, 'x-workspace-id': workspace.id } });
+    assert.deepEqual(await foreign.json(), []);
+    await links.pollConnectors(link.id);
+    const result = await (await pending).json() as { result: { content: { text: string }[]; isError?: boolean } };
+    assert.notEqual(result.result.isError, true, JSON.stringify(result));
+    assert.match(result.result.content[0].text, /TEST-1/);
+    assert.ok(!JSON.stringify(command).includes('SUPER_SECRET'));
+    assert.ok(!JSON.stringify(await submitted.json()).includes('capability'));
+    say({type:'approval_request',sessionId:command.sessionId,approvalId:'bridge-question',toolName:'AskUserQuestion',input:{questions:[{question:'조회 대상'}]}});
+    const foreignAnswer=await fetch(remoteUrl+'/v1/operation',{method:'POST',headers:{authorization:`Bearer ${other.token}`,'x-workspace-id':workspace.id,'content-type':'application/json'},
+      body:JSON.stringify({id:randomUUID(),method:'POST',path:'/approvals/bridge-question',body:{allow:true,answers:{'조회 대상':'PRIVATE-123'}}})});
+    assert.equal(foreignAnswer.status,409);
+    assert.equal(workspaceStore.getApproval('bridge-question')?.status,'pending');
+    const answer=await fetch(`${gatewayUrl}/api/workspaces/${link.id}/approvals/bridge-question`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({allow:true,answers:{'조회 대상':'TEST-1'}})});
+    assert.equal(answer.status,200,JSON.stringify(await answer.json()));
+    assert.equal(workspaceStore.getApproval('bridge-question')?.status,'allowed');
+    say({type:'approval_request',sessionId:command.sessionId,approvalId:'bridge-old-account',toolName:'Bash',input:{command:'read'}});
+    await f.connect();
+    const changedAccount=await fetch(`${gatewayUrl}/api/workspaces/${link.id}/approvals/bridge-old-account`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({allow:false,message:'다른 계정의 입력'})});
+    assert.equal(changedAccount.status,409);
+    assert.equal(workspaceStore.getApproval('bridge-old-account')?.status,'pending');
+  } finally {
+    await links.close(); await stop(server); await stop(remote);
+    canonical.dispose(); gateway.dispose(); workspaceStore.database.close(); gatewayStore.database.close(); f.close();
+  }
+});
+
+test('HTTP connector direct hub uses the same request authority and session MCP without a workspace gateway', async () => {
+  const f = fixture(), store = new Store(':memory:'), commands: HubToRunner[] = [];
+  let say!: (message: RunnerToHub) => void;
+  const hub = new Hub(store, { skills: new SkillStore(join(f.dir, 'direct-skills')),
+    runner: emit => { say=emit; return { connected: true, id: 'direct-local', engines: new Set(['claude']), connectorMcpSupported: true, has: () => false, handle: command => { commands.push(command); } }; } });
+  const links = new WorkspaceLinks(store);
+  const server = createHttpServer(hub, new Access(join(f.dir, 'direct-access'), 4317), join(f.dir, 'uploads'), { workspaces: links, connectors: f.connectors });
+  try {
+    await f.connect();
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const project = hub.createProject('direct', f.dir);
+    const invalid = await fetch(origin + '/api/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: 'missing', prompt: '#claude invalid' }) });
+    assert.equal(invalid.status, 404);
+    assert.equal((store.database.prepare('SELECT count(*) n FROM connector_grant').get() as { n: number }).n, 0);
+    const submitted = await fetch(origin + '/api/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude read issue' }) });
+    assert.equal(submitted.status, 201, JSON.stringify(await submitted.json()));
+    const command = commands.find((command): command is Extract<HubToRunner, { type: 'start' }> => command.type === 'start');
+    assert.ok(command?.connectorMcp); assert.equal(command.connectorMcp.url, origin + '/v1/connector-mcp');
+    const response = await fetch(command.connectorMcp.url, { method: 'POST', headers: { authorization: `Bearer ${command.connectorMcp.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'desk_connector_read', arguments: { service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } } } }) });
+    assert.equal(response.status, 200);
+    const result = await response.json() as { result: { content: { text: string }[]; isError?: boolean } };
+    assert.notEqual(result.result.isError, true, JSON.stringify(result));
+    assert.match(result.result.content[0].text, /TEST-1/);
+    assert.equal((store.database.prepare('SELECT count(*) n FROM connector_local_source').get() as { n: number }).n, 1);
+    say({type:'approval_request',sessionId:command.sessionId,approvalId:'direct-question',toolName:'AskUserQuestion',input:{questions:[{question:'조회 대상'}]}});
+    const answer=await fetch(origin+'/api/approvals/direct-question',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({allow:true,answers:{'조회 대상':'TEST-1'}})});
+    assert.equal(answer.status,200,JSON.stringify(await answer.json()));
+    assert.equal(store.getApproval('direct-question')?.status,'allowed');
+    say({type:'approval_request',sessionId:command.sessionId,approvalId:'direct-old-account',toolName:'Bash',input:{command:'read'}});
+    await f.connect();
+    const changedAccount=await fetch(origin+'/api/approvals/direct-old-account',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({allow:false,message:'다른 계정의 입력'})});
+    assert.equal(changedAccount.status,409);
+    assert.equal(store.getApproval('direct-old-account')?.status,'pending');
+  } finally {
+    await links.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    hub.dispose(); store.database.close(); f.close();
+  }
+});
+
+test('HTTP connector grants recheck runner capability after a same-workspace downgrade', async () => {
+  const f = fixture(), store = new Store(':memory:'), links = new WorkspaceLinks(store);
+  const authority = new ConnectorAuthority(store.database, f.connectors); links.connectorAuthority = authority;
+  let supported = true, submitted = 0;
+  const server = createServer(async (req, res) => {
+    if (req.url === '/v1/identity') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: 1, workspace_id: 'stable-workspace', capabilities: { connectors: supported ? 1 : undefined } }));
+    } else if (req.url === '/v1/operation') {
+      for await (const _ of req) { /* Drain the operation without interpreting private fields. */ }
+      submitted++;
+      res.writeHead(201, { 'content-type': 'application/json' }); res.end('{"accepted":true}');
+    } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end('[]'); }
+  });
+  try {
+    await f.connect();
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const link = await links.attach({ name: 'runner', url, token: 'a'.repeat(43) });
+    links.enqueue(link.id, { id: randomUUID(), method: 'POST', path: '/tasks/example/messages', body: { text: 'first read' } });
+    await links.flush(link.id); assert.equal(submitted, 1);
+    supported = false;
+    const next = randomUUID();
+    links.enqueue(link.id, { id: next, method: 'POST', path: '/tasks/example/messages', body: { text: 'second read' } });
+    await links.flush(link.id);
+    assert.equal(submitted, 1);
+    assert.equal(links.deliveries(link.id).find(delivery => delivery.id === next)!.status, 409);
+    assert.match(links.deliveries(link.id).find(delivery => delivery.id === next)!.error, /요청별 외부 연결/);
+  } finally {
+    await links.close(); authority.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    store.database.close(); f.close();
+  }
 });

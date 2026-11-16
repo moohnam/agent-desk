@@ -4,6 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { ServerResponse } from 'node:http';
+import { parse, parseFragment, serialize, type DefaultTreeAdapterTypes } from 'parse5';
 import { HttpError } from './errors.ts';
 import { TemporaryFiles } from './shared-files.ts';
 
@@ -15,6 +16,52 @@ const MIME: Record<string,string> = {
   '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.svg':'image/svg+xml','.ico':'image/x-icon',
   '.woff':'font/woff','.woff2':'font/woff2','.ttf':'font/ttf',
 };
+const HTML_TAGS=new Set('html head body title style link a abbr address article aside b bdi bdo blockquote br caption cite code col colgroup data dd del details dfn div dl dt em figcaption figure footer h1 h2 h3 h4 h5 h6 header hgroup hr i img ins kbd li main mark menu nav ol p picture pre q rp rt ruby s samp section small source span strong sub summary sup table tbody td th thead time tr u ul var wbr'.split(' '));
+const SVG_TAGS=new Set('svg a style g defs symbol use path rect circle ellipse line polyline polygon text tspan textpath title desc clippath mask pattern marker lineargradient radialgradient stop image filter feblend fecolormatrix fecomponenttransfer fecomposite feconvolvematrix fediffuselighting fedisplacementmap fedistantlight fedropshadow feflood fefunca fefuncb fefuncg fefuncr fegaussianblur femerge femergenode femorphology feoffset fepointlight fespecularlighting fespotlight fetile feturbulence'.split(' '));
+const STATIC_ATTRIBUTES=new Set('id class style title lang dir role width height alt loading decoding colspan rowspan span scope headers abbr start reversed type value open datetime cite align valign bgcolor border cellpadding cellspacing color size face translate hidden tabindex draggable contenteditable d x y x1 x2 y1 y2 dx dy cx cy r rx ry points viewbox preserveaspectratio transform fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity clip-path clip-rule mask filter vector-effect paint-order font-family font-size font-style font-weight text-anchor dominant-baseline alignment-baseline textlength lengthadjust offset stop-color stop-opacity gradientunits gradienttransform spreadmethod patternunits patterncontentunits patterntransform markerwidth markerheight markerunits refx refy orient clippathunits maskunits maskcontentunits filterunits primitiveunits in in2 result mode operator k1 k2 k3 k4 values stddeviation edgemode kernelmatrix order targetx targety divisor bias preservealpha scale xchannelselector ychannelselector surfaceScale diffuseconstant specularconstant specularexponent limitingconeangle azimuth elevation flood-color flood-opacity lighting-color numoctaves seed stitchtiles basefrequency tablevalues slope intercept amplitude exponent'.toLowerCase().split(' '));
+
+/** Parse with scripting disabled, matching the response sandbox. Never execute document code. */
+function staticDocument(source:string,svg:boolean) {
+  const document=svg?parseFragment(source,{scriptingEnabled:false}):parse(source,{scriptingEnabled:false});
+  const resource=(value:string,image=false)=>{
+    if(image&&/^data:image\/(?:png|jpeg|gif|webp|avif|bmp|x-icon);base64,[a-z\d+/=\s]+$/i.test(value))return true;
+    // Only document-relative assets, matching serve's single-decoding path rules.
+    if(!value||value.startsWith('/')||/[\\\x00-\x1f?#:]/.test(value))return false;
+    try {
+      const base='https://preview.invalid/_preview/document/';
+      const url=new URL(value,base);
+      if(!url.href.startsWith(base))return false;
+      const path=decodeURIComponent(url.pathname.slice(new URL(base).pathname.length));
+      return !/[\\%\x00-\x1f?#:]/.test(path)&&path.split('/').every(part=>part&&!part.startsWith('.'));
+    }catch{return false;}
+  };
+  const visit=(parent:DefaultTreeAdapterTypes.ParentNode,depth=0)=>{
+    if(depth>=256){parent.childNodes=[];return;}
+    parent.childNodes=parent.childNodes.filter(node=>{
+      if(!('tagName' in node))return node.nodeName!=='#comment';
+      const tag=node.tagName.toLowerCase(),isSvg=node.namespaceURI==='http://www.w3.org/2000/svg';
+      if(!(isSvg?SVG_TAGS:node.namespaceURI==='http://www.w3.org/1999/xhtml'?HTML_TAGS:new Set()).has(tag))return false;
+      if(tag==='link'&&!node.attrs.some(attr=>attr.name==='rel'&&attr.value.toLowerCase()==='stylesheet'))return false;
+      node.attrs=node.attrs.filter(attr=>{
+        const name=attr.name.toLowerCase();
+        if(name.startsWith('on'))return false;
+        if(isSvg&&attr.namespace==='http://www.w3.org/2000/xmlns/')return (name==='xmlns'&&attr.value==='http://www.w3.org/2000/svg')||(name==='xlink'&&attr.value==='http://www.w3.org/1999/xlink');
+        if(name==='href') {
+          if(attr.namespace&&attr.namespace!=='http://www.w3.org/1999/xlink')return false;
+          if(tag==='a'||(isSvg&&tag!=='image'))return /^#[^\x00-\x20]*$/.test(attr.value);
+          return (tag==='link'||(isSvg&&tag==='image'))&&resource(attr.value,tag==='image');
+        }
+        if(attr.namespace)return false;
+        if(name==='src')return tag==='img'&&resource(attr.value,true);
+        if(name==='rel')return tag==='link';
+        // srcset, ping, actions, targets, autofocus, srcdoc and unknown future URL attributes are omitted.
+        return STATIC_ATTRIBUTES.has(name)||name.startsWith('aria-')||name.startsWith('data-');
+      });
+      visit(node,depth+1);return true;
+    });
+  };
+  visit(document);return serialize(document);
+}
 export function documentPath(href:string) {
   let path:string;
   try {path=decodeURIComponent(/^file:/i.test(href)?new URL(href).pathname:href);} catch {throw new HttpError(400,'잘못된 파일 경로입니다');}
@@ -22,9 +69,9 @@ export function documentPath(href:string) {
   if(!path || /[\x00-\x1f\\?#]/.test(path) || /^[a-z][a-z\d+.-]*:/i.test(path))throw new HttpError(400,'파일 경로가 필요합니다');
   return posix.normalize(path);
 }
-type Entry = { source:string; task:string; href:string; name:string; at:number; busy:number; files:Map<string,Promise<string>> };
+type Entry = { approvedPath?:string; source:string; task:string; href:string; name:string; at:number; busy:number; files:Map<string,Promise<string>> };
 type Grant = { entry:Entry; until:number; allowed:()=>boolean };
-export type PreviewReader = (source:string,task:string,href:string,base:string|undefined,receive:(r:Response)=>Promise<string>)=>Promise<string>;
+export type PreviewReader = (source:string,task:string,href:string,base:string|undefined,receive:(r:Response)=>Promise<string>,approvedPath?:string)=>Promise<string>;
 
 /** Private copies with document-scoped, revocable read capabilities for sandboxed frames. */
 export class DocumentPreviews {
@@ -69,6 +116,7 @@ export class DocumentPreviews {
     grant.until=Date.now()+LEASE;grant.entry.at=Date.now();
   }
   private file(entry:Entry,path:string):Promise<string> {
+    if(entry.approvedPath!==undefined&&path!==entry.name)throw new HttpError(403,'허용한 문서 한 파일만 볼 수 있습니다. 부속 파일은 포함하지 않습니다');
     const prior=entry.files.get(path);
     if(prior)return prior.then(async file=>{
       try {await stat(file);return file;}
@@ -95,24 +143,26 @@ export class DocumentPreviews {
         const result=await this.files.receive(response);
         if(result.kind!=='file')throw new HttpError(502,'파일 응답이 필요합니다');
         return result.path;
-      });
+      },entry.approvedPath);
     }).finally(()=>{this.waiting--;entry.busy--;});
     entry.files.set(path,work);
     this.queue=work.catch(()=>{entry.files.delete(path);});
     return work;
   }
-  async prepare(source:string,task:string,href:string,refresh:boolean,allowed:()=>boolean) {
+  async prepare(source:string,task:string,href:string,refresh:boolean,allowed:()=>boolean,approvedPath?:string) {
     href=documentPath(href);
+    if(approvedPath!==undefined&&(typeof approvedPath!=='string'||!posix.isAbsolute(approvedPath)||approvedPath.length>4096||/[\x00-\x1f]/.test(approvedPath)))throw new HttpError(400,'확인한 문서의 절대 경로가 필요합니다');
     const ext=posix.extname(href).toLowerCase();
     if(!['.md','.markdown','.html','.htm'].includes(ext))throw new HttpError(400,'HTML 또는 Markdown 파일만 미리 볼 수 있습니다');
     if(this.stopped)throw new HttpError(503,'허브가 종료 중입니다');
     await this.collect(undefined,true);
-    const key=JSON.stringify([source,task,href]);
+    const key=JSON.stringify([source,task,href,approvedPath??null]);
     let entry=this.entries.get(key);
     if(this.grants.size>=256)throw new HttpError(429,'열어 둔 문서가 너무 많습니다');
-    if(!entry||refresh){
+    // Explicit document approval must revalidate the source path on each prepare, including symlinks.
+    if(!entry||refresh||approvedPath!==undefined){
       if(!entry&&this.entries.size>=100)throw new HttpError(429,'열어 둔 문서가 너무 많습니다');
-      entry={source,task,href,name:posix.basename(href),at:Date.now(),busy:0,files:new Map()};
+      entry={source,task,href,approvedPath,name:posix.basename(href),at:Date.now(),busy:0,files:new Map()};
       this.entries.set(key,entry);this.versions.add(entry);
     }
     entry.busy++;entry.at=Date.now();
@@ -148,13 +198,15 @@ export class DocumentPreviews {
     try {
     const file=await this.file(entry,path);
     if(!grant.allowed())throw new HttpError(403,'문서 접근 권한이 취소되었습니다');
-    const size=(await stat(file)).size;
+    const ext=posix.extname(path).toLowerCase();
+    const body=['.html','.htm','.svg'].includes(ext)?Buffer.from(staticDocument(await readFile(file,'utf8'),ext==='.svg')):undefined;
+    const size=body?.length??(await stat(file)).size;
     const root=`${origin}/_preview/${id}/ ${origin.replace(/^http:/,'https:')}/_preview/${id}/`;
     // Header sandbox also protects direct navigation, not just the UI's iframe.
-    const policy=`sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' ${root}; style-src 'unsafe-inline' ${root}; img-src data: ${root}; font-src data: ${root}; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
+    const policy=`sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline' ${root}; img-src data: ${root}; font-src data: ${root}; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
     res.writeHead(200,{'content-type':mime,'content-length':size,'cache-control':'no-store','referrer-policy':'no-referrer',
       'x-content-type-options':'nosniff','content-security-policy':policy,'access-control-allow-origin':'*'});
-    await pipeline(createReadStream(file),res);
+    if(body)res.end(body);else await pipeline(createReadStream(file),res);
     } finally {entry.busy--;void this.collect().catch(()=>{});}
   }
   async close(){this.stopped=true;clearInterval(this.timer);await this.queue;await this.maintenance;this.grants.clear();this.entries.clear();this.versions.clear();await this.files.close();}

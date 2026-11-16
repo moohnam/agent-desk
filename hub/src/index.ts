@@ -1,3 +1,5 @@
+import { InstructionStore } from './instruction-store.ts';
+import { hubBlockers, registerRuntimeControl } from './runtime-control.ts';
 import { Access } from './access.ts';
 import { config } from './config.ts';
 import { Store } from './db.ts';
@@ -36,9 +38,15 @@ if (workspaces) importLegacyWorkspaceLinks(DB_PATH,store);
 if (workspaces) importRemoteManifests(DB_PATH,store,true);
 const localAuthorityId = authorityTokenFile ? await workspaces!.configureLocal(config.localAuthorityUrl,readFileSync(authorityTokenFile,'utf8').trim()) : undefined;
 const access = new Access(TOKEN_FILE, PORT, undefined, config.allowedHosts);
-createHttpServer(hub, access, UPLOADS_DIR, {workspaces,localAuthorityId}).listen(PORT, HOST, async () => {
+const server = createHttpServer(hub, access, UPLOADS_DIR, {workspaces,localAuthorityId,instructions:new InstructionStore(config.instructionsFile)}).listen(PORT, HOST, async () => {
   console.log(`agent-desk hub listening on http://${HOST}:${PORT} (db: ${authorityTokenFile?config.gatewayDbPath:DB_PATH}${authorityTokenFile?`, canonical: ${DB_PATH}`:''})`);
   if (HOST === '127.0.0.1' || HOST === 'localhost') return;
   const [first, ...rest] = access.urls();
   console.log(`다른 기기에서 열기 (토큰: ${TOKEN_FILE}):\n${await access.qrTerminal(first)}${[first, ...rest].join('\n')}`);
 });
+await registerRuntimeControl({ role: 'hub', ready: () => server.listening && (!!authorityTokenFile || hub.runner.connected),
+  blockers: () => hubBlockers(hub), stop: async () => {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await workspaces?.close(); hub.dispose(); store.database.close(); process.exit(0);
+  } });

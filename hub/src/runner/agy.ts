@@ -296,7 +296,7 @@ export const startAgy: StartEngine = (opts) => {
       const files = turn.skills.map((s) => join(opts.skillsHome!, 'skills', s, 'SKILL.md')).join(', ');
       text = `[데스크 스킬] 이 메시지에는 먼저 다음 스킬 파일을 읽고 그 지침을 따르세요: ${files}\n\n${text}`;
     }
-    if (first) { first = false; text = `[데스크 지침]\n${deskInstructions(opts.skillsHome)}\n\n${text}`; }
+    if (first) { first = false; text = `[데스크 지침]\n${deskInstructions(opts.skillsHome, opts.instructions)}\n\n${text}`; }
     return text;
   };
 

@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { closeSync, existsSync, fchmodSync, openSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, fchmodSync, openSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { localAuthorityActivated } from './local-ownership.ts';
+import { destinationPath } from '../trusted-path.ts';
 
 export type LocalLaunchSettings = { authorityUrl: string; tokenFile: string; gatewayDbPath: string };
 
@@ -13,16 +14,31 @@ export class LocalAuthorityUnavailableError extends Error {}
 
 /** Only paths are persisted. The bearer token remains in a private file. */
 export function readLocalLaunchSettings(path: string): LocalLaunchSettings | undefined {
-  if (!existsSync(path)) return undefined;
+  // Resolve parents first so a dangling link or inaccessible path cannot silently disable protection.
+  destinationPath(path);
   let value: unknown;
   try { value = JSON.parse(readFileSync(path, 'utf8')); }
-  catch { throw new Error(`로컬 모드 설정 파일을 읽을 수 없습니다: ${path}`); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new Error(`로컬 모드 설정 파일을 읽을 수 없습니다: ${path}`);
+  }
   if (!value || typeof value !== 'object') throw new Error('로컬 모드 설정 형식이 잘못되었습니다');
   const { authorityUrl, tokenFile, gatewayDbPath } = value as Partial<LocalLaunchSettings>;
   if (typeof authorityUrl !== 'string' || typeof tokenFile !== 'string' || !isAbsolute(tokenFile)
     || typeof gatewayDbPath !== 'string' || !isAbsolute(gatewayDbPath))
     throw new Error('로컬 모드 설정에는 authorityUrl과 절대 경로 tokenFile·gatewayDbPath가 필요합니다');
   return { authorityUrl, tokenFile, gatewayDbPath };
+}
+
+/** The updater and runtime must use exactly the same environment/persisted-setting precedence. */
+export function resolveLocalLaunchSettings(env: NodeJS.ProcessEnv, dataDir: string) {
+  const local = env.AGENT_DESK_LOCAL_AUTHORITY_TOKEN_FILE && env.AGENT_DESK_GATEWAY_DB && env.AGENT_DESK_LOCAL_AUTHORITY_URL
+    ? undefined : readLocalLaunchSettings(env.AGENT_DESK_LOCAL_MODE_FILE ?? join(dataDir, 'local-mode.json'));
+  return {
+    gatewayDbPath: env.AGENT_DESK_GATEWAY_DB ?? local?.gatewayDbPath ?? join(dataDir, 'gateway.db'),
+    tokenFile: env.AGENT_DESK_LOCAL_AUTHORITY_TOKEN_FILE ?? local?.tokenFile,
+    authorityUrl: env.AGENT_DESK_LOCAL_AUTHORITY_URL ?? local?.authorityUrl,
+  };
 }
 
 function expectedWorkspace(dbPath: string): string {
@@ -101,6 +117,8 @@ export async function ensureLocalAuthority(input: {
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) throw new Error('로컬 작업공간 토큰 파일 내용이 잘못되었습니다');
   const expectedId = expectedWorkspace(dbPath);
   if (await probe(input.url, token, expectedId) === 'ready') return;
+  if (process.env.AGENT_DESK_MANAGED_RUNNERS === '1')
+    throw new LocalAuthorityUnavailableError('관리 중인 로컬 작업공간의 시작은 업데이트 워커가 담당합니다');
   if (!localAuthorityActivated(dbPath))
     throw new Error('첫 로컬 작업공간 전환은 자동 시작하지 않습니다. --takeover-live로 인수하세요');
   // A remote authority or a forwarded localhost port is never started here.

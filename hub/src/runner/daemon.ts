@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { config } from '../config.ts';
+import { registerRuntimeControl, sessionBlockers } from '../runtime-control.ts';
 import { PROTOCOL_VERSION, checkHubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
 import { Runner } from './runner.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, sameToken, writeLine } from './wire.ts';
@@ -85,3 +86,7 @@ server.listen(RUNNER_PORT, RUNNER_HOST, () => {
   writeFileSync(PID_FILE, String(process.pid));
   console.log(`agent-desk runner ${runner.id} listening on ${RUNNER_HOST}:${RUNNER_PORT} (pid ${process.pid})`);
 });
+await registerRuntimeControl({ role: 'daemon', ready: () => server.listening,
+  blockers: () => sessionBlockers(runner.snapshot()), stop: () => {
+    runner.shutdown(); hub?.destroy(); server.close(() => process.exit(0));
+  } });

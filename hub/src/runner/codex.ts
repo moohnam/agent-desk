@@ -80,7 +80,7 @@ export const startCodex: StartEngine = (opts) => {
   const fileChanges = new Map<string, Json>();
   const stderrTail = new StderrTail();
 
-  const mcpProcess = opts.mcp ? codexMcpProcess(opts.mcp) : { args: ['app-server'], env: process.env };
+  const mcpProcess = codexMcpProcess(opts.mcp, opts.connectorMcp);
   const child = spawn(CODEX_BIN, mcpProcess.args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: mcpProcess.env });
 
   const closed = (error?: string) => {
@@ -349,7 +349,7 @@ export const startCodex: StartEngine = (opts) => {
         return undefined;
       });
       const common = {
-        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: deskInstructions(opts.skillsHome),
+        ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: deskInstructions(opts.skillsHome, opts.instructions),
       };
       // Codex lets one process write a thread. Another client holding it (the Codex app with the
       // conversation open) makes resuming fail; a fork carries the history over to a new thread.

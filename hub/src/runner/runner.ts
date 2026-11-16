@@ -1,5 +1,6 @@
 import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { config } from '../config.ts';
+import { requireAdmission } from '../runtime-control.ts';
 import { startClaude } from './claude.ts';
 import type { StartEngine } from './engine.ts';
 import { startAgy } from './agy.ts';
@@ -40,7 +41,7 @@ export class Runner {
   }
 
   /** `close`: understands the close command (older runners ignore it). */
-  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true }; }
+  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true, instructions: true, connectorMcp: true }; }
 
   /** Sessions still running, so a reconnecting hub can learn what is busy and awaiting approval. */
   snapshot(): LiveSession[] {
@@ -121,6 +122,7 @@ export class Runner {
   }
 
   handle(cmd: HubToRunner) {
+    if (cmd.type === 'start' || cmd.type === 'send') requireAdmission();
     switch (cmd.type) {
       case 'start': {
         const old = this.sessions.get(cmd.sessionId);
@@ -136,7 +138,7 @@ export class Runner {
           if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
           entry.adapter = start({
             sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: this.mcp,
+            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: this.mcp,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {

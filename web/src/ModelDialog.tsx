@@ -1,110 +1,167 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { api } from './api.ts';
 import { workspaceId } from './workspace.ts';
-import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, modelTagsOf, type EngineName } from '../../shared/compose.ts';
+import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, type EngineName, type ModelName } from '../../shared/compose.ts';
 import { Modal } from './Modal.tsx';
-import { saveSettings, useSettings } from './settings.ts';
+import { saveSettings } from './settings.ts';
 import { resetTime } from './format.ts';
 import type { EngineUsage, Settings } from './types.ts';
+import './model-dialog.css';
 
-
-/** From this share used on, a window shows as running low. */
 const LOW_AT = 80;
+const errorMessage = (error: unknown) => error instanceof Error && error.name === 'TimeoutError'
+  ? '응답 시간이 초과되었습니다. 다시 시도하세요.' : error instanceof Error ? error.message : String(error);
 
-/** One engine's limit windows: a bar of the share used and when the window resets. */
-function UsageRows({ usage }: { usage: EngineUsage | undefined | null }) {
-  if (usage === undefined) return <span className="muted small">불러오는 중…</span>;
-  if (usage === null) return <span className="muted small">불러오지 못했습니다</span>;
-  if (usage.error && !usage.windows.length) return <span className="muted small">조회 실패: {usage.error}</span>;
-  return (
-    <ul className="usage">
-      {usage.windows.map((w) => (
-        <li key={w.label} className={w.usedPercent != null && w.usedPercent >= LOW_AT ? 'low' : undefined}>
-          <span className="name">{w.label}</span>
-          <span className="bar" aria-hidden><i style={{ width: `${Math.min(100, w.usedPercent ?? 0)}%` }} /></span>
-          <span className="pct">{w.usedPercent == null ? '?' : `${w.usedPercent}%`}</span>
-          <span className="reset muted">{w.resetsAt ? resetTime(w.resetsAt) : ''}</span>
-        </li>
-      ))}
-    </ul>
-  );
+/** Settings and usage belong to this hub, independently of the selected task's workspace. */
+async function read<T>(path: string, signal: AbortSignal, timeout = 15000): Promise<T> {
+  const response = await fetch(`/api/${path}`, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+    credentials: 'same-origin', mode: 'same-origin', cache: 'no-store',
+  });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`);
+  return value as T;
 }
 
-/**
- * "모델": the model and effort new tasks of each engine start with when the message names none,
- * with how much of each engine's plan limits is used (account-wide, terminal use included).
- */
+function checkedSettings(value: Settings): Settings {
+  if (!value || !ENGINES.every(engine => value[engine]
+    && (value[engine].model === null || ENGINE_MODELS[engine].includes(value[engine].model!))
+    && (value[engine].effort === null || ENGINE_EFFORTS[engine].includes(value[engine].effort!))))
+    throw new Error('저장된 기본 모델 설정을 확인하지 못했습니다. 다시 불러오세요.');
+  return value;
+}
+
+function fetchedTime(value: string) {
+  const time = new Date(value);
+  return Number.isNaN(time.getTime()) ? '조회 시각 없음' : time.toLocaleString('ko-KR', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
+type UsageState = { value: EngineUsage } | { error: string };
+function UsageRows({ state }: {state: UsageState | undefined}) {
+  if (!state) return <p className="muted small" role="status">사용량을 불러오는 중…</p>;
+  if ('error' in state) return <p className="error small" role="alert">사용량 조회 실패: {state.error}</p>;
+  const usage = state.value;
+  return <>
+    <div className="model-usage-heading"><strong>사용량{usage.plan ? ` · ${usage.plan}` : ''}</strong>
+      <span className="muted small">조회 {fetchedTime(usage.fetchedAt)}</span></div>
+    {usage.error && <p className="error small" role="alert">조회 안내: {usage.error}</p>}
+    {!usage.windows.length && !usage.error && <p className="muted small">이 계정에서 제공한 사용량 정보가 없습니다.</p>}
+    {!!usage.windows.length && <ul className="model-usage-list">
+      {usage.windows.map((window, index) => {
+        const percent = window.usedPercent != null && Number.isFinite(window.usedPercent) ? Math.max(0, Math.min(100, window.usedPercent)) : null;
+        const reset = window.resetsAt && !Number.isNaN(Date.parse(window.resetsAt)) ? resetTime(window.resetsAt) : null;
+        return <li key={`${window.label}-${index}`} className={percent != null && percent >= LOW_AT ? 'low' : undefined}>
+          <span className="model-usage-name">{window.label}</span>
+          <span className="model-usage-percent">{percent === null ? '정보 없음' : `${percent}% 사용`}</span>
+          <span className="model-usage-bar" aria-hidden="true"><i style={{width: `${percent ?? 0}%`}} /></span>
+          <span className="model-usage-reset muted">{reset ? `초기화 ${reset}` : '초기화 시각 없음'}</span>
+        </li>;
+      })}
+    </ul>}
+  </>;
+}
+
+/** New-task defaults and the hub CLI accounts' plan usage share one editor. */
 export function ModelDialog({ onClose }: { onClose: () => void }) {
-  const cur = useSettings();
-  /** Per engine, read separately so each shows as it arrives: missing while loading, null when the hub couldn't answer. */
-  const [usage, setUsage] = useState<Partial<Record<EngineName, EngineUsage | null>>>({});
-  const loadUsage = (refresh = false) => {
+  const [pick, setPick] = useState<Settings>();
+  const [settingsAttempt, setSettingsAttempt] = useState(0);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsError, setSettingsError] = useState('');
+  const [usage, setUsage] = useState<Partial<Record<EngineName, UsageState>>>({});
+  const [usageAttempt, setUsageAttempt] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const alive = useRef(false);
+  const saveRequest = useRef<AbortController | null>(null);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; saveRequest.current?.abort(); }; }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    setSettingsLoading(true); setSettingsError('');
+    void read<Settings>('settings', controller.signal).then(checkedSettings).then(value => {
+      if (!controller.signal.aborted) setPick(value);
+    }, error => { if (!controller.signal.aborted) setSettingsError(errorMessage(error)); })
+      .finally(() => { if (!controller.signal.aborted) setSettingsLoading(false); });
+    return () => controller.abort();
+  }, [settingsAttempt]);
+  useEffect(() => {
     if (workspaceId) return;
+    const controller = new AbortController();
     setUsage({});
-    for (const e of ENGINES) {
-      api.usage(e, refresh).then((u) => setUsage((p) => ({ ...p, [e]: u })), () => setUsage((p) => ({ ...p, [e]: null })));
+    for (const engine of ENGINES) {
+      // The hub's CLI readers time out after 30 seconds; leave time for that error to arrive.
+      void read<EngineUsage>(`usage?engine=${engine}${usageAttempt ? '&refresh=1' : ''}`, controller.signal, 35000).then(value => {
+        if (!value || !Array.isArray(value.windows)) throw new Error('사용량 응답을 확인하지 못했습니다');
+        if (!controller.signal.aborted) setUsage(previous => ({...previous, [engine]: {value}}));
+      }).catch(error => {
+        if (!controller.signal.aborted) setUsage(previous => ({...previous, [engine]: {error: errorMessage(error)}}));
+      });
     }
+    return () => controller.abort();
+  }, [usageAttempt]);
+  const loadingUsage = !workspaceId && ENGINES.some(engine => !usage[engine]);
+  const set = (engine: EngineName, value: Partial<Settings[EngineName]>) => {
+    setPick(previous => previous ? {...previous, [engine]: {...previous[engine], ...value}} : previous);
+    setError('');
   };
-  const loading = ENGINES.some((e) => !(e in usage));
-  useEffect(() => loadUsage(), []);
-  const [pick, setPick] = useState<Settings>(cur);
-  const [error, setError] = useState<string | null>(null);
-  const set = (e: EngineName, v: Partial<Settings[EngineName]>) => setPick((p) => ({ ...p, [e]: { ...p[e], ...v } }));
-  const submit = async (ev: FormEvent) => {
-    ev.preventDefault();
-    try { await saveSettings(pick); onClose(); }
-    catch (err) {
-      const m = err instanceof Error ? err.message : String(err);
-      setError(m === 'HTTP 404' || m.startsWith('no route') ? '허브를 재시작하면 쓸 수 있습니다.' : m);
-    }
+  const close = () => { if (!saving) onClose(); };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!pick || settingsLoading || settingsError || saving) return;
+    setSaving(true); setError('');
+    const controller = new AbortController(); saveRequest.current = controller;
+    try { await saveSettings(pick, AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])); if (alive.current) onClose(); }
+    catch (error) {
+      if (alive.current) {
+        const message = errorMessage(error);
+        setError(message === 'HTTP 404' || message.startsWith('no route') ? '허브를 재시작하면 쓸 수 있습니다.' : message);
+      }
+    } finally { if (saveRequest.current === controller) saveRequest.current = null; if (alive.current) setSaving(false); }
   };
-  return (
-    <Modal title="기본 모델" onClose={onClose}>
-      <form onSubmit={submit} className="form">
-        <p className="muted small">태그 없이 시작하는 새 작업에 씁니다. 작업마다 모델 태그와 <code>#low</code> … <code>#max</code>
-          {' '}태그로 바꿀 수 있고, 바꾼 값은 그 작업에 유지됩니다. <code>#ultra</code>는 Codex에서만 씁니다.</p>
-        {ENGINES.map((e) => (
-          <fieldset key={e} className="field-group">
-            <legend>{ENGINE_LABEL[e]} <small className="muted">{modelTagsOf(e)}{ENGINE_INFO[e].family ? ' (계열의 최신 버전)' : ''}</small></legend>
-            {!workspaceId && <div className="field">
-              <span className="lbl">사용량{usage[e]?.plan ? ` (${usage[e]!.plan})` : ''}
-                <small>계정 전체 기준, 사용 비율과 초기화 시각</small></span>
-              <UsageRows usage={usage[e]} />
-            </div>}
-            <div className="field">
-              <span className="lbl">모델</span>
-              <div className="pills" role="radiogroup" aria-label={`${ENGINE_LABEL[e]} 모델`}>
-                <button type="button" role="radio" className="toggle" aria-pressed={pick[e].model === null} aria-checked={pick[e].model === null}
-                  onClick={() => set(e, { model: null })}>{ENGINE_LABEL[e]} 기본</button>
-                {ENGINE_MODELS[e].map((m) => (
-                  <button key={m} type="button" role="radio" className="toggle" aria-pressed={pick[e].model === m} aria-checked={pick[e].model === m}
-                    onClick={() => set(e, { model: m })}>{MODEL_LABEL[m]}</button>
-                ))}
+  return <Modal title="기본 모델·사용량" wide onClose={close}>
+    <form onSubmit={submit} className="model-dialog-form">
+      <div className="model-dialog-scroll">
+        <p className="muted small model-dialog-intro">모델·effort 태그 없이 시작하는 새 작업의 기본값입니다. 작업에서 태그를 지정하면 해당 작업에 유지됩니다.</p>
+        <p className="muted small model-dialog-source">사용량은 허브 기기의 CLI 로그인 계정 전체 기준이며, 터미널 사용도 포함합니다.</p>
+        {settingsLoading && <p className="muted small" role="status">저장된 기본 모델 설정을 불러오는 중…</p>}
+        {settingsError && <div className="model-settings-error"><p className="error small" role="alert">설정 조회 실패: {settingsError}</p>
+          <button type="button" className="btn" onClick={() => setSettingsAttempt(value => value + 1)}>설정 다시 불러오기</button></div>}
+        {ENGINES.map(engine => <section key={engine} className="model-engine" aria-label={ENGINE_LABEL[engine]}>
+          <fieldset className="model-engine-settings" disabled={!pick || settingsLoading || !!settingsError || saving}>
+            <legend>{ENGINE_LABEL[engine]}</legend>
+            <label className="field"><span className="lbl">기본 모델{ENGINE_INFO[engine].family && <small>선택한 계열의 최신 버전</small>}</span>
+              <select className="input model-select" aria-label={`${ENGINE_LABEL[engine]} 기본 모델`} value={pick?.[engine].model ?? ''}
+                onChange={event => set(engine, {model: event.target.value ? event.target.value as ModelName : null})}>
+                <option value="">{ENGINE_LABEL[engine]} 기본</option>
+                {ENGINE_MODELS[engine].map(model => <option key={model} value={model}>{MODEL_LABEL[model]}</option>)}
+              </select>
+            </label>
+            <div className="field"><span className="lbl">추론 강도 · effort</span>
+              <div className="model-efforts" role="radiogroup" aria-label={`${ENGINE_LABEL[engine]} effort`}>
+                {[null, ...ENGINE_EFFORTS[engine]].map(effort => <label key={effort ?? 'default'} className="model-effort-choice">
+                  <input type="radio" name={`${engine}-effort`} value={effort ?? ''} checked={(pick?.[engine].effort ?? null) === effort} onChange={() => set(engine, {effort})} />
+                  <span>{effort ?? '모델 기본'}</span>
+                </label>)}
               </div>
-            </div>
-            <div className="field">
-              <span className="lbl">effort<small>모델이 지원하지 않는 단계는 가까운 단계로 실행</small></span>
-              <div className="pills" role="radiogroup" aria-label={`${ENGINE_LABEL[e]} effort`}>
-                <button type="button" role="radio" className="toggle" aria-pressed={pick[e].effort === null} aria-checked={pick[e].effort === null}
-                  onClick={() => set(e, { effort: null })}>모델 기본</button>
-                {ENGINE_EFFORTS[e].map((x) => (
-                  <button key={x} type="button" role="radio" className="toggle" aria-pressed={pick[e].effort === x} aria-checked={pick[e].effort === x}
-                    onClick={() => set(e, { effort: x })}>{x}</button>
-                ))}
-              </div>
+              <span className="muted small">지원하지 않는 단계는 가까운 단계로 실행합니다.{engine === 'codex' && ' ultra는 Codex에서만 지원합니다.'}</span>
             </div>
           </fieldset>
-        ))}
-        {error && <p className="error">{error}</p>}
+          <div className="model-engine-usage" aria-label={`${ENGINE_LABEL[engine]} 사용량`}>
+            {workspaceId ? <p className="muted small">사용량은 허브 화면에서 확인할 수 있습니다.</p> : <UsageRows state={usage[engine]} />}
+          </div>
+        </section>)}
+      </div>
+      <footer className="model-dialog-footer">
+        {error && <p className="error small" role="alert">{error}</p>}
         <div className="form-actions">
-          {!workspaceId && <button type="button" className="btn" title="사용량 다시 조회" disabled={loading} onClick={() => loadUsage(true)}>
-            <RefreshCw /> 사용량</button>}
+          {!workspaceId && <button type="button" className="btn" disabled={loadingUsage || saving} onClick={() => setUsageAttempt(value => value + 1)}>
+            <RefreshCw aria-hidden="true" />{loadingUsage ? '조회 중…' : '사용량 새로고침'}</button>}
           <span className="spacer" />
-          <button type="button" className="btn" onClick={onClose}>취소</button>
-          <button className="btn primary">저장</button>
+          <button type="button" className="btn" disabled={saving} onClick={close}>취소</button>
+          <button className="btn primary" disabled={!pick || settingsLoading || !!settingsError || saving}>{saving ? '저장 중…' : '저장'}</button>
         </div>
-      </form>
-    </Modal>
-  );
+      </footer>
+    </form>
+  </Modal>;
 }

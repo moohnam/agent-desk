@@ -1,3 +1,4 @@
+import { DEFAULT_INSTRUCTIONS } from '../instruction-store.ts';
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
@@ -21,6 +22,7 @@ export interface RunnerPort {
   has(sessionId: string): boolean;
   /** Absent on test and legacy ports; only an explicit false forbids pinned inputs. */
   readonly skillSnapshotSupported?: boolean;
+  readonly connectorMcpSupported?: boolean;
   /** Sends a command; throws when not connected. */
   handle(cmd: HubToRunner): void;
   /** Remote commands can be accepted durably while the link is down. */
@@ -48,6 +50,8 @@ export class RunnerClient implements RunnerPort {
   private stopped = false;
   private live = new Set<string>();
   private supportsSkillSnapshot = false;
+  private supportsInstructions = false;
+  private supportsConnectorMcp = false;
   private lastSpawn = 0;
   private onMessage: (m: RunnerToHub) => void;
   private onConnection: (connected: boolean) => void;
@@ -77,12 +81,17 @@ export class RunnerClient implements RunnerPort {
   get connected() { return this.socket !== null && this.id !== null; }
   get skillSnapshotSupported() { return this.supportsSkillSnapshot; }
 
+  get connectorMcpSupported() { return this.supportsConnectorMcp; }
   has(sessionId: string) { return this.connected && this.live.has(sessionId); }
 
   handle(cmd: HubToRunner) {
     if (!this.socket) throw new Error('runner not connected');
     if ((cmd.type === 'start' || cmd.type === 'send') && cmd.skillSnapshot && !this.supportsSkillSnapshot)
       throw new HttpError(409, '현재 로컬 러너는 고정 스킬 버전을 지원하지 않습니다. 실행 중인 세션은 유지되며, 러너가 업데이트된 뒤 다시 보내주세요');
+    if (cmd.type === 'start' && cmd.instructions !== undefined && cmd.instructions !== DEFAULT_INSTRUCTIONS && !this.supportsInstructions)
+      throw new HttpError(409, '현재 로컬 러너는 사용자 지침을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요');
+    if (cmd.type === 'start' && cmd.connectorMcp && !this.supportsConnectorMcp)
+      throw new HttpError(409, '외부 연결 도구를 사용하려면 로컬 러너를 업데이트하세요');
     if (cmd.type === 'start') {
       this.live.add(cmd.sessionId);
     }
@@ -115,6 +124,8 @@ export class RunnerClient implements RunnerPort {
           this.live = new Set(m.sessions.map((s) => s.sessionId));
           this.engines = new Set(m.capabilities.engines);
           this.supportsSkillSnapshot = !!m.capabilities.skillSnapshot;
+          this.supportsInstructions = !!m.capabilities.instructions;
+          this.supportsConnectorMcp = !!m.capabilities.connectorMcp;
           if (m.protocolVersion !== PROTOCOL_VERSION && this.options.spawnIfMissing !== false) {
             console.warn(`runner speaks protocol ${m.protocolVersion ?? '(none)'}, this hub ${PROTOCOL_VERSION}: restart the runner (npm run runner:stop)`);
           }
@@ -143,6 +154,7 @@ export class RunnerClient implements RunnerPort {
   }
 
   private spawnDaemon() {
+    if (process.env.AGENT_DESK_MANAGED_RUNNERS === '1') return;
     const now = Date.now();
     if (now - this.lastSpawn < SPAWN_EVERY_MS) return;
     this.lastSpawn = now;

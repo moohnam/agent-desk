@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { config } from '../config.ts';
+import { hubBlockers, registerRuntimeControl, sessionBlockers } from '../runtime-control.ts';
 import { Store } from '../db.ts';
 import { SharedWorkspace } from '../shared-workspace.ts';
 import { SharedRuntime } from './shared-runtime.ts';
@@ -35,4 +36,9 @@ if(command==='grant'||command==='revoke'||command==='peers') {
   let stopping=false;
   const stop=()=>{if(stopping)return;stopping=true;server.closeAllConnections();server.close(()=>{runtime.close();});};
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
+  await registerRuntimeControl({ role: 'shared', ready: () => server.listening,
+    blockers: () => [...hubBlockers(runtime.hub), ...sessionBlockers(runtime.agent.runner.snapshot()),
+      ...(runtime.journal.hasUndeliveredCommands ? ['미실행 명령'] : []),
+      ...(runtime.journal.lastEvent > runtime.journal.eventAck ? ['미확인 이벤트'] : [])],
+    stop: () => { server.closeAllConnections(); server.close(() => { runtime.close(); process.exit(0); }); } });
 }

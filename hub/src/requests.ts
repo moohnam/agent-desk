@@ -15,6 +15,7 @@ export interface Delivery {
   /** Sends the session's oldest waiting message if it has no turn running. */
   drain(sessionId: string): void;
   ready(sessionId: string): boolean;
+  bindApproval?(approvalId: string, sessionId: string): void;
 }
 
 export interface CrossPeer {
@@ -71,6 +72,7 @@ export class AgentRequests {
         status: 'pending', created_at: now() };
       r.approval_id = approval.id;
       this.core.store.createApproval(approval);
+      this.delivery.bindApproval?.(approval.id, from.id);
       this.core.publish({ type: 'approval', approval });
       this.core.addEvent(from.id, from.task_id, 'approval',
         { approvalId: approval.id, toolName: REQUEST_TOOL, input: approval.input, decision: 'pending' });
@@ -175,6 +177,7 @@ export class AgentRequests {
         input: { to: `@${this.core.taskLabel(to.task)}`, title: to.task.title, description: r.text }, status: 'pending', created_at: now(),
       };
       this.core.store.createApproval(approval);
+      this.delivery.bindApproval?.(approval.id, from.id);
       this.core.store.createRequest({ ...r, approval_id: approval.id });
       this.core.store.database.prepare('INSERT OR REPLACE INTO request_dedupe VALUES (?,?,?,?,?)')
         .run(from.task_id, userEventId, to.task.id, question, r.id);
@@ -284,7 +287,7 @@ export class AgentRequests {
     const from = remote ? `${remote.project_name}#${remote.seq}` : this.core.taskLabel(this.core.store.getTask(r.from_task_id)!);
     const id = randomUUID();
     this.core.store.enqueue({ id, task_id: r.to_task_id, session_id: sessionId,
-      text: `@${from}의 질문: ${r.text}`, body: this.requestPrompt(r), skills: [], mode: null, created_at: now() });
+      text: `@${from}의 질문: ${r.text}`, body: this.requestPrompt(r), skills: [], mode: null, created_at: now(), connector_context: null });
     this.core.store.updateRequest(r.id, { status: 'queued', queued_id: id, prompt_event_id: null, to_session_id: sessionId });
     this.core.publishTask(r.to_task_id);
   }

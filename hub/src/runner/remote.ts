@@ -3,6 +3,7 @@ import { chmodSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { RemoteExchange, RemoteReply } from '../../../shared/remote.ts';
 import { config } from '../config.ts';
+import { maintenanceActive, registerRuntimeControl, sessionBlockers } from '../runtime-control.ts';
 import { RemoteAgent } from './remote-agent.ts';
 import { RemoteJournal } from './remote-journal.ts';
 
@@ -22,11 +23,18 @@ const agent = new RemoteAgent(journal,id,config.skillsHome);
 const url = new URL(`/api/runners/${encodeURIComponent(id)}/exchange`,hub);
 let lastError = '';
 let stopping = false;
+let exchanging = false;
 process.on('SIGTERM',()=>{stopping=true;});
 process.on('SIGINT',()=>{stopping=true;});
 agent.pump();
+await registerRuntimeControl({ role: 'remote', ready: () => !stopping,
+  blockers: () => [...sessionBlockers(agent.runner.snapshot()), ...(exchanging ? ['교환 중'] : []),
+    ...(journal.hasUndeliveredCommands ? ['미실행 명령'] : []), ...(journal.lastEvent > journal.eventAck ? ['미확인 이벤트'] : [])],
+  stop: () => { stopping = true; } });
 while (!stopping) {
+  if (maintenanceActive()) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
   let more = false;
+  exchanging = true;
   try {
     // Replacing a revoked token must not require restarting engines that are still working.
     token = readFileSync(tokenFile,'utf8').trim();
@@ -35,7 +43,7 @@ while (!stopping) {
     if (!events.length && journal.lastEvent > journal.eventAck) throw new Error('첫 미전달 이벤트가 배치 크기 한도를 넘었습니다. 전달 DB 원본을 보존하고 확인해 주세요');
     const input: RemoteExchange = {version:1,journalId:journal.id,commandAck:journal.commandAck,events,
       more:journal.lastEvent > (events.at(-1)?.seq ?? journal.eventAck), sessions:agent.runner.snapshot(),engines:agent.runner.capabilities.engines,
-      skillSnapshot:agent.runner.capabilities.skillSnapshot};
+      skillSnapshot:agent.runner.capabilities.skillSnapshot,instructions:true};
     const res = await fetch(url,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify(input),signal:AbortSignal.timeout(10_000)});
     if (!res.ok) {
       const detail = await res.json().catch(()=>({})) as {error?:string};
@@ -53,7 +61,9 @@ while (!stopping) {
     if (error !== lastError) console.error(`${error}. 실행 중 작업과 미전달 기록을 유지하며 재시도합니다.`);
     lastError = error;
   }
+  finally { exchanging = false; }
   if (!more) await new Promise(r=>setTimeout(r,lastError?3000:1000));
 }
 for (const s of agent.runner.snapshot()) agent.runner.handle({type:'close',sessionId:s.sessionId});
 journal.close();
+if (process.env.AGENT_DESK_UPDATE_SOCKET) process.exit(0);

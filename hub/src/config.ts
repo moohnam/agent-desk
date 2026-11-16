@@ -5,7 +5,7 @@
 // elsewhere moves them all; each can still be set on its own.
 
 import { dirname, join, resolve } from 'node:path';
-import { readLocalLaunchSettings } from './runner/local-launch.ts';
+import { resolveLocalLaunchSettings } from './runner/local-launch.ts';
 
 const env = process.env;
 const REPO = resolve(import.meta.dirname, '../..');
@@ -16,17 +16,16 @@ const positive = (v: string | undefined, fallback: number) => {
 
 export const DB_PATH = env.AGENT_DESK_DB ?? join(REPO, 'data', 'agent-desk.db');
 const DATA_DIR = dirname(DB_PATH);
-const localLaunch = env.AGENT_DESK_LOCAL_AUTHORITY_TOKEN_FILE && env.AGENT_DESK_GATEWAY_DB && env.AGENT_DESK_LOCAL_AUTHORITY_URL
-  ? undefined : readLocalLaunchSettings(env.AGENT_DESK_LOCAL_MODE_FILE ?? join(DATA_DIR, 'local-mode.json'));
+const localLaunch = resolveLocalLaunchSettings(env, DATA_DIR);
 
 export const config = {
   /** The hub's HTTP port; HOST=127.0.0.1 keeps it to this machine, else other devices connect with the access token. */
   port: positive(env.PORT, 4317),
   host: env.HOST ?? '0.0.0.0',
   dbPath: DB_PATH,
-  gatewayDbPath: env.AGENT_DESK_GATEWAY_DB ?? localLaunch?.gatewayDbPath ?? join(DATA_DIR, 'gateway.db'),
-  localAuthorityTokenFile: env.AGENT_DESK_LOCAL_AUTHORITY_TOKEN_FILE ?? localLaunch?.tokenFile,
-  localAuthorityUrl: env.AGENT_DESK_LOCAL_AUTHORITY_URL ?? localLaunch?.authorityUrl ?? `http://127.0.0.1:${positive(env.AGENT_DESK_SHARED_PORT, 4321)}/`,
+  gatewayDbPath: localLaunch.gatewayDbPath,
+  localAuthorityTokenFile: localLaunch.tokenFile,
+  localAuthorityUrl: localLaunch.authorityUrl ?? `http://127.0.0.1:${positive(env.AGENT_DESK_SHARED_PORT, 4321)}/`,
   uploadsDir: env.AGENT_DESK_UPLOADS ?? join(DATA_DIR, 'uploads'),
   accessTokenFile: env.AGENT_DESK_TOKEN_FILE ?? join(DATA_DIR, 'access-token'),
   /**
@@ -37,6 +36,7 @@ export const config = {
   allowedHosts: (env.AGENT_DESK_HOSTS ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
   /** The desk plugin directory engines load desk skills from (skills.ts). */
   skillsHome: env.AGENT_DESK_SKILLS_HOME ?? join(DATA_DIR, 'desk-plugin'),
+  instructionsFile: env.AGENT_DESK_INSTRUCTIONS_FILE ?? join(DATA_DIR, 'instructions.md'),
   webDist: join(REPO, 'web', 'dist'),
   /** Optional Chrome/Chromium executable for hub-side Mermaid rendering. */
   diagramBrowser: env.AGENT_DESK_DIAGRAM_BROWSER,

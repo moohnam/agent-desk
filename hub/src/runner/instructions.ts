@@ -4,18 +4,15 @@
 import { resolve } from 'node:path';
 import { RESERVED_TAGS } from '../../../shared/compose.ts';
 
-export const DESK_INSTRUCTIONS = [
-  // Every utterance becomes a post in the feed, so Korean throughout, not only in final answers.
-  '사용자에게 보이는 모든 발화(작업 중간의 짧은 안내 포함)는 한국어로 작성합니다.',
-  // The desk opens local links on click (absolute paths, file://, with or without a line suffix).
-  '로컬 파일이나 디렉터리를 언급할 때는 경로를 마크다운 링크로 달고, 링크 대상은 절대 경로로 씁니다. 예: [hub/src/hub.ts](/Users/me/proj/hub/src/hub.ts), 특정 줄은 [hub.ts:42](/Users/me/proj/hub/src/hub.ts:42). 경로에 공백이 있으면 링크 대상을 <>로 감쌉니다.',
-].join('\n');
+import { DEFAULT_INSTRUCTIONS } from '../instruction-store.ts';
+
+export const DESK_INSTRUCTIONS = DEFAULT_INSTRUCTIONS;
 
 /** Resolve skill references lazily in the engine, without loading every referenced skill into a turn. */
-export function deskInstructions(skillsHome?: string): string {
-  if (!skillsHome) return DESK_INSTRUCTIONS;
+export function deskInstructions(skillsHome?: string, instructions = DESK_INSTRUCTIONS): string {
+  if (!skillsHome) return instructions;
   return [
-    DESK_INSTRUCTIONS,
+    instructions,
     '[데스크 스킬 참조]',
     `데스크 스킬 루트(절대 경로): ${JSON.stringify(resolve(skillsHome, 'skills'))}`,
     '입력에 별도 데스크 스킬 스냅샷 루트가 명시되면 그 입력의 선택 스킬·하위 참조·부속 파일에는 해당 루트를 우선 사용합니다. 별도 루트가 없는 입력에만 위 기본 루트를 사용합니다.',

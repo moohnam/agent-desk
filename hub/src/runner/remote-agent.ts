@@ -1,4 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
+import { maintenanceActive } from '../runtime-control.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { HubToRunner, RunnerToHub } from '../../../shared/protocol.ts';
@@ -21,6 +22,7 @@ export class RemoteAgent {
     journal.recoverAmbiguous();
   }
   pump() {
+    if (maintenanceActive()) return;
     for (let item; (item = this.journal.next());) {
       this.journal.dispatching(item.seq);
       const raw = item.value;

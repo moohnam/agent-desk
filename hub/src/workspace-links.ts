@@ -1,3 +1,5 @@
+import { needsDefaultInstructions } from './workspace-api.ts';
+import { DEFAULT_INSTRUCTIONS } from './instruction-store.ts';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -5,11 +7,13 @@ import { Readable } from 'node:stream';
 import type { SharedWorkspaceView, WorkspaceOperation } from '../../shared/workspace.ts';
 import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
-import { canonical, digest, json, operation } from './shared-workspace.ts';
+import { canonical, digest, json, operation, connectorUserInput } from './shared-workspace.ts';
+import { executeConnectorJob, type ConnectorAuthority } from './connector-authority.ts';
+import type { ConnectorJob } from './connector-broker.ts';
 import { readBody } from './body.ts';
-import { TemporaryFiles } from './shared-files.ts';
+import { DocumentPermissionError, TemporaryFiles } from './shared-files.ts';
 import type { LinkTarget } from './open.ts';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { closeRequestBroker } from './request-broker.ts';
 import type { SkillStore } from './skills.ts';
 import { collectSkillBundle, collectSkillVersion, EMPTY_SKILL_BUNDLE, type SkillBundle } from './shared-skill-sync.ts';
@@ -29,11 +33,14 @@ function address(value: unknown) {
 
 /** Each hub keeps its own durable submission queue; only the runner decides task state. */
 export class WorkspaceLinks {
+  instructions?: () => string;
+  connectorAuthority?: ConnectorAuthority;
   private db:DatabaseSync;
   private skills?:SkillStore;
   get database() {return this.db;}
   private flushing = new Map<string,Promise<void>>();
   private syncing = new Map<string,Promise<void>>();
+  private connectorPolling = new Map<string,Promise<void>>();
   private lastSync = new Map<string,number>();
   private sourceCache?:{at:number;versions:Map<string,SkillBundle>};
   private skillCapability = new Map<string,boolean>();
@@ -58,10 +65,11 @@ export class WorkspaceLinks {
       this.db.exec('ALTER TABLE workspace_delivery ADD COLUMN prepared_payload TEXT');
     this.timer=setInterval(()=>{for(const link of this.rows()){
       void this.flush(link.id);
+      void this.pollConnectors(link.id);
       if(Date.now()-(this.lastSync.get(link.id)??0)>15_000)void this.syncSkills(link.id);
     }},1500);this.timer.unref();
   }
-  async close() { this.stopped=true;clearInterval(this.timer);await closeRequestBroker(this);for(const c of this.requests.keys())c.abort();await Promise.all([...this.flushing.values(),...this.syncing.values()]);await this.files.close(); }
+  async close() { this.stopped=true;clearInterval(this.timer);await closeRequestBroker(this);for(const c of this.requests.keys())c.abort();await Promise.all([...this.flushing.values(),...this.syncing.values(),...this.connectorPolling.values()]);await this.files.close(); }
   private rows() {return this.db.prepare('SELECT * FROM workspace_link').all() as Link[];}
   private link(id:string) {const link=this.db.prepare('SELECT * FROM workspace_link WHERE id=?').get(id) as Link|undefined;if(!link)throw new HttpError(404,'공유 작업공간 연결이 없습니다');return link;}
   private legacy(id:string) {return this.db.prepare('SELECT * FROM remote_legacy WHERE link_id=?').all(id) as Legacy[];}
@@ -201,18 +209,32 @@ export class WorkspaceLinks {
     return id;
   }
   /** A bounded preview transfer; the runner must enforce the document-directory boundary. */
-  async previewFile(id:string, taskId:string, href:string, base:string|undefined, receive:(r:Response)=>Promise<string>) {
+  async previewFile(id:string, taskId:string, href:string, base:string|undefined, receive:(r:Response)=>Promise<string>, approvedPath?:string) {
     const link=this.link(id);
     const identity=await this.request(link,'/v1/identity');
     if(!('status' in identity)||identity.status!==200||identity.body.capabilities?.file_preview!==1)
       throw new HttpError(409,'문서 미리보기를 사용하려면 해당 러너를 업데이트해야 합니다');
-    const reply=await this.request(link,'/v1/file?'+new URLSearchParams({task_id:taskId,href,...(base?{base}:{})}),{},true);
+    if(approvedPath!==undefined&&identity.body.capabilities?.file_permission!==1)
+      throw new HttpError(409,'파일별 문서 허용을 사용하려면 해당 러너를 업데이트해야 합니다');
+    const reply=await this.request(link,'/v1/file?'+new URLSearchParams({task_id:taskId,href,...(base?{base}:{}),...(approvedPath!==undefined?{approved_path:approvedPath}:{})}),{},true);
     if(!('response' in reply))throw new HttpError(502,'파일 응답을 받지 못했습니다');
     const timer=setTimeout(reply.release,30_000);
     try {
       if(!reply.response.ok) {
         const status=reply.response.status;
-        // Do not buffer or display arbitrary runner error bodies.
+        // Only a small typed permission response may cross the runner boundary; never its free-form error.
+        if(status===403&&reply.response.headers.get('content-type')?.includes('application/json')&&reply.response.body) {
+          const reader=reply.response.body.getReader();let size=0;const chunks:Uint8Array[]=[];let permission:unknown;
+          try {
+            while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>16*1024){await reader.cancel();break;}chunks.push(part.value);}
+            if(size<=16*1024)permission=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          }catch{/* Malformed, excessive or interrupted errors remain a generic denial. */}
+          finally{reader.releaseLock();}
+          const details=permission as {code?:unknown;path?:unknown}|undefined;
+          if(details?.code==='document_permission_required'&&typeof details.path==='string'&&isAbsolute(details.path)&&details.path.length<=4096&&!/[\x00-\x1f]/.test(details.path))
+            throw new DocumentPermissionError(details.path);
+        }
+        // Do not display arbitrary runner error bodies.
         const reason=status===403?'문서 경로가 허용 범위 밖이거나 읽기 권한이 없습니다'
           :status===404?'문서 파일이나 작업을 찾을 수 없습니다'
           :status===413?'문서 파일은 50 MB까지 가져올 수 있습니다'
@@ -251,11 +273,12 @@ export class WorkspaceLinks {
     if(target.kind==='file')await this.files.discard(target.path);
   }
   remove(id:string) {
-    this.link(id);
+    const link = this.link(id);
     if(this.legacy(id).length)throw new HttpError(409,'이관한 원격 원본 연결은 제거할 수 없습니다');
     if(this.flushing.has(id)||this.list().find(l=>l.id===id)!.pending)throw new HttpError(409,'전달 중이거나 미전달 입력이 있어 연결을 제거할 수 없습니다');
     this.db.prepare('DELETE FROM workspace_delivery WHERE link_id=?').run(id);
     this.db.prepare('DELETE FROM workspace_link WHERE id=?').run(id);
+    this.connectorAuthority?.revokeWorkspace(link.workspace_id);
     for(const [controller,link] of this.requests)if(link===id)controller.abort();
   }
   deliveries(id:string) {
@@ -342,21 +365,56 @@ export class WorkspaceLinks {
       .finally(()=>this.syncing.delete(id));
     this.syncing.set(id,work);return work;
   }
+  /** The authenticated gateway drains only jobs assigned to its own workspace peer. */
+  pollConnectors(id: string): Promise<void> {
+    const active = this.connectorPolling.get(id); if (active) return active;
+    if (!this.connectorAuthority || this.stopped) return Promise.resolve();
+    const authority = this.connectorAuthority;
+    const work = (async () => {
+      const link = this.link(id);
+      const polled = await this.request(link, '/v1/connectors/poll');
+      if (!('status' in polled) || polled.status !== 200 || !Array.isArray(polled.body) || polled.body.length > 32) return;
+      for (const job of polled.body as ConnectorJob[]) {
+        if (this.stopped) break;
+        if (!job || typeof job.callId !== 'string' || !job.context || job.context.workspaceId !== link.workspace_id
+          || !Number.isSafeInteger(job.expiresAt) || job.expiresAt <= Date.now()) continue;
+        const completion = await executeConnectorJob(authority, job);
+        if (this.stopped || job.expiresAt <= Date.now()) continue;
+        const completed = await this.request(link, '/v1/connectors/complete', { method: 'POST', body: JSON.stringify({ callId: job.callId, completion }) });
+        if ('status' in completed && completed.status === 200)
+          await this.request(link, '/v1/connectors/ack', { method: 'POST', body: JSON.stringify({ callIds: [job.callId] }) });
+      }
+    })().catch(() => { /* The next peer-scoped poll retries the same call IDs; no account fallback. */ })
+      .finally(() => this.connectorPolling.delete(id));
+    this.connectorPolling.set(id, work); return work;
+  }
   enqueue(id:string,input:unknown) {
-    this.link(id);const op=operation(input),hash=digest(canonical(op));const old=this.result(op.id);
-    if('__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body)
-      throw new HttpError(400,'스킬 준비 필드는 작업공간 연결에서만 설정합니다');
+    const link = this.link(id);const op=operation(input),hash=digest(canonical(op));const old=this.result(op.id);
+    if('__desk_instructions' in op.body||'__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body||'__desk_connector_grant' in op.body)
+      throw new HttpError(400,'내부 지침·스킬 필드는 작업공간 연결에서만 설정합니다');
     if(old&&(old.digest!==hash||old.link_id!==id))throw new HttpError(409,'같은 명령 ID의 내용 또는 대상이 바뀌었습니다');
     if(!old){
       const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
       const bundle=text&&this.skills&&this.needsSkillSnapshot(text)
         ? collectSkillBundle(this.skills,text)??EMPTY_SKILL_BUNDLE:null;
       const prepared=bundle?JSON.stringify(bundle):'';
+      const preparedOp: WorkspaceOperation = needsDefaultInstructions(op.method, op.path, op.body)
+        ? {...op, body: {...op.body, __desk_instructions: this.instructions?.()}} : {...op, body: {...op.body}};
+      this.db.exec('SAVEPOINT connector_enqueue');
+      try {
+      if (connectorUserInput(op.method, op.path)) {
+        const grant = this.connectorAuthority?.issue({ workspaceId: link.workspace_id, requestId: op.id });
+        if (grant?.connections.length) preparedOp.body.__desk_connector_grant = grant;
+        if (grant && !grant.connections.length) this.connectorAuthority!.revoke(grant.capability);
+      }
+      const payload = JSON.stringify(preparedOp);
       const pending=this.db.prepare('SELECT count(*) n,coalesce(sum(length(CAST(payload AS BLOB))+coalesce(length(CAST(prepared_payload AS BLOB)),0)),0) bytes FROM workspace_delivery WHERE status IS NULL').get() as {n:number;bytes:number};
-      if(pending.n>=1000||pending.bytes+Buffer.byteLength(JSON.stringify(op))+Buffer.byteLength(prepared)>32*1024*1024)
+      if(pending.n>=1000||pending.bytes+Buffer.byteLength(payload)+Buffer.byteLength(prepared)>32*1024*1024)
         throw new HttpError(429,'미전달 입력 한도에 도달했습니다. 연결 복구 후 다시 보내세요');
       this.db.prepare('INSERT INTO workspace_delivery(id,link_id,digest,payload,prepared_payload) VALUES(?,?,?,?,?)')
-        .run(op.id,id,hash,JSON.stringify(op),prepared);
+        .run(op.id,id,hash,payload,prepared);
+      this.db.exec('RELEASE connector_enqueue');
+      } catch (error) { this.db.exec('ROLLBACK TO connector_enqueue; RELEASE connector_enqueue'); throw error; }
     }
     this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id,accepted_at) VALUES(?,?)').run(op.id,new Date().toISOString());
     return op.id;
@@ -374,6 +432,30 @@ export class WorkspaceLinks {
         if(this.stopped)break;
         try {
           const op=JSON.parse(row.payload) as WorkspaceOperation;
+          const connectorGrant = op.body.__desk_connector_grant as { expiresAt?: number } | null | undefined;
+          if (connectorGrant && (!Number.isSafeInteger(connectorGrant.expiresAt) || connectorGrant.expiresAt! <= Date.now())) {
+            this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+              .run(JSON.stringify({ error: '대기 중 외부 연결 허가가 만료되었습니다. 현재 연결을 확인하고 입력을 다시 보내주세요' }), row.id);
+            continue;
+          }
+          if (op.body.__desk_connector_grant) {
+            const identity = await this.request(this.link(id), '/v1/identity');
+            if (!('status' in identity) || identity.status !== 200) { failure('connector_capability_unavailable'); break; }
+            if (identity.body?.capabilities?.connectors !== 1) {
+              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+                .run(JSON.stringify({ error: '공유 러너가 요청별 외부 연결을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요' }), row.id);
+              continue;
+            }
+          }
+          if (needsDefaultInstructions(op.method, op.path, op.body) && op.body.__desk_instructions !== undefined && op.body.__desk_instructions !== DEFAULT_INSTRUCTIONS) {
+            const identity = await this.request(this.link(id), '/v1/identity');
+            if (!('status' in identity) || identity.status !== 200) { failure('instructions_capability_unavailable'); break; }
+            if (identity.body?.capabilities?.instructions !== 1) {
+              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+                .run(JSON.stringify({error:'공유 러너가 사용자 지침을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요'}),row.id);
+              continue;
+            }
+          }
           const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
           if(this.skills&&text&&this.needsSkillSnapshot(text)&&!row.prepared_payload){
             this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')

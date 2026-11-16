@@ -111,7 +111,7 @@ function LocalConnectors() {
   }
 
   return <>
-    <p className="small muted">검색과 읽기 권한으로 연결합니다. 연결한 도구를 에이전트에 자동으로 붙이는 기능은 아직 지원하지 않습니다.</p>
+    <p className="small muted">검색과 읽기 권한으로 연결합니다. 이 허브에서 보낸 입력은 최신 러너의 Codex·Claude 대화에서 연결을 사용할 수 있습니다. 계정 인증정보는 허브에만 보관합니다.</p>
     <div className="row">
       <button type="button" className="btn" disabled={loading || !!busy} onClick={() => { if (session.current) void refresh(session.current); }}>상태 새로고침</button>
       {loading && <span className="small muted" role="status">상태 확인 중…</span>}

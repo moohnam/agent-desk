@@ -100,7 +100,7 @@ await new Promise((done, fail) => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('agy resume receives current instructions once, not again on a follow-up turn', () => {
+for (const instructions of [undefined, '사용자 공통 지침', '']) test(`agy resume receives ${instructions === undefined ? 'default' : 'custom'} instructions once, not again on a follow-up turn`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-agy-ref-'));
   try {
     const home = join(dir, 'plugin with spaces');
@@ -123,7 +123,7 @@ await new Promise((done, fail) => {
   let turns = 0;
   const timer = setTimeout(() => { engine.close(); fail(Error('adapter timeout')); }, 4000);
   const engine = startAgy({ sessionId: 'fixture', cwd: ${JSON.stringify(dir)}, prompt: '짧게 설명해 주세요',
-    skillsHome: ${JSON.stringify(home)}, resume: 'existing-conversation', permissionMode: 'default',
+    instructions: ${JSON.stringify(instructions)}, skillsHome: ${JSON.stringify(home)}, resume: 'existing-conversation', permissionMode: 'default',
     emit(message) {
       if (message.type === 'event' && message.event.kind === 'status' && message.event.state === 'turn_done') {
         if (++turns === 1) engine.send('계속');
@@ -142,14 +142,15 @@ await new Promise((done, fail) => {
     assert.ok(requests[0].args.includes('existing-conversation'));
     const turns = requests.filter((r) => r.event === 'user');
     assert.equal(turns.length, 2);
-    assert.ok(turns[0].message.content.includes(DESK_INSTRUCTIONS));
+    assert.ok(turns[0].message.content.startsWith('[데스크 지침]\n' + deskInstructions(home, instructions)));
+    if (instructions !== undefined) assert.ok(!turns[0].message.content.includes(DESK_INSTRUCTIONS));
     assert.ok(turns[0].message.content.includes(JSON.stringify(join(home, 'skills'))));
     assert.equal(turns[1].message.content, '계속');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 // Exercise the actual adapter against a local JSON-RPC peer; no real CLI or model is invoked.
-for (const resume of [false, true]) test(`Codex ${resume ? 'resume' : 'start'} receives the skill root without eagerly loading children or changing approval mode`, () => {
+for (const instructions of [undefined, '사용자 공통 지침', '']) for (const resume of [false, true]) test(`Codex ${instructions === undefined ? 'default' : 'custom'} ${resume ? 'resume' : 'start'} receives the skill root without eagerly loading children or changing approval mode`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-skill-ref-'));
   try {
     const home = join(dir, 'plugin with spaces');
@@ -186,7 +187,7 @@ import { startCodex } from ${JSON.stringify(adapter)};
 await new Promise((done, fail) => {
   const timer = setTimeout(() => { engine.close(); fail(Error('adapter timeout')); }, 4000);
   const engine = startCodex({ sessionId: 'fixture', cwd: ${JSON.stringify(project)}, prompt: '짧게 설명해 주세요',
-    skillsHome: ${JSON.stringify(home)}, skills: ['parent'], permissionMode: 'default',
+    instructions: ${JSON.stringify(instructions)}, skillsHome: ${JSON.stringify(home)}, skills: ['parent'], permissionMode: 'default',
     ${resume ? "resume: 'fixture-thread'," : ''}
     emit(message) {
       if (message.type === 'event' && message.event.kind === 'status' && message.event.state === 'turn_done') {
@@ -203,7 +204,7 @@ await new Promise((done, fail) => {
     assert.equal(result.status, 0, result.stderr || String(result.error));
     const requests = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     const thread = requests.find((r) => r.method === (resume ? 'thread/resume' : 'thread/start'));
-    assert.ok(thread.params.developerInstructions.startsWith(DESK_INSTRUCTIONS));
+    assert.equal(thread.params.developerInstructions, deskInstructions(home, instructions));
     assert.ok(thread.params.developerInstructions.includes(JSON.stringify(join(home, 'skills'))));
     assert.equal(thread.params.approvalPolicy, 'untrusted');
     const turn = requests.find((r) => r.method === 'turn/start');

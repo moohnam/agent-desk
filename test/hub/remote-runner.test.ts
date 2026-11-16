@@ -191,6 +191,30 @@ test('a queued skill input stays queued across an old remote exchange and drains
   }finally{t.cleanup();}
 });
 
+test('accepted custom instructions wait for support on every remote delivery attempt',()=>{
+  const t=setup();try{
+    const exchange=(instructions:boolean)=>t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,{...t.request(),instructions}));
+    exchange(true);
+    const task=t.hub.withInstructions('접수 당시 사용자 지침',()=>t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`));
+    const session=t.store.latestSession(task.id)!;
+    // A runner may restart with an older executable while its durable journal stays intact.
+    assert.deepEqual(exchange(false).commands,[]);
+    assert.equal(t.hub.remotes.pendingFor(session.id),1);
+    const supported=exchange(true);
+    assert.equal(supported.commands.length,1);
+    assert.equal(supported.commands[0].value.type,'start');
+    if(supported.commands[0].value.type==='start')assert.equal(supported.commands[0].value.instructions,'접수 당시 사용자 지침');
+    // Even an already offered command must not be retried to an unsupported runner before ACK.
+    assert.deepEqual(exchange(false).commands,[]);
+    assert.equal(t.hub.remotes.pendingFor(session.id),1);
+    const retry=exchange(true);
+    assert.deepEqual(retry.commands,supported.commands);
+    t.journal.receive(retry.commands);t.agent.pump();
+    assert.equal(t.starts.length,1);
+    assert.equal(t.starts[0].instructions,'접수 당시 사용자 지침');
+  }finally{t.cleanup();}
+});
+
 test('remote Codex skill steering preserves the message and leaves skill paths to the remote adapter',()=>{
   const t=setup();try{
     const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex initial`);

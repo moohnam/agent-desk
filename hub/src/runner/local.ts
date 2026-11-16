@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { Store } from '../db.ts';
 import { config } from '../config.ts';
+import { hubBlockers, registerRuntimeControl } from '../runtime-control.ts';
 import { SharedWorkspace } from '../shared-workspace.ts';
 import { LocalRuntime, connectLocalTakeover } from './local-runtime.ts';
 import { localAuthorityActivated } from './local-ownership.ts';
@@ -59,4 +60,8 @@ if (command === 'grant' || command === 'revoke' || command === 'peers') {
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
+  await registerRuntimeControl({ role: 'local', ready: () => server.listening && runtime.hub.runner.connected,
+    blockers: () => hubBlockers(runtime.hub), stop: () => {
+      server.closeAllConnections(); server.close(() => { runtime.close(); process.exit(0); });
+    } });
 }

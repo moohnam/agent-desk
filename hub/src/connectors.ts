@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { auth, discoverOAuthServerInfo, refreshAuthorization, selectResourceURL, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import { InvalidClientError, InvalidGrantError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
@@ -33,6 +33,7 @@ const SLACK_READ = new Set(['slack_search_all', 'slack_search_messages', 'slack_
 export const connectorReadTool = (service: ConnectorService, tool: Tool) =>
   (service === 'jira' ? ATLASSIAN_READ : SLACK_READ).has(tool.name)
   && tool.annotations?.readOnlyHint !== false;
+export const connectorReadToolNames = (service: ConnectorService): string[] => [...(service === 'jira' ? ATLASSIAN_READ : SLACK_READ)];
 
 interface Credential {
   client?: OAuthClientInformationMixed;
@@ -40,6 +41,7 @@ interface Credential {
   tokens?: OAuthTokens;
   expiresAt?: number;
   connectedAt?: string;
+  generation?: string;
   redirectUrl: string;
 }
 type Credentials = Partial<Record<ConnectorService, Credential>>;
@@ -103,6 +105,21 @@ export class Connectors {
         connected_at: saved?.connectedAt, expires_at: saved?.expiresAt,
         scopes: CONNECTOR_PROVIDERS[service].scope.split(' ') };
     });
+  }
+
+  /** Non-secret account identities. Refresh keeps the generation; a new consent replaces it. */
+  connections(): { service: ConnectorService; generation: string }[] {
+    const saved = this.credentials();
+    const legacy = SERVICES.filter(service => saved[service]?.tokens && !saved[service]?.generation);
+    if (legacy.length) {
+      const next = { ...saved };
+      for (const service of legacy) next[service] = { ...saved[service]!, generation: randomUUID() };
+      this.persist(next);
+      // Keep credential identity stable for any in-flight refresh.
+      for (const service of legacy) saved[service]!.generation = next[service]!.generation;
+    }
+    return SERVICES.filter(service => saved[service]?.tokens)
+      .map(service => ({ service, generation: saved[service]!.generation! }));
   }
 
   private network(service: ConnectorService, controller: AbortController): typeof fetch {
@@ -265,7 +282,7 @@ export class Connectors {
         });
         controller.signal.throwIfAborted();
         if (result !== 'AUTHORIZED' || !pending.credential.tokens) throw new HttpError(502, '로그인을 완료하지 못했습니다');
-        const saved = { ...this.credentials(), [service]: { ...pending.credential, connectedAt: new Date().toISOString() } };
+        const saved = { ...this.credentials(), [service]: { ...pending.credential, connectedAt: new Date().toISOString(), generation: randomUUID() } };
         this.persist(saved);
         this.saved = saved;
         return { connected: true };
@@ -289,8 +306,11 @@ export class Connectors {
       const credential = this.credentials()[service];
       if (!credential?.tokens) throw new HttpError(409, '먼저 서비스를 연결하세요');
       const refresh = async () => {
-        if (!credential.tokens?.refresh_token) throw new HttpError(409, '서비스에 다시 로그인해야 합니다');
         const provider = this.provider(service, credential, controller), fetchFn = this.network(service, controller);
+        if (!credential.tokens?.refresh_token) {
+          await provider.invalidateCredentials?.('tokens');
+          throw new HttpError(409, '서비스에 다시 로그인해야 합니다');
+        }
         const info = await discoverOAuthServerInfo(CONNECTOR_PROVIDERS[service].endpoint, { fetchFn });
         const issuer = info.authorizationServerUrl;
         if (!credential.client || credential.client.issuer !== issuer || credential.tokens.issuer !== issuer)

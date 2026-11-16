@@ -83,8 +83,8 @@ export const startClaude: StartEngine = (opts) => {
       model: opts.model,
       effort: claudeEffort(opts.effort),
       plugins: opts.skillsHome ? [{ type: 'local', path: opts.skillsHome }] : undefined,
-      ...(opts.mcp ? claudeMcpOptions(opts.mcp) : {}),
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: deskInstructions(opts.skillsHome) },
+      ...claudeMcpOptions(opts.mcp, opts.connectorMcp),
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: deskInstructions(opts.skillsHome, opts.instructions) },
       canUseTool: (toolName, input, { signal }) => new Promise<PermissionResult>((resolve) => {
         const approvalId = randomUUID();
         pending.set(approvalId, { resolve, input });

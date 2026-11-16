@@ -278,7 +278,7 @@ export const api = {
   /** Each engine's plan limits: used share and reset time per window. `refresh`: skip the hub's one-minute cache. */
   usage: (engine: string, refresh = false) => call<EngineUsage>('GET', `/usage?engine=${engine}${refresh ? '&refresh=1' : ''}`),
   /** Only the engines and keys given change; null clears one. */
-  saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }) => call<Settings>('PUT', '/settings', s),
+  saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }, signal?: AbortSignal) => call<Settings>('PUT', '/settings', s, signal),
   skills: (source='') => call<Skill[]>('GET', '/skills',undefined,undefined,source),
   createSkill: (name: string, description: string) => call<Skill>('POST', '/skills', { name, description }),
   deleteSkill: (name: string) => call('DELETE', `/skills/${name}`),

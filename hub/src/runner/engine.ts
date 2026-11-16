@@ -10,6 +10,8 @@ import type { RunnerMcp } from './managed-mcp.ts';
 export interface StartOptions {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
   model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillSnapshotHome?: string;
+  instructions?: string;
+  connectorMcp?: {url:string;token:string};
   mcp?: RunnerMcp;
   emit: (m: RunnerToHub) => void;
 }

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { InstructionsDialog } from './InstructionsDialog.tsx';
+import { useEffect, useRef, useState } from 'react';
 import { Bot, Plug, Server } from 'lucide-react';
 import { Modal } from './Modal.tsx';
 import { ConnectorsPanel } from './Connectors.tsx';
@@ -24,7 +25,15 @@ export function SettingsDialog({ local, onClose, onModels, onSkills, onChannels,
   onSkills?: () => void; onChannels?: () => void; onRunners: () => void;
 }) {
   const [section, setSection] = useState<typeof SECTIONS[number]['id']>('agent');
-  return <Modal title="설정" wide onClose={onClose}>
+  const [instructions, setInstructions] = useState(false);
+  const instructionsOpener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!instructions && instructionsOpener.current) {
+      instructionsOpener.current.focus();
+      instructionsOpener.current = null;
+    }
+  }, [instructions]);
+  return <><div inert={instructions} aria-hidden={instructions || undefined}><Modal title="설정" wide onClose={instructions ? () => {} : onClose}>
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="설정 항목">
         {SECTIONS.map(({ id, label, Icon }) => <button key={id} className="btn" aria-pressed={section === id}
@@ -34,6 +43,7 @@ export function SettingsDialog({ local, onClose, onModels, onSkills, onChannels,
         {section === 'agent' && <>
           <h3>에이전트</h3>
           <SettingRow title="기본 모델·사용량" description="새 작업의 엔진별 기본 모델과 effort, 계정 사용량" onOpen={onModels} />
+          <SettingRow title="기본 지침" description="이 허브에서 시작하는 실행에 전달할 공통 지침" onOpen={() => { instructionsOpener.current = document.activeElement as HTMLElement; setInstructions(true); }} />
           {onSkills && <SettingRow title="스킬" description="#이름으로 불러오는 스킬과 부속 파일 관리" onOpen={onSkills} />}
         </>}
         {section === 'connections' && <>
@@ -51,5 +61,5 @@ export function SettingsDialog({ local, onClose, onModels, onSkills, onChannels,
         </>}
       </section>
     </div>
-  </Modal>;
+  </Modal></div>{instructions && <InstructionsDialog onClose={() => setInstructions(false)} />}</>;
 }

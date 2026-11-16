@@ -20,3 +20,7 @@
   .settings-content { padding: 14px; }
   .settings-row { gap: 8px; }
 }
+
+.instructions-form { min-height: 0; overflow-y: auto; }
+.instructions-form .form-actions { flex-wrap: wrap; }
+.instructions-conflict { display: flex; flex-direction: column; gap: 10px; }

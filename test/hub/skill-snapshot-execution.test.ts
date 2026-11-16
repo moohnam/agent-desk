@@ -139,6 +139,8 @@ test('old local daemon rejects pinned skills and continues to accept plain input
     assert.throws(() => client.handle({ type: 'start', sessionId: 's', engine: 'codex', cwd: temp, prompt: '원문', permissionMode: 'default',
       skills: ['parent'], skillsHome: skills.home, skillSnapshot: snapshot }), /고정 스킬 버전/);
     assert.equal(client.has('s'), false);
+    assert.throws(() => client.handle({type:'start', sessionId:'custom', engine:'codex', cwd:temp, prompt:'원문', permissionMode:'default', instructions:'사용자 지침'}), /사용자 지침/);
+    assert.equal(client.has('custom'), false);
     client.handle({ type: 'start', sessionId: 's', engine: 'codex', cwd: temp, prompt: '일반 원문', permissionMode: 'default' });
     assert.throws(() => client.handle({ type: 'send', sessionId: 's', text: '추가 원문', skills: ['parent'], steer: true, skillSnapshot: snapshot }), /고정 스킬 버전/);
     client.handle({ type: 'send', sessionId: 's', text: '일반 추가', steer: true });

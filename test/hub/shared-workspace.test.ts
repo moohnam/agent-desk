@@ -96,9 +96,11 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
   assert.match(denied.body.error,/허용 범위|읽기 권한/);
   assert.equal(html.body.kind,'html');assert.ok(!html.body.text);
   const content=await fetch(url+html.body.url);assert.equal(content.status,200);
-  assert.match(content.headers.get('content-security-policy')!,/sandbox allow-scripts;/);
+  assert.match(content.headers.get('content-security-policy')!,/^sandbox;/);
+  assert.match(content.headers.get('content-security-policy')!,/script-src 'none'/);
   assert.ok(!content.headers.get('content-security-policy')!.includes('allow-same-origin'));
   assert.equal(content.headers.get('referrer-policy'),'no-referrer');
+  const staticHtml=await content.text();assert.match(staticHtml,/<h1>preview<\/h1>/);assert.doesNotMatch(staticHtml,/<script\b/i);
   const base=html.body.url.replace(/[^/]*$/,'');
   const resources=await Promise.all(['assets/style.css','assets/app.js','assets/style.css'].map(p=>fetch(url+base+p)));
   assert.deepEqual(resources.map(r=>r.status),[200,200,200]);

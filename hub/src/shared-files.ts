@@ -26,16 +26,30 @@ export async function isProjectMemoryFile(root: string, path: string, config = p
   } catch { return false; }
 }
 
-/** Task files, temporary artifacts, and task-scoped Claude Markdown notes only. */
-export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string) {
+/** A typed request to confirm one canonical document, never a directory. */
+export class DocumentPermissionError extends HttpError {
+  readonly code = 'document_permission_required';
+  readonly path: string;
+  constructor(path: string) { super(403, '프로젝트 밖의 문서입니다. 실제 파일 경로를 확인한 뒤 이 파일만 허용해 주세요.'); this.path = path; }
+}
+const isPreviewDocument = (path: string) => ['.md', '.markdown', '.html', '.htm'].includes(extname(path).toLowerCase());
+
+/** Task files, temporary artifacts, task-scoped notes, or one explicitly approved document. */
+export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
   const cwd = hub.cwdOf(taskId);
   if (!cwd) throw new HttpError(404, '파일의 작업을 찾을 수 없습니다');
   const root = await realpath(expandHome(remoteLocation(cwd)?.path ?? cwd));
   const target = linkTarget(href, root);
   if (target.kind !== 'file') throw new HttpError(400, '파일 링크가 필요합니다');
   const path = await realpath(target.path), temp = await realpath(tmpdir());
-  if (!inside(root, path) && !inside(temp, path) && !await isProjectMemoryFile(root, path))
+  if (approvedPath !== undefined) {
+    if (base || !isPreviewDocument(path) || !isPreviewDocument(target.path))
+      throw new HttpError(403, '허용한 문서 한 파일만 볼 수 있습니다. 부속 파일은 포함하지 않습니다');
+    if (typeof approvedPath !== 'string' || path !== approvedPath) throw new DocumentPermissionError(path);
+  } else if (!inside(root, path) && !inside(temp, path) && !await isProjectMemoryFile(root, path)) {
+    if (!base && isPreviewDocument(path) && isPreviewDocument(target.path)) throw new DocumentPermissionError(path);
     throw new HttpError(403, '프로젝트·임시 폴더 또는 해당 프로젝트의 Claude 메모리 문서만 가져올 수 있습니다');
+  }
   if (base) {
     const document = linkTarget(base, root);
     if (document.kind !== 'file') throw new HttpError(400, '문서 경로가 필요합니다');
@@ -45,14 +59,22 @@ export async function workspaceFile(hub: Hub, taskId: string, href: string, base
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
+    if (approvedPath !== undefined) {
+      const current = await realpath(target.path);
+      if (current !== approvedPath) throw new DocumentPermissionError(current);
+      // Recheck after open: a renamed ancestor must not redirect the approved pathname.
+      const canonical = await realpath(path), entry = await lstat(path);
+      if (canonical !== approvedPath || entry.dev !== stat.dev || entry.ino !== stat.ino)
+        throw new DocumentPermissionError(current);
+    }
     if (!stat.isFile()) throw new HttpError(400, '일반 파일만 가져올 수 있습니다');
     if (stat.size > SHARED_FILE_LIMIT) throw new HttpError(413, '파일은 50 MB까지 가져올 수 있습니다');
     return { file, stat, target };
   } catch (error) { await file.close(); throw error; }
 }
 
-export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string) {
-  const { file, stat, target } = await workspaceFile(hub, taskId, href, base);
+export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string, approvedPath?: string) {
+  const { file, stat, target } = await workspaceFile(hub, taskId, href, base, approvedPath);
   try {
     res.writeHead(200, {
       'content-type': 'application/octet-stream', 'cache-control': 'no-store',
@@ -100,7 +122,12 @@ export class TemporaryFiles {
         }
       }
       // Recover old copies after a crash without touching another hub's fresh files.
-      const directory = await opendir(this.baseDir);
+      let directory;
+      try { directory = await opendir(this.baseDir); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
       for await (const item of directory) {
         if (!item.name.startsWith(this.prefix) || !/^[A-Za-z0-9]{6}$/.test(item.name.slice(this.prefix.length))) continue;
         const path = join(this.baseDir, item.name);

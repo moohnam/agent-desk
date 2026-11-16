@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { maintenanceActive } from '../runtime-control.ts';
 import { Hub } from '../hub.ts';
 import { Store } from '../db.ts';
 import { SkillStore } from '../skills.ts';
@@ -43,6 +44,7 @@ export class SharedRuntime {
         if(peer.journal_id&&peer.journal_id!==this.journal.id)throw new Error('이관한 전달 DB의 ID가 기존 러너와 다릅니다');
       }
       this.runnerId=opts.migration?.runnerId??peers[0]?.id??this.hub.remotes.register(address).runner.id;
+      this.hub.connectorRuntimeId = this.runnerId;
       if(!opts.migration)this.journal.bind('workspace:'+this.workspace.id,this.runnerId);
       const mcp = sharedRunnerMcp(this.workspace, dir, config.shared.port);
       this.agent=agent=new RemoteAgent(this.journal,this.runnerId,opts.migration?.skillsHome??join(dir,'engine-skills'),opts.start,mcp);
@@ -60,7 +62,7 @@ export class SharedRuntime {
     this.timer=setInterval(()=>this.exchange(),250);this.timer.unref();
   }
   exchange() {
-    if(this.stopped)return;
+    if(this.stopped || maintenanceActive())return;
     const snapshot=JSON.stringify(this.agent.runner.snapshot());
     if(this.journal.lastEvent===this.journal.eventAck && !this.hub.remotes.list()[0].pending
       && snapshot===this.snapshot && Date.now()-this.exchangedAt<5000)return;
@@ -68,7 +70,7 @@ export class SharedRuntime {
       const events=this.journal.events();
       const reply=this.hub.atomic(()=>this.hub.remotes.exchange(this.runnerId,{version:1,journalId:this.journal.id,commandAck:this.journal.commandAck,events,
         more:this.journal.lastEvent>(events.at(-1)?.seq??this.journal.eventAck),sessions:this.agent.runner.snapshot(),engines:this.agent.runner.capabilities.engines,
-        skillSnapshot:this.agent.runner.capabilities.skillSnapshot}));
+        skillSnapshot:this.agent.runner.capabilities.skillSnapshot,instructions:true,connectorMcp:true}));
       this.journal.acknowledge(reply.eventAck,events.at(-1)?.seq??this.journal.eventAck);
       this.journal.receive(reply.commands);this.agent.pump();
       this.exchangedAt=Date.now();this.snapshot=JSON.stringify(this.agent.runner.snapshot());

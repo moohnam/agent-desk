@@ -9,11 +9,19 @@ import { localAuthorityRoute, workspaceApi, workspaceRoute, type WorkspaceResult
 import type { WorkspaceOperation } from '../../shared/workspace.ts';
 import { applySkillBundle, ensureSharedSkillTables, listPeerSkills, peerSkillManifest, peerSkillStore, removeAbsentSkills, restoreSkillBundle, syncSkillVersion, type SkillBundle, type SkillReference } from './shared-skill-sync.ts';
 import type { HubMessage } from '../../shared/api.ts';
-import { sendWorkspaceFile } from './shared-files.ts';
+import { DocumentPermissionError, sendWorkspaceFile } from './shared-files.ts';
+import { isAbsolute } from 'node:path';
 import { handleMcp } from './mcp.ts';
 import { linkTarget } from './open.ts';
 import { remoteLocation } from '../../shared/remote.ts';
 import { handleWorkspaceBroker } from './request-broker.ts';
+import { ConnectorBroker, type ConnectorExecutionContext, type ConnectorCompletion } from './connector-broker.ts';
+import { handleConnectorMcp } from './connector-mcp.ts';
+import type { ConnectorGrant } from './connector-authority.ts';
+
+export const connectorUserInput = (method: string, path: string) => method === 'POST'
+  && (/^\/(compose|tasks)$/.test(path.split('?')[0]) || /^\/tasks\/[^/]+\/(messages|reset|handoff)$/.test(path.split('?')[0])
+    || /^\/approvals\/[^/]+$/.test(path.split('?')[0]));
 
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export function canonical(value: unknown): string {
@@ -38,6 +46,7 @@ export function json(res: ServerResponse, status: number, body: unknown) {
 /** One canonical workspace, many separately revocable hub credentials. */
 export class SharedWorkspace {
   readonly id: string;
+  readonly connectorBroker?: ConnectorBroker;
   private db: DatabaseSync;
   private owner?: Hub;
   private localAuthority: boolean;
@@ -54,6 +63,13 @@ export class SharedWorkspace {
       CREATE TABLE IF NOT EXISTS workspace_receipt (id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);`);
     if (!this.db.prepare('SELECT id FROM workspace_identity').get()) this.db.prepare('INSERT INTO workspace_identity VALUES (?)').run(randomUUID());
     this.id = (this.db.prepare('SELECT id FROM workspace_identity').get() as { id: string }).id;
+    if (hub) {
+      this.connectorBroker = new ConnectorBroker(this.db, this.id, {
+        onIdle: sessionId => hub.connectorIdle(sessionId),
+        shouldAuthorizePeer: peer => !!this.db.prepare('SELECT 1 FROM workspace_peer WHERE id=? AND revoked=0').get(peer),
+      });
+      hub.connectorBroker = this.connectorBroker;
+    }
   }
   peers() { return this.db.prepare('SELECT id,name,revoked FROM workspace_peer').all(); }
   grant(name: string) {
@@ -95,6 +111,15 @@ export class SharedWorkspace {
       : op.body.__desk_skill_bundle as SkillBundle|undefined;
     if(op.body.__desk_skill_ref && !snapshot)
       return {status:409,body:{code:'skill_missing',error:'스킬 버전이 없거나 지문이 다릅니다. 준비 파일을 보내야 합니다'}};
+    const grant = op.body.__desk_connector_grant as ConnectorGrant | null | undefined;
+    let connectorContext: ConnectorExecutionContext | null = null;
+    if (grant != null) {
+      if (!connectorUserInput(op.method, op.path) || grant.requestId !== op.id || grant.workspaceId !== this.id
+        || typeof grant.hubId !== 'string' || typeof grant.capability !== 'string' || !Array.isArray(grant.connections)
+        || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now())
+        throw new HttpError(403, '사용자 입력과 외부 연결 허가가 일치하지 않거나 만료되었습니다');
+      connectorContext = { ...grant, sourcePeerId: peer };
+    }
     return this.hub.atomic(() => {
       // Authentication may precede a slow request body. Check revocation again in
       // the transaction that accepts the operation, including receipt replays.
@@ -105,10 +130,10 @@ export class SharedWorkspace {
         return JSON.parse(held.result);
       }
       let result: WorkspaceResult;
-      try { result = this.hub.atomic(()=>snapshot
+      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(op.body.__desk_instructions, ()=>snapshot
         ? this.hub.withSkillSnapshot(snapshot,
           () => workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))
-        : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body)); }
+        : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))))); }
       catch (e) {
         if (!(e instanceof HttpError) || e.status >= 500) throw e;
         result = {status:e.status,body:{error:e.message}};
@@ -150,8 +175,10 @@ export class SharedWorkspace {
       try {
         // Only machine-to-machine requests; never cookie/local-IP authorization.
         if (req.headers.origin) throw new HttpError(403,'허브를 통해 연결하세요');
-        const peer = this.authenticate(req.headers.authorization?.match(/^Bearer (.+)$/)?.[1]);
         const url = new URL(req.url ?? '/', 'http://workspace');
+        if (url.pathname === '/v1/connector-mcp' && this.connectorBroker)
+          return await handleConnectorMcp(this.connectorBroker, req, res);
+        const peer = this.authenticate(req.headers.authorization?.match(/^Bearer (.+)$/)?.[1]);
         if (req.method === 'GET' && url.pathname === '/v1/identity') {
           const migrated=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_import'").get()
             ? this.db.prepare("SELECT runner_id,address,fingerprint FROM remote_import WHERE activated_at IS NOT NULL LIMIT 1").get() as
@@ -160,9 +187,22 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,instructions:1,connectors:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
+        if (url.pathname.startsWith('/v1/connectors/') && this.connectorBroker) {
+          if (req.method === 'GET' && url.pathname === '/v1/connectors/poll') return json(res, 200, this.connectorBroker.poll(peer));
+          if (req.method === 'POST') {
+            const body = await readBody(req) as { callId?: string; completion?: ConnectorCompletion; callIds?: string[] };
+            this.assertPeer(peer);
+            if (url.pathname === '/v1/connectors/complete' && typeof body?.callId === 'string' && body.completion)
+              return json(res, 200, this.connectorBroker.complete(peer, body.callId, body.completion));
+            if (url.pathname === '/v1/connectors/ack' && Array.isArray(body?.callIds)) {
+              this.connectorBroker.ack(peer, body.callIds); return json(res, 200, { acknowledged: true });
+            }
+          }
+          throw new HttpError(400, '잘못된 외부 조회 중계 요청입니다');
+        }
         if (req.method === 'GET' && url.pathname === '/v1/skills/manifest')
           return json(res,200,{hashes:peerSkillManifest(this.db,this.hub.skills,peer)});
         if (req.method === 'POST' && url.pathname === '/v1/skills/sync') {
@@ -209,6 +249,8 @@ export class SharedWorkspace {
           return json(res,200,await this.hub.channels.refresh(channelId));
         }
         if (req.method === 'GET' && url.pathname === '/v1/file') {
+          const approvedPath=url.searchParams.get('approved_path')??undefined;
+          if(approvedPath!==undefined&&(!isAbsolute(approvedPath)||approvedPath.length>4096||/[\x00-\x1f]/.test(approvedPath)))throw new HttpError(400,'확인한 문서의 절대 경로가 필요합니다');
           this.files.set(res,peer);
           const ping=setInterval(()=>{
             try {this.authenticate(req.headers.authorization?.slice(7));}
@@ -216,7 +258,7 @@ export class SharedWorkspace {
           },5000);
           ping.unref();
           res.on('close',()=>{clearInterval(ping);this.files.delete(res);});
-          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined);
+          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined, approvedPath);
         }
         if (req.method === 'GET' && url.pathname === '/v1/read') return json(res,200,this.read(url.searchParams.get('path')!,peer));
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
@@ -235,7 +277,11 @@ export class SharedWorkspace {
           return;
         }
         throw new HttpError(404,'지원하지 않는 공유 API입니다');
-      } catch(e) { if (res.headersSent) res.destroy(); else json(res,e instanceof HttpError?e.status:500,{error:e instanceof HttpError?e.message:'공유 작업공간 처리에 실패했습니다'}); }
+      } catch(e) { if (res.headersSent) res.destroy(); else json(res,e instanceof HttpError?e.status:500,{error:e instanceof HttpError?e.message:'공유 작업공간 처리에 실패했습니다',...(e instanceof DocumentPermissionError?{code:e.code,path:e.path}:{})}); }
+    });
+    server.on('listening', () => {
+      const address = server.address();
+      if (this.owner && address && typeof address !== 'string') this.owner.connectorMcpUrl = `http://127.0.0.1:${address.port}/v1/connector-mcp`;
     });
     server.on('close',()=>{for(const res of this.streams.keys())res.end();for(const res of this.files.keys())res.destroy();});
     return server;

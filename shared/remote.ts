@@ -20,6 +20,8 @@ export interface RemoteExchange {
   engines: string[];
   /** Absent from old agents; only true means frozen desk skill commands are safe to deliver. */
   skillSnapshot?: boolean;
+  instructions?: boolean;
+  connectorMcp?: boolean;
 }
 export interface RemoteReply {
   eventAck: number;

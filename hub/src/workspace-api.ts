@@ -4,6 +4,7 @@ import type { Hub } from './hub.ts';
 import { HttpError } from './errors.ts';
 import { feedEvent } from './db.ts';
 import { parseFeedParams, type FeedFilter, type MessageReceipt } from '../../shared/api.ts';
+import { parseCompose } from '../../shared/compose.ts';
 export interface WorkspaceResult { status: number; body: any }
 const reply = (status: number, body: unknown): WorkspaceResult => ({ status, body });
 /** Question answers from a request body: string values keyed by question text, else none. */
@@ -88,6 +89,17 @@ const localAuthorityRoutes = new Set([
 ]);
 export function localAuthorityRoute(method:string,pathname:string) {
   return localAuthorityRoutes.has(workspaceRoute(method,pathname) ?? '');
+}
+/** Existing-session controls must work even if the defaults file or a new runner feature is unavailable. */
+export function needsDefaultInstructions(method: string, path: string, body: Record<string, unknown>): boolean {
+  const route = workspaceRoute(method, path);
+  if (route === 'POST /tasks' || route === 'POST /channels/:id/messages') return true;
+  if (route !== 'POST /compose' && route !== 'POST /tasks/:id/messages') return false;
+  if (typeof body.text !== 'string') return false;
+  const composed = parseCompose(body.text, [], route === 'POST /compose');
+  if (composed.delivery === 'new' || composed.delivery === 'fork') return true;
+  // A project-only mention or channel can create its first conversation; the remote store decides.
+  return route === 'POST /compose' && !composed.mention?.no;
 }
 export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<string, any> = {}): WorkspaceResult {
   const parts = ['api', ...url.pathname.split('/').filter(Boolean)];

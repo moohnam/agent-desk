@@ -1,11 +1,16 @@
+import { InstructionStore } from './instruction-store.ts';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { dirname, extname, join, normalize } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { dirname, extname, isAbsolute, join, normalize } from 'node:path';
 import { Connectors, type ConnectorService } from './connectors.ts';
+import { ConnectorAuthority, executeConnectorJob } from './connector-authority.ts';
+import { SharedWorkspace, connectorUserInput } from './shared-workspace.ts';
+import { handleConnectorMcp } from './connector-mcp.ts';
 import { DocumentPreviews } from './document-previews.ts';
 import { DiagramBrowser } from './diagram-browser.ts';
 import { DiagramCache } from './diagram-cache.ts';
-import { workspaceFile } from './shared-files.ts';
+import { DocumentPermissionError, workspaceFile } from './shared-files.ts';
 import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import type { HubMessage } from '../../shared/api.ts';
@@ -94,22 +99,59 @@ $('send').onclick = async () => {
 </script></body></html>`;
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
-export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string; connectors?: Connectors } = {}) {
+export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string; connectors?: Connectors; instructions?: InstructionStore } = {}) {
   const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
+  const instructions = options.instructions ?? new InstructionStore(join(dirname(uploadsDir), 'instructions.md'));
+  hub.defaultInstructions = () => instructions.read().text;
+  workspaces.instructions = hub.defaultInstructions;
   const localAuthorityId = options.localAuthorityId;
   const connectors = options.connectors ?? new Connectors({ directory: join(dirname(uploadsDir), 'connectors'),
     slackClientFile: config.connectors.slackClientFile });
+  const connectorAuthority = new ConnectorAuthority(workspaces.database, connectors);
+  hub.connectorQueriesPending = () => connectorAuthority.busy;
+  workspaces.connectorAuthority = connectorAuthority;
+  const directWorkspace = !localAuthorityId ? new SharedWorkspace(hub, undefined, { localAuthority: true }) : undefined;
+  let directPeer: string | undefined;
+  if (directWorkspace) {
+    hub.store.database.exec('CREATE TABLE IF NOT EXISTS connector_local_source (id INTEGER PRIMARY KEY CHECK(id=1),peer_id TEXT NOT NULL)');
+    const saved = hub.store.database.prepare('SELECT peer_id FROM connector_local_source WHERE id=1').get() as { peer_id: string } | undefined;
+    if (saved) {
+      if (!hub.store.database.prepare('SELECT 1 FROM workspace_peer WHERE id=? AND revoked=0').get(saved.peer_id))
+        throw new HttpError(503, '로컬 외부 연결 출처 권한이 없어 허브 설정 복구가 필요합니다');
+      directPeer = saved.peer_id;
+    } else {
+      directPeer = directWorkspace.grant('local-connector-source').id;
+      hub.store.database.prepare('INSERT INTO connector_local_source VALUES (1,?)').run(directPeer);
+    }
+  }
+  let directTimer: ReturnType<typeof setInterval> | undefined;
+  let directPoll: Promise<void> | undefined;
+  let closingConnectors = false;
+  const pollDirect = () => {
+    if (!directWorkspace?.connectorBroker || !directPeer || directPoll || closingConnectors) return;
+    const broker = directWorkspace.connectorBroker, peer = directPeer;
+    directPoll = (async () => {
+      for (const job of broker.poll(peer)) {
+        const completion = await executeConnectorJob(connectorAuthority, job);
+        if (closingConnectors || job.expiresAt <= Date.now()) break;
+        try { broker.complete(peer, job.callId, completion); broker.ack(peer, [job.callId]); }
+        catch { /* Cancelled or superseded calls cannot return their results. */ }
+      }
+    })().catch(() => { /* Closed or revoked local authority fails its callers closed. */ }).finally(() => { directPoll = undefined; });
+  };
   const diagramBrowser=new DiagramBrowser(WEB_DIST,config.diagramBrowser);
   const diagrams=new DiagramCache((source,signal)=>diagramBrowser.render(source,signal));
-  const previews = new DocumentPreviews(async(source,task,href,base,receive)=>{
-    if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive);
-    const {file,stat,target}=await workspaceFile(hub,task,href,base);
+  const previews = new DocumentPreviews(async(source,task,href,base,receive,approvedPath)=>{
+    if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive,approvedPath);
+    const {file,stat,target}=await workspaceFile(hub,task,href,base,approvedPath);
     try {return await receive(new Response(await file.readFile(),{headers:{'content-length':String(stat.size),'x-desk-filename':encodeURIComponent(target.path.split('/').at(-1)!)}}));}
     finally {await file.close();}
   });
   access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (url.pathname === '/v1/connector-mcp' && directWorkspace?.connectorBroker)
+      return await handleConnectorMcp(directWorkspace.connectorBroker, req, res);
     const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
     const route = `${req.method} /${parts.slice(1).map((p, i) => (i % 2 === 1 ? ':id' : p)).join('/')}`;
     const id = parts[2];
@@ -239,6 +281,15 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         throw new HttpError(404, '외부 연결 요청을 찾을 수 없습니다');
       }
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+      if (url.pathname === '/api/instructions') {
+        res.setHeader('cache-control', 'no-store');
+        if (req.method === 'GET') return send(res, 200, instructions.read());
+        if (req.method === 'PUT') {
+          const body = await readJson(req);
+          return send(res, 200, instructions.save(body.text, body.revision));
+        }
+        throw new HttpError(405, '지원하지 않는 기본 지침 요청입니다');
+      }
       if (url.pathname === '/mcp') {
         if(!localAuthorityId)return await handleMcp(hub,req,res);
         const body=await readBody(req);
@@ -268,12 +319,13 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       if (req.method === 'POST' && url.pathname === '/api/preview') {
         const b=await readJson(req);
         if(typeof b.task_id!=='string'||!b.task_id||typeof b.href!=='string'||b.href.length>4096||typeof b.source!=='string')throw new HttpError(400,'작업과 파일 링크가 필요합니다');
+        if(b.approved_path!==undefined&&(typeof b.approved_path!=='string'||!isAbsolute(b.approved_path)||b.approved_path.length>4096||/[\x00-\x1f]/.test(b.approved_path)))throw new HttpError(400,'확인한 문서의 절대 경로가 필요합니다');
         const source=b.source||workspaces.legacyOwner('task',b.task_id)||'';
         if(!source&&!localAuthorityId&&remoteLocation(hub.cwdOf(b.task_id)??''))throw new HttpError(409,'원격 작업공간 연결이 필요합니다');
         const token=access.token;
         const allowed=()=> (client.kind==='local'||client.kind==='device'&&access.view().devices.some(d=>d.id===client.device.id)||client.kind==='shared'&&access.matches(token))
           && (!source||workspaces.list().some(w=>w.id===source));
-        const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed);
+        const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed,b.approved_path);
         if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
         return send(res,200,document);
       }
@@ -340,7 +392,19 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           }
           return await workspaces.proxy(owner??localAuthorityId,workspaceUrl.pathname+url.search,req,res,undefined,body);
         }
-        const result = workspaceApi(hub, req.method!, workspaceUrl, req.method === 'GET' ? {} : await readJson(req));
+        const body = req.method === 'GET' ? {} : await readJson(req);
+        const result = (() => {
+          if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
+          return hub.withInputPeer(directPeer, () => hub.atomic(() => {
+            if (!connectorUserInput(req.method!, workspaceUrl.pathname)) return workspaceApi(hub, req.method!, workspaceUrl, body);
+            const grant = connectorAuthority.issue({ workspaceId: directWorkspace.id, requestId: randomUUID() });
+            if (!grant.connections.length) connectorAuthority.revoke(grant.capability);
+            const result = hub.withConnectorContext(grant.connections.length ? { ...grant, sourcePeerId: directPeer } : null,
+              () => workspaceApi(hub, req.method!, workspaceUrl, body));
+            if (result.status >= 400) connectorAuthority.revoke(grant.capability);
+            return result;
+          }));
+        })();
         return send(res, result.status, result.body);
       }
       if (localAuthorityId && req.method === 'GET' && url.pathname === '/api/state') {
@@ -460,10 +524,17 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) console.error(err);
-      send(res, status, { error: err instanceof Error ? err.message : String(err) });
+      send(res, status, { error: err instanceof Error ? err.message : String(err), ...(err instanceof DocumentPermissionError?{code:err.code,path:err.path}:{}) });
     }
   });
-  server.on('listening', () => { if(!localAuthorityId)hub.channels.start(); });
-  server.on('close', () => { connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
+  server.on('listening', () => {
+    if(!localAuthorityId)hub.channels.start();
+    const address = server.address();
+    if (directWorkspace && address && typeof address !== 'string') {
+      hub.connectorMcpUrl = `http://127.0.0.1:${address.port}/v1/connector-mcp`;
+      directTimer = setInterval(pollDirect, 100); directTimer.unref();
+    }
+  });
+  server.on('close', () => { closingConnectors = true; clearInterval(directTimer); directWorkspace?.connectorBroker?.close(); connectorAuthority.close(); connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
   return server;
 }
