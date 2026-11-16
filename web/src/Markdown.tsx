@@ -1,16 +1,13 @@
-import { memo, useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.tsx';
-import { remarkKoreanSuffixStrong } from './markdownKoreanStrong.ts';
 import { mermaidSource } from './mermaid.ts';
 import { documentHref, documentPath, isDocumentLink } from './documentLinks.ts';
-import { remarkLineBreaks } from './markdownLineBreaks.ts';
+import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation } from './markdownMath.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
-// Strikethrough only with ~~two~~ tildes: a single one is common in prose ("1~2개", "~/path").
-const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }] as [typeof remarkGfm, { singleTilde: boolean }], remarkKoreanSuffixStrong, remarkLineBreaks];
 
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
@@ -25,8 +22,9 @@ function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraPr
  * go to `onLocalLink` (the hub opens them, since a web page can't reach local apps or files).
  */
 export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase }: { text: string; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
+  const normalizedText = useMemo(() => normalizeMathNotation(text), [text]);
   return (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS}
+    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
       urlTransform={(url) => (APP_LINK.test(url) ? url : defaultUrlTransform(url))}
       components={{
         pre: CodeBlock,
@@ -47,7 +45,7 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
             }} />;
         },
       }}>
-      {text}
+      {normalizedText}
     </ReactMarkdown>
   );
 });
