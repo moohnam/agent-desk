@@ -14,6 +14,7 @@ import { steeringSkillText } from './skill-input.ts';
 import { codexMcpProcess } from './managed-mcp.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
+import { CodexActivity } from './codex-activity.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
 
 const CODEX_BIN = config.codexBin;
@@ -86,6 +87,7 @@ export const startCodex: StartEngine = (opts) => {
   const closed = (error?: string) => {
     if (closedEmitted) return;
     closedEmitted = true;
+    activity.stop();
     for (const approvalId of pending.keys()) emit({ type: 'approval_cancelled', sessionId, approvalId });
     pending.clear();
     emit(error && !closing ? { type: 'closed', sessionId, error } : { type: 'closed', sessionId });
@@ -98,11 +100,13 @@ export const startCodex: StartEngine = (opts) => {
     if (!child.stdin.writable) return;
     child.stdin.write(JSON.stringify(msg) + '\n');
   };
-  const request = (method: string, params: Json) => new Promise<Json>((resolve, reject) => {
+  const request = (method: string, params: Json, timeoutMs?:number) => new Promise<Json>((resolve, reject) => {
     const id = nextId++;
-    calls.set(id, { resolve, reject });
+    const timer = timeoutMs ? setTimeout(()=>{calls.delete(id);reject(new Error(`${method} 응답 시간 초과`));},timeoutMs) : undefined;
+    calls.set(id, { resolve: value=>{clearTimeout(timer);resolve(value);}, reject: error=>{clearTimeout(timer);reject(error);} });
     write({ id, method, params });
   });
+  const activity = new CodexActivity((method,params)=>request(method,params,5000),tasks=>emit({type:'background',sessionId,tasks}));
   const respond = (id: Id, result: Json) => write({ id, result });
 
   // Writing after the process went raises EPIPE here; 'exit' reports the end.
@@ -259,6 +263,7 @@ export const startCodex: StartEngine = (opts) => {
   };
 
   const onNotification = (method: string, p: Json) => {
+    activity.notification(method,p);
     if (p.threadId && threadId && p.threadId !== threadId) return; // sub-agent threads
     switch (method) {
       case 'turn/started': noteTurn(p.turn?.id); break;
@@ -336,7 +341,7 @@ export const startCodex: StartEngine = (opts) => {
     try {
       await request('initialize', {
         clientInfo: { name: 'agent-desk', title: 'Agent Desk', version: '0.1.0' },
-        capabilities: { experimentalApi: false, requestAttestation: false },
+        capabilities: { experimentalApi: true, requestAttestation: false },
       });
       write({ method: 'initialized' });
       if (opts.skillsHome) {
@@ -362,6 +367,7 @@ export const startCodex: StartEngine = (opts) => {
           return request('thread/fork', { threadId: opts.resume, ...common, excludeTurns: true });
         });
       threadId = r.thread.id as string;
+      activity.start(threadId);
       emit({ type: 'engine_session', sessionId, engineSessionId: threadId });
       reported = r.model;
       event({ kind: 'status', state: 'started', detail: {
@@ -374,6 +380,7 @@ export const startCodex: StartEngine = (opts) => {
       const message = err instanceof Error ? err.message : String(err);
       closing = true; // the failure is reported here; the kill below must not report again
       closedEmitted = true;
+      activity.stop();
       emit({ type: 'busy', sessionId, busy: false });
       emit({ type: 'closed', sessionId, error: `Codex 세션 시작 실패: ${message}` });
       child.kill();
@@ -431,6 +438,7 @@ export const startCodex: StartEngine = (opts) => {
     close: () => {
       if (closing) return;
       closing = true;
+      activity.stop();
       pending.clear();
       child.stdin.end();
       child.kill();

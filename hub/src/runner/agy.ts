@@ -22,6 +22,7 @@ import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily } from './models.ts';
+import { AgyActivity } from './agy-activity.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
 
 const AGY_BIN = config.agyBin;
@@ -112,6 +113,7 @@ interface Pending { res: ServerResponse; timer: NodeJS.Timeout }
 export const startAgy: StartEngine = (opts) => {
   const { sessionId, emit } = opts;
   const event = (e: RunnerEvent) => emit({ type: 'event', sessionId, event: e });
+  const activity = new AgyActivity(tasks=>emit({type:'background',sessionId,tasks}));
   let mode = opts.permissionMode;
   let family: ModelName = opts.model ?? DEFAULT_FAMILY;
   let effort = opts.effort;
@@ -245,9 +247,17 @@ export const startAgy: StartEngine = (opts) => {
         }
         break;
       }
-      case 'step_update': onStep(msg.step_update ?? {}); break;
+      case 'step_update': {
+        const step=msg.step_update??{};
+        activity.step(step);
+        if(!step.conversation_id||!conversationId||step.conversation_id===conversationId)onStep(step);
+        break;
+      }
       case 'result': {
         const r = msg.result ?? {};
+        const resultId=msg.conversation_id??r.conversation_id;
+        if(resultId&&conversationId&&resultId!==conversationId){activity.childResult(resultId);break;}
+        activity.parentResult();
         const denied = (r.denied_actions ?? []).map((d: Json) => d.display_name ?? d.action);
         turnEnded(r.status === 'SUCCESS' ? 'turn_done' : 'error', {
           subtype: String(r.status ?? '').toLowerCase(), duration_ms: r.duration_seconds != null ? Math.round(r.duration_seconds * 1000) : undefined,
@@ -262,7 +272,10 @@ export const startAgy: StartEngine = (opts) => {
   /** The process for `model`, started (resuming the conversation) or restarted if it runs another model. */
   const processFor = async (model: string): Promise<ChildProcess> => {
     if (child && running === model) return child;
-    if (child) { const old = child; child = null; old.stdin?.end(); stopTree(old, 'SIGTERM'); }
+    if (child) {
+      if(activity.hasWork())throw new Error('백그라운드 작업의 종료를 확인한 뒤 모델을 변경하세요');
+      const old = child; child = null; old.stdin?.end(); stopTree(old, 'SIGTERM');
+    }
     const port = await listening;
     const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model,
       ...(conversationId ? ['--conversation', conversationId] : [])];
@@ -344,13 +357,14 @@ export const startAgy: StartEngine = (opts) => {
       turns.clear();
       cancelApprovals();
       // The process goes (its later output is dropped); the next message resumes the conversation.
-      if (!turns.active) return;
+      if (!turns.active && !activity.hasWork()) return;
       if (child) {
         const proc = child;
         child = null;
         running = null;
         stopTree(proc, 'SIGINT');
       }
+      activity.reset();
       // Without a process the turn was still starting; startTurn sees it ended and stops there.
       turnEnded('interrupted', { subtype: 'interrupted' });
     },

@@ -21,7 +21,7 @@ import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
-import { stalledMinutes } from './format.ts';
+import { stalledMinutes, taskRunning } from './format.ts';
 import { HandoffPanel, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { pruneDrafts, useDraftTasks } from './drafts.ts';
 import { keepTaskDraft } from './draftRetention.ts';
@@ -304,7 +304,7 @@ export function App() {
     for (const posts of [...columnPosts.values(), threadPosts]) {
       for (const p of posts) last.set(p.taskId, Math.max(p.id, last.get(p.taskId) ?? 0));
     }
-    return new Set([...last].filter(([t]) => hub.tasks.get(t)?.status === 'running').map(([, id]) => id));
+    return new Set([...last].filter(([t]) => taskRunning(hub.tasks.get(t))).map(([, id]) => id));
   }, [columnPosts, threadPosts, hub.tasks]);
 
   /** Deck index of the thread column when it sits right of column `after`. */
@@ -452,7 +452,7 @@ export function App() {
   }, [queue, queueFocus]);
   const counts = useMemo(() => {
     const c = { running: 0, error: 0 };
-    for (const t of hub.tasks.values()) if (t.status === 'running' || t.status === 'error') c[t.status]++;
+    for (const t of hub.tasks.values()) { if(taskRunning(t))c.running++; if(t.status==='error')c.error++; }
     return c;
   }, [hub.tasks]);
   // Drafts outlive nothing they belong to: a deleted task, or a question answered elsewhere.

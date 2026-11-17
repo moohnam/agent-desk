@@ -29,8 +29,9 @@ export function StatusBadge({ task, now }: { task: TaskView; now: number }) {
   }
   if (inBackground(task)) {
     const bg = task.background!;
-    return <span className="badge running" title={`백그라운드에서 일하는 중:\n${bg.map((b) => `· ${b.description}`).join('\n')}`}>
-      {bg.some((b) => b.type === 'local_agent') ? '서브 에이전트' : '백그라운드'} {bg.length}</span>;
+    const unknown=bg.some(b=>b.state==='unknown');
+    return <span className="badge running" title={`${unknown?'종료 확인 전까지 실행 중으로 유지합니다':'백그라운드에서 일하는 중'}:\n${bg.map((b) => `· ${b.description}`).join('\n')}`}>
+      {unknown?'상태 확인 필요':bg.some((b) => b.type === 'local_agent') ? '서브 에이전트' : '백그라운드'} {bg.length}</span>;
   }
   return <span className={`badge ${task.status}`}>{statusLabel(task)}</span>;
 }

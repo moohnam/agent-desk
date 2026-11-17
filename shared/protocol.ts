@@ -66,7 +66,7 @@ export type RunnerEvent =
   | { kind: 'status'; state: RunnerStatusState; detail?: Record<string, unknown> };
 
 /** Work the agent left running between turns, such as a subagent started in the background. */
-export interface BackgroundTask { id: string; type: string; description: string; agent?: string }
+export interface BackgroundTask { id: string; type: string; description: string; agent?: string; state?: 'unknown' }
 
 /** A session the runner is still running, reported when the hub (re)connects. */
 export interface LiveSession {

@@ -7,6 +7,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
 /** Like STATUS_LABEL, but a task waiting only on its agent's question reads "답 대기". */
 export function statusLabel(t: TaskView): string {
   if (t.status === 'waiting' && t.pending_questions > 0 && !t.pending_approvals) return '답 대기';
+  if(inBackground(t))return t.background.some(b=>b.state==='unknown')?'작업 상태 확인 필요':'백그라운드 실행 중';
   return STATUS_LABEL[t.status];
 }
 
@@ -14,13 +15,15 @@ export function statusLabel(t: TaskView): string {
 export const backgroundCount = (t: TaskView) => t.background?.length ?? 0;
 /** Between turns but with background work going: shown as working, not as finished. */
 export const inBackground = (t: TaskView) => t.status !== 'running' && t.status !== 'waiting' && backgroundCount(t) > 0;
+/** Display activity independently of whether the parent turn has already finished. */
+export const taskRunning = (t: TaskView | undefined) => !!t && (t.status === 'running' || inBackground(t));
 
 /** An app-run task still "running" with no event for this long is shown as unresponsive. */
 export const STALL_MS = 3 * 60_000;
 
 /** Whole minutes since a running app task last said anything, or null if it is not stalled. */
 export function stalledMinutes(t: TaskView, nowMs = Date.now()): number | null {
-  if (t.source !== 'app' || t.status !== 'running' || !t.last_event) return null;
+  if (t.source !== 'app' || t.status !== 'running' || backgroundCount(t)>0 || !t.last_event) return null;
   const idle = nowMs - Date.parse(t.last_event.ts);
   return idle >= STALL_MS ? Math.floor(idle / 60_000) : null;
 }

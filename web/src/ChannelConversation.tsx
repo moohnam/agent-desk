@@ -8,6 +8,7 @@ import { buildPosts, placeThread } from './posts.ts';
 import { PostView } from './PostView.tsx';
 import { QueuedShortcut } from './queuedShortcut.ts';
 import { useTaskEvents } from './useHub.ts';
+import { inBackground, statusLabel, taskRunning } from './format.ts';
 import type { Approval, Channel, HubEvent, Project, Question, TaskView } from './types.ts';
 
 export interface ChannelConversationProps {
@@ -112,7 +113,7 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
   };
   return <>
     <div className="channel-chat-meta">
-      <span>{task ? `${task.project_name} · ${task.engine ?? '에이전트'} · ${task.status === 'running' ? '실행 중' : task.status === 'waiting' ? '응답 대기' : '대화 이어가기'}` : '이 채널의 알림을 함께 읽고 정리합니다.'}</span>
+      <span>{task ? `${task.project_name} · ${task.engine ?? '에이전트'} · ${inBackground(task) ? statusLabel(task) : task.status === 'running' ? '실행 중' : task.status === 'waiting' ? '응답 대기' : '대화 이어가기'}` : '이 채널의 알림을 함께 읽고 정리합니다.'}</span>
       {task && <button className="link" onClick={() => onOpenTask(task.id)}>전체 스레드</button>}
     </div>
     <div className="feed thread-feed channel-chat-feed" ref={feed} onScroll={(event) => { const el = event.currentTarget; atBottom.current = el.scrollHeight - el.clientHeight - el.scrollTop < 40; }}>
@@ -121,7 +122,7 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
         {placed.map(({ post, up, down }, i) => <PostView key={post.id} post={post} task={task} model={task?.model ?? undefined}
           approval={post.kind === 'approval' ? approvals.get(post.event.payload.approvalId) : undefined}
           question={post.kind === 'question' ? questions.get(post.event.payload.questionId) : undefined}
-          colId={`channel-chat:${channelId}`} selected={false} flash={false} expanded={expanded.has(post.id)} working={task?.status === 'running' && i === placed.length - 1}
+          colId={`channel-chat:${channelId}`} selected={false} flash={false} expanded={expanded.has(post.id)} working={taskRunning(task) && i === placed.length - 1}
           inThread up={up} down={down} onSelect={() => {}} onToggle={() => toggle(post.id)} onError={onError}
           onAllow={() => { const a = approvals.get(post.event.payload.approvalId); if (a) onApproval(a, true); }}
           onDeny={() => { const a = approvals.get(post.event.payload.approvalId); if (a) onApproval(a, false); }} />)}
