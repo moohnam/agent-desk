@@ -9,7 +9,7 @@ import { localAuthorityRoute, workspaceApi, workspaceRoute, type WorkspaceResult
 import type { WorkspaceOperation } from '../../shared/workspace.ts';
 import { applySkillBundle, ensureSharedSkillTables, listPeerSkills, peerSkillManifest, peerSkillStore, removeAbsentSkills, restoreSkillBundle, syncSkillVersion, type SkillBundle, type SkillReference } from './shared-skill-sync.ts';
 import type { HubMessage } from '../../shared/api.ts';
-import { DocumentPermissionError, sendWorkspaceFile } from './shared-files.ts';
+import { DocumentPermissionError, sendWorkspaceFile, workspaceDocumentPath } from './shared-files.ts';
 import { isAbsolute } from 'node:path';
 import { handleMcp } from './mcp.ts';
 import { linkTarget } from './open.ts';
@@ -199,9 +199,16 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,instructions:1,connectors:1,connector_tags:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
+        if (req.method === 'GET' && url.pathname === '/v1/file-path') {
+          const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
+          if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
+          const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined);
+          this.assertPeer(peer);
+          return json(res, 200, { path });
+        }
         if(req.method==='GET'&&url.pathname.startsWith('/v1/receipts/')) {
           const receipt=this.db.prepare('SELECT result FROM workspace_receipt WHERE id=? AND peer_id=?').get(url.pathname.slice('/v1/receipts/'.length),peer) as {result:string}|undefined;
           return receipt?json(res,200,JSON.parse(receipt.result)):json(res,404,{error:'처리 기록이 없습니다'});

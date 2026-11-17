@@ -5,7 +5,8 @@ import ReactMarkdown, { defaultUrlTransform, type ExtraProps, type Components } 
 import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.tsx';
 import { mermaidSource } from './mermaid.ts';
-import { documentHref, documentPath, isDocumentLink } from './documentLinks.ts';
+import { documentPath, isDocumentLink } from './documentLinks.ts';
+import { DocumentLink } from './DocumentLink.tsx';
 import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation } from './markdownMath.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
@@ -38,10 +39,10 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
         a: ({ node: _, ...props }) => {
           if (!onLocalLink || !isLocalLink(props.href)) return <a {...props} target="_blank" rel="noreferrer" />;
           const path=documentPath(props.href!,linkBase), document=!!taskId&&isDocumentLink(path);
-          return <a {...props} href={document?documentHref(taskId!,path):props.href} className="local-link"
-            title={`${document?'문서 미리보기':'로컬 앱으로 열기'}: ${path}`}
+          if (document) return <DocumentLink {...props} path={path} taskId={taskId!} previewId={resourceBase?.match(/^\/_preview\/([^/]+)\//)?.[1]} onPreview={()=>onLocalLink(path)} />;
+          return <a {...props} className="local-link"
+            title={`로컬 앱으로 열기: ${path}`}
             onClick={(e) => {
-              if(document&&(e.metaKey||e.ctrlKey||e.shiftKey||e.altKey))return;
               e.preventDefault();onLocalLink(path);
             }} />;
         },

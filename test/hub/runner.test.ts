@@ -114,3 +114,57 @@ test('a replaced session\'s later messages are dropped', () => {
   emits[1]({ type: 'busy', sessionId: 's1', busy: true });
   assert.deepEqual(out, [{ type: 'busy', sessionId: 's1', busy: true }]);
 });
+
+for (const engine of ['claude','codex','agy']) test(`${engine}: model changes finish before the following send; a failed change blocks old-model execution`,async()=>{
+  const delivered:string[]=[];
+  let finish!:()=>void,fail!:(error:Error)=>void;
+  const {runner,out}=setup({send:text=>{delivered.push(text);},setModel:()=>new Promise<void>((resolve,reject)=>{finish=resolve;fail=reject;})});
+  runner.handle(start('s',engine));
+  runner.handle({type:'set_model',sessionId:'s',effort:'high'});
+  runner.handle({type:'send',sessionId:'s',text:'after success'});
+  await tick();assert.deepEqual(delivered,[]);
+  finish();await tick();assert.deepEqual(delivered,['after success']);
+  runner.handle({type:'set_model',sessionId:'s',effort:'max'});
+  runner.handle({type:'send',sessionId:'s',text:'must not use old model'});
+  await tick();fail(new Error('model disappeared'));await tick();
+  assert.deepEqual(delivered,['after success']);
+  assert.ok(out.some(m=>m.type==='event'&&m.event.kind==='status'&&m.event.state==='error'));
+  runner.handle({type:'set_model',sessionId:'s',effort:'medium'});
+  runner.handle({type:'send',sessionId:'s',text:'after recovery'});
+  await tick();finish();await tick();assert.deepEqual(delivered,['after success','after recovery']);
+  runner.shutdown();
+});
+
+test('a model gate never sends delayed input into a closed or replacement adapter',async()=>{
+  let finish!:()=>void;
+  const delivered:string[]=[];
+  const {runner}=setup({send:text=>{delivered.push(text);},setModel:()=>new Promise<void>(resolve=>{finish=resolve;})});
+  runner.handle(start('s'));
+  runner.handle({type:'set_model',sessionId:'s',effort:'high'});
+  runner.handle({type:'send',sessionId:'s',text:'stale'});
+  await tick();runner.handle({type:'close',sessionId:'s'});runner.handle(start('s'));
+  finish();await tick();assert.deepEqual(delivered,[]);runner.shutdown();
+});
+
+for (const engine of ['claude','codex','agy']) test(`${engine}: interrupt cancels gate-waiting input before a delayed model change resolves`,async()=>{
+  let finish!:()=>void;const called:string[]=[];
+  const {runner}=setup({send:text=>{called.push(text);},interrupt:async()=>{called.push('interrupt');},setModel:()=>new Promise<void>(resolve=>{finish=resolve;})});
+  runner.handle(start('s',engine));runner.handle({type:'set_model',sessionId:'s',effort:'high'});
+  runner.handle({type:'send',sessionId:'s',text:'cancelled'});await tick();
+  runner.handle({type:'interrupt',sessionId:'s'});finish();await tick();
+  assert.deepEqual(called,['interrupt']);runner.handle({type:'send',sessionId:'s',text:'fresh input'});
+  assert.deepEqual(called,['interrupt','fresh input']);runner.shutdown();
+});
+
+test('gate-waiting input stays busy through adapter busy:false and cannot be lost to idle eviction',async()=>{
+  let finish!:()=>void;const delivered:string[]=[];
+  const {runner,emit,out}=setup({send:text=>{delivered.push(text);},setModel:()=>new Promise<void>(resolve=>{finish=resolve;})},15);
+  runner.handle(start('s'));runner.handle({type:'set_model',sessionId:'s',effort:'high'});
+  runner.handle({type:'send',sessionId:'s',text:'wait for model'});await tick();
+  emit({type:'busy',sessionId:'s',busy:false});
+  assert.equal(runner.snapshot()[0]?.busy,true);
+  assert.deepEqual(out.at(-1),{type:'busy',sessionId:'s',busy:true});
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(runner.snapshot().length,1,'pending input protects the idle timer');
+  finish();await tick();assert.deepEqual(delivered,['wait for model']);runner.shutdown();
+});

@@ -3,6 +3,7 @@ import { FileText, RotateCw, X } from 'lucide-react';
 import { api } from './api.ts';
 import { Markdown } from './Markdown.tsx';
 import { previewLink } from './documentLinks.ts';
+import { DocumentLink } from './DocumentLink.tsx';
 import { splitId } from './federation.ts';
 
 const releasePreview=(url:string)=>fetch('/api/preview',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id:url.split('/')[2]}),keepalive:true}).catch(()=>{});
@@ -74,7 +75,7 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
     return()=>{controller.abort();clearInterval(timer);document.removeEventListener('visibilitychange',resume);window.removeEventListener('online',resume);};
   },[preview,visible]);
   return <section ref={ref} className="reference-card document-card">
-    <div className="reference-tools"><FileText/><strong title={href}>{preview?.name??href.split('/').at(-1)}</strong><span className="spacer"/>
+    <div className="reference-tools"><FileText/><DocumentLink path={href} taskId={taskId} previewId={preview?.url.split('/')[2]} onPreview={()=>openLink(href)}><strong>{preview?.name??href.split('/').at(-1)}</strong></DocumentLink><span className="spacer"/>
       <button className="icon-btn" title="원본 파일 다시 가져오기" aria-label="문서 새로고침" disabled={loading} onClick={()=>{setReady(true);setRequest(value=>({revision:value.revision+1,refresh:true}));}}><RotateCw/></button>
       <button className="icon-btn" title="문서 닫기" aria-label="문서 닫기" onClick={remove}><X/></button>
     </div>

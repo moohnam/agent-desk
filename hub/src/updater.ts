@@ -74,8 +74,13 @@ export class UpdateWorker {
   readonly statePath: string;
   private lock?: string;
   private readonly node: string;
-  constructor(config: UpdateConfig, options: { node?: string } = {}) {
+  private readonly commandTimeoutMs: number;
+  private prepareToken?: string;
+  private prepareUncertain = false;
+  constructor(config: UpdateConfig, options: { node?: string; commandTimeoutMs?: number } = {}) {
     this.config = validateUpdateConfig(config); this.node = options.node ?? process.execPath;
+    this.commandTimeoutMs = options.commandTimeoutMs ?? 15 * 60_000;
+    if (!Number.isSafeInteger(this.commandTimeoutMs) || this.commandTimeoutMs < 1) throw new Error('명령 제한 시간은 양의 정수여야 합니다');
     this.statePath = join(this.config.deploymentDir, 'state.json');
   }
   socket(role: RuntimeRole) { return join(this.config.dataDir, 'update-control', `${role}.sock`); }
@@ -116,7 +121,19 @@ export class UpdateWorker {
   close() { if (this.lock) { unlinkSync(this.lock); this.lock = undefined; } }
   private async command(command: string, args: string[], cwd: string) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_)/.test(key)));
-    await exec(command, args, { cwd, env, timeout: 15 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+    const operation = exec(command, args, { cwd, env, timeout: this.commandTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+    try {
+      await operation;
+      if (this.prepareToken && operation.child.killed) throw new Error('준비 명령을 중단해 후손 프로세스의 종료를 확인하지 못했습니다');
+    } catch (error) {
+      if (this.prepareToken) {
+        const failure = error as NodeJS.ErrnoException & {killed?: boolean; signal?: string};
+        const exited = typeof failure.code === 'number' && !failure.killed && !failure.signal;
+        const notStarted = ['ENOENT','EACCES','ENOTDIR'].includes(String(failure.code)) && !operation.child.pid;
+        if ((!exited && !notStarted) || operation.child.killed || operation.child.signalCode) this.prepareUncertain = true;
+      }
+      throw error;
+    }
   }
   private deploymentPaths(commit?: string) {
     const root = this.config.deploymentDir;
@@ -132,8 +149,42 @@ export class UpdateWorker {
       if (existsSync(release)) assertTrustedTree(release);
     }
   }
+  private preparationIdle(): string {
+    const marker = join(this.config.deploymentDir,'prepare.pending.json');
+    assertTrustedPath(marker,{kind:'file',private:true,allowMissing:true});
+    if (existsSync(marker)) throw new Error(`이전 업데이트 준비의 프로세스 종료를 확인하지 못해 자동 준비를 막았습니다. 남은 설치·빌드·테스트 후손을 확인한 뒤 준비 표시를 복구하세요: ${marker}`);
+    return marker;
+  }
   async prepare(): Promise<string> {
     if (!this.lock) throw new Error('워커 잠금이 필요합니다');
+    const marker = this.preparationIdle();
+    const token = randomUUID(), identity = {version:1,host:hostname(),pid:process.pid,token,startedAt:new Date().toISOString()};
+    writePrivateJson(marker,identity,true);
+    this.prepareToken = token; this.prepareUncertain = false;
+    try { return await this.prepareRelease(); }
+    catch (error) {
+      if (this.prepareUncertain) throw new Error(`준비 명령이 중단되어 후손 프로세스의 종료를 확인하지 못했습니다. 준비 표시를 자동 삭제하지 않았습니다: ${marker}`,{cause:error});
+      throw error;
+    } finally {
+      this.prepareToken = undefined;
+      if (!this.prepareUncertain) {
+        try {
+          assertTrustedPath(marker,{kind:'file',private:true});
+          const saved = JSON.parse(readFileSync(marker,'utf8')) as typeof identity;
+          assertTrustedPath(this.lock,{kind:'file',private:true});
+          const lock = JSON.parse(readFileSync(this.lock,'utf8')) as {host:string;pid:number};
+          if (saved.token !== token || saved.host !== hostname() || saved.pid !== process.pid
+            || lock.host !== hostname() || lock.pid !== process.pid) throw new Error('준비 표시 또는 워커 잠금의 소유자가 바뀌었습니다');
+          unlinkSync(marker);
+        } catch (error) {
+          // Never clear an unknown owner's marker. Recreate a removed marker fail-closed where possible.
+          if (!existsSync(marker)) writePrivateJson(marker,{...identity,error:'준비 종료 소유권을 확인하지 못했습니다'},true);
+          throw new Error(`준비 종료 소유권을 확인하지 못해 자동 준비를 막았습니다: ${marker}`,{cause:error});
+        }
+      }
+    }
+  }
+  private async prepareRelease(): Promise<string> {
     this.deploymentPaths(); this.protectedPaths();
     const root = this.config.deploymentDir, mirror = join(root, 'repository.git');
     if (!existsSync(mirror)) await this.command('git', ['clone', '--mirror', '--', this.config.source, mirror], root);
@@ -283,6 +334,7 @@ export class UpdateWorker {
   }
   async activate(commit: string): Promise<boolean> {
     if (!this.lock || !sha(commit)) throw new Error('워커 잠금과 고정 커밋이 필요합니다');
+    this.preparationIdle();
     this.deploymentPaths(commit); this.protectedPaths();
     if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 후보는 실행할 수 없습니다');
     const previous = this.state(), prepared: { role: RuntimeRole; runtime: RuntimeStatus; lease: string }[] = [];
@@ -331,6 +383,7 @@ export class UpdateWorker {
   /** Retain recovery/runtime anchors and three other recent releases; never traverse external roots. */
   async pruneReleases(): Promise<string[]> {
     if (!this.lock) throw new Error('워커 잠금이 필요합니다');
+    this.preparationIdle();
     for (const path of [this.config.deploymentDir, this.config.dataDir]) assertTrustedPath(path, {kind: 'directory'});
     const protectedPaths = this.protectedPaths();
     const deployment = realpathSync(this.config.deploymentDir), releases = join(deployment, 'releases'), mirror = join(deployment, 'repository.git'), verified = join(deployment, 'verified');

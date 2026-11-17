@@ -19,8 +19,21 @@ export type LinkTarget = { kind: 'url'; url: string } | { kind: 'file'; path: st
  */
 export function linkTarget(href: string, cwd: string | undefined): LinkTarget {
   if (APP_SCHEMES.test(href)) return { kind: 'url', url: href };
+  const path = filePath(href, cwd);
+  let st;
+  try { st = statSync(path); } catch { throw new HttpError(404, `파일이 없습니다: ${path}`); }
+  const runnable = RUNNABLE.has(extname(path).toLowerCase()) || (st.isFile() && (st.mode & 0o111) !== 0);
+  return { kind: 'file', path, reveal: runnable };
+}
+
+/** Resolve the source-machine pathname without reading or opening the file. */
+export function filePath(href: string, cwd: string | undefined): string {
   let path: string;
-  try { path = /^file:/i.test(href) ? new URL(href).pathname : href; path = decodeURIComponent(path); }
+  try {
+    const url = /^file:/i.test(href) ? new URL(href) : undefined;
+    if (url?.hostname && url.hostname !== 'localhost') throw new Error('non-local file URL');
+    path = decodeURIComponent(url ? url.pathname : href);
+  }
   catch { throw new HttpError(400, `열 수 없는 링크입니다: ${href}`); }
   path = path.replace(/#L\d+(-L?\d+)?$/, '').replace(/:\d+(:\d+)?(-\d+)?$/, '');
   if (/^[a-z][a-z0-9+.-]*:/i.test(path)) throw new HttpError(400, `열 수 없는 링크입니다: ${href}`);
@@ -29,10 +42,7 @@ export function linkTarget(href: string, cwd: string | undefined): LinkTarget {
     if (!cwd) throw new HttpError(400, `상대 경로의 기준 폴더를 알 수 없습니다: ${href}`);
     path = resolve(cwd, path);
   }
-  let st;
-  try { st = statSync(path); } catch { throw new HttpError(404, `파일이 없습니다: ${path}`); }
-  const runnable = RUNNABLE.has(extname(path).toLowerCase()) || (st.isFile() && (st.mode & 0o111) !== 0);
-  return { kind: 'file', path, reveal: runnable };
+  return path;
 }
 
 /** Opens the target with macOS `open`: the default app, or Finder for runnable files. */

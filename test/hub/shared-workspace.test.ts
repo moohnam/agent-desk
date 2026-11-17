@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, truncateSync, symlinkSync, existsSync, statSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, truncateSync, symlinkSync, existsSync, statSync, utimesSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -76,7 +76,8 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
  const store=new Store(join(f.dir,'preview-gateway.db')),links=new WorkspaceLinks(store);
  const hub=new Hub(store,{skills:new SkillStore(join(f.dir,'preview-skills')),runner:()=>({connected:true,id:'gateway',engines:new Set(),has:()=>false,handle:()=>{throw Error('unexpected execution');}})});
  const access=new Access(join(f.dir,'preview-access-token'),4317);
- const server=createHttpServer(hub,access,join(f.dir,'uploads'),{workspaces:links});
+ let osOpens=0;
+ const server=createHttpServer(hub,access,join(f.dir,'uploads'),{workspaces:links,openTarget:async()=>{osOpens++;}});
  const url=await listen(server);
  try {
   const peer=f.runtime.workspace.grant('preview');const source=await links.attach({name:'runner',url:runnerUrl,token:peer.token});
@@ -120,6 +121,13 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
   const cookie=access.addDevice('phone','test')[0].split(';')[0];
   const device=access.view().devices[0];
   const remote=await prepare('docs/index.html',false,{cookie});assert.equal(remote.status,200);
+  for(const path of ['/api/open',`/api/workspaces/${source.id}/open`]) {
+   const response=await fetch(url+path,{method:'POST',headers:{'content-type':'application/json',cookie},body:JSON.stringify({task_id:task.id,href:'docs/index.html'})});
+   assert.equal(response.status,403,'a remote browser cannot open the hub OS');
+  }
+  assert.equal(osOpens,0);
+  const sourcePath=await fetch(url+`/api/workspaces/${source.id}/file-path?`+new URLSearchParams({task_id:task.id,href:'docs/note.md:12'}),{headers:{cookie}});
+  assert.equal(sourcePath.status,200);assert.deepEqual(await sourcePath.json(),{path:realpathSync(join(f.project,'docs','note.md'))});
   assert.equal((await fetch(url+remote.body.url,{headers:{origin:'null'}})).status,200);
   const renew=()=>fetch(url+'/api/preview',{method:'PUT',headers:{'content-type':'application/json',cookie},body:JSON.stringify({id:remote.body.url.split('/')[2]})});
   assert.equal((await renew()).status,200);

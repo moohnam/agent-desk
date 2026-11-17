@@ -8,11 +8,12 @@ import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as compose from '../../shared/compose.ts';
+import * as modelCatalog from '../../shared/model-catalog.ts';
 
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
-  imports={ './sourceStream.ts':{openSourceStream:()=>new (globals.EventSource as any)()},'./answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
+  imports={ './modelCatalogs.ts':{useModelCatalogs:()=>({runners:[],loading:false,error:'',refresh(){}})},'../../shared/model-catalog.ts':modelCatalog,'./sourceStream.ts':{openSourceStream:()=>new (globals.EventSource as any)()},'./answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
@@ -650,4 +651,78 @@ test('editing a durably pending queue deletion preserves text and drafts after l
   reject(new SharedPending());await new Promise(r=>setTimeout(r,0));
   assert.equal(draft.text,'queued original\nexisting draft\nnewer draft');assert.equal(draft.pick,'now');
  } finally {h.unmount();}
+});
+
+
+test('dynamic model autocomplete and compose preview share the checked Fable reference',()=>{
+  const jsx=(type:any,props:any)=>({type,props});
+  const module=load('Compose.tsx',{
+    react:hooks().react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'../../shared/compose.ts':compose,
+    './api.ts':{},'./workspace.ts':{},'./drafts.ts':{},'./files.ts':{},'./projects.ts':{},'./skills.ts':{},'./settings.ts':{},'./Modal.tsx':{},'./queuedShortcut.ts':{},
+  },{},'\nexport {suggest,interpretNew};');
+  const catalog={engine:'claude' as const,checkedAt:'2026-11-17T00:00:00Z',updatedAt:'2026-11-17T00:00:00Z',
+    models:[{id:'claude-fable-5-1[1m]',resolvedId:'claude-fable-5-1',label:'Fable',efforts:['high' as const,'max' as const]}]};
+  const runners=[{runnerId:'local-test',label:'local',connected:true,catalogs:{claude:catalog}}];
+  const tags=modelCatalog.catalogModelTags(runners.map(r=>r.catalogs));
+  const suggestions=module.suggest('#fa',3,[],[],'route',[],tags);
+  assert.ok(suggestions.items.some((item:any)=>item.insert==='fable'));
+  const settings={claude:{model:null,effort:null},codex:{model:null,effort:null},agy:{model:null,effort:null}};
+  const preview=module.interpretNew('@demo:/tmp/demo #fable 검토',[],[],[],settings,runners);
+  assert.equal(preview.ok,true);
+  assert.ok(preview.rows.some((row:any)=>row.label==='모델'&&row.value.includes('claude-fable-5-1[1m]')));
+  assert.ok(preview.rows.some((row:any)=>row.label==='할 일'&&row.value==='검토'));
+});
+
+test('existing model dialog selects actual models and supported effort while retaining a disappeared selection',async()=>{
+  const h=hooks(),jsx=(type:any,props:any)=>({type,props});
+  let runners:any[]=[{runnerId:'local-test',label:'local',connected:true,catalogs:{
+    claude:{engine:'claude',checkedAt:'2026-11-17T00:00:00Z',updatedAt:'2026-11-17T00:00:00Z',models:[{id:'claude-fable-5-1[1m]',resolvedId:'claude-fable-5-1',label:'Fable',efforts:['low','medium','high','xhigh','max']}]},
+    agy:{engine:'agy',checkedAt:'2026-11-17T00:00:00Z',updatedAt:'2026-11-17T00:00:00Z',models:[{id:'gemini-4-hydrogen-xhigh',label:'Hydrogen XHigh',efforts:['xhigh']}]},
+  }}];
+  const saved:any[]=[];
+  const settings={claude:{model:null,effort:'high'},codex:{model:null,effort:null},agy:{model:null,effort:'high'}};
+  const module=load('ModelDialog.tsx',{
+    react:h.react,'react/jsx-runtime':{jsx,jsxs:jsx},'lucide-react':{},'../../shared/compose.ts':compose,
+    './modelCatalogs.ts':{useModelCatalogs:()=>({runners,loading:false,error:'',refresh(){}})},
+    './workspace.ts':{workspaceId:''},'./settingsPanel.tsx':{SettingsEditor:'SettingsEditor',useSettingsPanel:()=>({active:false,embedded:true})},
+    './settings.ts':{saveSettings:async(value:any)=>{saved.push(value);}},'./format.ts':{},'./model-dialog.css':{},
+  },{AbortController,AbortSignal,fetch:async()=>({ok:true,json:async()=>settings})});
+  const render=()=>h.render(()=>module.ModelDialog({onClose(){}}));
+  const all=(node:any,match:(node:any)=>boolean):any[]=>!node||typeof node!=='object'?[]:Array.isArray(node)?node.flatMap(child=>all(child,match)):[...(match(node)?[node]:[]),...all(node.props?.children,match)];
+  render();await new Promise(resolve=>setImmediate(resolve));
+  let tree=render();
+  const select=(name:string)=>all(tree,node=>node.type==='select'&&node.props['aria-label']===name)[0];
+  const fable=compose.catalogModelName('claude','claude-fable-5-1[1m]');
+  assert.ok(all(select('Claude 기본 모델'),node=>node.type==='option').some(node=>node.props.value===fable));
+  select('Claude 기본 모델').props.onChange({target:{value:fable}});tree=render();
+  const hydrogen=compose.catalogModelName('agy','gemini-4-hydrogen-xhigh');
+  select('Antigravity 기본 모델').props.onChange({target:{value:hydrogen}});tree=render();
+  const effort=all(tree,node=>node.props?.role==='radiogroup'&&node.props['aria-label']==='Antigravity effort')[0];
+  assert.deepEqual(all(effort,node=>node.type==='input').map(node=>node.props.value),['','xhigh']);
+  assert.equal(all(effort,node=>node.type==='input'&&node.props.value==='')[0].props.checked,true,'changing a variant clears an incompatible old effort');
+  runners=[{...runners[0],catalogs:{...runners[0].catalogs,claude:{...runners[0].catalogs.claude,models:[],error:'offline'}}}];
+  tree=render();
+  assert.equal(select('Claude 기본 모델').props.value,fable);
+  assert.ok(all(select('Claude 기본 모델'),node=>node.type==='option').some(node=>node.props.value===fable&&node.props.disabled));
+  const form=all(tree,node=>node.type==='form')[0];await form.props.onSubmit({preventDefault(){}});
+  assert.equal(saved[0].claude.model,fable);assert.equal(saved[0].agy.model,hydrogen);
+  h.unmount();
+});
+
+
+for (const remoteAt of ['1900-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z']) test(`manual model refresh compares changed snapshots across remote clock skew ${remoteAt.slice(0,4)}`,async()=>{
+  const h=hooks();let now=Date.parse('2026-11-17T00:00:00Z'),poll=()=>{};
+  const calls:boolean[]=[];
+  const make=(checkedAt:string)=>[{runnerId:'remote-clock',label:'remote',connected:true,supported:true,catalogs:Object.fromEntries(['claude','codex','agy'].map(engine=>[engine,{engine,checkedAt,updatedAt:checkedAt,models:[{id:'fixture-model',label:'fixture',efforts:null}]}]))}];
+  let response=make(remoteAt);
+  const module=load('modelCatalogs.ts',{
+    react:h.react,'./api.ts':{api:{modelCatalogs:async(_source:string,force:boolean)=>{calls.push(force);return response;}}},
+  },{Date:{now:()=>now},AbortSignal:{timeout:()=>new AbortController().signal},setInterval:(callback:()=>void)=>{poll=callback;return 1;},clearInterval(){},setTimeout:()=>1,clearTimeout(){}});
+  const render=()=>h.render(()=>module.useModelCatalogs());
+  render();await new Promise(resolve=>setImmediate(resolve));let state=render();assert.equal(state.loading,false);
+  now+=1000;state.refresh();await new Promise(resolve=>setImmediate(resolve));state=render();
+  assert.equal(state.loading,true,'an unchanged snapshot cannot complete a refresh even if its remote clock is in the future');
+  response=make(new Date(Date.parse(remoteAt)+1000).toISOString());now+=2001;poll();await new Promise(resolve=>setImmediate(resolve));state=render();
+  assert.equal(state.loading,false,'a changed snapshot completes even if its timestamp is behind the browser clock');
+  assert.deepEqual(calls,[false,true,false]);h.unmount();
 });

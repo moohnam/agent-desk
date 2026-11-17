@@ -11,25 +11,24 @@
 // agy has no interrupt message: interrupting kills the process, and the next message starts a new
 // one that resumes the conversation (`--conversation`). A model change does the same between turns.
 
-import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { Effort, ModelName } from '../../../shared/compose.ts';
+import type { ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
-import { latestOfFamily } from './models.ts';
+import { latestOfFamily, catalogModel, catalogProblem } from '../../../shared/model-catalog.ts';
+import { runnerModelCatalogs } from './model-catalog.ts';
 import { AgyActivity } from './agy-activity.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
 
 const AGY_BIN = config.agyBin;
 /** How long an approval may wait for the user; the hook's own timeout in hooks.json is a little longer. */
 const APPROVAL_TIMEOUT_MS = 60 * 60_000;
-/** Without a tag, the middle level (agy's models come in low, medium and high only). */
-const DEFAULT_LEVEL = 'medium';
 /** Default model family when the task names none. */
 const DEFAULT_FAMILY: ModelName = 'flash';
 
@@ -43,9 +42,6 @@ const READ_ONLY = new Set([
 ]);
 
 type Json = any;
-
-/** agy's model level for a desk effort: #xhigh and #max run as high. */
-const level = (e?: Effort) => (!e ? DEFAULT_LEVEL : e === 'low' || e === 'medium' ? e : 'high');
 
 /** An agy tool call as the desk shows it: commands as Bash, a file path where the call has one. */
 export function toolView(name: string, args: Json): { name: string; input: Json } {
@@ -92,18 +88,6 @@ function stopTree(proc: ChildProcess, signal: NodeJS.Signals) {
   setTimeout(() => send('SIGKILL'), 3000).unref();
 }
 
-let modelList: Promise<string[]> | null = null;
-/** `agy models`, once per runner (a failure is retried next time). */
-function listModels(): Promise<string[]> {
-  modelList ??= new Promise<string[]>((resolve, reject) => {
-    execFile(AGY_BIN, ['models'], { timeout: 60_000 }, (err, stdout) => {
-      if (err) { modelList = null; reject(err); return; }
-      resolve(stdout.split('\n').map((l) => l.split('\t')[0].trim()).filter((id) => /^[a-z0-9.-]+$/.test(id)));
-    });
-  });
-  return modelList;
-}
-
 /** A message waiting for its turn. */
 interface Turn { text: string; skills?: string[]; skillSnapshotHome?: string }
 
@@ -117,6 +101,12 @@ export const startAgy: StartEngine = (opts) => {
   let mode = opts.permissionMode;
   let family: ModelName = opts.model ?? DEFAULT_FAMILY;
   let effort = opts.effort;
+  let selectedId: string | undefined;
+  let selectionVersion = 0;
+  let switching: Promise<void> = Promise.resolve();
+  let selectionError: Error | undefined;
+  let deliveryVersion = 0;
+  const deferredSends = new Set<symbol>();
   /** The model id the running process uses; a different wanted one restarts it between turns. */
   let running: string | null = null;
   /** The model the feed last heard of. */
@@ -320,10 +310,18 @@ export const startAgy: StartEngine = (opts) => {
     const seq = ++turnSeq;
     const current = () => !closing && turns.active && seq === turnSeq;
     try {
-      const ids = await listModels();
+      const choice = family, wantedEffort = effort, version = selectionVersion;
+      let model = selectedId;
+      if (!model) {
+        const catalog = await runnerModelCatalogs.read('agy');
+        if (!catalog.updatedAt) throw new Error(catalog.error ?? 'agy 모델 목록을 확인하지 못했습니다');
+        const problem = catalogProblem('agy',choice,wantedEffort,catalog);
+        if (problem) throw new Error(problem);
+        model = catalogModel(catalog,choice,wantedEffort)?.id;
+        if (!model) throw new Error(`agy 모델 목록에 ${choice}이 없습니다`);
+        if (version === selectionVersion) selectedId = model;
+      }
       if (!current()) return;
-      const model = agyModelId(ids, family, level(effort));
-      if (!model) throw new Error(`agy 모델 목록에 #${family} (${level(effort)})이 없습니다`);
       const proc = await processFor(model);
       if (!current()) return;
       proc.stdin!.write(JSON.stringify({ event: 'user', message: { content: turnText(turn) } }) + '\n');
@@ -339,9 +337,20 @@ export const startAgy: StartEngine = (opts) => {
 
   const send = (text: string, skills?: string[], _steer?: boolean, skillSnapshotHome?: string) => {
     if (closing) return;
+    const version = deliveryVersion, token = Symbol();
+    deferredSends.add(token);
     emit({ type: 'busy', sessionId, busy: true });
     // #now waits like #later (see turns).
-    turns.push({ text, skills, skillSnapshotHome });
+    void switching.then(() => {
+      deferredSends.delete(token);
+      if (closing || version !== deliveryVersion) return;
+      if (selectionError) {
+        event({kind:'status',state:'error',detail:{message:`모델 변경을 적용하지 못해 입력을 실행하지 않았습니다: ${selectionError.message}`}});
+        if (!turns.active) emit({type:'busy',sessionId,busy:false});
+        return;
+      }
+      turns.push({ text, skills, skillSnapshotHome });
+    });
   };
   listening.catch((err: Error) => {
     if (closing) return;
@@ -354,10 +363,19 @@ export const startAgy: StartEngine = (opts) => {
   return {
     send,
     interrupt: async () => {
+      deliveryVersion++;
+      const deferred = deferredSends.size > 0;
+      deferredSends.clear();
       turns.clear();
       cancelApprovals();
       // The process goes (its later output is dropped); the next message resumes the conversation.
-      if (!turns.active && !activity.hasWork()) return;
+      if (!turns.active && !activity.hasWork()) {
+        if (deferred) {
+          event({kind:'status',state:'interrupted',detail:{subtype:'interrupted'}});
+          emit({type:'busy',sessionId,busy:false});
+        }
+        return;
+      }
       if (child) {
         const proc = child;
         child = null;
@@ -380,9 +398,20 @@ export const startAgy: StartEngine = (opts) => {
       pending.clear();
     },
     // Takes effect from the next turn, which restarts the process on the new model.
-    setModel: async (m, e) => {
-      if (m) family = m;
-      if (e) effort = e;
+    setModel: (m, e) => {
+      const pending = switching.then(async () => {
+        const choice = m ?? family, wantedEffort = e ?? effort;
+        const fresh = await runnerModelCatalogs.read('agy');
+        const base = !m && selectedId ? selectedId.replace(/-(low|medium|high|xhigh|max|ultra)$/,'') : undefined;
+        const catalog = base ? {...fresh,models:fresh.models.filter(model=>model.id.startsWith(`${base}-`))} : fresh;
+        const problem = catalogProblem('agy',choice,wantedEffort,catalog);
+        if (problem) throw new Error(problem);
+        const model = catalogModel(catalog,choice,wantedEffort);
+        if (!model) throw new Error(catalog.error ?? 'agy 모델 목록을 확인하지 못했습니다');
+        family = choice; effort = wantedEffort; selectedId = model.id; selectionVersion++; selectionError = undefined;
+      });
+      switching = pending.catch(error => { selectionError = error instanceof Error ? error : new Error(String(error)); });
+      return pending;
     },
     resolveApproval: (approvalId, allow, message) => {
       const p = pending.get(approvalId);
@@ -393,7 +422,7 @@ export const startAgy: StartEngine = (opts) => {
     },
     close: () => {
       if (closing) return;
-      closing = true;
+      closing = true; deliveryVersion++; deferredSends.clear();
       cancelApprovals();
       server.close();
       if (child) { child.stdin?.end(); stopTree(child, 'SIGTERM'); }

@@ -1,3 +1,4 @@
+import { runnerModelCatalogs } from './model-catalog.ts';
 import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { config } from '../config.ts';
 import { requireAdmission } from '../runtime-control.ts';
@@ -17,9 +18,14 @@ interface Entry {
   idleTimer: NodeJS.Timeout | null;
   skillsHome?: string;
   snapshotHomes: Set<string>;
+  modelChange?: Promise<void>;
+  modelError?: string;
+  deliveryVersion: number;
+  pendingSends: Set<symbol>;
 }
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const idle = (e: Entry) => !e.live.busy && !e.live.approvals.length && !e.live.background?.length;
+const effectiveBusy = (e: Entry) => e.live.busy || e.pendingSends.size > 0;
+const idle = (e: Entry) => !effectiveBusy(e) && !e.modelChange && !e.live.approvals.length && !e.live.background?.length;
 
 /** Runs engine sessions on this machine. Talks to the hub only through protocol messages. */
 export class Runner {
@@ -31,6 +37,8 @@ export class Runner {
   /** Test override: one start function for every engine. */
   private start: StartEngine | null;
   private mcp?: RunnerMcp;
+  private catalogListener?: () => void;
+  private catalogSignature = '';
 
   constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine; mcp?: RunnerMcp } = {}) {
     this.id = id;
@@ -41,15 +49,28 @@ export class Runner {
   }
 
   /** `close`: understands the close command (older runners ignore it). */
-  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true, instructions: true, connectorMcp: true }; }
+  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true, instructions: true, connectorMcp: true, modelCatalogs: runnerModelCatalogs.snapshot() }; }
+
+  /** Production entry points opt in; metadata refresh never touches session adapters. */
+  startModelRefresh(changed: () => void = () => {}) {
+    this.catalogListener = changed;
+    this.refreshModels();
+  }
+  refreshModels(force=false) {
+    for (const engine of Object.keys(ENGINES) as Engine[]) void runnerModelCatalogs.read(engine,force).then(() => {
+      const signature = JSON.stringify(runnerModelCatalogs.snapshot());
+      if (signature !== this.catalogSignature) { this.catalogSignature = signature; this.catalogListener?.(); }
+    });
+  }
 
   /** Sessions still running, so a reconnecting hub can learn what is busy and awaiting approval. */
   snapshot(): LiveSession[] {
-    return [...this.sessions.values()].map(({ live: s }) => ({ ...s, approvals: [...s.approvals] }));
+    return [...this.sessions.values()].map(entry => ({ ...entry.live, busy:effectiveBusy(entry) || !!entry.modelChange, approvals:[...entry.live.approvals] }));
   }
 
   /** Stops this process's engines without treating their queued input as user-cancelled. */
   shutdown() {
+    this.catalogListener = undefined;
     for (const [sessionId, entry] of this.sessions) {
       this.drop(sessionId, entry);
       let error: string | undefined;
@@ -68,6 +89,12 @@ export class Runner {
     if (!idle(entry)) return;
     entry.idleTimer = setTimeout(() => this.closeIdle(sessionId, entry), this.idleMs);
     entry.idleTimer.unref?.();
+  }
+
+  private reportBusy(sessionId: string, entry: Entry) {
+    if (this.sessions.get(sessionId) !== entry) return;
+    this.emit({type:'busy',sessionId,busy:effectiveBusy(entry)});
+    this.schedule(sessionId,entry);
   }
 
   private closeIdle(sessionId: string, entry: Entry) {
@@ -89,7 +116,7 @@ export class Runner {
     if (this.sessions.get(m.sessionId) !== entry) return false;
     const s = entry.live;
     switch (m.type) {
-      case 'busy': s.busy = m.busy; this.schedule(m.sessionId, entry); break;
+      case 'busy': s.busy = m.busy; m.busy = effectiveBusy(entry); this.schedule(m.sessionId, entry); break;
       case 'background': s.background = m.tasks; this.schedule(m.sessionId, entry); break;
       case 'approval_request':
         s.approvals.push({ approvalId: m.approvalId, toolName: m.toolName, input: m.input });
@@ -124,10 +151,11 @@ export class Runner {
   handle(cmd: HubToRunner) {
     if (cmd.type === 'start' || cmd.type === 'send') requireAdmission();
     switch (cmd.type) {
+      case 'refresh_models': this.refreshModels(cmd.force); break;
       case 'start': {
         const old = this.sessions.get(cmd.sessionId);
         if (old) { this.drop(cmd.sessionId, old); old.adapter?.close(); }
-        const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null, skillsHome: cmd.skillsHome, snapshotHomes: new Set() };
+        const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null, skillsHome: cmd.skillsHome, snapshotHomes: new Set(), deliveryVersion:0, pendingSends:new Set() };
         this.sessions.set(cmd.sessionId, entry);
         // An engine this runner doesn't know (a newer hub talking to an older daemon) must not run as another engine.
         const start = this.start ?? (Object.hasOwn(ENGINES, cmd.engine) ? ENGINES[cmd.engine] : null);
@@ -165,19 +193,60 @@ export class Runner {
           break;
         }
         if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
-        entry.adapter.send(cmd.text, cmd.skills, cmd.steer, skillSnapshotHome);
+        const version = entry.deliveryVersion;
+        const deliver = () => {
+          if (this.sessions.get(cmd.sessionId) !== entry || !entry.adapter || entry.deliveryVersion !== version) return;
+          if (entry.modelError) {
+            this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'error',detail:{message:`모델 변경 실패로 입력을 실행하지 않았습니다: ${entry.modelError}. 모델·effort 태그를 다시 지정해 재시도하세요.`}}});
+            return;
+          }
+          entry.adapter.send(cmd.text, cmd.skills, cmd.steer, skillSnapshotHome);
+        };
+        if (entry.modelChange) {
+          const token = Symbol(); entry.pendingSends.add(token); this.reportBusy(cmd.sessionId,entry);
+          void entry.modelChange.then(deliver).catch(error => {
+            if (this.sessions.get(cmd.sessionId) === entry) this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'error',detail:{message:`입력 전달 실패: ${errorText(error)}`}}});
+          }).finally(() => { entry.pendingSends.delete(token); this.reportBusy(cmd.sessionId,entry); });
+        } else { deliver(); if (entry.modelError) this.reportBusy(cmd.sessionId,entry); }
         if (skillSnapshotHome) this.prune(entry.skillsHome ?? config.skillsHome);
         break;
       }
       case 'set_mode':
         this.attempt(cmd.sessionId, '모드 변경 실패', (a) => a.setMode(cmd.permissionMode));
         break;
-      case 'set_model':
-        this.attempt(cmd.sessionId, '모델 변경 실패', (a) => a.setModel(cmd.model, cmd.effort));
+      case 'set_model': {
+        const entry = this.sessions.get(cmd.sessionId);
+        if (!entry?.adapter) break;
+        const adapter = entry.adapter;
+        const changing = (entry.modelChange ?? Promise.resolve()).then(async () => {
+          if (this.sessions.get(cmd.sessionId) !== entry) return;
+          await adapter.setModel(cmd.model,cmd.effort);
+          entry.modelError = undefined;
+        });
+        const settled = changing.catch(error => {
+          if (this.sessions.get(cmd.sessionId) !== entry) return;
+          entry.modelError = errorText(error);
+          this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'warning',detail:{message:`모델 변경 실패: ${entry.modelError}`}}});
+        }).finally(() => {
+          if (entry.modelChange === settled) entry.modelChange = undefined;
+          this.schedule(cmd.sessionId,entry);
+        });
+        entry.modelChange = settled;
+        this.schedule(cmd.sessionId,entry);
         break;
-      case 'interrupt':
+      }
+      case 'interrupt': {
+        const entry = this.sessions.get(cmd.sessionId);
+        if (entry) {
+          entry.deliveryVersion++;
+          const pending = entry.pendingSends.size > 0;
+          entry.pendingSends.clear();
+          if (pending && !entry.live.busy) this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'interrupted',detail:{subtype:'interrupted'}}});
+          if (pending) this.reportBusy(cmd.sessionId,entry);
+        }
         this.attempt(cmd.sessionId, '중단 실패', (a) => a.interrupt());
         break;
+      }
       case 'close': {
         const entry = this.sessions.get(cmd.sessionId);
         if (!entry) break;

@@ -1,3 +1,5 @@
+import {modelReference} from '../../../shared/compose.ts';
+import {checkModelCatalogs, type ModelCatalogs} from '../../../shared/model-catalog.ts';
 import { DEFAULT_INSTRUCTIONS } from '../instruction-store.ts';
 // Durable remote delivery uses the hub's own SQLite transaction, separate from the #later queue.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -52,6 +54,14 @@ export class RemoteRunners implements RunnerPort {
   private changed: () => void;
   private skills: SkillStore;
   private reported = '';
+  private catalogs = new Map<string,ModelCatalogs>();
+  private catalogRequests = new Map<string,boolean>();
+  refreshModels(force=false) {
+    this.local.refreshModels?.(force);
+    for (const peer of this.peers()) if (this.catalogs.has(peer.id)) this.catalogRequests.set(peer.id,force || this.catalogRequests.get(peer.id) === true);
+  }
+  catalogsSupported(id: string) { return this.catalogs.has(id); }
+  catalogsFor(id: string): ModelCatalogs { return this.catalogs.get(id) ?? {}; }
   constructor(store: Store, local: RunnerPort,
     onMessage: (m: RunnerToHub, at?: string) => void,
     onSnapshot: (sessions: LiveSession[], runnerId: string) => void,
@@ -189,6 +199,7 @@ export class RemoteRunners implements RunnerPort {
       || !integer(input.commandAck) || input.commandAck > peer.sent_through || !Array.isArray(input.events) || input.events.length > 64
       || typeof input.more !== 'boolean' || !Array.isArray(input.sessions) || !Array.isArray(input.engines)
       || input.engines.some(e => !['claude','codex','agy'].includes(e)) || (input.skillSnapshot !== undefined && typeof input.skillSnapshot !== 'boolean') || (input.connectorMcp !== undefined && typeof input.connectorMcp !== 'boolean') || (input.instructions !== undefined && typeof input.instructions !== 'boolean')) throw new HttpError(400, '원격 러너 교환 형식이 잘못되었습니다');
+    if (input.modelCatalogs !== undefined && !checkModelCatalogs(input.modelCatalogs)) throw new HttpError(400, '모델 목록 형식이 잘못되었습니다');
     if (peer.journal_id && peer.journal_id !== input.journalId) throw new HttpError(409, '러너 전달 DB가 바뀌었습니다. 이전 DB를 복구하거나 새 러너로 등록하세요');
     const snapshot = checkRunnerToHub({ type: 'hello', runnerId: id, host: peer.address, capabilities: { engines: input.engines }, sessions: input.sessions });
     if (typeof snapshot === 'string' || input.sessions.length > 1000 || input.sessions.some(s => !s || typeof s.sessionId !== 'string' || typeof s.busy !== 'boolean' || !Array.isArray(s.approvals) || s.approvals.some(a => !a || typeof a.approvalId !== 'string' || typeof a.toolName !== 'string') || (this.store.getSession(s.sessionId) && this.store.getSession(s.sessionId)?.runner_id !== id))) throw new HttpError(403, '다른 러너의 세션을 보고할 수 없습니다');
@@ -222,6 +233,7 @@ export class RemoteRunners implements RunnerPort {
       const commands: { seq: number; value: HubToRunner }[] = [];
       if (!input.more) for (const row of this.db.prepare('SELECT seq, payload FROM remote_command WHERE runner_id = ? ORDER BY seq LIMIT 16').all(id) as { seq: number; payload: string }[]) {
         const value = JSON.parse(row.payload) as HubToRunner;
+        if ((value.type === 'start' || value.type === 'set_model') && value.model && modelReference(value.model) && input.modelCatalogs === undefined) break;
         if (value.type === 'start' && value.connectorMcp && input.connectorMcp !== true) break;
         if (value.type === 'start' && value.instructions !== undefined && value.instructions !== DEFAULT_INSTRUCTIONS && input.instructions !== true) break;
         if (value.type === 'start' || value.type === 'send') {
@@ -233,8 +245,12 @@ export class RemoteRunners implements RunnerPort {
       }
       if (commands.length) this.db.prepare('UPDATE remote_runner SET sent_through = max(sent_through, ?) WHERE id = ?').run(commands.at(-1)!.seq, id);
       this.db.exec('RELEASE remote_exchange');
+      if (input.modelCatalogs !== undefined) this.catalogs.set(id,structuredClone(input.modelCatalogs));
+      else this.catalogs.delete(id);
       this.notify();
-      return { eventAck: ack, commands };
+      const forceModelRefresh = this.catalogRequests.get(id);
+      const refreshModels = input.modelCatalogs !== undefined && this.catalogRequests.delete(id);
+      return { eventAck: ack, commands, ...(refreshModels ? {refreshModels:true,forceModelRefresh} : {}) };
     } catch (e) { this.db.exec('ROLLBACK TO remote_exchange; RELEASE remote_exchange'); throw e; }
     finally { if (!input.more) this.syncing.delete(id); }
   }

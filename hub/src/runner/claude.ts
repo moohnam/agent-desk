@@ -1,6 +1,8 @@
+import {catalogProblem,catalogEffort} from '../../../shared/model-catalog.ts';
+import {runnerModelCatalogs} from './model-catalog.ts';
 import { randomUUID } from 'node:crypto';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { Effort } from '../../../shared/compose.ts';
+import { modelReference, type ModelName, type Effort } from '../../../shared/compose.ts';
 import { clipResult, type StartEngine } from './engine.ts';
 import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
@@ -80,7 +82,7 @@ export const startClaude: StartEngine = (opts) => {
       resume: opts.resume,
       forkSession: opts.resume && opts.fork ? true : undefined,
       permissionMode: opts.permissionMode,
-      model: opts.model,
+      model: modelReference(opts.model)?.id ?? opts.model,
       effort: claudeEffort(opts.effort),
       plugins: opts.skillsHome ? [{ type: 'local', path: opts.skillsHome }] : undefined,
       ...claudeMcpOptions(opts.mcp, opts.connectorMcp),
@@ -158,26 +160,55 @@ export const startClaude: StartEngine = (opts) => {
     }
   })();
 
-  const send = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
+  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
     busy = true;
     emit({ type: 'busy', sessionId, busy: true });
     prompts.push(skillSnapshotHome ? steeringSkillText(text, skills, skillSnapshotHome) : withSkills(text, skills), steer ? 'next' : 'later');
   };
-  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
+  let selectedChoice = opts.model, selectedEffort = opts.effort;
+  const validateModel = async (choice?: ModelName, effort?: Effort) => {
+    const catalog = await runnerModelCatalogs.read('claude');
+    const problem = catalogProblem('claude',choice,effort,catalog);
+    if (problem) throw new Error(problem);
+    return catalogEffort(catalog,choice,effort);
+  };
+  let initialized = false;
+  let deliveryVersion = 0;
+  setBusy(true);
+  const ready = validateModel(selectedChoice,selectedEffort).then(async effective => {
+    if (closing) return;
+    if (effective && effective !== selectedEffort) await q.applyFlagSettings({effortLevel:claudeEffort(effective)});
+    initialized = true;
+    if (!closing && deliveryVersion === 0) deliver(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
+  }).catch(error => {
+    if (closing) return;
+    closing = true; prompts.end(); q.close();
+    emit({type:'closed',sessionId,error:error instanceof Error ? error.message : String(error)});
+  });
+  const send = (text: string,skills?:string[],steer?:boolean,skillSnapshotHome?:string) => {
+    const version = deliveryVersion;
+    void ready.then(() => { if (!closing && version === deliveryVersion) deliver(text,skills,steer,skillSnapshotHome); });
+  };
 
   return {
     send,
     interrupt: async () => {
       // With no turn running the flag would stick and mislabel the next turn's failure as an interrupt.
       if (!busy) return;
+      deliveryVersion++;
+      if (!initialized) { setBusy(false); return; }
       interrupting = true;
       await q.interrupt();
     },
     setMode: (mode) => q.setPermissionMode(mode),
     setModel: async (model, effort) => {
-      if (model) await q.setModel(model);
-      // 'max' on a model without it runs as 'high' (the SDK's rule).
-      if (effort) await q.applyFlagSettings({ effortLevel: claudeEffort(effort) });
+      await ready;
+      if (closing) throw new Error('Claude 세션이 종료되었습니다');
+      const choice = model ?? selectedChoice, wantedEffort = effort ?? selectedEffort;
+      const effective = await validateModel(choice,wantedEffort);
+      if (model) await q.setModel(modelReference(model)?.id ?? model);
+      if (effective) await q.applyFlagSettings({ effortLevel: claudeEffort(effective) });
+      selectedChoice = choice; selectedEffort = wantedEffort;
     },
     resolveApproval: (approvalId, allow, message, answers) => {
       const p = pending.get(approvalId);

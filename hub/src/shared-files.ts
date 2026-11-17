@@ -9,7 +9,7 @@ import type { Hub } from './hub.ts';
 import { remoteLocation } from '../../shared/remote.ts';
 import { expandHome } from './paths.ts';
 import { HttpError } from './errors.ts';
-import { linkTarget, type LinkTarget } from './open.ts';
+import { filePath, linkTarget, type LinkTarget } from './open.ts';
 
 export const SHARED_FILE_LIMIT = 50 * 1024 * 1024;
 const CACHE_LIMIT = 250 * 1024 * 1024;
@@ -35,7 +35,7 @@ export class DocumentPermissionError extends HttpError {
 const isPreviewDocument = (path: string) => ['.md', '.markdown', '.html', '.htm'].includes(extname(path).toLowerCase());
 
 /** Task files, temporary artifacts, task-scoped notes, or one explicitly approved document. */
-export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
+async function workspaceFileLocation(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
   const cwd = hub.cwdOf(taskId);
   if (!cwd) throw new HttpError(404, '파일의 작업을 찾을 수 없습니다');
   const root = await realpath(expandHome(remoteLocation(cwd)?.path ?? cwd));
@@ -56,6 +56,20 @@ export async function workspaceFile(hub: Hub, taskId: string, href: string, base
     const directory = dirname(await realpath(document.path));
     if (!inside(directory, path)) throw new HttpError(403, '문서 폴더 안의 부속 파일만 볼 수 있습니다');
   }
+  return { path, target };
+}
+
+/** Metadata only, with the same document boundary as preview reads; never return a temporary copy. */
+export async function workspaceDocumentPath(hub: Hub, taskId: string, href: string, approvedPath?: string) {
+  if (!isPreviewDocument(filePath(href, '/'))) throw new HttpError(400, 'Markdown 또는 HTML 문서 경로만 복사할 수 있습니다');
+  const { path } = await workspaceFileLocation(hub, taskId, href, undefined, approvedPath);
+  if (!isPreviewDocument(path)) throw new HttpError(400, 'Markdown 또는 HTML 문서 경로만 복사할 수 있습니다');
+  if (!(await lstat(path)).isFile()) throw new HttpError(400, '일반 파일의 경로만 복사할 수 있습니다');
+  return path;
+}
+
+export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
+  const { path, target } = await workspaceFileLocation(hub, taskId, href, base, approvedPath);
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();

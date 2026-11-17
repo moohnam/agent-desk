@@ -1,7 +1,9 @@
+import { catalogModel } from '../../shared/model-catalog.ts';
+import {useModelCatalogs} from './modelCatalogs.ts';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { workspaceId } from './workspace.ts';
-import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, type EngineName, type ModelName } from '../../shared/compose.ts';
+import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, catalogModelName, modelReference, modelEngine, modelLabel, type EngineName, type ModelName } from '../../shared/compose.ts';
 import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 import { saveSettings } from './settings.ts';
 import { resetTime } from './format.ts';
@@ -25,7 +27,7 @@ async function read<T>(path: string, signal: AbortSignal, timeout = 15000): Prom
 
 function checkedSettings(value: Settings): Settings {
   if (!value || !ENGINES.every(engine => value[engine]
-    && (value[engine].model === null || ENGINE_MODELS[engine].includes(value[engine].model!))
+    && (value[engine].model === null || modelEngine(value[engine].model!) === engine)
     && (value[engine].effort === null || ENGINE_EFFORTS[engine].includes(value[engine].effort!))))
     throw new Error('저장된 기본 모델 설정을 확인하지 못했습니다. 다시 불러오세요.');
   return value;
@@ -65,6 +67,7 @@ function UsageRows({ state }: {state: UsageState | undefined}) {
 
 /** New-task defaults and the hub CLI accounts' plan usage share one editor. */
 export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => void; prefetchUsage?:boolean }) {
+  const models = useModelCatalogs();
   const [savedPick, setSavedPick] = useState('');
   const [notice, setNotice] = useState('');
   const [pick, setPick] = useState<Settings>();
@@ -131,30 +134,49 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
         {settingsLoading && <p className="muted small" role="status">저장된 기본 모델 설정을 불러오는 중…</p>}
         {settingsError && <div className="model-settings-error"><p className="error small" role="alert">설정 조회 실패: {settingsError}</p>
           <button type="button" className="btn" onClick={() => setSettingsAttempt(value => value + 1)}>설정 다시 불러오기</button></div>}
-        {ENGINES.map(engine => <section key={engine} className="model-engine" aria-label={ENGINE_LABEL[engine]}>
+        {models.error && <p className="error small" role="alert">모델 목록 조회 실패: {models.error} · 기존 태그와 설정은 유지합니다.</p>}
+        {ENGINES.map(engine => {
+          const catalogs = models.runners.flatMap(r=>r.catalogs[engine] ? [{runner:r,catalog:r.catalogs[engine]!}] : []);
+          const choices = [...new Map(catalogs.flatMap(({catalog})=>catalog.models.map(model=>[model.id,model] as const))).values()];
+          const selected = pick?.[engine].model;
+          const selectedModel = catalogs.map(({catalog})=>catalogModel(catalog,selected ?? undefined,pick?.[engine].effort ?? undefined)).find(Boolean);
+          const supported = modelReference(selected) && selectedModel?.efforts !== null && selectedModel?.efforts !== undefined
+            ? selectedModel.efforts : ENGINE_EFFORTS[engine];
+          const visibleEfforts = [...new Set([...supported,...(pick?.[engine].effort ? [pick[engine].effort!] : [])])];
+          const changeModel = (model: ModelName | null) => {
+            const next = catalogs.map(({catalog})=>catalogModel(catalog,model ?? undefined)).find(Boolean);
+            const effort = pick?.[engine].effort;
+            set(engine,{model,...(modelReference(model) && effort && next?.efforts && !next.efforts.includes(effort) ? {effort:null} : {})});
+          };
+          return <section key={engine} className="model-engine" aria-label={ENGINE_LABEL[engine]}>
           <fieldset className="model-engine-settings" disabled={!pick || settingsLoading || !!settingsError || saving}>
             <legend>{ENGINE_LABEL[engine]}</legend>
-            <label className="field"><span className="lbl">기본 모델{ENGINE_INFO[engine].family && <small>선택한 계열의 최신 버전</small>}</span>
+            <label className="field"><span className="lbl">기본 모델{ENGINE_INFO[engine].family && <small>기존 태그는 계열 최신, 실제 ID는 선택한 버전</small>}</span>
               <select className="input model-select" aria-label={`${ENGINE_LABEL[engine]} 기본 모델`} value={pick?.[engine].model ?? ''}
-                onChange={event => set(engine, {model: event.target.value ? event.target.value as ModelName : null})}>
+                onChange={event => changeModel(event.target.value ? event.target.value as ModelName : null)}>
                 <option value="">{ENGINE_LABEL[engine]} 기본</option>
-                {ENGINE_MODELS[engine].map(model => <option key={model} value={model}>{MODEL_LABEL[model]}</option>)}
+                {ENGINE_MODELS[engine].map(model => <option key={model} value={model}>{MODEL_LABEL[model]} · 기존 태그</option>)}
+                {choices.map(model => <option key={model.id} value={catalogModelName(engine,model.id)}>{model.label} · {model.id}</option>)}
+                {selected && modelReference(selected) && !choices.some(model=>catalogModelName(engine,model.id)===selected)
+                  && <option value={selected} disabled>{modelLabel(selected)} · 현재 목록에 없음</option>}
               </select>
             </label>
             <div className="field"><span className="lbl">추론 강도 · effort</span>
               <div className="model-efforts" role="radiogroup" aria-label={`${ENGINE_LABEL[engine]} effort`}>
-                {[null, ...ENGINE_EFFORTS[engine]].map(effort => <label key={effort ?? 'default'} className="model-effort-choice">
-                  <input type="radio" name={`${engine}-effort`} value={effort ?? ''} checked={(pick?.[engine].effort ?? null) === effort} onChange={() => set(engine, {effort})} />
+                {[null, ...visibleEfforts].map(effort => <label key={effort ?? 'default'} className="model-effort-choice">
+                  <input type="radio" name={`${engine}-effort`} value={effort ?? ''} checked={(pick?.[engine].effort ?? null) === effort} disabled={effort !== null && !supported.includes(effort)} onChange={() => set(engine, {effort})} />
                   <span>{effort ?? '모델 기본'}</span>
                 </label>)}
               </div>
-              <span className="muted small">지원하지 않는 단계는 가까운 단계로 실행합니다.{engine === 'codex' && ' ultra는 Codex에서만 지원합니다.'}</span>
+              <span className="muted small">{modelReference(selected) ? selectedModel?.efforts === null ? 'CLI가 이 모델의 effort 정보를 제공하지 않았습니다.' : '실제 모델 ID와 지원하는 effort를 그대로 실행합니다.' : '기존 계열 태그는 지원하는 가까운 단계로 실행합니다.'}</span>
+              {selectedModel && <span className="muted small">실제 지원 effort: {selectedModel.efforts?.join(', ') || (selectedModel.efforts ? '없음' : '정보 없음')}</span>}
+              {catalogs.map(({runner,catalog})=><p key={runner.runnerId} className="muted small">{runner.label}{!runner.connected && ' · 연결 끊김'} · {catalog.updatedAt ? `모델 ${catalog.models.length}개 · 조회 ${fetchedTime(catalog.updatedAt)}` : '모델 목록 확인 중'}{catalog.error && ` · 갱신 실패: ${catalog.error}${catalog.updatedAt ? ' · 마지막 성공 목록 유지' : ''}`}</p>)}
             </div>
           </fieldset>
           <div className="model-engine-usage" aria-label={`${ENGINE_LABEL[engine]} 사용량`}>
             {workspaceId ? <p className="muted small">사용량은 허브 화면에서 확인할 수 있습니다.</p> : <UsageRows state={usage[engine]} />}
           </div>
-        </section>)}
+        </section>; })}
       </div>
       <footer className="model-dialog-footer">
         {error && <p className="error small" role="alert">{error}</p>}
@@ -162,6 +184,7 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
         <div className="form-actions">
           {!workspaceId && <button type="button" className="btn" disabled={loadingUsage || saving} onClick={() => setUsageAttempt(value => value + 1)}>
             <RefreshCw aria-hidden="true" />{loadingUsage ? '조회 중…' : '사용량 새로고침'}</button>}
+          <button type="button" className="btn" disabled={models.loading || saving} onClick={models.refresh}><RefreshCw aria-hidden="true" />{models.loading ? '모델 조회 중…' : '모델 목록 새로고침'}</button>
           <span className="spacer" />
           {!panel.embedded && <button type="button" className="btn" disabled={saving} onClick={close}>취소</button>}
           <button className="btn primary" disabled={!pick || settingsLoading || !!settingsError || saving}>{saving ? '저장 중…' : '저장'}</button>

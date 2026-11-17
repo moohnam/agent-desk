@@ -13,7 +13,7 @@ import { CONNECTOR_SCOPES, connectorTags } from './connector-tags.ts';
 //                    the engine of a new task. Untagged new tasks use the desk's default for the engine,
 //                    else the engine's own default
 //     #low…#max      reasoning effort for the task, kept the same way; a model that lacks the level
-//                    runs at the nearest one it supports (agy: #xhigh and #max run as high). #ultra is Codex only
+//                    runs at the nearest one it supports for legacy tags. Catalog selections require support. #ultra is Codex only
 //     #later/#now    what to do with a message sent while the task is still working: run it after
 //                    the current turn (#later, the default) or add it to the running turn (#now)
 //     #new           start a new task in the project instead of continuing one: a fresh session in
@@ -31,7 +31,19 @@ export const MODE_TAGS: Record<string, PermissionMode> = { auto: 'auto', ask: 'd
 export const MODE_LABEL: Record<PermissionMode, string> = { auto: '#auto', default: '#ask' };
 
 export type EngineName = 'claude' | 'codex' | 'agy';
-export type ModelName = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna' | 'argon' | 'flash';
+export type ModelAlias = 'opus' | 'sonnet' | 'haiku' | 'sol' | 'astra' | 'terra' | 'luna' | 'argon' | 'flash';
+export type CatalogModelName = `model:${EngineName}:${string}`;
+/** Catalog references keep the owning engine explicit; membership is checked on the runner. */
+export type VariantModelName = `variants:agy:${string}`;
+export type ModelName = ModelAlias | CatalogModelName | VariantModelName;
+export const catalogModelName = (engine: EngineName, id: string): CatalogModelName => `model:${engine}:${id}`;
+export const variantModelName = (base: string): VariantModelName => `variants:agy:${base}`;
+export function modelReference(value: unknown): { engine: EngineName; id: string; variants?: true } | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(model|variants):(claude|codex|agy):([a-zA-Z0-9][a-zA-Z0-9._/\[\]-]{0,199})$/.exec(value);
+  if (!match || (match[1] === 'variants' && match[2] !== 'agy')) return null;
+  return { engine: match[2] as EngineName, id: match[3], ...(match[1] === 'variants' ? {variants:true as const} : {}) };
+}
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export const EFFORT_TAGS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
@@ -43,7 +55,7 @@ export const EFFORT_TAGS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max', '
  * version runs (else a model alias).
  */
 export const ENGINE_INFO: Record<EngineName, {
-  label: string; tagLabel: string; short: string; models: ModelName[]; efforts: Effort[]; modelOwner: string; family: boolean;
+  label: string; tagLabel: string; short: string; models: ModelAlias[]; efforts: Effort[]; modelOwner: string; family: boolean;
 }> = {
   claude: { label: 'Claude', tagLabel: 'Claude', short: 'C', models: ['opus', 'sonnet', 'haiku'],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], modelOwner: 'Claude', family: false },
@@ -66,13 +78,13 @@ export const ENGINE_SHORT = byEngine((e) => ENGINE_INFO[e].short);
  */
 export const ENGINE_MODELS = byEngine((e) => ENGINE_INFO[e].models);
 export const ENGINE_EFFORTS = byEngine((e) => ENGINE_INFO[e].efforts);
-export const MODEL_TAGS: ModelName[] = ENGINES.flatMap((e) => ENGINE_MODELS[e]);
+export const MODEL_TAGS: ModelAlias[] = ENGINES.flatMap((e) => ENGINE_MODELS[e]);
 /** Engines whose terminal sessions desk_handoff can take over (importer.ts reads their session files). */
 export const HANDOFF_ENGINES = ['claude', 'codex'] as const satisfies readonly EngineName[];
 export type HandoffEngine = typeof HANDOFF_ENGINES[number];
 
 /** Each model's name, and how its tag reads in the compose box's suggestions. */
-export const MODEL_INFO: Record<ModelName, { label: string; help: string }> = {
+export const MODEL_INFO: Record<ModelAlias, { label: string; help: string }> = {
   opus: { label: 'Opus', help: 'Claude 모델을 Opus로' },
   sonnet: { label: 'Sonnet', help: 'Claude 모델을 Sonnet으로' },
   haiku: { label: 'Haiku', help: 'Claude 모델을 Haiku로' },
@@ -83,8 +95,9 @@ export const MODEL_INFO: Record<ModelName, { label: string; help: string }> = {
   argon: { label: 'Argon', help: 'agy 모델을 Gemini Argon 계열 최신으로' },
   flash: { label: 'Flash', help: 'agy 모델을 Gemini Flash 계열 최신으로' },
 };
-export const MODEL_LABEL = Object.fromEntries(MODEL_TAGS.map((m) => [m, MODEL_INFO[m].label])) as Record<ModelName, string>;
-export const modelEngine = (m: ModelName): EngineName => ENGINES.find((e) => ENGINE_MODELS[e].includes(m))!;
+export const MODEL_LABEL = Object.fromEntries(MODEL_TAGS.map((m) => [m, MODEL_INFO[m].label])) as Record<ModelAlias, string>;
+export const modelEngine = (m: ModelName): EngineName => (modelReference(m)?.engine ?? ENGINES.find((e) => (ENGINE_MODELS[e] as readonly string[]).includes(m)))!;
+export const modelLabel = (m: ModelName): string => modelReference(m)?.id ?? MODEL_LABEL[m as ModelAlias] ?? m;
 /** What an engine's model tags do, for help texts: "Codex 모델 계열 고르기, 최신 버전". */
 export const modelHelpOf = (e: EngineName) =>
   `${ENGINE_INFO[e].modelOwner} 모델${ENGINE_INFO[e].family ? ' 계열 고르기, 최신 버전' : ' 고르기'}`;
@@ -99,8 +112,9 @@ export const effortNote = () => EFFORT_TAGS.filter((t) => !ENGINES.every((e) => 
  * task the one the tags pick (`wantedEngine`).
  */
 export function modelProblem(engine: EngineName, c: { model?: ModelName; effort?: Effort }): string | null {
+  if (c.model && !modelEngine(c.model)) return `알 수 없는 모델입니다: ${c.model}`;
   if (c.model && modelEngine(c.model) !== engine) {
-    return `#${c.model}은(는) ${ENGINE_LABEL[modelEngine(c.model)]} 모델입니다. 이 작업은 ${ENGINE_LABEL[engine]}입니다`;
+    return `#${c.model}은(는) ${ENGINE_LABEL[modelEngine(c.model)!]} 모델입니다. 이 작업은 ${ENGINE_LABEL[engine]}입니다`;
   }
   if (c.effort && !ENGINE_EFFORTS[engine].includes(c.effort)) return `#${c.effort}는 ${ENGINE_LABEL[engine]}에서 쓸 수 없습니다`;
   return null;
@@ -168,7 +182,7 @@ export function mentionsIn(text: string): { name: string; no?: number }[] {
  * compose box's text, whose leading mention (only #tags before it) says where it goes and is taken
  * out; elsewhere, and in replies, mentions stay in the text the agent gets.
  */
-export function parseCompose(text: string, skills: Iterable<string> = [], route = true): Composed {
+export function parseCompose(text: string, skills: Iterable<string> = [], route = true, modelTags: Readonly<Record<string, ModelName>> = {}): Composed {
   const known = new Set([...skills].filter(name => !(CONNECTOR_SCOPES as readonly string[]).includes(name)));
   let body = text;
   let mention: Composed['mention'];
@@ -191,8 +205,17 @@ export function parseCompose(text: string, skills: Iterable<string> = [], route 
     if ((MODEL_TAGS as string[]).includes(t)) { model ??= t as ModelName; return pre; }
     if ((EFFORT_TAGS as string[]).includes(t)) { effort ??= t as Effort; return pre; }
     if ((DELIVERY_TAGS as string[]).includes(t)) { delivery ??= t as Delivery; return pre; }
+    if (!known.has(t) && modelTags[t]) { model ??= modelTags[t]; return pre; }
     if (known.has(t)) { if (!used.includes(t)) used.push(t); return pre; }
     return all;
   });
   return { mention, mode, engine, model, effort, delivery, skills: used, body: body.trim() };
+}
+
+/** Runtime IDs can carry provider suffixes; do not interpolate a catalog ID into a regex. */
+export function modelMatches(choice:ModelName,actual:string|undefined):boolean {
+  if (!actual) return false;
+  const reference=modelReference(choice);
+  return reference ? reference.variants ? actual.startsWith(`${reference.id}-`) : actual===reference.id || actual===reference.id.replace(/\[[^\]]+\]$/,'')
+    : actual===choice || actual.endsWith(`-${choice}`) || actual.includes(`-${choice}-`);
 }

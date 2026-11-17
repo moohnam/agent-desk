@@ -1,3 +1,4 @@
+import {catalogModelTags, catalogProblem, catalogModel, catalogsForTarget, type ModelCatalogs, type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import type { ConnectorBroker, ConnectorExecutionContext } from './connector-broker.ts';
 import type { ConnectorIdentity } from './connector-authority.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -7,8 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINE_MODELS, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
-  type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
+  DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_EFFORTS, ENGINE_LABEL, ENGINES, REQUEST_TOOL, engineOf, modelProblem, parseCompose, wantedEngine,
+  modelEngine, type Composed, type Effort, type EngineName, type ModelName, type PermissionMode,
 } from '../../shared/compose.ts';
 import type { Approval, ChannelContext, ChannelMessageInput, MessageReceipt, Settings, TaskView } from '../../shared/api.ts';
 import { channelContext, channelPrompt } from './channel-context.ts';
@@ -151,6 +152,9 @@ export class Hub extends DeskCore {
   readonly remotes: RemoteRunners;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
+  private localModelCatalogs: ModelCatalogs = {};
+  private localModelLabel = '로컬 러너';
+  private localModelsSupported = false;
   private pathAddress?: string;
   private inboundSkillSnapshot?: SkillSnapshot;
   /**
@@ -197,7 +201,24 @@ export class Hub extends DeskCore {
   }
 
   /** Compose syntax with the desk's skills as known #tags; `route`: the compose box's leading @mention. */
-  parse(text: string, route = false) { return parseCompose(text ?? '', this.inboundSkillSnapshot?.selected ?? this.skills.names(), route); }
+  parse(text: string, route = false, target?: {rootPath?: string; runnerId?: string}) {
+    const skills = this.inboundSkillSnapshot?.selected ?? this.skills.names();
+    return parseCompose(text ?? '', skills, route, catalogModelTags(catalogsForTarget(this.modelCatalogs(),target),skills));
+  }
+
+  /** Same workspace/authority scope as the new-task defaults. */
+  refreshModelCatalogs(force=false): RunnerModelCatalog[] { this.remotes.refreshModels(force); return this.modelCatalogs(); }
+  modelCatalogs(): RunnerModelCatalog[] {
+    const remote = this.remotes.list().map(r => ({runnerId:r.id,label:r.address,connected:r.connected,supported:this.remotes.catalogsSupported(r.id),catalogs:this.remotes.catalogsFor(r.id)}));
+    return this.runner.id && this.runner.engines.size ? [{runnerId:this.runner.id,label:this.localModelLabel,
+      connected:this.runner.connected,supported:this.localModelsSupported,catalogs:structuredClone(this.localModelCatalogs)},...remote] : remote;
+  }
+  private checkCatalog(engine: EngineName, model: ModelName | null | undefined, effort: Effort | null | undefined, path?: string, runnerId?: string) {
+    const peer = runnerId ? this.remotes.peer(runnerId) : path ? this.remotes.forPath(path) : undefined;
+    const catalogs = peer ? this.remotes.catalogsFor(peer.id) : this.localModelCatalogs;
+    const problem = catalogProblem(engine,model ?? undefined,effort ?? undefined,catalogs[engine]);
+    if (problem) throw new HttpError(400,problem);
+  }
 
   /** The received workspace operation keeps its own accepted skill version through synchronous routing. */
   withSkillSnapshot<T>(snapshot: SkillSnapshot, work: () => T): T {
@@ -276,8 +297,15 @@ export class Hub extends DeskCore {
     const engines = ENGINES.filter((e) => s[e]);
     for (const e of engines) {
       const { model, effort } = s[e]!;
-      if (model != null && !ENGINE_MODELS[e].includes(model)) throw new HttpError(400, `${ENGINE_LABEL[e]} 모델이 아닙니다: ${model}`);
+      if (model != null && modelEngine(model) !== e) throw new HttpError(400, `${ENGINE_LABEL[e]} 모델이 아닙니다: ${model}`);
       if (effort != null && !ENGINE_EFFORTS[e].includes(effort)) throw new HttpError(400, `${ENGINE_LABEL[e]}에서 쓸 수 없는 effort입니다: ${effort}`);
+      const selected = model === undefined ? this.settings()[e].model : model;
+      const selectedEffort = effort === undefined ? this.settings()[e].effort : effort;
+      const inventory = this.modelCatalogs();
+      const catalogs = inventory.flatMap(r=>r.catalogs[e]?.updatedAt ? [r.catalogs[e]!] : []);
+      const catalog = catalogs.find(c=>catalogModel(c,selected ?? undefined,selectedEffort ?? undefined)) ?? catalogs[0];
+      const problem = catalogProblem(e,selected ?? undefined,selectedEffort ?? undefined,catalog);
+      if (problem) throw new HttpError(400,problem);
     }
     for (const e of engines) {
       if (s[e]!.model !== undefined) this.store.setSetting(`${e}_model`, s[e]!.model);
@@ -396,7 +424,7 @@ export class Hub extends DeskCore {
     requireAdmission();
     const project = this.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'project not found');
-    const c = this.parse(text, routed);
+    const c = this.parse(text, routed, {rootPath:project.root_path});
     const engine = this.checkNewTask(c, engine0, project.root_path);
     const skillSnapshot = this.skillSnapshot(c.skills);
     this.requireSkillSnapshotRunner(skillSnapshot, undefined, project.root_path);
@@ -405,6 +433,7 @@ export class Hub extends DeskCore {
     const permissionMode = c.mode ?? mode;
     const d = this.settings()[engine];
     const model = c.model ?? d.model, effort = c.effort ?? d.effort;
+    this.checkCatalog(engine,model,effort,project.root_path);
     const ts = now();
     const task = this.store.createTask({
       id: randomUUID(), project_id: projectId, title: title?.trim() || (prompt || c.skills.map((s) => `#${s}`).join(' ')).slice(0, 60),
@@ -441,10 +470,10 @@ export class Hub extends DeskCore {
   }
   private sendMessageInner(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context?: ChannelContext): string {
     requireAdmission();
-    const c = this.parse(text, routed);
-    if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     const session = this.store.latestSession(taskId);
     if (!session) throw new HttpError(404, 'task has no session');
+    const c = this.parse(text,routed,{runnerId:session.runner_id});
+    if (!c.body && !c.mode && !c.model && !c.effort && !c.skills.length) throw new HttpError(400, 'text is required');
     if (session.source !== 'app') throw new HttpError(409, 'external sessions are view-only');
     const engine = engineOf(session.engine);
     if (this.remotes.canQueue(session.id) && text.includes(config.uploadsDir + '/')) throw new HttpError(400, '첨부 파일은 허브 머신에 있습니다. 원격 머신에 파일을 옮긴 뒤 해당 경로를 입력하세요');
@@ -476,8 +505,9 @@ export class Hub extends DeskCore {
     const wait = !asked && content && (this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
     // model and the change applies from the next turn.
-    const model = c.model && c.model !== session.model ? c.model : undefined;
-    const effort = c.effort && c.effort !== session.effort ? c.effort : undefined;
+    const model = c.model; // An explicit repeat also retries a runner-side model-change failure.
+    const effort = c.effort;
+    if (model || effort) this.checkCatalog(engine,model ?? session.model,effort ?? session.effort,undefined,session.runner_id);
     if ((model || effort || (c.mode && c.mode !== session.permission_mode)) && this.approvalPending(session.id))
       throw new HttpError(409,'먼저 대기 중인 승인·질문에 답한 뒤 실행 설정을 바꿔 주세요');
     if ((model || effort || (c.mode && c.mode !== session.permission_mode))
@@ -681,13 +711,14 @@ export class Hub extends DeskCore {
     this.requireSkillSnapshotRunner(skillSnapshot, parent.id);
     const permissionMode = c.mode ?? parent.permission_mode;
     const model = c.model ?? parent.model, effort = c.effort ?? parent.effort;
+    const engine = engineOf(parent.engine);
+    this.checkCatalog(engine,model,effort,undefined,parent.runner_id);
     const ts = now();
     const task = this.store.createTask({
       id: randomUUID(), project_id: parentTask.project_id, title: (c.body || c.skills.map((s) => `#${s}`).join(' ')).slice(0, 60),
       status: 'running', checkpoint_md: null, created_by: OWNER, created_at: ts, updated_at: ts,
     });
     const sessionId = randomUUID();
-    const engine = engineOf(parent.engine);
     this.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd: parent.cwd,
       source: 'app', status: 'running', runner_id: parent.runner_id, created_at: ts, permission_mode: permissionMode,
@@ -896,6 +927,9 @@ export class Hub extends DeskCore {
     if (m.type === 'hello') {
       this.store.upsertRunner(m.runnerId, m.host, m.capabilities);
       this.runnerCloses = !!m.capabilities.close;
+      this.localModelCatalogs = structuredClone(m.capabilities.modelCatalogs ?? {});
+      this.localModelLabel = m.host;
+      this.localModelsSupported = m.capabilities.modelCatalogs !== undefined;
       this.reconcile(m.sessions);
       return;
     }

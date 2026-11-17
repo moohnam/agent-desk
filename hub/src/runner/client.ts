@@ -1,3 +1,4 @@
+import { modelReference } from '../../../shared/compose.ts';
 import { DEFAULT_INSTRUCTIONS } from '../instruction-store.ts';
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
@@ -28,6 +29,7 @@ export interface RunnerPort {
   /** Remote commands can be accepted durably while the link is down. */
   canQueue?(sessionId: string): boolean;
   ready?(sessionId: string): boolean;
+  refreshModels?(force?: boolean): void;
 }
 
 /** Makes the hub's runner connection, which reports messages and connection changes back. */
@@ -52,6 +54,7 @@ export class RunnerClient implements RunnerPort {
   private supportsSkillSnapshot = false;
   private supportsInstructions = false;
   private supportsConnectorMcp = false;
+  private supportsModelCatalogs = false;
   private lastSpawn = 0;
   private onMessage: (m: RunnerToHub) => void;
   private onConnection: (connected: boolean) => void;
@@ -84,8 +87,14 @@ export class RunnerClient implements RunnerPort {
   get connectorMcpSupported() { return this.supportsConnectorMcp; }
   has(sessionId: string) { return this.connected && this.live.has(sessionId); }
 
+  refreshModels(force=false) {
+    if (this.connected && this.supportsModelCatalogs) this.handle({type:'refresh_models',sessionId:'model-catalog',force});
+  }
+
   handle(cmd: HubToRunner) {
     if (!this.socket) throw new Error('runner not connected');
+    if ((cmd.type === 'start' || cmd.type === 'set_model') && cmd.model && modelReference(cmd.model) && !this.supportsModelCatalogs)
+      throw new HttpError(409,'현재 로컬 러너는 실제 모델 ID 선택을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요');
     if ((cmd.type === 'start' || cmd.type === 'send') && cmd.skillSnapshot && !this.supportsSkillSnapshot)
       throw new HttpError(409, '현재 로컬 러너는 고정 스킬 버전을 지원하지 않습니다. 실행 중인 세션은 유지되며, 러너가 업데이트된 뒤 다시 보내주세요');
     if (cmd.type === 'start' && cmd.instructions !== undefined && cmd.instructions !== DEFAULT_INSTRUCTIONS && !this.supportsInstructions)
@@ -126,6 +135,7 @@ export class RunnerClient implements RunnerPort {
           this.supportsSkillSnapshot = !!m.capabilities.skillSnapshot;
           this.supportsInstructions = !!m.capabilities.instructions;
           this.supportsConnectorMcp = !!m.capabilities.connectorMcp;
+          this.supportsModelCatalogs = m.capabilities.modelCatalogs !== undefined;
           if (m.protocolVersion !== PROTOCOL_VERSION && this.options.spawnIfMissing !== false) {
             console.warn(`runner speaks protocol ${m.protocolVersion ?? '(none)'}, this hub ${PROTOCOL_VERSION}: restart the runner (npm run runner:stop)`);
           }

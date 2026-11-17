@@ -26,6 +26,7 @@ let stopping = false;
 let exchanging = false;
 process.on('SIGTERM',()=>{stopping=true;});
 process.on('SIGINT',()=>{stopping=true;});
+agent.runner.startModelRefresh();
 agent.pump();
 await registerRuntimeControl({ role: 'remote', ready: () => !stopping,
   blockers: () => [...sessionBlockers(agent.runner.snapshot()), ...(exchanging ? ['교환 중'] : []),
@@ -43,13 +44,14 @@ while (!stopping) {
     if (!events.length && journal.lastEvent > journal.eventAck) throw new Error('첫 미전달 이벤트가 배치 크기 한도를 넘었습니다. 전달 DB 원본을 보존하고 확인해 주세요');
     const input: RemoteExchange = {version:1,journalId:journal.id,commandAck:journal.commandAck,events,
       more:journal.lastEvent > (events.at(-1)?.seq ?? journal.eventAck), sessions:agent.runner.snapshot(),engines:agent.runner.capabilities.engines,
-      skillSnapshot:agent.runner.capabilities.skillSnapshot,instructions:true};
+      modelCatalogs:agent.runner.capabilities.modelCatalogs,skillSnapshot:agent.runner.capabilities.skillSnapshot,instructions:true};
     const res = await fetch(url,{method:'POST',redirect:'error',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify(input),signal:AbortSignal.timeout(10_000)});
     if (!res.ok) {
       const detail = await res.json().catch(()=>({})) as {error?:string};
       throw new Error(`허브 교환 실패 (HTTP ${res.status}): ${detail.error?.slice(0,250) ?? ''}`);
     }
     const reply = await res.json() as RemoteReply;
+    if (reply.refreshModels) agent.runner.refreshModels(reply.forceModelRefresh);
     journal.acknowledge(reply.eventAck,events.at(-1)?.seq ?? journal.eventAck);
     journal.receive(reply.commands);
     agent.pump();

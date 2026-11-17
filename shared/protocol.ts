@@ -3,6 +3,7 @@
 // newline-delimited JSON over a loopback TCP socket.
 
 import type { Effort, EngineName, ModelName, PermissionMode } from './compose.ts';
+import { checkModelCatalogs, type ModelCatalogs } from './model-catalog.ts';
 import type { RunnerStatusState } from './events.ts';
 
 /**
@@ -25,7 +26,7 @@ export interface SkillSnapshot { version: 1; selected: string[]; files: SkillTra
 export const PROTOCOL_VERSION = 1;
 
 /** What a runner can do: the engines it runs, and `close`: it understands the close command. */
-export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean }
+export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean; modelCatalogs?: ModelCatalogs }
 
 /** A Codex question asked in passing (delivery 'async'): the user's next message answers it. */
 export interface AsyncQuestion { title: string; options: string[] }
@@ -48,6 +49,8 @@ export type HubToRunner =
   | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
   /** Changes what is given; takes effect from the next turn. */
+  /** Metadata only; sessionId is a control-channel identifier, never an engine session. */
+  | { type: 'refresh_models'; sessionId: string; force?: boolean }
   | { type: 'set_model'; sessionId: string; model?: ModelName; effort?: Effort }
   | { type: 'interrupt'; sessionId: string }
   /** Ends the session now (the user closed it); a turn in progress is cut. */
@@ -133,6 +136,7 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';
     case 'set_mode': return MODES.includes(m.permissionMode as string) ? m as HubToRunner : 'set_mode: bad mode';
     case 'set_model': return optStr(m.model) && optStr(m.effort) ? m as HubToRunner : 'set_model: bad fields';
+    case 'refresh_models': return m.force === undefined || typeof m.force === 'boolean' ? m as HubToRunner : 'refresh_models: bad force';
     case 'interrupt': case 'close': return m as HubToRunner;
     case 'approval_result':
       return str(m.approvalId) && typeof m.allow === 'boolean' && optStr(m.message) && (m.answers === undefined || isObj(m.answers))
@@ -146,6 +150,7 @@ export function checkRunnerToHub(m: unknown): RunnerToHub | string {
   if (!isObj(m) || !str(m.type)) return 'not a message';
   if (m.type === 'hello') {
     return str(m.runnerId) && Array.isArray(m.sessions) && isObj(m.capabilities) && Array.isArray(m.capabilities.engines)
+      && (m.capabilities.modelCatalogs === undefined || checkModelCatalogs(m.capabilities.modelCatalogs))
       ? m as RunnerToHub : 'hello: bad fields';
   }
   if (!str(m.sessionId)) return `${m.type}: no sessionId`;

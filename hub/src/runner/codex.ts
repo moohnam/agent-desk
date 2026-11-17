@@ -13,7 +13,8 @@ import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
 import { codexMcpProcess } from './managed-mcp.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
-import { latestOfFamily } from './models.ts';
+import { catalogModel, catalogProblem, catalogEffort } from '../../../shared/model-catalog.ts';
+import { runnerModelCatalogs, readCodexModels } from './model-catalog.ts';
 import { CodexActivity } from './codex-activity.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
 
@@ -57,6 +58,7 @@ export const startCodex: StartEngine = (opts) => {
   /** The model id a family tag resolved to, and the effort; both go with every turn/start. Unset: Codex's default. */
   let model: string | undefined;
   let effort = opts.effort;
+  let selectedChoice = opts.model;
   /** The model the feed last heard of (thread start or a later switch). */
   let reported: string | undefined;
   let threadId: string | null = null;
@@ -303,18 +305,16 @@ export const startCodex: StartEngine = (opts) => {
     return input;
   };
 
-  /** A family tag to the newest model id the app server lists for it. */
-  const resolveModel = async (family: ModelName): Promise<string> => {
-    const ids: string[] = [];
-    let cursor: string | null = null;
-    do {
-      const r: Json = await request('model/list', { cursor, includeHidden: false });
-      for (const m of r.data ?? []) ids.push(m.id);
-      cursor = r.nextCursor ?? null;
-    } while (cursor);
-    const id = latestOfFamily(ids, family);
-    if (!id) throw new Error(`Codex 모델 목록에 #${family} 계열이 없습니다`);
-    return id;
+  /** Resolve only on session start or explicit selection; refreshes never change this session. */
+  const resolveModel = async (choice: ModelName, wantedEffort = effort, pinnedId?: string): Promise<{model:string;effort:typeof effort}> => {
+    const fresh = await runnerModelCatalogs.read('codex',false,()=>readCodexModels(request));
+    const catalog = pinnedId ? {...fresh,models:fresh.models.filter(m=>m.id===pinnedId)} : fresh;
+    if (!catalog.updatedAt) throw new Error(catalog.error ?? 'Codex 모델 목록을 확인하지 못했습니다');
+    const problem = catalogProblem('codex',choice,wantedEffort,catalog);
+    if (problem) throw new Error(problem);
+    const selected = catalogModel(catalog,choice,wantedEffort);
+    if (!selected) throw new Error(`Codex 모델 목록에 ${choice}이 없습니다`);
+    return {model:selected.id,effort:catalogEffort(catalog,choice,wantedEffort)};
   };
 
   /** Runs a turn; the queue calls it once the thread has started. */
@@ -349,10 +349,7 @@ export const startCodex: StartEngine = (opts) => {
           event({ kind: 'status', state: 'warning', detail: { message: `데스크 스킬 등록 실패: ${err.message}` } });
         });
       }
-      if (opts.model) model = await resolveModel(opts.model).catch((err: Error) => {
-        event({ kind: 'status', state: 'warning', detail: { message: `${err.message}. Codex 기본 모델로 진행합니다` } });
-        return undefined;
-      });
+      if (opts.model) ({model,effort} = await resolveModel(opts.model));
       const common = {
         ...(model && { model }), cwd: opts.cwd, approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandbox: SANDBOX_MODE, developerInstructions: deskInstructions(opts.skillsHome, opts.instructions),
       };
@@ -423,8 +420,11 @@ export const startCodex: StartEngine = (opts) => {
     setMode: async (m) => { mode = m; },
     // Like the mode, applies from the next turn/start.
     setModel: (m, e) => {
-      if (e) effort = e;
-      const p = switching.then(async () => { if (m) model = await resolveModel(m); });
+      const p = switching.then(async () => {
+        const choice = m ?? selectedChoice;
+        if (choice) { ({model,effort} = await resolveModel(choice,e ?? effort,m ? undefined : model)); selectedChoice = choice; }
+        else if (e) effort = e;
+      });
       switching = p.catch(() => {});
       return p;
     },

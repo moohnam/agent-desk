@@ -185,6 +185,13 @@ export class DocumentPreviews {
     const grant=this.grants.get(id);if(!grant)return;
     this.grants.delete(id);grant.entry.at=Date.now();await this.collect();
   }
+  /** Reuse only this live document capability, never its directory or another task's approval. */
+  approvedPath(id: string | null, source: string, task: string, href: string): string | undefined {
+    const grant = id ? this.grants.get(id) : undefined;
+    if (!grant || grant.until <= Date.now() || !grant.allowed()) return undefined;
+    const entry = grant.entry;
+    return entry.source === source && entry.task === task && entry.href === documentPath(href) ? entry.approvedPath : undefined;
+  }
   async serve(id:string,rawPath:string,res:ServerResponse,origin:string) {
     this.expireGrants();const grant=this.grants.get(id);
     if(!grant||!grant.allowed())throw new HttpError(404,'문서 미리보기가 만료됐습니다. 다시 열어 주세요');

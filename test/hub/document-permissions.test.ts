@@ -93,6 +93,10 @@ test('local and remote HTTP previews require explicit canonical approval and kee
     const headers = {authorization: `Bearer ${peer.token}`, 'x-workspace-id': authority.id};
     const identity = await fetch(runnerUrl + '/v1/identity', {headers}).then(r => r.json()) as any;
     assert.equal(identity.capabilities.file_permission, 1);
+    assert.equal(identity.capabilities.file_path, 1);
+    const pathRequest = '/v1/file-path?' + new URLSearchParams({task_id:remote.task.id,href:'report.html'});
+    assert.equal((await fetch(runnerUrl + pathRequest)).status,401);
+    assert.equal((await fetch(runnerUrl + pathRequest,{headers:{...headers,'x-workspace-id':'wrong'}})).status,409);
     const first = join(outside, 'first.html'), second = join(outside, 'second.html'), alias = join(project, 'report.html');
     await Promise.all([writeFile(first, '<h1>first fixture</h1>'), writeFile(second, '<h1>second fixture</h1>'), writeFile(join(outside, 'style.css'), 'h1{}')]);
     const post = async (input: Record<string, unknown>) => {
@@ -105,10 +109,20 @@ test('local and remote HTTP previews require explicit canonical approval and kee
       const denied = await post(input); assert.equal(denied.status, 403); assert.equal(denied.body.code, 'document_permission_required'); assert.equal(denied.body.path, first);
       for (const approved_path of ['relative.html', '/bad\0path.html', '/' + 'a'.repeat(4096), null]) assert.equal((await post({...input, approved_path})).status, 400);
       const allowed = await post({...input, approved_path: first}); assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+      const metadata = async (href: string, previewId?: string, taskId = task) => {
+        const response = await fetch(url + (owner ? `/api/workspaces/${owner}` : '/api') + '/file-path?' + new URLSearchParams({task_id:taskId,href,...(previewId ? {preview_id:previewId} : {})}));
+        return {status:response.status,body:await response.json() as any};
+      };
+      const grant = allowed.body.url.split('/')[2];
+      assert.equal((await metadata(alias)).status,403,'outside metadata needs the existing document grant');
+      assert.deepEqual(await metadata(alias,grant),{status:200,body:{path:first}},'return the remote source, not the hub preview copy');
+      assert.equal((await metadata(second,grant)).status,403,'one grant cannot authorize a sibling document');
+      assert.notEqual((await metadata(alias,grant,'wrong-task')).status,200);
       assert.equal(await fetch(url + allowed.body.url).then(r => r.text()), '<html><head></head><body><h1>first fixture</h1></body></html>');
       assert.equal((await fetch(url + allowed.body.url.replace(/[^/]*$/, 'style.css'))).status, 403);
       assert.equal((await post(input)).status, 403, 'an approved cache must not satisfy an unapproved request');
       await unlink(alias); await symlink(second, alias);
+      assert.equal((await metadata(alias,grant)).status,403,'a redirected source cannot reuse the old grant');
       const changed = await post({...input, approved_path: first}); assert.equal(changed.status, 403); assert.equal(changed.body.path, second);
       const replacement = await post({...input, approved_path: second}); assert.equal(replacement.status, 200);
       assert.equal(await fetch(url + replacement.body.url).then(r => r.text()), '<html><head></head><body><h1>second fixture</h1></body></html>');

@@ -214,6 +214,20 @@ export class WorkspaceLinks {
     }else await this.attach({name:'local',url,token},id);
     return id;
   }
+  /** Read source metadata directly; never queue a copy action or download its contents. */
+  async documentPath(id: string, task: string, href: string, approvedPath?: string) {
+    const link = this.link(id), identity = await this.request(link, '/v1/identity');
+    if (!('status' in identity) || identity.status !== 200 || identity.body.capabilities?.file_path !== 1)
+      throw new HttpError(409, '원본 경로를 복사하려면 해당 러너를 업데이트해야 합니다');
+    const reply = await this.request(link, '/v1/file-path?' + new URLSearchParams({ task_id: task, href, ...(approvedPath ? { approved_path: approvedPath } : {}) }));
+    if (!('status' in reply)) throw new HttpError(502, '원본 경로 응답을 받지 못했습니다');
+    if (reply.status !== 200) throw new HttpError(reply.status, reply.status === 404 ? '원본 문서나 작업을 찾을 수 없습니다' : '원본 경로를 확인하지 못했습니다. 문서 접근 권한과 러너 연결을 확인해 주세요');
+    const path = reply.body?.path;
+    if (typeof path !== 'string' || !isAbsolute(path) || path.length > 4096 || /[\x00-\x1f]/.test(path))
+      throw new HttpError(502, '러너가 올바른 원본 절대 경로를 반환하지 않았습니다');
+    return path;
+  }
+
   /** A bounded preview transfer; the runner must enforce the document-directory boundary. */
   async previewFile(id:string, taskId:string, href:string, base:string|undefined, receive:(r:Response)=>Promise<string>, approvedPath?:string) {
     const link=this.link(id);

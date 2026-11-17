@@ -35,6 +35,11 @@ const runner = new Runner(`local-${hostname()}`, (m) => {
   }
 }, { mcp: { url: `http://127.0.0.1:${config.port}/mcp` } });
 
+runner.startModelRefresh(() => {
+  if (hub) writeLine(hub, {type:'hello',runnerId:runner.id,host:hostname(),capabilities:runner.capabilities,
+    sessions:runner.snapshot(),protocolVersion:PROTOCOL_VERSION} satisfies RunnerToHub);
+});
+
 // A failure in one session's adapter must not end the daemon and every other session with it.
 process.on('unhandledRejection', (err) => console.error('runner: unhandled rejection', err));
 

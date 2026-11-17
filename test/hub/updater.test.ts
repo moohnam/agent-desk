@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { controlRequest, hubBlockers, registerRuntimeControl, requireAdmission, sessionBlockers } from '../../hub/src/runtime-control.ts';
@@ -138,6 +139,122 @@ appendFileSync(process.env.AGENT_DESK_DB,';forward-migration'); process.exit(17)
       }
       await delay(150);
     } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('real worker exits and crashes preserve detached runtimes, reclaim stale locks and recover forward after a failed start', {timeout: 90_000}, async () => {
+  const dir = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'desk-worker-process-'));
+  const source = join(dir, 'source'), data = join(dir, 'data'), deploy = join(dir, 'deploy');
+  mkdirSync(join(source, 'hub/src/runner'), {recursive: true}); mkdirSync(data);
+  for (const name of ['runtime-control.ts', 'trusted-path.ts', 'errors.ts'])
+    copyFileSync(new URL('../../hub/src/' + name, import.meta.url), join(source, 'hub/src', name));
+  const git = (...args: string[]) => execFileSync('git', ['-C', source, ...args], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+  git('init', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  const pkg = {name: 'worker-process-fixture', version: '1.0.0', type: 'module', scripts: {
+    typecheck: 'node -e "process.exit(0)"', build: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"',
+  }};
+  writeFileSync(join(source, 'package.json'), JSON.stringify(pkg));
+  writeFileSync(join(source, 'package-lock.json'), JSON.stringify({name: pkg.name, version: pkg.version, lockfileVersion: 3, packages: {'': {name: pkg.name, version: pkg.version}}}));
+  const runtime = (version: string) => `import {registerRuntimeControl} from '../runtime-control.ts';
+import {appendFileSync} from 'node:fs'; import {dirname,join} from 'node:path';
+const data=dirname(process.env.AGENT_DESK_DB);
+appendFileSync(join(data,'starts.jsonl'),JSON.stringify({version:${JSON.stringify(version)},environment:process.env.DESK_WORKER_PROCESS_TEST})+'\\n');
+await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:()=>process.exit(0)});`;
+  const commit = (text: string, message: string) => {
+    writeFileSync(join(source, 'hub/src/runner/shared.ts'), text); git('add', '.'); git('commit', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  const firstCommit = commit(runtime('first'), 'first');
+  const probe = createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const port = (probe.address() as {port: number}).port;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const config: UpdateConfig = {version: 1, enabled: true, source, ref: 'main', deploymentDir: deploy, dataDir: data,
+    roles: ['shared'], environment: {AGENT_DESK_SHARED_PORT: String(port)}, intervalMs: 1000};
+  const configPath = join(dir, 'update.json'); writePrivateJson(configPath, config);
+  writeFileSync(join(data, 'agent-desk.db'), 'original-data');
+  const observer = new UpdateWorker(config), children: ChildProcess[] = [];
+  const reports = new Map<ChildProcess, string>();
+  let diagnostics = '';
+  const launch = () => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../../hub/src/update-cli.ts', import.meta.url)), 'run', configPath], {
+      cwd: dir, env: {...process.env, DESK_WORKER_PROCESS_TEST: 'preserved'}, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    children.push(child);
+    child.on('error', error => { diagnostics += error.message; });
+    for (const stream of [child.stdout!, child.stderr!]) stream.on('data', chunk => {
+      diagnostics = (diagnostics + chunk).slice(-32_768);
+      reports.set(child, ((reports.get(child) ?? '') + chunk).slice(-32_768));
+    });
+    return child;
+  };
+  const waitFor = async <T,>(read: () => T | Promise<T>, label: string): Promise<NonNullable<T>> => {
+    for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+      const value = await read(); if (value) return value as NonNullable<T>;
+      await delay(25);
+    }
+    throw new Error(label + '\n' + diagnostics);
+  };
+  const active = async (commit: string) => {
+    const state = observer.state();
+    if (state.phase !== 'active' || state.current !== commit) return;
+    const runtime = (await observer.status())[0].runtime;
+    return runtime?.ready && runtime.commit === commit ? runtime : undefined;
+  };
+  const stopWorker = async (child: ChildProcess, signal: NodeJS.Signals) => {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+    await waitFor(() => child.exitCode !== null || child.signalCode !== null, 'worker did not exit');
+  };
+  try {
+    const firstWorker = launch();
+    const firstRuntime = await waitFor(() => active(firstCommit), 'first runtime did not become ready');
+    await stopWorker(firstWorker, 'SIGTERM');
+    assert.equal(firstWorker.exitCode, 0); assert.equal(existsSync(join(deploy, 'worker.lock')), false);
+    assert.equal((await observer.status())[0].runtime?.pid, firstRuntime.pid, 'SIGTERM must leave the runtime alive');
+
+    const secondWorker = launch();
+    await waitFor(() => reports.get(secondWorker)?.includes('"activated":true') && existsSync(join(deploy, 'worker.lock'))
+      && JSON.parse(readFileSync(join(deploy, 'worker.lock'), 'utf8')).pid === secondWorker.pid, 'replacement worker did not claim the deployment');
+    assert.equal((await observer.status())[0].runtime?.instance, firstRuntime.instance);
+    await stopWorker(secondWorker, 'SIGKILL');
+    assert.equal(secondWorker.signalCode, 'SIGKILL'); assert.equal(existsSync(join(deploy, 'worker.lock')), true);
+    assert.equal((await observer.status())[0].runtime?.pid, firstRuntime.pid, 'a worker crash must leave the runtime alive');
+
+    const brokenCommit = commit(`import {appendFileSync} from 'node:fs';
+appendFileSync(process.env.AGENT_DESK_DB,';forward-migration');process.exit(17);`, 'fails after forward migration');
+    const thirdWorker = launch();
+    await waitFor(() => {const state = observer.state(); return state.phase === 'failed' && state.candidate === brokenCommit;}, 'startup failure was not recorded');
+    await stopWorker(thirdWorker, 'SIGTERM');
+    assert.equal(thirdWorker.exitCode, 0);
+    assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), 'original-data;forward-migration');
+    assert.equal((await observer.status())[0].runtime, undefined, 'the old binary must not restart after migration');
+
+    const repairedCommit = commit(runtime('repaired'), 'forward repair');
+    const fourthWorker = launch();
+    const repairedRuntime = await waitFor(() => active(repairedCommit), 'restarted worker did not recover with the forward repair');
+    await stopWorker(fourthWorker, 'SIGTERM');
+    assert.equal(fourthWorker.exitCode, 0); assert.notEqual(repairedRuntime.pid, firstRuntime.pid);
+    assert.equal((await observer.status())[0].runtime?.instance, repairedRuntime.instance);
+    assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), 'original-data;forward-migration');
+    const starts = readFileSync(join(data, 'starts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(starts, [{version: 'first', environment: 'preserved'}, {version: 'repaired', environment: 'preserved'}]);
+  } finally {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) await stopWorker(child, 'SIGKILL');
+    const runtime = (await observer.status())[0].runtime;
+    if (runtime) {
+      const hold = await controlRequest(observer.socket('shared'), {action: 'prepare', instance: runtime.instance});
+      assert.equal(hold.ok, true);
+      await controlRequest(observer.socket('shared'), {action: 'stop', instance: runtime.instance, lease: hold.lease});
+      await waitFor(async () => {
+        try {return !(await observer.status())[0].runtime;}
+        catch (error) {
+          // A connection accepted immediately before process exit can end without a status reply.
+          if ((error as Error).message === '런타임 제어 응답이 끊겼습니다' || (error as NodeJS.ErrnoException).code === 'ECONNRESET') return false;
+          throw error;
+        }
+      }, 'fixture runtime did not stop');
+    }
+    rmSync(dir, {recursive: true, force: true});
   }
 });
 
@@ -424,4 +541,85 @@ test('prepare and activate reject writable Git metadata, release trees, markers 
     unlinkSync(internal); symlinkSync(alias, internal);
     assert.throws(() => assertTrustedTree(release), /쓰기 권한/);
   } finally {worker?.close(); rmSync(dir, {recursive: true, force: true});}
+});
+
+/** A disposable Git source and fake npm: no real package install, model or production service. */
+function prepareGuardFixture() {
+  const dir=mkdtempSync(join(process.platform==='darwin'?'/private/tmp':tmpdir(),'desk-prepare-'));
+  const source=join(dir,'source'),data=join(dir,'data'),deploy=join(dir,'deploy'),bin=join(dir,'bin');
+  mkdirSync(join(source,'hub/src/runner'),{recursive:true});mkdirSync(data);mkdirSync(bin);
+  const git=(...args:string[])=>execFileSync('git',['-C',source,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('init','-b','main');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');
+  writeFileSync(join(source,'package.json'),JSON.stringify({name:'prepare-fixture',version:'1.0.0',type:'module'}));
+  writeFileSync(join(source,'package-lock.json'),'{}');writeFileSync(join(source,'hub/src/runner/shared.ts'),'process.exit(0)');
+  git('add','.');git('commit','-m','fixture');const commit=git('rev-parse','HEAD');
+  const npm=join(bin,'npm'),marker=join(deploy,'prepare.pending.json');
+  const fakeNpm=(body:string)=>writeFileSync(npm,`#!${process.execPath}\n${body}\n`,{mode:0o755});
+  const config:UpdateConfig={version:1,enabled:true,source,ref:'main',deploymentDir:deploy,dataDir:data,roles:['shared'],environment:{AGENT_DESK_SHARED_PORT:'65431'},intervalMs:1000};
+  return {dir,data,deploy,bin,marker,config,commit,fakeNpm};
+}
+
+test('prepare crash guard blocks a replacement worker while orphan npm remains and allows explicit recovery only after it ends',{timeout:30_000},async()=>{
+  const f=prepareGuardFixture(),configPath=join(f.dir,'update.json'),capture=join(f.data,'npm.jsonl');
+  writePrivateJson(configPath,f.config);
+  f.fakeNpm(`import{appendFileSync}from'node:fs';appendFileSync(${JSON.stringify(capture)},JSON.stringify({pid:process.pid,args:process.argv.slice(2)})+'\\n');setInterval(()=>{},1000);`);
+  const workers:ChildProcess[]=[];let reports='';
+  const rows=()=>existsSync(capture)?readFileSync(capture,'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line) as {pid:number;args:string[]}):[];
+  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
+  const wait=async(read:()=>boolean,label:string)=>{for(let i=0;i<400;i++){if(read())return;await delay(25);}throw new Error(label+'\n'+reports);};
+  const launch=()=>{
+    const child=spawn(process.execPath,[fileURLToPath(new URL('../../hub/src/update-cli.ts',import.meta.url)),'run',configPath],{cwd:f.dir,env:{...process.env,PATH:f.bin+':'+process.env.PATH},stdio:['ignore','pipe','pipe']});
+    workers.push(child);for(const stream of [child.stdout!,child.stderr!])stream.on('data',chunk=>{reports=(reports+chunk).slice(-32_768);});return child;
+  };
+  try {
+    const first=launch();await wait(()=>rows().length===1,'initial fake npm did not start');
+    const orphan=rows()[0].pid;first.kill('SIGKILL');await wait(()=>first.signalCode==='SIGKILL','worker did not crash');
+    assert.equal(alive(orphan),true);assert.equal(existsSync(f.marker),true);
+    const second=launch();await wait(()=>reports.includes('이전 업데이트 준비의 프로세스 종료를 확인하지 못해'),'replacement did not report its prepare guard');
+    await delay(150);assert.equal(rows().length,1,'no second npm may build the same release');assert.equal(alive(orphan),true);
+    second.kill('SIGTERM');await wait(()=>second.exitCode!==null||second.signalCode!==null,'replacement did not stop');
+    process.kill(orphan,'SIGKILL');await wait(()=>!alive(orphan),'orphan npm did not exit');
+    // Only this fixture's known process has been stopped; emulate the documented operator recovery.
+    unlinkSync(f.marker);f.fakeNpm('process.exit(0)');
+    const previousPath=process.env.PATH;process.env.PATH=f.bin+':'+previousPath;
+    const recovered=new UpdateWorker(f.config);recovered.claim();
+    try {assert.equal(await recovered.prepare(),f.commit);assert.equal(existsSync(f.marker),false);}
+    finally {recovered.close();process.env.PATH=previousPath;}
+  } finally {
+    for(const child of workers)if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');
+    for(const row of rows())if(alive(row.pid))try{process.kill(row.pid,'SIGKILL');}catch{}
+    await delay(100);rmSync(f.dir,{recursive:true,force:true});
+  }
+});
+
+for(const mode of ['exit','signal','maxBuffer','timeout'] as const)test(`prepare guard handles ${mode} without treating uncertain process termination as a normal retry`,{timeout:15_000},async()=>{
+  const f=prepareGuardFixture(),previousPath=process.env.PATH;
+  const scripts={exit:'process.exit(7)',signal:"process.kill(process.pid,'SIGTERM')",maxBuffer:"process.stdout.write('x'.repeat(3*1024*1024))",timeout:'setInterval(()=>{},1000)'};
+  f.fakeNpm(scripts[mode]);process.env.PATH=f.bin+':'+previousPath;
+  const worker=new UpdateWorker(f.config,{commandTimeoutMs:1000});worker.claim();
+  try {
+    await assert.rejects(worker.prepare());
+    if(mode==='exit') {
+      assert.equal(existsSync(f.marker),false,'a confirmed nonzero command exit preserves automatic retry');
+      f.fakeNpm('process.exit(0)');assert.equal(await worker.prepare(),f.commit);
+      assert.equal(await worker.prepare(),f.commit,'a verified cache hit also clears its temporary guard');
+      assert.equal(existsSync(f.marker),false);
+    } else {
+      assert.equal(existsSync(f.marker),true);assert.equal(readFileSync(f.marker,'utf8').includes('"pid": '+process.pid),true);
+      await assert.rejects(worker.prepare(),/이전 업데이트 준비/);
+      await assert.rejects(worker.activate(f.commit),/이전 업데이트 준비/);
+      await assert.rejects(worker.pruneReleases(),/이전 업데이트 준비/);
+    }
+  } finally {worker.close();process.env.PATH=previousPath;rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('prepare guard preserves a changed owner marker instead of clearing an unconfirmed preparation',{timeout:10_000},async()=>{
+  const f=prepareGuardFixture(),previousPath=process.env.PATH;
+  f.fakeNpm(`import{readFileSync,writeFileSync}from'node:fs';const marker=${JSON.stringify(f.marker)};const saved=JSON.parse(readFileSync(marker,'utf8'));saved.token='different-owner';writeFileSync(marker,JSON.stringify(saved),{mode:0o600});`);
+  process.env.PATH=f.bin+':'+previousPath;const worker=new UpdateWorker(f.config);worker.claim();
+  try {
+    await assert.rejects(worker.prepare(),/소유권/);
+    assert.equal(JSON.parse(readFileSync(f.marker,'utf8')).token,'different-owner');
+    await assert.rejects(worker.prepare(),/이전 업데이트 준비/);
+  } finally {worker.close();process.env.PATH=previousPath;rmSync(f.dir,{recursive:true,force:true});}
 });

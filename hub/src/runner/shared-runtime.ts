@@ -58,6 +58,7 @@ export class SharedRuntime {
   /** The production server calls this only after the loopback MCP listener is ready. */
   start() {
     if(this.stopped||this.timer)return;
+    this.agent.runner.startModelRefresh();
     this.exchange();
     this.timer=setInterval(()=>this.exchange(),250);this.timer.unref();
   }
@@ -70,7 +71,8 @@ export class SharedRuntime {
       const events=this.journal.events();
       const reply=this.hub.atomic(()=>this.hub.remotes.exchange(this.runnerId,{version:1,journalId:this.journal.id,commandAck:this.journal.commandAck,events,
         more:this.journal.lastEvent>(events.at(-1)?.seq??this.journal.eventAck),sessions:this.agent.runner.snapshot(),engines:this.agent.runner.capabilities.engines,
-        skillSnapshot:this.agent.runner.capabilities.skillSnapshot,instructions:true,connectorMcp:true}));
+        modelCatalogs:this.agent.runner.capabilities.modelCatalogs,skillSnapshot:this.agent.runner.capabilities.skillSnapshot,instructions:true,connectorMcp:true}));
+      if (reply.refreshModels) this.agent.runner.refreshModels(reply.forceModelRefresh);
       this.journal.acknowledge(reply.eventAck,events.at(-1)?.seq??this.journal.eventAck);
       this.journal.receive(reply.commands);this.agent.pump();
       this.exchangedAt=Date.now();this.snapshot=JSON.stringify(this.agent.runner.snapshot());

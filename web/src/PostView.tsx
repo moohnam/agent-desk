@@ -2,7 +2,7 @@ import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, MODEL_LABEL, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
+import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, modelLabel, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { asyncAnswerText } from './asyncAnswers.ts';
 import type { AsyncQuestion } from '../../shared/protocol.ts';
@@ -325,7 +325,7 @@ const STATE_LABEL: Record<string, string> = { context_reset: '컨텍스트 재�
 
 /** A model/effort switch (status 'model'): "모델 → Opus · effort high". */
 const modelSwitch = (d: { model?: ModelName | null; effort?: string | null }) =>
-  `모델 → ${[d.model ? MODEL_LABEL[d.model] ?? d.model : null, d.effort ? `effort ${d.effort}` : null].filter(Boolean).join(' · ') || '엔진 기본'}`;
+  `모델 → ${[d.model ? modelLabel(d.model) : null, d.effort ? `effort ${d.effort}` : null].filter(Boolean).join(' · ') || '엔진 기본'}`;
 
 function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded: boolean; onToggle: () => void }) {
   const tools = events.filter((e) => e.kind === 'tool');

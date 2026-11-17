@@ -1,6 +1,6 @@
 import { ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
-import { ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
+import { ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, modelMatches, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { modelShort, projectColor } from './projects.ts';
 import type { HubEvent, Project, TaskView } from './types.ts';
 import { DraftBadge, StatusBadge, TerminalBadge } from './badges.tsx';
@@ -105,7 +105,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
           <span title={`모델은 ${ENGINES.map((e) => `${modelTagsOf(e)}(${ENGINE_LABEL[e]})`).join(', ')}, effort는 #low … #max(${effortNote()}) 태그로 바꿉니다`}>
             {ENGINE_LABEL[engineOf(task.engine)]}{model ? ` · ${modelShort(model)}` : ''}
             {/* Switched by a tag, but no turn has run on it yet. */}
-            {task.model && !new RegExp(`-${task.model}(-|$)`).test(model ?? '') ? ` → ${MODEL_LABEL[task.model]} (다음 턴)` : ''}
+            {task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)} (다음 턴)` : ''}
             {task.effort ? ` · effort ${task.effort}` : ''}</span>
           {turns > 0 && <span>턴 {turns}</span>}
           {task.permission_mode && task.source !== 'external' && <span>{task.permission_mode === 'auto' ? '자동 승인' : '매번 확인'} ({MODE_LABEL[task.permission_mode]})</span>}

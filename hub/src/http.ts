@@ -12,7 +12,7 @@ import { handleConnectorMcp } from './connector-mcp.ts';
 import { DocumentPreviews } from './document-previews.ts';
 import { DiagramBrowser } from './diagram-browser.ts';
 import { DiagramCache } from './diagram-cache.ts';
-import { DocumentPermissionError, workspaceFile } from './shared-files.ts';
+import { DocumentPermissionError, workspaceFile, workspaceDocumentPath } from './shared-files.ts';
 import { deviceName, ipOf, type Access } from './access.ts';
 import { readBody, sameOrigin } from './body.ts';
 import type { HubMessage } from '../../shared/api.ts';
@@ -330,6 +330,15 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed,b.approved_path);
         if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
         return send(res,200,document);
+      }
+      if (req.method === 'GET' && (url.pathname === '/api/file-path' || /^\/api\/workspaces\/[^/]+\/file-path$/.test(url.pathname))) {
+        const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
+        if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
+        const source = parts[1] === 'workspaces' ? id : workspaces.legacyOwner('task', task) ?? '';
+        const approved = previews.approvedPath(url.searchParams.get('preview_id'), source, task, href);
+        if (source || localAuthorityId) return send(res, 200, { path: await workspaces.documentPath(source || localAuthorityId!, task, href, approved) });
+        if (remoteLocation(hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
+        return send(res, 200, { path: await workspaceDocumentPath(hub, task, href, approved) });
       }
       if(req.method==='GET'&&url.pathname==='/api/streams') {
         const token=access.token;

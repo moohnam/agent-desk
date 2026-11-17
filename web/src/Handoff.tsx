@@ -1,6 +1,6 @@
 import { X } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { ENGINE_LABEL, MODE_LABEL, MODEL_LABEL, engineOf } from '../../shared/compose.ts';
+import { ENGINE_LABEL, MODE_LABEL, modelLabel, modelMatches, engineOf } from '../../shared/compose.ts';
 import { extractHandoff, handoffMessage, HANDOFF_SECTIONS, quoteEvent, type Quoted } from '../../shared/handoff.ts';
 import { api } from './api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
@@ -213,7 +213,7 @@ export function HandoffPanel({ task, state: s, model, events, onError, onDone }:
         <textarea className="input handoff-text" rows={12} value={appendixReady ? final : '원문을 불러오는 중…'} readOnly={!appendixReady}
           onChange={(e) => up({ final: e.target.value })} />
         <div className="reply-note">
-          새 세션: {engine}{model ? ` · ${modelShort(model)}` : ''}{task.model && !new RegExp(`-${task.model}(-|$)`).test(model ?? '') ? ` → ${MODEL_LABEL[task.model]}` : ''}
+          새 세션: {engine}{model ? ` · ${modelShort(model)}` : ''}{task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)}` : ''}
           {task.effort ? ` · effort ${task.effort}` : ''}{task.permission_mode ? ` · ${MODE_LABEL[task.permission_mode]}` : ''}
           {' · '}{running ? '지금 턴이 끝나면 넘깁니다.' : '지금 세션을 닫고 이 메시지로 새 세션을 시작합니다.'} 이전 대화는 스레드에 남지만 에이전트는 기억하지 않습니다.
         </div>

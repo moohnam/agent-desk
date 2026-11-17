@@ -7,8 +7,9 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { remarkKoreanSuffixStrong } from './markdownKoreanStrong.ts';
 import { remarkLineBreaks } from './markdownLineBreaks.ts';
+import { remarkCachedParse } from './markdownParseCache.ts';
 
-const notationParser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMath);
+const notationParser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMath).use(remarkCachedParse);
 const protectedTypes = new Set(['code', 'inlineCode', 'link', 'image', 'linkReference', 'imageReference', 'definition', 'html', 'math', 'inlineMath']);
 const command = /\\[a-zA-Z]+/;
 // Legacy bare brackets are accepted only around a command or a compact equation.
@@ -69,7 +70,7 @@ function remarkDollarGuard() {
 
 // Single tildes occur in ordinary prose ("1~2개", "~/path"). Keep their existing behavior.
 export const MARKDOWN_REMARK_PLUGINS: PluggableList = [
-  [remarkGfm, { singleTilde: false }], remarkMath, remarkDollarGuard, remarkKoreanSuffixStrong, remarkLineBreaks,
+  [remarkGfm, { singleTilde: false }], remarkMath, remarkCachedParse, remarkDollarGuard, remarkKoreanSuffixStrong, remarkLineBreaks,
 ];
 // rehype-katex catches per-formula errors and renders invalid input as escaped source.
 export const MARKDOWN_REHYPE_PLUGINS: PluggableList = [

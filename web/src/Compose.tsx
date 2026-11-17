@@ -1,8 +1,10 @@
+import {useModelCatalogs} from './modelCatalogs.ts';
+import {catalogModelTags,catalogsForTarget,type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
-  DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, MODEL_LABEL, TAG_HELP, effortNote, modelEngine,
+  DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, TAG_HELP, effortNote, modelEngine,
   modelHelpOf, modelProblem, modelTagsOf, parseCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../shared/compose.ts';
 import { api } from './api.ts';
@@ -32,7 +34,7 @@ const TAG_OPTIONS: Option[] = TAG_HELP.map(({ tag, help }) => ({ key: tag, inser
  * mention says where the text goes (and may define a new project), 'refer' where it names a project
  * or task the agent may ask (replies).
  */
-function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[]) {
+function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[], models: Record<string,ModelName> = {}) {
   const before = text.slice(0, caret);
   const no = mentions ? /(^|\s)@([^\s:@#]+)#(\d*)$/.exec(before) : null;
   const numbered = no && projects.find((p) => p.name.toLowerCase() === no[2].toLowerCase());
@@ -62,7 +64,8 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
     const skillOptions: Option[] = skills.map((k) => ({
       key: `skill:${k.name}`, insert: k.name, label: `#${k.name}`, desc: `스킬 · ${k.description || '설명 없음'}`, space: true,
     }));
-    const items = [...TAG_OPTIONS, ...skillOptions].filter((t) => t.insert.startsWith(q) && t.insert !== q);
+    const modelOptions: Option[] = Object.entries(models).map(([tag,model]) => ({key:`model:${tag}`,insert:tag,label:`#${tag}`,desc:`${ENGINE_LABEL[modelEngine(model)]} · ${modelLabel(model)}`,space:true}));
+    const items = [...TAG_OPTIONS, ...modelOptions, ...skillOptions].filter((t) => t.insert.startsWith(q) && t.insert !== q);
     return { start: caret - q.length, items, total: items.length };
   }
   return null;
@@ -74,20 +77,26 @@ type Mentions = 'route' | 'refer';
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='' }: {
+export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; without it, Esc leaves the field. */
   onEscape?: () => void;
   onBlur?: () => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
-  projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string;
+  projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string; runnerId?:string;
 }) {
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const skills = useSkills(source);
-  const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills), [value, caret, projects, tasks, mentions, skills]);
+  const inventory = useModelCatalogs(source);
+  const modelTags = useMemo(() => {
+    const mention = mentions === 'route' ? parseCompose(value).mention : undefined;
+    const project = mention && projects.find(p=>p.name.toLowerCase()===mention.name.toLowerCase());
+    return catalogModelTags(catalogsForTarget(inventory.runners,{runnerId,rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
+  },[inventory.runners,source,runnerId,value,projects,mentions,skills]);
+  const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills,modelTags), [value, caret, projects, tasks, mentions, skills,modelTags]);
   const open = !dismissed && !!sug?.items.length;
   const cur = Math.min(index, (sug?.items.length ?? 1) - 1);
   const app = useDeskApp();
@@ -188,7 +197,7 @@ const effortName = (e: Effort | null | undefined) => e ? `effort ${e}` : 'effort
 
 /** "Opus (태그) · effort high (기본 설정)": where the model and effort of a message come from. */
 function modelRow(engine: EngineName, c: { model?: ModelName; effort?: Effort }, task: TaskView | undefined, s: Settings): string {
-  const modelName = (m: ModelName | null) => m ? MODEL_LABEL[m] : `${ENGINE_LABEL[engine]} 기본`;
+  const modelName = (m: ModelName | null) => m ? modelLabel(m) : `${ENGINE_LABEL[engine]} 기본`;
   const part = <T,>(tag: T | undefined, kept: T | null | undefined, def: T | null, name: (v: T | null) => string) =>
     tag ? `${name(tag)} (태그)` : task ? `${name(kept ?? null)}${kept ? ' (작업 유지)' : ''}`
       : def ? `${name(def)} (기본 설정)` : name(null);
@@ -207,12 +216,14 @@ function deliveryText(task: TaskView, d: Delivery | undefined): string | null {
   return `지금 턴이 끝난 뒤 보내기${(task.queued ?? []).length ? ` · 앞에 ${(task.queued ?? []).length}개 대기 중` : ''}${d ? '' : ' (기본)'}`;
 }
 
-function interpretNew(text: string, projects: Project[], tasks: TaskView[], skills: Skill[], settings: Settings) {
-  const c = parseCompose(text, skillNames(skills));
+function interpretNew(text: string, projects: Project[], tasks: TaskView[], skills: Skill[], settings: Settings, runners:RunnerModelCatalog[] = []) {
+  const mention = parseCompose(text).mention;
+  const project = mention && projects.find(p=>p.name.toLowerCase()===mention.name.toLowerCase());
+  const modelTags = catalogModelTags(catalogsForTarget(runners,{rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
+  const c = parseCompose(text, skillNames(skills),true,modelTags);
   const rows: Row[] = [];
   let ok = true;
   let continuing: TaskView | undefined;
-  const project = c.mention && projects.find((p) => p.name.toLowerCase() === c.mention!.name.toLowerCase());
   if (!c.mention) {
     ok = false;
     rows.push({ label: '대상', value: '@프로젝트 또는 @이름:/경로가 필요합니다', tone: 'bad' });
@@ -295,7 +306,8 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
   try{selectedSource=composeSource(text,allProjects,target==='auto'?undefined:target);}catch{/* submit explains ambiguity */}
   const skills = useSkills(selectedSource);
   const settings = useSettings(selectedSource);
-  const hint = useMemo(() => interpretNew(text, projects, tasks, skills, settings), [text, projects, tasks, skills, settings]);
+  const inventory = useModelCatalogs(selectedSource);
+  const hint = useMemo(() => interpretNew(text, projects, tasks, skills, settings,inventory.runners), [text, projects, tasks, skills, settings,inventory.runners]);
   const recent = useMemo(() => rankProjects(projects, tasks)[0]?.project.name, [projects, tasks]);
 
   const submit = async () => {
@@ -414,7 +426,9 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   useEffect(() => { setDraft(draftKey, { text, pick }, { taskId: task.id, empty: !text.trim() }); }, [draftKey, text, pick, task.id]);
   useDraftSync<{ text: string; pick: Delivery | null }>(draftKey, (v) => { edited(); setText(v?.text ?? ''); setPick(v?.pick ?? null); });
   const skills = useSkills(splitId(task.id)[0]);
-  const c = parseCompose(text, skillNames(skills), false);
+  const inventory = useModelCatalogs(splitId(task.id)[0]);
+  const modelTags = catalogModelTags(catalogsForTarget(inventory.runners,{runnerId:task.runner_id}),skillNames(skills));
+  const c = parseCompose(text, skillNames(skills), false,modelTags);
   const name = engineName(task.engine);
   const delivery = c.delivery ?? pick ?? undefined;
   // #new picks its own engine by tag (else this task's); #fork and plain replies stay on this task's.
@@ -504,7 +518,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
 
   const how = content ? deliveryText(task, delivery) : null;
   // A #new or #fork reply carries its tags into the new task instead of switching this task.
-  const switches = branch ? '' : [c.mode && MODE_LABEL[c.mode], c.model && MODEL_LABEL[c.model], c.effort && `effort ${c.effort}`]
+  const switches = branch ? '' : [c.mode && MODE_LABEL[c.mode], c.model && modelLabel(c.model), c.effort && `effort ${c.effort}`]
     .filter(Boolean).join(' · ');
   const note = otherEngine ? { warn: true, text: `이 작업은 ${name}로 진행 중입니다. 엔진은 새 작업에서만 고를 수 있습니다.` }
     : problem ? { warn: true, text: `${problem}.` }
@@ -545,7 +559,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
       <AnswerDestination taskId={task.id} />
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
       <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2}
-        projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]}
+        projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]} runnerId={task.runner_id}
         placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">

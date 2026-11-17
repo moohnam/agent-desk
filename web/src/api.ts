@@ -268,12 +268,17 @@ export const api = {
   answer: (questionId: string, answer: string) => call('POST', `/questions/${questionId}`, { answer }),
   /** Opens a link from a reply in its local app (via the hub, which may run `open`). */
   open: (href: string, taskId?: string) => call<{ ok: true }>('POST', '/open', { href, task_id: taskId }),
+  filePath: (href: string, taskId: string, previewId?: string, signal?: AbortSignal) => {
+    const [source, task] = splitId(taskId);
+    return call<{path:string}>('GET', '/file-path?' + new URLSearchParams({ href, task_id: task, ...(previewId ? {preview_id:previewId} : {}) }), undefined, signal, source);
+  },
   /** Addresses (with QR codes) other devices open the desk at; only on the hub's own machine. */
   access: () => call<{ urls: { url: string; qr: string }[] } & AccessView>('GET', '/access'),
   answerAccess: (id: string, allow: boolean) => call<AccessView>('POST', `/access-requests/${id}`, { allow }),
   renameDevice: (id: string, name: string) => call<AccessView>('PATCH', `/devices/${id}`, { name }),
   removeDevice: (id: string) => call<AccessView>('DELETE', `/devices/${id}`),
   rotateAccessToken: () => call<{ ok: true }>('POST', '/access-token'),
+  modelCatalogs: (source='',refresh=false,signal?:AbortSignal) => call<import('../../shared/model-catalog.ts').RunnerModelCatalog[]>('GET', `/models${refresh ? '?refresh=1' : ''}`,undefined,signal,source),
   settings: (source='') => call<Settings>('GET', '/settings',undefined,undefined,source),
   /** Each engine's plan limits: used share and reset time per window. `refresh`: skip the hub's one-minute cache. */
   usage: (engine: string, refresh = false) => call<EngineUsage>('GET', `/usage?engine=${engine}${refresh ? '&refresh=1' : ''}`),

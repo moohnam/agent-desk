@@ -31,6 +31,7 @@ function feedFilter(url: URL): FeedFilter {
 
 const routes = [
   'GET /settings',
+  'GET /models',
   'PUT /settings',
   'POST /projects',
   'POST /tasks',
@@ -113,6 +114,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
   if (route === 'POST /approvals/:id' && (typeof body.allow !== 'boolean' || (body.message !== undefined && typeof body.message !== 'string'))) throw new HttpError(400,'승인 응답 형식이 잘못되었습니다');
   if (body.permission_mode !== undefined && !['auto','default'].includes(body.permission_mode)) throw new HttpError(400,'승인 모드가 잘못되었습니다');
   switch (route) {
+        case 'GET /models':
+          return reply(200, hub.refreshModelCatalogs(url.searchParams.get('refresh') === '1'));
         case 'GET /settings':
           return reply(200, hub.settings());
         case 'PUT /settings':
