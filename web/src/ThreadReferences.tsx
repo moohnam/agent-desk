@@ -108,7 +108,7 @@ function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, ev
       {ids.length === 0 && !files?.length && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
       {referenceOrder({ ids, files, order }).map((entry, index) => {
         if (entry.kind === 'file') return <DocumentPreview key={`file:${entry.href}`} taskId={task.id} href={entry.href} visible={visible}
-          focusRevision={fileFocus?.href===entry.href?fileFocus.revision:0} onRemove={()=>onRemoveFile(entry.href)} onError={onError}/>;
+          focusRevision={fileFocus?.href===entry.href?fileFocus.revision:0} onRemove={onRemoveFile} onError={onError}/>;
         const id = entry.id;
         return <section className="reference-card" key={`event:${id}`} data-reference={id}>
         <div className="reference-tools"><span>{index + 1}</span><span className="spacer" />

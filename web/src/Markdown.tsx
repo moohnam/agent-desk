@@ -1,5 +1,6 @@
+import { scheduleLayoutRead } from './layoutBatch.ts';
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
-import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform, type ExtraProps, type Components } from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.tsx';
 import { mermaidSource } from './mermaid.ts';
@@ -8,6 +9,7 @@ import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
+const transformUrl = (url: string) => APP_LINK.test(url) ? url : defaultUrlTransform(url);
 
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
@@ -23,10 +25,7 @@ function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraPr
  */
 export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase }: { text: string; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
   const normalizedText = useMemo(() => normalizeMathNotation(text), [text]);
-  return (
-    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-      urlTransform={(url) => (APP_LINK.test(url) ? url : defaultUrlTransform(url))}
-      components={{
+  const components = useMemo<Components>(() => ({
         pre: CodeBlock,
         ...(resourceBase ? { img: ({ node: _, src, ...props }: ComponentProps<'img'> & ExtraProps) => {
           // Document images stay in its capability directory; no absolute filesystem requests.
@@ -44,7 +43,11 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
               e.preventDefault();onLocalLink(path);
             }} />;
         },
-      }}>
+
+  }), [resourceBase, onLocalLink, taskId, linkBase]);
+  return (
+    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+      urlTransform={transformUrl} components={components}>
       {normalizedText}
     </ReactMarkdown>
   );
@@ -56,20 +59,24 @@ export function LongText({ full, className, onToggle, children }: {
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [long, setLong] = useState(false);
-  // Measure only while clamped; once expanded the toggle stays so it can be folded again.
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && !full) setLong(el.scrollHeight > el.clientHeight + 1);
-  }, [full, children]);
-  // Column resizing can change wrapping without changing the text. Observe size changes
-  // separately so selecting another post does not synchronously measure every body.
+  // Content updates may change overflow without changing the clamped box's dimensions.
+  // Batch new bodies and resize notifications into one read phase, then update their toggles.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || full) return;
-    const observer = new ResizeObserver(() => setLong(el.scrollHeight > el.clientHeight + 1));
+    let cancel: (() => void) | undefined;
+    const measure = () => {
+      cancel?.();
+      cancel = scheduleLayoutRead(() => {
+        const overflows = el.scrollHeight > el.clientHeight + 1;
+        return () => setLong(overflows);
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, [full]);
+    return () => { observer.disconnect(); cancel?.(); };
+  }, [full, children]);
   return (
     <>
       <div ref={ref} className={`${className}${full ? '' : ' clamp'}`}>{children}</div>

@@ -350,6 +350,7 @@ export function App() {
   // Layout effect: runs before the browser's scroll anchoring reports the insert as a scroll.
   useLayoutEffect(() => {
     const next: Record<string, number> = {};
+    const scrolls: { feed: HTMLElement; top: number }[] = [];
     for (const col of deck) {
       const top = col.posts[0]?.id;
       if (col.id === THREAD || top == null) continue;
@@ -360,18 +361,19 @@ export function App() {
         const el = feed?.querySelector<HTMLElement>(`[data-post="${anchor.id}"]`);
         if (feed && el) {
           const moved = el.getBoundingClientRect().top - feed.getBoundingClientRect().top - anchor.top;
-          if (Math.abs(moved) >= 1) feed.scrollTop += moved;
+          if (Math.abs(moved) >= 1) scrolls.push({ feed, top: feed.scrollTop + moved });
         }
       }
       if (seen == null || atTop.current.get(col.id) !== false) {
         seenTop.current.set(col.id, top);
-        const feed = document.querySelector(`section[data-col="${col.id}"] .feed`);
-        if (feed && seen != null && top !== seen) feed.scrollTop = 0;
+        const feed = document.querySelector<HTMLElement>(`section[data-col="${col.id}"] .feed`);
+        if (feed && seen != null && top !== seen) scrolls.push({ feed, top: 0 });
         continue;
       }
       const n = col.posts.findIndex((p) => p.id === seen);
       if (n !== 0) next[col.id] = n < 0 ? col.posts.length : n;
     }
+    for (const { feed, top } of scrolls) feed.scrollTop = top;
     setUnseen((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
   }, [deck]);
   // Older posts (drawn or loaded as a feed nears its bottom) are FeedColumn's.

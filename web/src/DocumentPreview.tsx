@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FileText, RotateCw, X } from 'lucide-react';
 import { api } from './api.ts';
 import { Markdown } from './Markdown.tsx';
@@ -9,7 +9,9 @@ const releasePreview=(url:string)=>fetch('/api/preview',{method:'DELETE',headers
 class PermissionRequired extends Error { constructor(readonly path:string) { super('문서 접근 확인이 필요합니다'); } }
 type Preview = {name:string;url:string;kind:'html'|'markdown';text?:string};
 type PreviewRequest = {revision:number;refresh:boolean};
-export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,onError}:{taskId:string;href:string;visible:boolean;focusRevision?:number;onRemove:()=>void;onError:(message:string)=>void}) {
+export const DocumentPreview = memo(function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,onError}:{taskId:string;href:string;visible:boolean;focusRevision?:number;onRemove:(href:string)=>void;onError:(message:string)=>void}) {
+  const openLink=useCallback((path:string)=>{if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));},[taskId,onError]);
+  const remove=useCallback(()=>onRemove(href),[href,onRemove]);
   const scope=JSON.stringify([taskId,href]);
   const [approval,setApproval]=useState<{scope:string;path:string}|null>(null);
   const [permission,setPermission]=useState<{scope:string;path:string}|null>(null);
@@ -74,7 +76,7 @@ export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,on
   return <section ref={ref} className="reference-card document-card">
     <div className="reference-tools"><FileText/><strong title={href}>{preview?.name??href.split('/').at(-1)}</strong><span className="spacer"/>
       <button className="icon-btn" title="원본 파일 다시 가져오기" aria-label="문서 새로고침" disabled={loading} onClick={()=>{setReady(true);setRequest(value=>({revision:value.revision+1,refresh:true}));}}><RotateCw/></button>
-      <button className="icon-btn" title="문서 닫기" aria-label="문서 닫기" onClick={onRemove}><X/></button>
+      <button className="icon-btn" title="문서 닫기" aria-label="문서 닫기" onClick={remove}><X/></button>
     </div>
     {loading&&<p className="muted" role="status">문서를 불러오는 중…</p>}
     {error&&<p className="error" role="alert">{error}</p>}
@@ -84,12 +86,12 @@ export function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,on
       <p className="muted small">주변 폴더와 HTML의 부속 파일은 허용하지 않습니다.</p>
       <div className="form-actions">
         <button type="button" className="btn primary" onClick={()=>{setApproval({scope,path:requestedPath});setRequest(value=>({revision:value.revision+1,refresh:true}));}}>이 파일만 허용</button>
-        <button type="button" className="btn" onClick={onRemove}>취소</button>
+        <button type="button" className="btn" onClick={remove}>취소</button>
       </div>
     </div>}
     {preview?.kind==='html'&&near&&<iframe title={preview.name} src={preview.url} sandbox="" referrerPolicy="no-referrer" className="document-frame"/>}
     {preview?.kind==='html'&&!near&&<div className="document-frame"/>}
     {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url} taskId={taskId} linkBase={href}
-      onLocalLink={path=>{if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));}}/></div>}
+      onLocalLink={openLink}/></div>}
   </section>;
-}
+});

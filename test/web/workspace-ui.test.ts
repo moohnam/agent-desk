@@ -12,11 +12,11 @@ import * as compose from '../../shared/compose.ts';
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
-  imports={ './federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
+  imports={ './answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
-  const context = { exports: {}, require: (name: string) => {
+  const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
     assert.ok(name in imports, `missing mock: ${name}`);
     return imports[name];
   }, ...globals };

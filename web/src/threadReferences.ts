@@ -1,5 +1,5 @@
 import { workspaceKey } from './workspace.ts';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { HubEvent } from './types.ts';
 
 export const REFERENCES_KEY = workspaceKey('agent-desk.threadReferences');
@@ -78,6 +78,7 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
       return entries.length === Object.keys(previous).length ? previous : Object.fromEntries(entries);
     });
   }, [gone]);
+  const removeFile=useCallback((href:string)=>{if(taskId)setState(s=>({...s,[taskId]:{...s[taskId],files:s[taskId]?.files?.filter(f=>f!==href)}}));},[taskId]);
   const selected = taskId && Object.hasOwn(state, taskId) ? state[taskId] : EMPTY;
   return {
     ...selected,
@@ -89,7 +90,7 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
       setFileFocus(previous=>({taskId:task,href,revision:(previous?.revision??0)+1}));
       setState(s => openReferenceFile(s, task, href));
     },
-    removeFile: (href:string) => {if(taskId)setState(s=>({...s,[taskId]:{...s[taskId],files:s[taskId]?.files?.filter(f=>f!==href)}}));},
+    removeFile,
     toggle: (id: number) => { if (taskId) setState(s => toggleReference(s, taskId, id)); },
     show: (open: boolean) => { if (taskId) setState(s => ({ ...s, [taskId]: { ...(Object.hasOwn(s, taskId) ? s[taskId] : EMPTY), open } })); },
     clear: () => { if (taskId) setState(s => ({ ...s, [taskId]: { ids: [], open: true } })); },
