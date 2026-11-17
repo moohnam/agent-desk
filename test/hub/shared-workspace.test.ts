@@ -242,7 +242,7 @@ for (const engine of ENGINES) test(`${engine}: two ordinary hub APIs share histo
   let seen='';const reading=(async()=>{try{for await(const chunk of stream.body! as any)seen+=new TextDecoder().decode(chunk);}catch{}})();
   const first=randomUUID();await api(a,`/tasks/${task.id}/messages`,'POST',{text:'a-message'},first);
   await api(b,`/tasks/${task.id}/messages`,'POST',{text:'b-message'});
-  await api(b,`/tasks/${task.id}/messages`,'POST',{text:'a-message'},first);
+  assert.equal((await api(b,`/tasks/${task.id}/messages`,'POST',{text:'a-message'},first)).status,409);
   assert.equal((await api(a,'/state')).body.tasks[0].queued.length,2);
   assert.equal((await api(a,`/tasks/${task.id}/messages`,'POST',{text:'changed'},first)).status,409);
   f.finish('first');await wait(()=>f.sends.length===1);f.finish('second');await wait(()=>f.sends.length===2);f.finish('third');

@@ -17,11 +17,13 @@ import { remoteLocation } from '../../shared/remote.ts';
 import { handleWorkspaceBroker } from './request-broker.ts';
 import { ConnectorBroker, type ConnectorExecutionContext, type ConnectorCompletion } from './connector-broker.ts';
 import { handleConnectorMcp } from './connector-mcp.ts';
-import type { ConnectorGrant } from './connector-authority.ts';
+import type { ConnectorGrant, ConnectorIdentity } from './connector-authority.ts';
+import { connectorInputScopes } from '../../shared/connector-tags.ts';
+import { connectorTagTools } from './connectors.ts';
 
 export const connectorUserInput = (method: string, path: string) => method === 'POST'
   && (/^\/(compose|tasks)$/.test(path.split('?')[0]) || /^\/tasks\/[^/]+\/(messages|reset|handoff)$/.test(path.split('?')[0])
-    || /^\/approvals\/[^/]+$/.test(path.split('?')[0]));
+    || /^\/approvals\/[^/]+$/.test(path.split('?')[0]) || /^\/channels\/[^/]+\/messages$/.test(path.split('?')[0]));
 
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export function canonical(value: unknown): string {
@@ -99,8 +101,9 @@ export class SharedWorkspace {
     const op = operation(input), hash = digest(canonical(op));
     if (!this.localAuthority && localAuthorityRoute(op.method,op.path)) throw new HttpError(400,'공유 작업공간에서 지원하지 않는 요청입니다');
     this.assertPeer(peer);
-    const prior = this.db.prepare('SELECT digest,result FROM workspace_receipt WHERE id=?').get(op.id) as {digest:string;result:string}|undefined;
+    const prior = this.db.prepare('SELECT digest,result,peer_id FROM workspace_receipt WHERE id=?').get(op.id) as {digest:string;result:string;peer_id:string}|undefined;
     if (prior) {
+      if (prior.peer_id!==peer) throw new HttpError(409,'다른 허브에서 이미 사용한 명령 ID입니다. 새 명령으로 다시 보내세요');
       if (prior.digest !== hash) throw new HttpError(409,'같은 명령 ID의 내용이 바뀌었습니다');
       return JSON.parse(prior.result);
     }
@@ -112,28 +115,37 @@ export class SharedWorkspace {
     if(op.body.__desk_skill_ref && !snapshot)
       return {status:409,body:{code:'skill_missing',error:'스킬 버전이 없거나 지문이 다릅니다. 준비 파일을 보내야 합니다'}};
     const grant = op.body.__desk_connector_grant as ConnectorGrant | null | undefined;
+    const scopes=connectorInputScopes(op.method,op.path,op.body);
+    let identity=op.body.__desk_connector_identity as ConnectorIdentity|undefined;
     let connectorContext: ConnectorExecutionContext | null = null;
-    if (grant != null) {
+    if (grant != null && !grant.inputScoped) {
+      if(scopes.length)throw new HttpError(409,'허브를 업데이트한 뒤 외부 조회 태그와 함께 다시 보내세요. 이전 자동 조회 권한은 사용하지 않습니다');
+      if(!identity&&typeof grant.hubId==='string'&&Array.isArray(grant.connections))identity={hubId:grant.hubId,connections:grant.connections};
+    } else if (grant != null) {
       if (!connectorUserInput(op.method, op.path) || grant.requestId !== op.id || grant.workspaceId !== this.id
         || typeof grant.hubId !== 'string' || typeof grant.capability !== 'string' || !Array.isArray(grant.connections)
         || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now())
         throw new HttpError(403, '사용자 입력과 외부 연결 허가가 일치하지 않거나 만료되었습니다');
+      if(grant.inputScoped!==true || !scopes.length || grant.connections.some(c=>!c || !['slack','jira'].includes(c.service)
+        || !Array.isArray(c.tools) || !connectorTagTools(scopes,c.service).length || c.tools.some(tool=>!connectorTagTools(scopes,c.service).includes(tool))))
+        throw new HttpError(403,'입력 태그와 외부 조회 권한 범위가 일치하지 않습니다');
       connectorContext = { ...grant, sourcePeerId: peer };
-    }
+    } else if(scopes.length)throw new HttpError(409,'외부 조회 태그의 권한이 전달되지 않았습니다. 원래 허브의 연결과 업데이트 상태를 확인해 주세요');
     return this.hub.atomic(() => {
       // Authentication may precede a slow request body. Check revocation again in
       // the transaction that accepts the operation, including receipt replays.
       this.assertPeer(peer);
-      const held = this.db.prepare('SELECT digest,result FROM workspace_receipt WHERE id=?').get(op.id) as {digest:string;result:string}|undefined;
+      const held = this.db.prepare('SELECT digest,result,peer_id FROM workspace_receipt WHERE id=?').get(op.id) as {digest:string;result:string;peer_id:string}|undefined;
       if (held) {
+        if(held.peer_id!==peer)throw new HttpError(409,'다른 허브에서 이미 사용한 명령 ID입니다. 새 명령으로 다시 보내세요');
         if (held.digest !== hash) throw new HttpError(409, '같은 명령 ID의 내용이 바뀌었습니다');
         return JSON.parse(held.result);
       }
       let result: WorkspaceResult;
-      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(op.body.__desk_instructions, ()=>snapshot
+      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(op.body.__desk_instructions, ()=>snapshot
         ? this.hub.withSkillSnapshot(snapshot,
           () => workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))
-        : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))))); }
+        : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body)))))); }
       catch (e) {
         if (!(e instanceof HttpError) || e.status >= 500) throw e;
         result = {status:e.status,body:{error:e.message}};
@@ -187,9 +199,13 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,instructions:1,connectors:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,instructions:1,connectors:1,connector_tags:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
+        if(req.method==='GET'&&url.pathname.startsWith('/v1/receipts/')) {
+          const receipt=this.db.prepare('SELECT result FROM workspace_receipt WHERE id=? AND peer_id=?').get(url.pathname.slice('/v1/receipts/'.length),peer) as {result:string}|undefined;
+          return receipt?json(res,200,JSON.parse(receipt.result)):json(res,404,{error:'처리 기록이 없습니다'});
+        }
         if (url.pathname.startsWith('/v1/connectors/') && this.connectorBroker) {
           if (req.method === 'GET' && url.pathname === '/v1/connectors/poll') return json(res, 200, this.connectorBroker.poll(peer));
           if (req.method === 'POST') {

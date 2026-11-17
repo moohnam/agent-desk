@@ -635,7 +635,7 @@ test('HTTP connector bridge binds gateway input to session MCP and returns a pro
     const owner = workspace.grant('gateway'), other = workspace.grant('other-gateway');
     const link = await links.attach({ name: 'workspace', url: remoteUrl, token: owner.token });
     const project = canonical.createProject('connector', f.dir);
-    const submitted = await fetch(`${gatewayUrl}/api/workspaces/${link.id}/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude read TEST-1' }) });
+    const submitted = await fetch(`${gatewayUrl}/api/workspaces/${link.id}/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude #jira read TEST-1' }) });
     assert.equal(submitted.status, 201, JSON.stringify(await submitted.clone().json()));
     const command = commands.find((command): command is Extract<HubToRunner, { type: 'start' }> => command.type === 'start');
     assert.ok(command?.connectorMcp);
@@ -645,7 +645,7 @@ test('HTTP connector bridge binds gateway input to session MCP and returns a pro
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
     });
     assert.equal((await rpc(owner.token, 'desk_connector_list', {})).status, 403);
-    const pending = rpc(command.connectorMcp.token, 'desk_connector_read', { service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } });
+    const pending = rpc(command.connectorMcp.token, 'desk_connector_read', { request_id:workspace.connectorBroker!.stored(command.sessionId)!.requestId, service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } });
     const end = Date.now() + 2000;
     while (!workspace.connectorBroker!.busy(command.sessionId) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5));
     assert.equal(workspace.connectorBroker!.busy(command.sessionId), true);
@@ -691,12 +691,12 @@ test('HTTP connector direct hub uses the same request authority and session MCP 
     const invalid = await fetch(origin + '/api/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: 'missing', prompt: '#claude invalid' }) });
     assert.equal(invalid.status, 404);
     assert.equal((store.database.prepare('SELECT count(*) n FROM connector_grant').get() as { n: number }).n, 0);
-    const submitted = await fetch(origin + '/api/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude read issue' }) });
+    const submitted = await fetch(origin + '/api/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project_id: project.id, prompt: '#claude #jira read issue' }) });
     assert.equal(submitted.status, 201, JSON.stringify(await submitted.json()));
     const command = commands.find((command): command is Extract<HubToRunner, { type: 'start' }> => command.type === 'start');
     assert.ok(command?.connectorMcp); assert.equal(command.connectorMcp.url, origin + '/v1/connector-mcp');
     const response = await fetch(command.connectorMcp.url, { method: 'POST', headers: { authorization: `Bearer ${command.connectorMcp.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'desk_connector_read', arguments: { service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } } } }) });
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'desk_connector_read', arguments: { request_id:hub.connectorBroker!.stored(command.sessionId)!.requestId, service: 'jira', tool: 'getJiraIssue', arguments: { issueIdOrKey: 'TEST-1' } } } }) });
     assert.equal(response.status, 200);
     const result = await response.json() as { result: { content: { text: string }[]; isError?: boolean } };
     assert.notEqual(result.result.isError, true, JSON.stringify(result));
@@ -724,7 +724,7 @@ test('HTTP connector grants recheck runner capability after a same-workspace dow
   const server = createServer(async (req, res) => {
     if (req.url === '/v1/identity') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ version: 1, workspace_id: 'stable-workspace', capabilities: { connectors: supported ? 1 : undefined } }));
+      res.end(JSON.stringify({ version: 1, workspace_id: 'stable-workspace', capabilities: { connectors: supported ? 1 : undefined, connector_tags: supported ? 1 : undefined } }));
     } else if (req.url === '/v1/operation') {
       for await (const _ of req) { /* Drain the operation without interpreting private fields. */ }
       submitted++;
@@ -736,19 +736,103 @@ test('HTTP connector grants recheck runner capability after a same-workspace dow
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const link = await links.attach({ name: 'runner', url, token: 'a'.repeat(43) });
-    links.enqueue(link.id, { id: randomUUID(), method: 'POST', path: '/tasks/example/messages', body: { text: 'first read' } });
+    links.enqueue(link.id, { id: randomUUID(), method: 'POST', path: '/tasks/example/messages', body: { text: '#jira first read' } });
+    assert.equal((store.database.prepare('SELECT count(*) n FROM connector_grant').get() as {n:number}).n,0);
     await links.flush(link.id); assert.equal(submitted, 1);
     supported = false;
     const next = randomUUID();
-    links.enqueue(link.id, { id: next, method: 'POST', path: '/tasks/example/messages', body: { text: 'second read' } });
+    links.enqueue(link.id, { id: next, method: 'POST', path: '/tasks/example/messages', body: { text: '#jira second read' } });
     await links.flush(link.id);
     assert.equal(submitted, 1);
     assert.equal(links.deliveries(link.id).find(delivery => delivery.id === next)!.status, 409);
     assert.match(links.deliveries(link.id).find(delivery => delivery.id === next)!.error, /요청별 외부 연결/);
+    // Untagged ordinary input needs neither a grant nor the new remote capability.
+    links.enqueue(link.id,{id:randomUUID(),method:'POST',path:'/tasks/example/messages',body:{text:'일반 대화'}});
+    await links.flush(link.id);assert.equal(submitted,2);
+    supported=true;
+    const changed=randomUUID();
+    links.enqueue(link.id,{id:changed,method:'POST',path:'/tasks/example/messages',body:{text:'#jira 계정 고정'}});
+    await f.connect();
+    await links.flush(link.id);assert.equal(submitted,2);
+    assert.equal(links.deliveries(link.id).find(delivery=>delivery.id===changed)!.status,409);
+    assert.match(links.deliveries(link.id).find(delivery=>delivery.id===changed)!.error,/계정이나 권한이 바뀌/);
   } finally {
     await links.close(); authority.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     store.database.close(); f.close();
   }
+});
+
+test('service tags split Jira and Confluence tools and start the short TTL only when bound',async()=>{
+  const f=fixture(),db=new DatabaseSync(':memory:');let now=Date.now();
+  const authority=new ConnectorAuthority(db,f.connectors,{now:()=>now});
+  try {
+    await f.connect();await f.connect('slack');
+    const selection=authority.select(['confluence']);
+    assert.equal(selection[0].service,'jira');
+    assert.ok(selection[0].tools.includes('getConfluenceContent'));
+    assert.ok(!selection[0].tools.includes('getJiraIssue'));
+    const jira=authority.select(['jira']);
+    assert.ok(jira[0].tools.includes('getJiraIssue'));
+    assert.ok(!jira[0].tools.includes('getConfluenceContent'));
+    assert.deepEqual(authority.select(['slack']).map(c=>c.service),['slack']);
+    const grant=authority.issue({workspaceId:'workspace',requestId:'waiting',scopes:['confluence'],expectedPolicy:selection});
+    const context={capability:grant.capability,workspaceId:'workspace',requestId:'waiting',taskId:'task',sessionId:'session'};
+    now+=20*60_000;authority.bind(context);
+    await assert.rejects(authority.call({...context,callId:'wrong-service',service:'jira',tool:'getJiraIssue',arguments:{}}),/읽기 도구/);
+    now+=14*60_000;authority.bind(context);assert.equal(authority.list(context).connections.length,1);
+    now+=2*60_000;assert.throws(()=>authority.list(context),/만료/);
+  }finally{authority.close();db.close();f.close();}
+});
+
+test('outbox retries freeze scoped grants and legacy recovery checks receipts before stripping authority',async()=>{
+  const f=fixture(),store=new Store(':memory:'),links=new WorkspaceLinks(store);
+  const authority=new ConnectorAuthority(store.database,f.connectors);links.connectorAuthority=authority;
+  const received:string[]=[],receipts=new Map<string,unknown>();let fail=false;
+  const server=createServer(async(req,res)=>{
+    res.setHeader('content-type','application/json');
+    if(req.url==='/v1/identity')return res.end(JSON.stringify({version:1,workspace_id:'stable-workspace',capabilities:{connectors:1,connector_tags:1}}));
+    if(req.url?.startsWith('/v1/receipts/')) {
+      const prior=receipts.get(req.url.slice('/v1/receipts/'.length));res.statusCode=prior?200:404;return res.end(JSON.stringify(prior??{}));
+    }
+    if(req.url==='/v1/operation') {
+      let body='';for await(const chunk of req)body+=chunk;received.push(body);
+      res.statusCode=fail?503:201;return res.end(JSON.stringify({accepted:true}));
+    }
+    res.end('[]');
+  });
+  try {
+    await f.connect();await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const link=await links.attach({name:'runner',url:`http://127.0.0.1:${(server.address() as {port:number}).port}`,token:'a'.repeat(43)});
+    const scoped=randomUUID();links.enqueue(link.id,{id:scoped,method:'POST',path:'/tasks/t/messages',body:{text:'#jira 조회'}});
+    fail=true;await links.flush(link.id);fail=false;await links.flush(link.id);
+    assert.equal(received.length,2);assert.equal(received[0],received[1]);
+    const scopes=JSON.parse(received[0]).body;
+    assert.equal(scopes.__desk_connector_selection,undefined);assert.equal(scopes.__desk_connector_grant.inputScoped,true);
+    for(const recoveredStatus of [201,409]) {
+    const expiredId=randomUUID();links.enqueue(link.id,{id:expiredId,method:'POST',path:'/tasks/t/messages',body:{text:'#jira 조회'}});
+    fail=true;await links.flush(link.id);fail=false;
+    const expired=JSON.parse((store.database.prepare('SELECT payload FROM workspace_delivery WHERE id=?').get(expiredId) as {payload:string}).payload);
+    expired.body.__desk_connector_grant.expiresAt=Date.now()-1;
+    store.database.prepare('UPDATE workspace_delivery SET payload=? WHERE id=?').run(JSON.stringify(expired),expiredId);
+    receipts.set(expiredId,{status:recoveredStatus,body:{accepted:recoveredStatus===201}});
+    const sentBefore:number=received.length;await links.flush(link.id);
+    assert.equal(received.length,sentBefore);
+    assert.equal((store.database.prepare('SELECT status FROM workspace_delivery WHERE id=?').get(expiredId) as {status:number}).status,recoveredStatus);
+    if(recoveredStatus===409)assert.equal(links.deliveries(link.id).find(row=>row.id===expiredId)?.text,'#jira 조회');
+    }
+    for(const committed of [0,201,409]) {
+      const id=randomUUID();links.enqueue(link.id,{id,method:'POST',path:'/tasks/t/messages',body:{text:'일반 대화'}});
+      const row=store.database.prepare('SELECT payload FROM workspace_delivery WHERE id=?').get(id) as {payload:string};
+      const old=JSON.parse(row.payload);old.body.__desk_connector_grant=authority.issue({workspaceId:'stable-workspace',requestId:id});
+      store.database.prepare('UPDATE workspace_delivery SET payload=? WHERE id=?').run(JSON.stringify(old),id);
+      if(committed)receipts.set(id,{status:committed,body:{accepted:committed===201}});
+      const before:number=received.length;await links.flush(link.id);
+      assert.equal(received.length,before+(committed?0:1));
+      if(!committed)assert.equal(JSON.parse(received.at(-1)!).body.__desk_connector_grant,undefined);
+      assert.equal((store.database.prepare('SELECT status FROM workspace_delivery WHERE id=?').get(id) as {status:number}).status,committed||201);
+      if(committed===409)assert.equal(links.deliveries(link.id).find(row=>row.id===id)?.text,'일반 대화');
+    }
+  }finally{await links.close();authority.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));store.database.close();f.close();}
 });
 
 test('current Slack message search tools are exposed and callable while writes remain blocked', async () => {

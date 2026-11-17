@@ -10,7 +10,8 @@ import type { SharedWorkspaceView, WorkspaceOperation } from '../../shared/works
 import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
 import { canonical, digest, json, operation, connectorUserInput } from './shared-workspace.ts';
-import { executeConnectorJob, type ConnectorAuthority } from './connector-authority.ts';
+import { executeConnectorJob, type ConnectorAuthority, type ConnectorPolicy } from './connector-authority.ts';
+import { connectorInputScopes, type ConnectorScope } from '../../shared/connector-tags.ts';
 import type { ConnectorJob } from './connector-broker.ts';
 import { readBody } from './body.ts';
 import { DocumentPermissionError, TemporaryFiles } from './shared-files.ts';
@@ -395,7 +396,7 @@ export class WorkspaceLinks {
   }
   enqueue(id:string,input:unknown) {
     const link = this.link(id);const op=operation(input),hash=digest(canonical(op));const old=this.result(op.id);
-    if('__desk_instructions' in op.body||'__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body||'__desk_connector_grant' in op.body)
+    if('__desk_instructions' in op.body||'__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body||'__desk_connector_grant' in op.body||'__desk_connector_selection' in op.body||'__desk_connector_identity' in op.body)
       throw new HttpError(400,'내부 지침·스킬 필드는 작업공간 연결에서만 설정합니다');
     if(old&&(old.digest!==hash||old.link_id!==id))throw new HttpError(409,'같은 명령 ID의 내용 또는 대상이 바뀌었습니다');
     if(!old){
@@ -408,9 +409,12 @@ export class WorkspaceLinks {
       this.db.exec('SAVEPOINT connector_enqueue');
       try {
       if (connectorUserInput(op.method, op.path)) {
-        const grant = this.connectorAuthority?.issue({ workspaceId: link.workspace_id, requestId: op.id });
-        if (grant?.connections.length) preparedOp.body.__desk_connector_grant = grant;
-        if (grant && !grant.connections.length) this.connectorAuthority!.revoke(grant.capability);
+        if(this.connectorAuthority)preparedOp.body.__desk_connector_identity=this.connectorAuthority.identity();
+        const scopes=connectorInputScopes(op.method,op.path,op.body);
+        if (scopes.length) {
+          if (!this.connectorAuthority) throw new HttpError(409,'외부 연결을 사용할 수 없습니다. 허브 연결 설정을 확인하세요');
+          preparedOp.body.__desk_connector_selection={scopes,policy:this.connectorAuthority.select(scopes),hubId:this.connectorAuthority.hubId};
+        }
       }
       const payload = JSON.stringify(preparedOp);
       const pending=this.db.prepare('SELECT count(*) n,coalesce(sum(length(CAST(payload AS BLOB))+coalesce(length(CAST(prepared_payload AS BLOB)),0)),0) bytes FROM workspace_delivery WHERE status IS NULL').get() as {n:number;bytes:number};
@@ -437,19 +441,72 @@ export class WorkspaceLinks {
         if(this.stopped)break;
         try {
           const op=JSON.parse(row.payload) as WorkspaceOperation;
-          const connectorGrant = op.body.__desk_connector_grant as { expiresAt?: number } | null | undefined;
+          const selection=op.body.__desk_connector_selection as {scopes:ConnectorScope[];policy:ConnectorPolicy[];hubId:string}|undefined;
+          let connectorGrant = op.body.__desk_connector_grant as { expiresAt?: number; inputScoped?:true;capability?:string } | null | undefined;
+          if(connectorGrant&&!connectorGrant.inputScoped) {
+            const identity=await this.request(this.link(id),'/v1/identity');
+            if(!('status'in identity)||identity.status!==200){failure('connector_capability_unavailable');break;}
+            if(identity.body?.capabilities?.connector_tags!==1) {
+              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+                .run(JSON.stringify({error:'업데이트 전 대기 입력입니다. 러너를 업데이트한 뒤 내용을 확인하고 다시 보내세요'}),row.id);
+              continue;
+            }
+            // Do not rewrite an operation already committed before a lost response.
+            const receipt=await this.request(this.link(id),'/v1/receipts/'+encodeURIComponent(op.id));
+            if(!('status'in receipt)){failure('receipt_unavailable');break;}
+            if(receipt.status===200&&Number.isInteger(receipt.body?.status)) {
+              this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
+                .run(receipt.body.status,JSON.stringify(receipt.body.body),receipt.body.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
+              continue;
+            }
+            if(receipt.status!==404){failure('receipt_unavailable');break;}
+            if(connectorInputScopes(op.method,op.path,op.body).length) {
+              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+                .run(JSON.stringify({error:'업데이트 전 입력의 권한은 자동 승계하지 않습니다. 내용을 확인하고 태그와 함께 다시 보내세요'}),row.id);
+              continue;
+            }
+            if(connectorGrant.capability)this.connectorAuthority?.revoke(connectorGrant.capability);
+            delete op.body.__desk_connector_grant;connectorGrant=undefined;
+            if(this.connectorAuthority)op.body.__desk_connector_identity=this.connectorAuthority.identity();
+            this.db.prepare('UPDATE workspace_delivery SET payload=? WHERE id=?').run(JSON.stringify(op),row.id);
+          }
           if (connectorGrant && (!Number.isSafeInteger(connectorGrant.expiresAt) || connectorGrant.expiresAt! <= Date.now())) {
+            // A lost response must not turn an already committed input into an expiry error.
+            const receipt=await this.request(this.link(id),'/v1/receipts/'+encodeURIComponent(op.id));
+            if(!('status'in receipt)){failure('receipt_unavailable');break;}
+            if(receipt.status===200&&Number.isInteger(receipt.body?.status)) {
+              this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
+                .run(receipt.body.status,JSON.stringify(receipt.body.body),receipt.body.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
+              continue;
+            }
+            if(receipt.status!==404){failure('receipt_unavailable');break;}
             this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
               .run(JSON.stringify({ error: '대기 중 외부 연결 허가가 만료되었습니다. 현재 연결을 확인하고 입력을 다시 보내주세요' }), row.id);
             continue;
           }
-          if (op.body.__desk_connector_grant) {
+          if (selection || op.body.__desk_connector_grant) {
             const identity = await this.request(this.link(id), '/v1/identity');
             if (!('status' in identity) || identity.status !== 200) { failure('connector_capability_unavailable'); break; }
-            if (identity.body?.capabilities?.connectors !== 1) {
+            if (identity.body?.capabilities?.connectors !== 1 || ((selection || connectorGrant?.inputScoped) && identity.body?.capabilities?.connector_tags !== 1)) {
               this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
                 .run(JSON.stringify({ error: '공유 러너가 요청별 외부 연결을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요' }), row.id);
               continue;
+            }
+            if (selection) {
+              try {
+                if (!this.connectorAuthority || selection.hubId!==this.connectorAuthority.hubId) throw new HttpError(409,'권한을 선택한 허브가 바뀌었습니다. 원래 허브에서 다시 요청하세요');
+                this.db.exec('SAVEPOINT connector_prepare');
+                try {
+                  op.body.__desk_connector_grant=this.connectorAuthority.issue({workspaceId:this.link(id).workspace_id,requestId:op.id,scopes:selection.scopes,expectedPolicy:selection.policy});
+                  delete op.body.__desk_connector_selection;
+                  this.db.prepare('UPDATE workspace_delivery SET payload=? WHERE id=?').run(JSON.stringify(op),row.id);
+                  this.db.exec('RELEASE connector_prepare');
+                } catch(error) {this.db.exec('ROLLBACK TO connector_prepare; RELEASE connector_prepare');throw error;}
+              } catch (error) {
+                if (!(error instanceof HttpError)) throw error;
+                this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,prepared_payload=NULL WHERE id=?').run(error.status,JSON.stringify({error:error.message}),row.id);
+                continue;
+              }
             }
           }
           if (needsDefaultInstructions(op.method, op.path, op.body) && op.body.__desk_instructions !== undefined && op.body.__desk_instructions !== DEFAULT_INSTRUCTIONS) {
@@ -479,7 +536,7 @@ export class WorkspaceLinks {
             }
           }
           const ref=bundle?{version:bundle.version,selected:bundle.selected,hashes:bundle.hashes,digest:bundle.digest}:null;
-          const requestBody=ref?JSON.stringify({...op,body:{...op.body,__desk_skill_ref:ref}}):row.payload;
+          const requestBody=JSON.stringify(ref?{...op,body:{...op.body,__desk_skill_ref:ref}}:op);
           let r=await this.request(this.link(id),'/v1/operation',{method:'POST',body:requestBody});
           if(bundle&&'status' in r&&r.status===409&&r.body?.code==='skill_missing'){
             const prepared=await this.request(this.link(id),'/v1/skills/prepare',

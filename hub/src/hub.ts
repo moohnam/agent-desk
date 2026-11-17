@@ -1,4 +1,5 @@
 import type { ConnectorBroker, ConnectorExecutionContext } from './connector-broker.ts';
+import type { ConnectorIdentity } from './connector-authority.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { maintenanceActive, requireAdmission } from './runtime-control.ts';
 import { DEFAULT_INSTRUCTIONS, validateInstructions } from './instruction-store.ts';
@@ -46,6 +47,7 @@ export class Hub extends DeskCore {
   private instructionContext = new AsyncLocalStorage<string>();
   private connectorContext = new AsyncLocalStorage<ConnectorExecutionContext | null | undefined>();
   private inputPeer = new AsyncLocalStorage<string>();
+  private connectorIdentity = new AsyncLocalStorage<ConnectorIdentity|undefined>();
   connectorBroker?: ConnectorBroker;
   connectorQueriesPending?: () => boolean;
   connectorMcpUrl?: string;
@@ -57,16 +59,22 @@ export class Hub extends DeskCore {
   withInputPeer<T>(peerId: string, work: () => T): T {
     return this.inputPeer.run(peerId, work);
   }
+  withConnectorIdentity<T>(identity:ConnectorIdentity|undefined,work:()=>T):T {return this.connectorIdentity.run(identity,work);}
   private assertApprovalReply(approval: Approval) {
     const context = this.connectorContext.getStore();
     this.connectorBroker?.assertApprovalReply(approval.id, approval.session_id,
-      this.inputPeer.getStore() ?? context?.sourcePeerId, context);
+      this.inputPeer.getStore() ?? context?.sourcePeerId, context,this.connectorIdentity.getStore());
   }
-  connectorIdle(sessionId: string) { this.drain(sessionId); }
+  connectorIdle(sessionId: string) { this.finishConnectorInput(sessionId);this.drain(sessionId); }
+  private finishConnectorInput(sessionId:string) {
+    if (!this.connectorPending(sessionId)) this.connectorBroker?.finishInput(sessionId);
+  }
   private connectorPending(sessionId: string) {
-    return this.busy.has(sessionId) || !!this.background.get(sessionId)?.length || !!this.connectorBroker?.busy(sessionId);
+    return this.busy.has(sessionId) || this.approvalPending(sessionId) || !!this.background.get(sessionId)?.length || !!this.connectorBroker?.busy(sessionId);
   }
+  private approvalPending(sessionId:string) {return this.store.pendingApprovals().some(a=>a.session_id===sessionId);}
   private connectorSwitchBlocked(sessionId: string, context: ConnectorExecutionContext | null | undefined, textOnly = true) {
+    if (textOnly && (context === null || context?.inputScoped || this.connectorBroker?.scoped(sessionId))) return false;
     return this.store.getSession(sessionId)?.engine !== 'agy' && context !== undefined && this.connectorPending(sessionId)
       && !!this.connectorBroker && (!textOnly || this.connectorBroker.hasAuthority(sessionId) || this.connectorBroker.busy(sessionId))
       && !this.connectorBroker.samePolicy(sessionId, context ?? undefined);
@@ -98,9 +106,14 @@ export class Hub extends DeskCore {
     if (context === undefined) return false;
     if (this.unsupportedConnector(this.store.getSession(sessionId)!,context)) return false;
     const broker = this.connectorBroker;
+    if (context?.inputScoped) broker?.assertScopedTools(sessionId);
     if (this.connectorSwitchBlocked(sessionId,context)) throw new HttpError(409, broker!.switchBlockedMessage(sessionId,context ?? undefined));
     if (!broker?.hasSession(sessionId)) {
       if (context) throw new HttpError(409, '이전에 시작한 실행에는 외부 연결 도구가 없습니다. 실행을 닫고 메시지를 다시 보내 재개해 주세요');
+      return false;
+    }
+    if (context === null || context.inputScoped || broker.scoped(sessionId)) {
+      broker.activateInput(sessionId,this.store.getSession(sessionId)!.task_id,context ?? undefined);
       return false;
     }
     // Steering is part of the current turn, so it must retain the original grant.
@@ -157,7 +170,7 @@ export class Hub extends DeskCore {
     this.requests = new AgentRequests(this, {
       dispatch: (sessionId, body, skills, steer) => this.connectorContext.run(null, () => this.dispatch(sessionId, body, skills, steer)),
       drain: (sessionId) => this.drain(sessionId),
-      ready: (sessionId) => this.remotes.ready(sessionId) && !this.connectorSwitchBlocked(sessionId,null),
+      ready: (sessionId) => this.remotes.ready(sessionId) && !this.approvalPending(sessionId) && !this.connectorSwitchBlocked(sessionId,null,false),
       bindApproval: (approvalId, sessionId) => this.connectorBroker?.bindApproval(approvalId, sessionId),
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
@@ -233,6 +246,7 @@ export class Hub extends DeskCore {
     }
     this.busy = new Set([...this.busy].filter(id => !ownedSession(id)).concat(sessions.filter(s => s.busy).map(s => s.sessionId)));
     this.background = new Map([...this.background].filter(([id]) => !ownedSession(id)).concat(sessions.filter(s => s.background?.length).map(s => [s.sessionId, s.background!] as [string, import("../../shared/protocol.ts").BackgroundTask[]])));
+    for (const s of sessions) this.finishConnectorInput(s.sessionId);
     for (const s of sessions) if (s.background?.length) { const t = this.store.getSession(s.sessionId)?.task_id; if (t) touched.push(t); }
     // Messages that waited for a session the runner no longer has will not be sent.
     const live = new Set(sessions.map((s) => s.sessionId));
@@ -407,7 +421,7 @@ export class Hub extends DeskCore {
       ...(context && { channel_context: context }),
     });
     this.runner.handle({
-      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: project.root_path, prompt, permissionMode,
+      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: project.root_path, prompt:prompt+(this.connectorBroker?.inputNote(sessionId)??''), permissionMode,
       model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
     });
     this.busy.add(sessionId);
@@ -455,13 +469,17 @@ export class Hub extends DeskCore {
     const asked = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
       ? this.store.pendingApprovals().find((a) => a.session_id === session.id && a.tool_name === ASK_USER) : undefined;
     if (asked) this.assertApprovalReply(asked);
+    if (!asked && live && engine !== 'agy' && this.connectorContext.getStore()?.inputScoped)
+      this.connectorBroker?.assertScopedTools(session.id);
     // Behind messages already waiting too, so they keep their order.
     const offline = !this.remotes.ready(session.id);
-    const wait = !asked && content && (this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
+    const wait = !asked && content && (this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
     // model and the change applies from the next turn.
     const model = c.model && c.model !== session.model ? c.model : undefined;
     const effort = c.effort && c.effort !== session.effort ? c.effort : undefined;
+    if ((model || effort || (c.mode && c.mode !== session.permission_mode)) && this.approvalPending(session.id))
+      throw new HttpError(409,'먼저 대기 중인 승인·질문에 답한 뒤 실행 설정을 바꿔 주세요');
     if ((model || effort || (c.mode && c.mode !== session.permission_mode))
       && this.connectorSwitchBlocked(session.id,this.connectorContext.getStore(),false))
       throw new HttpError(409, '다른 외부 연결 계정의 작업이 끝난 뒤 실행 설정을 바꿀 수 있습니다');
@@ -546,13 +564,13 @@ export class Hub extends DeskCore {
     if (this.runner.has(sessionId)) {
       unavailable = this.activateConnector(sessionId,context) || unavailable;
       warn();
-      this.runner.handle({ type: 'send', sessionId, text: body, skills, steer, skillSnapshot });
+      this.runner.handle({ type: 'send', sessionId, text: body+(this.connectorBroker?.inputNote(sessionId)??''), skills, steer, skillSnapshot });
     } else {
       // A new engine process: whatever ran in the background before went with the old one.
       this.background.delete(sessionId);
       warn();
       this.runner.handle({
-        type: 'start', sessionId, connectorMcp: this.startConnector(sessionId,context), instructions: this.startInstructions(sessionId, sessionId), engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
+        type: 'start', sessionId, connectorMcp: this.startConnector(sessionId,context), instructions: this.startInstructions(sessionId, sessionId), engine: engineOf(session.engine), cwd: session.cwd, prompt: body+(this.connectorBroker?.inputNote(sessionId)??''),
         resume: session.engine_session_id ?? undefined, permissionMode: session.permission_mode,
         model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home, skillSnapshot,
       });
@@ -577,7 +595,7 @@ export class Hub extends DeskCore {
   }
   private drainInner(sessionId: string) {
     if (maintenanceActive()) return;
-    if (!this.remotes.ready(sessionId) || this.busy.has(sessionId)) return;
+    if (!this.remotes.ready(sessionId) || this.busy.has(sessionId) || this.approvalPending(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
     if (next?.skill_snapshot && !this.remotes.canSnapshot(sessionId)) return;
     if (!next || this.connectorSwitchBlocked(sessionId,next.connector_context,next.kind !== 'reset')) return;
@@ -630,6 +648,7 @@ export class Hub extends DeskCore {
     const q = this.store.queued({ taskId }).find((x) => x.id === queuedId);
     if (!q) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     if (q.kind === 'reset') throw new HttpError(409, '컨텍스트 재구성은 지금 턴이 끝난 뒤에 실행됩니다');
+    if (this.approvalPending(q.session_id)) throw new HttpError(409,'먼저 대기 중인 승인·질문에 답해 주세요. 메시지는 대기열에 보관됩니다');
     this.requireRunner(q.session_id);
     this.requireSkillSnapshotRunner(q.skill_snapshot, q.session_id);
     if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
@@ -679,7 +698,7 @@ export class Hub extends DeskCore {
     });
     this.addEvent(parent.id, parentId, 'status', { kind: 'status', state: 'forked', detail: { task_id: task.id, title: task.title, seq: task.seq } });
     this.runner.handle({
-      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: parent.cwd, prompt: c.body, resume: parent.engine_session_id, fork: true,
+      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: parent.cwd, prompt: c.body+(this.connectorBroker?.inputNote(sessionId)??''), resume: parent.engine_session_id, fork: true,
       permissionMode, model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
     });
     this.busy.add(sessionId);
@@ -770,7 +789,7 @@ export class Hub extends DeskCore {
     this.addEvent(old.id, taskId, 'status', { kind: 'status', state: 'context_reset', detail: { session_id: sessionId } });
     this.addEvent(sessionId, taskId, 'user', { text, skills: [], handoff: 'reset', ...(queuedAt && { queued_at: queuedAt }) });
     this.runner.handle({
-      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId, old.id), engine, cwd: old.cwd ?? '', prompt: text, permissionMode: old.permission_mode,
+      type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId, old.id), engine, cwd: old.cwd ?? '', prompt: text+(this.connectorBroker?.inputNote(sessionId)??''), permissionMode: old.permission_mode,
       model: old.model ?? undefined, effort: old.effort ?? undefined, skills: [], skillsHome: this.skills.home,
     });
     this.busy.add(sessionId);
@@ -899,6 +918,7 @@ export class Hub extends DeskCore {
           break;
         }
         this.busy.delete(session.id);
+        this.finishConnectorInput(session.id);
         this.transition(taskId, session.id, 'turn_ended');
         this.requests.answerRequests(session.id);
         this.drain(session.id);
@@ -930,6 +950,7 @@ export class Hub extends DeskCore {
       }
       case 'background':
         if (m.tasks.length) this.background.set(session.id, m.tasks); else this.background.delete(session.id);
+        this.finishConnectorInput(session.id);
         this.publishTask(taskId);
         if (!m.tasks.length) this.drain(session.id);
         break;

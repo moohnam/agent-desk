@@ -1,14 +1,17 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { Connectors, connectorReadToolNames, type ConnectorService } from './connectors.ts';
+import { Connectors, connectorReadToolNames, connectorTagTools, type ConnectorService } from './connectors.ts';
 import { HttpError } from './errors.ts';
 import { requireAdmission } from './runtime-control.ts';
 import type { ConnectorCompletion, ConnectorJob } from './connector-broker.ts';
+import { CONNECTOR_SCOPES, type ConnectorScope } from '../../shared/connector-tags.ts';
 
 export interface ConnectorPolicy { service: ConnectorService; generation: string; tools: string[] }
+export interface ConnectorIdentity { hubId:string; connections:{service:ConnectorService;generation:string}[] }
 export interface ConnectorGrant {
   capability: string; hubId: string; workspaceId: string; requestId: string; expiresAt: number;
   connections: ConnectorPolicy[];
+  inputScoped?: true;
 }
 /** Populated by the authenticated execution layer, never from model-supplied task IDs. */
 export interface ConnectorContext {
@@ -20,6 +23,7 @@ export interface ConnectorCall extends ConnectorContext {
 interface GrantRow {
   capability_hash: string; workspace_id: string; request_id: string; task_id: string | null;
   session_id: string | null; expires_at: number; policy: string; revoked: number;
+  active_ttl_ms: number | null;
 }
 interface CallRow { fingerprint: string; result: string | null; error: string | null }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -61,6 +65,8 @@ export class ConnectorAuthority {
       CREATE TABLE IF NOT EXISTS connector_call (
         capability_hash TEXT NOT NULL, call_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
         result TEXT, error TEXT, PRIMARY KEY(capability_hash,call_id));`);
+    if (!(db.prepare('PRAGMA table_info(connector_grant)').all() as {name:string}[]).some(column=>column.name==='active_ttl_ms'))
+      db.exec('ALTER TABLE connector_grant ADD COLUMN active_ttl_ms INTEGER');
     if (!db.prepare('SELECT id FROM connector_authority_identity').get())
       db.prepare('INSERT INTO connector_authority_identity VALUES (?)').run(randomUUID());
     this.hubId = (db.prepare('SELECT id FROM connector_authority_identity').get() as { id: string }).id;
@@ -75,23 +81,44 @@ export class ConnectorAuthority {
   }
 
   /** Only the gateway's accepted user-input path may invoke this method. */
-  issue(input: { workspaceId: string; requestId: string; taskId?: string; sessionId?: string; ttlMs?: number }): ConnectorGrant {
+  identity(): ConnectorIdentity { return {hubId:this.hubId,connections:this.connectors.connections()}; }
+  select(scopes: readonly ConnectorScope[]): ConnectorPolicy[] {
+    if (!Array.isArray(scopes) || scopes.some(scope => !CONNECTOR_SCOPES.includes(scope))) throw new HttpError(400, '외부 조회 태그가 올바르지 않습니다');
+    const connections = this.connectors.connections();
+    const selected: ConnectorPolicy[] = [];
+    for (const scope of new Set(scopes)) {
+      const service = scope === 'slack' ? 'slack' : 'jira';
+      const connection = connections.find(c => c.service === service);
+      if (!connection) throw new HttpError(409, `#${scope} 연결이 없습니다. 설정에서 먼저 연결해 주세요`);
+      const tools = connectorTagTools([scope],service);
+      const prior = selected.find(c => c.service === service);
+      if (prior) prior.tools = [...new Set([...prior.tools,...tools])].sort();
+      else selected.push({...connection,tools:tools.sort()});
+    }
+    return selected.sort((a,b)=>a.service.localeCompare(b.service));
+  }
+
+  issue(input: { workspaceId: string; requestId: string; taskId?: string; sessionId?: string; ttlMs?: number;
+    scopes?: ConnectorScope[]; expectedPolicy?: ConnectorPolicy[] }): ConnectorGrant {
     if (this.closed) throw new HttpError(503, '외부 연결 권한 처리가 종료되었습니다');
     if (!validId(input.workspaceId) || !validId(input.requestId)
       || (input.taskId !== undefined && !validId(input.taskId)) || (input.sessionId !== undefined && !validId(input.sessionId)))
       throw new HttpError(400, '외부 연결 요청 문맥이 올바르지 않습니다');
-    const ttl = input.ttlMs ?? DEFAULT_TTL;
-    if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > MAX_TTL) throw new HttpError(400, '외부 연결 허가 기간이 올바르지 않습니다');
+    const scoped = input.scopes !== undefined;
+    const ttl = input.ttlMs ?? (scoped ? 24 * 60 * 60_000 : DEFAULT_TTL);
+    if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > (scoped ? 24 * 60 * 60_000 : MAX_TTL)) throw new HttpError(400, '외부 연결 허가 기간이 올바르지 않습니다');
     this.prune();
     if (this.db.prepare('SELECT 1 FROM connector_grant WHERE workspace_id=? AND request_id=?').get(input.workspaceId, input.requestId))
       throw new HttpError(409, '이미 허가한 사용자 요청입니다');
     if ((this.db.prepare('SELECT count(*) n FROM connector_grant').get() as { n: number }).n >= 256)
       throw new HttpError(429, '외부 연결 허가 한도에 도달했습니다');
-    const connections = this.connectors.connections().map(connection => ({ ...connection, tools: connectorReadToolNames(connection.service) }));
+    const connections = scoped ? this.select(input.scopes!) : this.connectors.connections().map(connection => ({ ...connection, tools: connectorReadToolNames(connection.service) }));
+    if (input.expectedPolicy && canonical(connections) !== canonical(input.expectedPolicy))
+      throw new HttpError(409, '대기 중 외부 연결 계정이나 권한이 바뀌었습니다. 연결을 확인한 뒤 태그를 붙여 다시 보내세요');
     const capability = randomBytes(32).toString('base64url'), expiresAt = this.now() + ttl;
-    this.db.prepare('INSERT INTO connector_grant VALUES (?,?,?,?,?,?,?,0)').run(hash(capability), input.workspaceId,
-      input.requestId, input.taskId ?? null, input.sessionId ?? null, expiresAt, JSON.stringify(connections));
-    return { capability, hubId: this.hubId, workspaceId: input.workspaceId, requestId: input.requestId, expiresAt, connections };
+    this.db.prepare('INSERT INTO connector_grant VALUES (?,?,?,?,?,?,?,0,?)').run(hash(capability), input.workspaceId,
+      input.requestId, input.taskId ?? null, input.sessionId ?? null, expiresAt, JSON.stringify(connections),scoped?DEFAULT_TTL:null);
+    return { capability, hubId: this.hubId, workspaceId: input.workspaceId, requestId: input.requestId, expiresAt, connections, ...(scoped && {inputScoped:true as const}) };
   }
 
   private grant(context: ConnectorContext): GrantRow {
@@ -109,8 +136,9 @@ export class ConnectorAuthority {
   /** The authoritative broker binds newly-created tasks exactly once before exposing tools. */
   bind(context: ConnectorContext): void {
     const row = this.grant(context);
-    if (row.task_id === null || row.session_id === null)
-      this.db.prepare('UPDATE connector_grant SET task_id=?,session_id=? WHERE capability_hash=?').run(context.taskId, context.sessionId, row.capability_hash);
+    if (row.task_id === null || row.session_id === null || row.active_ttl_ms !== null)
+      this.db.prepare('UPDATE connector_grant SET task_id=?,session_id=?,expires_at=?,active_ttl_ms=NULL WHERE capability_hash=?')
+        .run(context.taskId,context.sessionId,row.active_ttl_ms===null?row.expires_at:Math.min(row.expires_at,this.now()+row.active_ttl_ms),row.capability_hash);
   }
 
   private allowed(context: ConnectorContext, service?: ConnectorService): { row: GrantRow; policies: ConnectorPolicy[] } {

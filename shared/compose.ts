@@ -1,3 +1,4 @@
+import { CONNECTOR_SCOPES, connectorTags } from './connector-tags.ts';
 // Parses the compose box syntax shared by the hub and the web UI (no Node imports here).
 //   @name          continue the latest task of an existing project
 //   @name#N        continue task N of the project (tasks are numbered 1, 2, … per project)
@@ -115,7 +116,7 @@ export const wantedEngine = (c: { engine?: EngineName; model?: ModelName }): Eng
   c.engine ?? (c.model ? modelEngine(c.model) : undefined);
 
 /** Built-in tags; a skill cannot take one of these names. */
-export const RESERVED_TAGS = [...Object.keys(MODE_TAGS), ...ENGINES, ...MODEL_TAGS, ...EFFORT_TAGS, ...DELIVERY_TAGS];
+export const RESERVED_TAGS = [...Object.keys(MODE_TAGS), ...ENGINES, ...MODEL_TAGS, ...EFFORT_TAGS, ...DELIVERY_TAGS, ...CONNECTOR_SCOPES];
 
 const EFFORT_HELP: Record<Effort, string> = {
   low: 'effort 낮게', medium: 'effort 보통', high: 'effort 높게', xhigh: 'effort 매우 높게',
@@ -123,6 +124,7 @@ const EFFORT_HELP: Record<Effort, string> = {
 };
 /** Every built-in tag and what it does, in the order the compose box suggests them. */
 export const TAG_HELP: { tag: string; help: string }[] = [
+  ...CONNECTOR_SCOPES.map(tag => ({tag, help: `이번 요청에만 ${tag === 'slack' ? 'Slack' : tag === 'jira' ? 'Jira' : 'Confluence'} 읽기·검색 허용`})),
   { tag: 'auto', help: '이제부터 자동 승인' },
   { tag: 'ask', help: '이제부터 매번 확인 (기본)' },
   ...ENGINES.map((e) => ({ tag: e, help: `새 작업을 ${ENGINE_INFO[e].tagLabel}로${e === DEFAULT_ENGINE ? ' (기본)' : ''}` })),
@@ -167,7 +169,7 @@ export function mentionsIn(text: string): { name: string; no?: number }[] {
  * out; elsewhere, and in replies, mentions stay in the text the agent gets.
  */
 export function parseCompose(text: string, skills: Iterable<string> = [], route = true): Composed {
-  const known = new Set(skills);
+  const known = new Set([...skills].filter(name => !(CONNECTOR_SCOPES as readonly string[]).includes(name)));
   let body = text;
   let mention: Composed['mention'];
   const m = route ? MENTION.exec(body) : null;
@@ -181,6 +183,7 @@ export function parseCompose(text: string, skills: Iterable<string> = [], route 
   let effort: Effort | undefined;
   let delivery: Delivery | undefined;
   const used: string[] = [];
+  body = connectorTags(body).body;
   body = body.replace(TAG, (all, pre: string, tag: string) => {
     const t = tag.toLowerCase();
     if ((ENGINES as string[]).includes(t)) { engine ??= t as EngineName; return pre; }

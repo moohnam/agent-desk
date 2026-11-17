@@ -13,7 +13,11 @@
     "fast-xml-parser": "5.11.2",
     "parse5": "8.1.1",
     "puppeteer-core": "25.17.0",
-    "qrcode": "1.5.4"
+    "qrcode": "1.5.4",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

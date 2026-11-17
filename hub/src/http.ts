@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, extname, isAbsolute, join, normalize } from 'node:path';
 import { Connectors, type ConnectorService } from './connectors.ts';
 import { ConnectorAuthority, executeConnectorJob } from './connector-authority.ts';
+import { connectorInputScopes } from '../../shared/connector-tags.ts';
 import { SharedWorkspace, connectorUserInput } from './shared-workspace.ts';
 import { handleConnectorMcp } from './connector-mcp.ts';
 import { DocumentPreviews } from './document-previews.ts';
@@ -417,11 +418,11 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
           return hub.withInputPeer(directPeer, () => hub.atomic(() => {
             if (!connectorUserInput(req.method!, workspaceUrl.pathname)) return workspaceApi(hub, req.method!, workspaceUrl, body);
-            const grant = connectorAuthority.issue({ workspaceId: directWorkspace.id, requestId: randomUUID() });
-            if (!grant.connections.length) connectorAuthority.revoke(grant.capability);
-            const result = hub.withConnectorContext(grant.connections.length ? { ...grant, sourcePeerId: directPeer } : null,
-              () => workspaceApi(hub, req.method!, workspaceUrl, body));
-            if (result.status >= 400) connectorAuthority.revoke(grant.capability);
+            const scopes=connectorInputScopes(req.method!,workspaceUrl.pathname,body);
+            const grant = scopes.length ? connectorAuthority.issue({ workspaceId: directWorkspace.id, requestId: randomUUID(),scopes }) : undefined;
+            const result = hub.withConnectorIdentity(connectorAuthority.identity(),()=>hub.withConnectorContext(grant ? { ...grant, sourcePeerId: directPeer } : null,
+              () => workspaceApi(hub, req.method!, workspaceUrl, body)));
+            if (grant && result.status >= 400) connectorAuthority.revoke(grant.capability);
             return result;
           }));
         })();

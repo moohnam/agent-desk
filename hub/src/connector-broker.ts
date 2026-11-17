@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { ConnectorContext, ConnectorGrant } from './connector-authority.ts';
+import type { ConnectorContext, ConnectorGrant, ConnectorIdentity } from './connector-authority.ts';
 import { HttpError } from './errors.ts';
 import { requireAdmission } from './runtime-control.ts';
 
@@ -12,7 +12,7 @@ export interface ConnectorJob {
   callId: string; method: ConnectorMethod; context: ConnectorContext; args: Record<string, unknown>; expiresAt: number;
 }
 export type ConnectorCompletion = { result: unknown; error?: never } | { error: { status: number; message: string }; result?: never };
-interface SessionRow { session_id: string; task_id: string; token_hash: string; context: string | null; epoch: string; active: number }
+interface SessionRow { session_id: string; task_id: string; token_hash: string; context: string | null; epoch: string; active: number; scoped_tools:number }
 interface JobRow {
   id: string; session_id: string; peer_id: string; epoch: string; context: string; method: ConnectorMethod;
   args: string; expires_at: number; status: string; completion: string | null; completion_hash: string | null;
@@ -28,7 +28,7 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 const policy = (context?: ConnectorRequestContext) => context ? canonical({ hubId: context.hubId, sourcePeerId: context.sourcePeerId,
-  workspaceId: context.workspaceId, connections: context.connections.map(c => ({ ...c, tools: [...c.tools].sort() })).sort((a, b) => a.service.localeCompare(b.service)) }) : '';
+  workspaceId: context.workspaceId, ...(context.inputScoped && {inputScoped:true}), connections: context.connections.map(c => ({ ...c, tools: [...c.tools].sort() })).sort((a, b) => a.service.localeCompare(b.service)) }) : '';
 
 /** Durable, peer-isolated mailbox. Runtime tokens authorize one session, never a workspace. */
 export class ConnectorBroker {
@@ -60,6 +60,8 @@ export class ConnectorBroker {
       approval_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, peer_id TEXT NOT NULL,
       epoch TEXT NOT NULL, policy TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS connector_job_peer ON connector_job(peer_id,status,expires_at);`);
+    if (!(db.prepare('PRAGMA table_info(connector_runtime)').all() as {name:string}[]).some(column=>column.name==='scoped_tools'))
+      db.exec('ALTER TABLE connector_runtime ADD COLUMN scoped_tools INTEGER NOT NULL DEFAULT 0');
     this.prune();
     this.sweepTimer = setInterval(() => { if (!this.closed) this.prune(true); }, 60_000);
     this.sweepTimer.unref();
@@ -81,6 +83,7 @@ export class ConnectorBroker {
     if (!context || context.workspaceId !== this.workspaceId || !id(context.hubId) || !id(context.sourcePeerId) || !id(context.requestId)
       || typeof context.capability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(context.capability)
       || !Number.isSafeInteger(context.expiresAt) || !Array.isArray(context.connections)
+      || (context.inputScoped !== undefined && context.inputScoped !== true)
       || context.connections.length > 2 || new Set(context.connections.map(c => c?.service)).size !== context.connections.length
       || context.connections.some(c => !c || !['jira', 'slack'].includes(c.service) || !id(c.generation) || !Array.isArray(c.tools)
         || c.tools.length > 100 || c.tools.some(tool => !id(tool))))
@@ -103,6 +106,19 @@ export class ConnectorBroker {
     return checked.expiresAt > this.now() ? checked : null;
   }
   private context(row: SessionRow): ConnectorRequestContext | undefined { return row.context ? JSON.parse(row.context) : undefined; }
+  scoped(sessionId: string) { const row=this.row(sessionId);return !!row?.active && !!this.context(row)?.inputScoped; }
+  markScopedTools(token:string) {
+    const row=this.authenticate(token);
+    this.db.prepare('UPDATE connector_runtime SET scoped_tools=1 WHERE session_id=?').run(row.session_id);
+  }
+  assertScopedTools(sessionId:string) {
+    if (!this.row(sessionId)?.scoped_tools) throw new HttpError(409,'이 실행은 이전 외부 도구 목록을 사용하고 있습니다. 진행 중인 작업이 끝난 뒤 실행을 닫고, #slack·#jira·#confluence 태그와 함께 다시 보내세요. 실행 중 작업은 유지됩니다');
+  }
+  inputNote(sessionId: string): string {
+    const row=this.row(sessionId), context=row?.active ? this.context(row) : undefined;
+    if (!context?.inputScoped) return '';
+    return `\n\n[데스크 외부 조회 권한] 이 요청에만 허용된 읽기 도구를 사용하세요. desk_connector_list/tools/read 호출에는 request_id=${context.requestId}를 반드시 넣으세요. 다른 요청의 식별자를 재사용하거나 이전 백그라운드 작업에 전달하지 마세요. Confluence 도구의 service는 jira입니다.`;
+  }
   stored(sessionId: string): ConnectorExecutionContext | undefined {
     const row = this.row(sessionId);
     if (!row?.context) return;
@@ -116,12 +132,20 @@ export class ConnectorBroker {
     this.db.prepare('INSERT OR IGNORE INTO connector_approval VALUES (?,?,?,?,?)')
       .run(approvalId, sessionId, context.sourcePeerId, row!.epoch, policy(context));
   }
-  assertApprovalReply(approvalId: string, sessionId: string, peerId?: string, context?: ConnectorRequestContext | null): void {
+  assertApprovalReply(approvalId: string, sessionId: string, peerId?: string, context?: ConnectorRequestContext | null, identity?:ConnectorIdentity): void {
     const binding = this.db.prepare('SELECT * FROM connector_approval WHERE approval_id=?').get(approvalId) as
       { session_id: string; peer_id: string; epoch: string; policy: string } | undefined;
     const row = this.row(sessionId);
     // Pre-upgrade approvals with active grants have no trustworthy originating epoch.
     if (!binding && !row?.context) return;
+    if (binding && !context && binding.session_id === sessionId && row?.active && row.epoch === binding.epoch
+      && peerId === binding.peer_id) {
+      const expected=JSON.parse(binding.policy) as ConnectorRequestContext;
+      if ((expected.inputScoped || identity) && (!identity || identity.hubId!==expected.hubId
+        || !Array.isArray(identity.connections) || expected.connections.some(p=>!identity.connections.some(c=>c?.service===p.service&&c?.generation===p.generation))))
+        throw new HttpError(409,'질문·승인을 요청한 외부 연결 계정과 응답 계정이 다릅니다. 원래 허브의 연결 계정을 확인하세요');
+      this.peer(peerId); return;
+    }
     if (!binding || binding.session_id !== sessionId || !row?.active || row.epoch !== binding.epoch
       || peerId !== binding.peer_id || !context || context.sourcePeerId !== peerId
       || !this.samePolicy(sessionId, context) || policy(context) !== binding.policy)
@@ -131,11 +155,11 @@ export class ConnectorBroker {
   /** New engine process only: rotates the secret and rejects calls from the old process. */
   open(sessionId: string, taskId: string, context?: ConnectorRequestContext): string {
     this.session(sessionId, taskId);
-    const accepted = context ? this.checked(context) : undefined;
+    const accepted = context ? this.activeContext(context) : undefined;
     const token = randomBytes(32).toString('base64url');
     this.deactivate(sessionId);
-    this.db.prepare(`INSERT INTO connector_runtime VALUES (?,?,?,?,?,1)
-      ON CONFLICT(session_id) DO UPDATE SET task_id=excluded.task_id,token_hash=excluded.token_hash,context=excluded.context,epoch=excluded.epoch,active=1`)
+    this.db.prepare(`INSERT INTO connector_runtime(session_id,task_id,token_hash,context,epoch,active) VALUES (?,?,?,?,?,1)
+      ON CONFLICT(session_id) DO UPDATE SET task_id=excluded.task_id,token_hash=excluded.token_hash,context=excluded.context,epoch=excluded.epoch,active=1,scoped_tools=0`)
       .run(sessionId, taskId, hash(token), accepted ? JSON.stringify(accepted) : null, randomUUID());
     return token;
   }
@@ -149,6 +173,27 @@ export class ConnectorBroker {
       if (context) this.checked(context);
       return policy(current) === policy(context);
     } catch { return false; }
+  }
+  private activeContext(context: ConnectorRequestContext) {
+    const accepted=this.checked(context);
+    if (accepted.inputScoped) accepted.expiresAt=Math.min(accepted.expiresAt,this.now()+15*60_000);
+    return accepted;
+  }
+  /** A new explicit input replaces its scope, never lends the new grant to old tool calls. */
+  activateInput(sessionId: string, taskId: string, context?: ConnectorRequestContext): void {
+    this.session(sessionId,taskId);
+    const row=this.row(sessionId);
+    if (!row?.active || row.task_id!==taskId) throw new HttpError(403,'실행 중인 외부 조회 인증이 없습니다');
+    const accepted=context ? this.activeContext(context) : undefined;
+    this.db.prepare('UPDATE connector_runtime SET context=?,epoch=? WHERE session_id=?')
+      .run(accepted?JSON.stringify(accepted):null,randomUUID(),sessionId);
+    this.db.prepare("UPDATE connector_job SET status='cancelled',completion=NULL WHERE session_id=? AND status='pending'").run(sessionId);
+    for (const job of this.db.prepare("SELECT id FROM connector_job WHERE session_id=? AND status='cancelled'").all(sessionId) as {id:string}[]) this.wake(job.id);
+  }
+  finishInput(sessionId: string): void {
+    if (this.scoped(sessionId) && !this.busy(sessionId)) {
+      const row=this.row(sessionId)!;this.activateInput(sessionId,row.task_id);
+    }
   }
   /** Explains an already-blocked switch; never grants authority or changes admission. */
   switchBlockedMessage(sessionId: string, context?: ConnectorRequestContext): string {
@@ -225,12 +270,17 @@ export class ConnectorBroker {
     const row = this.authenticate(token), context = this.context(row);
     if (!['list', 'tools', 'read'].includes(method) || !args || typeof args !== 'object' || Array.isArray(args))
       throw new HttpError(400, '외부 조회 도구 형식이 올바르지 않습니다');
-    const fields = method === 'read' ? ['service', 'tool', 'arguments'] : method === 'tools' ? ['service'] : [];
+    const fields = method === 'read' ? ['service', 'tool', 'arguments','request_id'] : method === 'tools' ? ['service','request_id'] : ['request_id'];
     if (Object.keys(args).some(key => !fields.includes(key))) throw new HttpError(400, '외부 조회 도구에 허용되지 않은 인자가 있습니다');
     if (!context) {
       if (method === 'list') return { connections: [] };
-      throw new HttpError(403, '이 사용자 입력에 허용된 외부 연결이 없습니다');
+      throw new HttpError(403, '이 입력에 허용된 외부 연결이 없습니다. 사용자가 #slack, #jira 또는 #confluence 태그로 요청해야 합니다. 이전 요청의 식별자를 재사용하지 마세요');
     }
+    if (context.inputScoped && args.request_id !== context.requestId)
+      throw new HttpError(403,'이번 입력의 request_id가 필요합니다. 입력에 첨부된 식별자를 사용하세요. 도구에 request_id 인자가 없다면 작업 종료 후 실행을 닫고 태그와 함께 다시 요청하세요');
+    if (args.request_id !== undefined && args.request_id !== context.requestId)
+      throw new HttpError(403,'이전 요청의 외부 조회 권한은 사용할 수 없습니다');
+    args = {...args};delete args.request_id;
     if (method !== 'list') {
       const allowed = context.connections.find(connection => connection.service === args.service);
       if (!allowed || (method === 'read' && (typeof args.tool !== 'string' || !allowed.tools.includes(args.tool))))

@@ -11,7 +11,7 @@ import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { codexMcpProcess, claudeMcpOptions } from '../../hub/src/runner/managed-mcp.ts';
 import { checkHubToRunner, type HubToRunner, type RunnerToHub } from '../../shared/protocol.ts';
 
-function fixture() {
+function fixture(scoped = false) {
   const dir = mkdtempSync(join(tmpdir(),'desk-connector-execution-'));
   const store = new Store(':memory:'), sent:HubToRunner[] = [], live = new Set<string>();
   let say!:(message:RunnerToHub)=>void;
@@ -24,12 +24,108 @@ function fixture() {
   hub.connectorBroker=broker;hub.connectorMcpUrl='http://127.0.0.1:4321/v1/connector-mcp';
   const context=(peer='A',request='first'):ConnectorExecutionContext=>({sourcePeerId:'peer-'+peer,
     hubId:'hub-'+peer,workspaceId:'workspace',requestId:request,capability:(peer==='A'?'a':'b').repeat(43),
-    expiresAt:Date.now()+60_000,connections:[{service:'jira',generation:peer,tools:['getJiraIssue']}]});
+    expiresAt:Date.now()+60_000,connections:[{service:'jira',generation:peer,tools:['getJiraIssue']}],...(scoped&&{inputScoped:true as const})});
   const task=hub.withConnectorContext(context(),()=>hub.compose(`@fixture:${dir} #codex 시작`));
   const start=sent[0] as Extract<HubToRunner,{type:'start'}>;
+  if (start.connectorMcp) broker.markScopedTools(start.connectorMcp.token);
   return {hub,store,broker,sent,say,context,task,start,
     close:()=>{hub.dispose();store.database.close();rmSync(dir,{recursive:true,force:true});}};
 }
+
+test('tagged requests require their input id and untagged steering revokes previous tool access',async()=>{
+  const f=fixture(true);
+  try {
+    assert.match(f.start.prompt,/request_id=first/);
+    await assert.rejects(f.broker.invoke(f.start.connectorMcp!.token,'list'),/request_id/);
+    await assert.rejects(f.broker.invoke(f.start.connectorMcp!.token,'list',{request_id:'another'}),/request_id/);
+    const pending=f.broker.invoke(f.start.connectorMcp!.token,'list',{request_id:'first'});
+    const cancelled=assert.rejects(pending,/문맥|만료/);
+    f.hub.withConnectorContext(null,()=>f.hub.sendMessage(f.task.id,'#now 일반 대화'));
+    assert.equal(f.store.queued().length,0);
+    assert.equal(f.sent.at(-1)?.type,'send');
+    assert.equal(f.broker.stored(f.start.sessionId),undefined);
+    await cancelled;
+    assert.deepEqual(await f.broker.invoke(f.start.connectorMcp!.token,'list',{request_id:'first'}),{connections:[]});
+  } finally {f.close();}
+});
+
+test('a fresh tagged input cannot be borrowed by old background calls and ends with the turn',async()=>{
+  const f=fixture(true);
+  try {
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[{id:'old',type:'local_agent',description:'이전 요청'}]});
+    f.hub.withConnectorContext(f.context('B','second'),()=>f.hub.sendMessage(f.task.id,'#now #jira 새 조회'));
+    assert.equal(f.store.queued().length,0);
+    const send=f.sent.at(-1) as Extract<HubToRunner,{type:'send'}>;
+    assert.match(send.text,/request_id=second/);
+    await assert.rejects(f.broker.invoke(f.start.connectorMcp!.token,'list',{request_id:'first'}),/request_id/);
+    const pending=f.broker.invoke(f.start.connectorMcp!.token,'list',{request_id:'second'});
+    const [job]=f.broker.poll('peer-B');assert.ok(job);
+    f.broker.complete('peer-B',job.callId,{result:{connections:['jira']}});
+    await pending;
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[]});
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    assert.equal(f.broker.stored(f.start.sessionId),undefined);
+  } finally {f.close();}
+});
+
+test('an untagged answer continues the original scoped question without minting another grant',()=>{
+  const f=fixture(true);
+  try {
+    f.say({type:'approval_request',sessionId:f.start.sessionId,approvalId:'scoped-question',toolName:'AskUserQuestion',input:{questions:[{question:'어느 이슈?'}]}});
+    const identity={hubId:'hub-A',connections:[{service:'jira' as const,generation:'A'}]};
+    assert.throws(()=>f.hub.withInputPeer('peer-B',()=>f.hub.withConnectorIdentity(identity,()=>f.hub.withConnectorContext(null,()=>f.hub.sendMessage(f.task.id,'TEST-1')))),/응답 계정/);
+    f.hub.withInputPeer('peer-A',()=>f.hub.withConnectorIdentity(identity,()=>f.hub.withConnectorContext(null,()=>f.hub.sendMessage(f.task.id,'TEST-1'))));
+    assert.equal(f.store.getApproval('scoped-question')?.status,'allowed');
+    assert.equal(f.broker.stored(f.start.sessionId)?.requestId,'first');
+  } finally {f.close();}
+});
+
+test('older cached tool schemas reject tagged input before changing engine settings',()=>{
+  const f=fixture();
+  try {
+    f.store.database.prepare('UPDATE connector_runtime SET scoped_tools=0 WHERE session_id=?').run(f.start.sessionId);
+    const before=f.sent.length,session=f.store.getSession(f.start.sessionId);
+    assert.throws(()=>f.hub.withConnectorContext({...f.context(),inputScoped:true},()=>f.hub.sendMessage(f.task.id,'#now #jira #high 조회')),/이전 외부 도구 목록/);
+    assert.equal(f.sent.length,before);
+    assert.deepEqual(f.store.getSession(f.start.sessionId),session);
+  } finally {f.close();}
+});
+
+test('a new input waits for pending approval and cannot invalidate either approve or deny',()=>{
+  for(const allow of [true,false]) {
+    const f=fixture(true);
+    try {
+      f.say({type:'approval_request',sessionId:f.start.sessionId,approvalId:'held',toolName:'Bash',input:{command:'read'}});
+      f.hub.withInputPeer('peer-A',()=>f.hub.withConnectorContext(null,()=>f.hub.sendMessage(f.task.id,'#now 일반 입력')));
+      const q=f.store.queued()[0];assert.ok(q);
+      assert.throws(()=>f.hub.sendQueuedNow(f.task.id,q.id),/승인·질문/);
+      assert.equal(f.broker.stored(f.start.sessionId)?.requestId,'first');
+      f.hub.withInputPeer('peer-A',()=>f.hub.withConnectorIdentity({hubId:'hub-A',connections:[{service:'jira',generation:'A'}]},
+        ()=>f.hub.withConnectorContext(null,()=>f.hub.resolveApproval('held',allow))));
+      assert.equal(f.store.getApproval('held')?.status,allow?'allowed':'denied');
+      f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+      assert.equal(f.store.queued().length,0);
+    } finally {f.close();}
+  }
+});
+
+test('shared input discards legacy automatic grants and rejects tagged legacy requests',async()=>{
+  const f=fixture(),workspace=new SharedWorkspace(f.hub,undefined,{localAuthority:true});
+  try {
+    const peer=workspace.grant('legacy'),operationId=crypto.randomUUID();
+    const grant={...f.context(),workspaceId:workspace.id,requestId:operationId};
+    const op={id:operationId,method:'POST',path:'/compose',body:{text:`@legacy:${f.start.cwd} #codex 일반 대화`,__desk_connector_grant:grant}};
+    const result=workspace.execute(peer.id,op);assert.equal(result.status,201);
+    const start=f.sent.at(-1) as Extract<HubToRunner,{type:'start'}>;
+    assert.equal(workspace.connectorBroker!.stored(start.sessionId),undefined);
+    assert.deepEqual(await workspace.connectorBroker!.invoke(start.connectorMcp!.token,'list'),{connections:[]});
+    const tagged=crypto.randomUUID();
+    assert.throws(()=>workspace.execute(peer.id,{...op,id:tagged,body:{...op.body,text:`@legacy #slack 읽어줘`,__desk_connector_grant:{...grant,requestId:tagged}}}),/허브를 업데이트/);
+    assert.deepEqual(workspace.execute(peer.id,op),JSON.parse(JSON.stringify(result)));
+    const foreign=workspace.grant('foreign');
+    assert.throws(()=>workspace.execute(foreign.id,op),/다른 허브/);
+  } finally {workspace.connectorBroker!.close();f.close();}
+});
 
 test('cross-hub now messages wait for the turn and background work, then use their own grant',()=>{
   const f=fixture();

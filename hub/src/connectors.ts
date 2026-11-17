@@ -34,6 +34,10 @@ export const connectorReadTool = (service: ConnectorService, tool: Tool) =>
   (service === 'jira' ? ATLASSIAN_READ : SLACK_READ).has(tool.name)
   && tool.annotations?.readOnlyHint !== false;
 export const connectorReadToolNames = (service: ConnectorService): string[] => [...(service === 'jira' ? ATLASSIAN_READ : SLACK_READ)];
+export const connectorTagTools = (scopes:readonly string[],service:ConnectorService):string[] => connectorReadToolNames(service)
+  .filter(tool=>service==='slack'?scopes.includes('slack'):(scopes.includes('jira')||scopes.includes('confluence'))
+    && (['atlassianUserInfo','getAccessibleAtlassianResources'].includes(tool)
+      || scopes.includes('jira')&&tool.includes('Jira') || scopes.includes('confluence')&&tool.includes('Confluence'))).sort();
 
 interface Credential {
   client?: OAuthClientInformationMixed;
