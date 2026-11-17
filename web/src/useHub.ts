@@ -1,3 +1,4 @@
+import { openSourceStream } from './sourceStream.ts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { api, FEED_PAGE, type FeedQuery } from './api.ts';
 import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
@@ -221,17 +222,17 @@ export function useHub() {
       }
       for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
-    const streams=new Map<string,EventSource>();
+    const streams=new Map<string,ReturnType<typeof openSourceStream>>();
     const update=()=>{
       const sources=[{id:'',view_index:0},...getSources()];
       for(const [id,stream] of streams)if(!sources.some(s=>s.id===id)){stream.close();streams.delete(id);void refresh().catch(()=>{});}
       for(const source of sources) {
         if(streams.has(source.id))continue;
-        const es=new EventSource(sourceBase(source.id)+'/stream');streams.set(source.id,es);
+        const es=openSourceStream(source.id);streams.set(source.id,es);
         // A pending snapshot may predate this connection. Always queue one recovery read.
         es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh().catch(()=>{});};
         es.onerror=()=>{
-          if(source.id){sourceConnected(source.id,false);commitTasks(prev=>new Map([...prev].map(([id,t])=>[id,id.startsWith(`w:${source.id}:`)?{...t,runner_connected:false}:t])));}
+          if(source.id){sourceConnected(source.id,false);commitTasks(prev=>{let next=prev;for(const [id,t] of prev)if(id.startsWith(`w:${source.id}:`)&&t.runner_connected!==false){if(next===prev)next=new Map(prev);next.set(id,{...t,runner_connected:false});}return next;});}
           else {setConnected(false);fetch('/api/state',{method:'HEAD'}).then(r=>{if(r.status===401)location.reload();},()=>{});}
         };
         es.onmessage=msg=>{

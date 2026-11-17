@@ -171,10 +171,11 @@ test('local gateway forwards compose and retains one offline message across its 
       assert.deepEqual((await api('/workspaces')).body, []);
     } finally { await stop(sharedPeer); }
 
+    for (const streamPath of ['/api/stream', '/api/streams']) {
     const localStreamAbort = new AbortController();
     let remoteStream: import('node:http').IncomingMessage | undefined;
     try {
-      const localStream = await fetch(gateway.url + '/api/stream', {signal: localStreamAbort.signal});
+      const localStream: Response = await fetch(gateway.url + streamPath, {signal: localStreamAbort.signal});
       const remoteHeaders = {host: 'desk.example.test', authorization: `Bearer ${gateway.access.token}`, 'content-type': 'application/json'};
       const remoteRequest = (path: string, method = 'GET', body?: unknown) => new Promise<{
         status: number; body: any; headers: import('node:http').IncomingHttpHeaders;
@@ -188,7 +189,7 @@ test('local gateway forwards compose and retains one offline message across its 
         req.end(body === undefined ? undefined : JSON.stringify(body));
       });
       const activeRemoteStream = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
-        const req = httpRequest(gateway!.url + '/api/stream', {headers: remoteHeaders}, resolve);
+        const req = httpRequest(gateway!.url + streamPath, {headers: remoteHeaders}, resolve);
         req.on('error', reject);
         req.end();
       });
@@ -199,6 +200,12 @@ test('local gateway forwards compose and retains one offline message across its 
       let remoteEvents = '';
       const readLocal = (async () => { try { for await (const chunk of localStream.body! as any) localEvents += new TextDecoder().decode(chunk); } catch {} })();
       activeRemoteStream.on('data', chunk => { remoteEvents += chunk.toString(); });
+      if (streamPath === '/api/streams') {
+        await wait(() => localEvents.includes('"connected":true') && remoteEvents.includes('"connected":true'));
+        authority.hub.bus.emit('message', {type: 'runners', runners: []});
+        await wait(() => localEvents.includes('"message":{"type":"runners"') && remoteEvents.includes('"message":{"type":"runners"'));
+        assert.ok(localEvents.includes('"source":"","view_index":0'));
+      }
       assert.equal((await remoteRequest('/api/access')).status, 403);
       const requested = await remoteRequest('/access/request', 'POST', {name: 'test device'});
       assert.equal(requested.status, 200);
@@ -214,12 +221,33 @@ test('local gateway forwards compose and retains one offline message across its 
       const polled = await remoteRequest('/access/status', 'POST', request);
       assert.equal(polled.body.status, 'allowed');
       assert.ok(polled.headers['set-cookie']?.join(';').includes('desk_device='));
+      if (streamPath === '/api/streams') {
+        const deviceStream = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
+          const req = httpRequest(gateway!.url + streamPath, {headers: {
+            host: 'desk.example.test', cookie: polled.headers['set-cookie']!.map(value => value.split(';')[0]).join('; '),
+          }}, resolve);
+          req.on('error', reject); req.end();
+        });
+        try {
+          assert.equal(deviceStream.statusCode, 200);
+          deviceStream.resume();
+          const device: import('../../shared/api.ts').AccessDevice = gateway.access.view().devices.find(device => device.connections > 0)!;
+          assert.ok(device);
+          gateway.access.removeDevice(device.id);
+          await wait(() => deviceStream.destroyed);
+          gateway.access.rotateToken();
+          await wait(() => activeRemoteStream.destroyed);
+          assert.equal(localStreamAbort.signal.aborted, false);
+        } finally { deviceStream.destroy(); }
+      }
       localStreamAbort.abort();
       activeRemoteStream.destroy();
       await readLocal;
     } finally {
       localStreamAbort.abort();
       remoteStream?.destroy();
+    }
+
     }
 
     liveSharedPeer = createServer((req, res) => {

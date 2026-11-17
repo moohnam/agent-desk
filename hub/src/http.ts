@@ -1,3 +1,4 @@
+import { multiplexStream } from './stream-mux.ts';
 import { InstructionStore } from './instruction-store.ts';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -328,6 +329,25 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed,b.approved_path);
         if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
         return send(res,200,document);
+      }
+      if(req.method==='GET'&&url.pathname==='/api/streams') {
+        const token=access.token;
+        const leave=client.kind==='device'?access.connect(client.device.id,ipOf(req),()=>res.destroy()):()=>{};
+        res.once('close',leave);
+        multiplexStream(res,{
+          allowed:()=>client.kind==='local'||client.kind==='device'&&access.view().devices.some(d=>d.id===client.device.id)||client.kind==='shared'&&access.matches(token),
+          sources:()=>workspaces.list().map(link=>({id:link.id===localAuthorityId?'':link.id,linkId:link.id,view_index:link.id===localAuthorityId?0:link.view_index})),
+          stream:(id,signal,opened,receive)=>workspaces.stream(id,signal,opened,message=>{if(message.type!=='access')receive(message);}),
+          ...(!localAuthorityId?{local:(receive:(message:HubMessage)=>void)=>{
+            const handler=(message:HubMessage)=>{if(message.type!=='access')receive(message);};
+            hub.bus.on('message',handler);return()=>{hub.bus.off('message',handler);};
+          }}:{}),
+          access:receive=>{
+            const handler=(message:HubMessage)=>{if(local&&message.type==='access')receive(message);};
+            hub.bus.on('message',handler);return()=>{hub.bus.off('message',handler);};
+          },
+        });
+        return;
       }
       if (parts[1] === 'workspaces') {
         if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list().filter(link=>link.id!==localAuthorityId));

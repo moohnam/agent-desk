@@ -1,3 +1,5 @@
+import { readSse } from './sse-reader.ts';
+import type { HubMessage } from '../../shared/api.ts';
 import { needsDefaultInstructions } from './workspace-api.ts';
 import { DEFAULT_INSTRUCTIONS } from './instruction-store.ts';
 import { randomUUID } from 'node:crypto';
@@ -108,13 +110,13 @@ export class WorkspaceLinks {
     },{} as Record<string,unknown>),
     view_index:Number((this.db.prepare('SELECT seq FROM workspace_view_index WHERE link_id=?').get(link.id) as {seq:number}).seq),
     pending:Number((this.db.prepare('SELECT count(*) n FROM workspace_delivery WHERE link_id=? AND status IS NULL').get(link.id) as {n:number}).n)}));}
-  private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000):Promise<{status:number;body:any}|{response:Response;release:()=>void}> {
+  private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000):Promise<{status:number;body:any}|{response:Response;release:()=>void;signal:AbortSignal}> {
     if(this.stopped)throw new Error('종료 중입니다');
     const controller=new AbortController();this.requests.set(controller,link.id);
     const timer=setTimeout(()=>controller.abort(),timeoutMs);
     try {
       const response=await fetch(new URL(path,link.url),{...init,redirect:'error',headers:{'content-type':'application/json',...init.headers,authorization:`Bearer ${link.token}`,'x-workspace-id':link.workspace_id},signal:init.signal ? AbortSignal.any([controller.signal,init.signal]) : controller.signal});
-      if(stream){clearTimeout(timer);return {response,release:()=>{controller.abort();this.requests.delete(controller);}};}
+      if(stream){clearTimeout(timer);return {response,signal:controller.signal,release:()=>{controller.abort();this.requests.delete(controller);}};}
       const body=await response.json();
       return {status:response.status,body};
     } catch(e) { controller.abort();this.requests.delete(controller);throw e; }
@@ -134,8 +136,11 @@ export class WorkspaceLinks {
       throw new HttpError(409,'이관한 원격 작업공간의 신원이 일치하지 않습니다');
     if(id&&this.db.prepare('SELECT 1 FROM workspace_link WHERE id=?').get(id)&&this.link(id).workspace_id!==link.workspace_id)throw new HttpError(409,'기존 연결을 다른 작업공간으로 바꿀 수 없습니다');
     if(this.rows().some(l=>l.workspace_id===link.workspace_id&&l.id!==id))throw new HttpError(409,'이미 연결한 공유 작업공간입니다');
+    const previous=this.rows().find(row=>row.id===id);
     this.db.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,token=excluded.token').run(link.id,link.name,link.url,link.workspace_id,link.token);
     this.db.prepare('INSERT INTO workspace_view_index(link_id) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index WHERE link_id=?)').run(link.id,link.id);
+    if(previous&&(previous.url!==link.url||previous.token!==link.token))
+      for(const [controller,source] of this.requests)if(source===id)controller.abort();
     this.sourceCache=undefined;void this.syncSkills(link.id);
     return this.list().find(l=>l.id===link.id)!;
   }
@@ -493,6 +498,22 @@ export class WorkspaceLinks {
       }
     })().finally(()=>this.flushing.delete(id));
     this.flushing.set(id,pending);return pending;
+  }
+  /** One upstream attempt; the gateway owns reconnects and cancels when the page closes. */
+  async stream(id:string,signal:AbortSignal,opened:()=>void,receive:(message:HubMessage)=>void) {
+    const reply=await this.request(this.link(id),'/v1/stream',{signal},true);
+    if(!('response' in reply))throw new Error('invalid stream');
+    try {
+      if(!reply.response.ok||!reply.response.body)throw new Error('upstream stream unavailable');
+      if(signal.aborted||reply.signal.aborted)return;
+      opened();
+      await readSse(reply.response.body,data=>{
+        if(signal.aborted||reply.signal.aborted)return;
+        const message=JSON.parse(data) as HubMessage;
+        if(!message||typeof message.type!=='string')throw new Error('invalid stream message');
+        receive(message);
+      });
+    }finally{reply.release();}
   }
   async proxy(id:string,path:string,req:IncomingMessage,res:ServerResponse,onStreamOpen?:()=>void,suppliedBody?:unknown) {
     const link=this.link(id);
