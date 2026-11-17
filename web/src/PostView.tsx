@@ -107,7 +107,7 @@ function PostViewInner(props: Props) {
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' ? <Markdown text={p.text} taskId={post.taskId} onLocalLink={onLocalLink} />
+  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user'} taskId={post.taskId} onLocalLink={onLocalLink} />
     : richText(String(p.text ?? '')), [post.kind, p, onLocalLink]);
   const engine = task?.engine ?? 'claude';
   const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
@@ -174,7 +174,7 @@ function PostViewInner(props: Props) {
           <QuestionCard post={post} question={question} full={!!inThread || expanded}
             onToggle={inThread ? undefined : props.onToggle} onError={props.onError} />
         ) : (
-          <LongText full={!!inThread || expanded} className={`body${post.kind === 'assistant' ? ' md' : ''}`}
+          <LongText full={!!inThread || expanded} className={`body${post.kind === 'assistant' || post.kind === 'user' ? ' md' : ''}`}
             onToggle={inThread ? undefined : props.onToggle}>
             {body}
           </LongText>

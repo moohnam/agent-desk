@@ -154,6 +154,20 @@ export class SkillStore {
     return this.get(name);
   }
 
+  /** Validate the whole draft before reserving its name; never publish a placeholder skill. */
+  createFromContent(content: unknown): Skill {
+    if (typeof content !== 'string') throw new HttpError(400, 'content는 문자열이어야 합니다');
+    if (Buffer.byteLength(content) > MAX_FILE_BYTES) throw new HttpError(413, '파일은 1MB 이하여야 합니다');
+    const fm = frontmatter(content);
+    if (!fm.name || !fm.description?.trim()) throw new HttpError(400, '맨 앞 --- 블록에 name과 description을 입력하세요');
+    const base = this.dir(fm.name);
+    try { mkdirSync(base); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new HttpError(409, `이미 있는 스킬입니다: ${fm.name}`); throw error; }
+    try { writeFileSync(join(base, 'SKILL.md'), content, {flag: 'wx'}); }
+    catch (error) { rmSync(base, {recursive: true, force: true}); throw error; }
+    return this.get(fm.name);
+  }
+
   remove(name: string) {
     const base = this.dir(name);
     if (!existsSync(base)) throw new HttpError(404, `스킬이 없습니다: ${name}`);

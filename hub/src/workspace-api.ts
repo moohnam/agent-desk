@@ -221,7 +221,7 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         case 'POST /channels/:id/read': return reply(200, hub.channels.read(id,body.through_id));
         case 'POST /channels/:id/messages': return reply(200, hub.sendChannelMessage(id,body as any));
         case 'GET /skills': return reply(200, hub.skills.list());
-        case 'POST /skills': return reply(201, hub.skills.create(String(body.name ?? ''),body.description ?? ''));
+        case 'POST /skills': return reply(201, body.content !== undefined ? hub.skills.createFromContent(body.content) : hub.skills.create(String(body.name ?? ''),body.description ?? ''));
         case 'GET /skills/:id': return reply(200, hub.skills.get(id));
         case 'DELETE /skills/:id': hub.skills.remove(id); return reply(200, {ok:true});
         case 'GET /skills/:id/file': return reply(200, hub.skills.readFile(id,url.searchParams.get('path') ?? ''));

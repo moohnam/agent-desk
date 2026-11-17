@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { workspaceId } from './workspace.ts';
 import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, type EngineName, type ModelName } from '../../shared/compose.ts';
-import { Modal } from './Modal.tsx';
+import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 import { saveSettings } from './settings.ts';
 import { resetTime } from './format.ts';
 import type { EngineUsage, Settings } from './types.ts';
@@ -65,6 +65,8 @@ function UsageRows({ state }: {state: UsageState | undefined}) {
 
 /** New-task defaults and the hub CLI accounts' plan usage share one editor. */
 export function ModelDialog({ onClose }: { onClose: () => void }) {
+  const [savedPick, setSavedPick] = useState('');
+  const [notice, setNotice] = useState('');
   const [pick, setPick] = useState<Settings>();
   const [settingsAttempt, setSettingsAttempt] = useState(0);
   const [settingsLoading, setSettingsLoading] = useState(true);
@@ -73,6 +75,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
   const [usageAttempt, setUsageAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const panel = useSettingsPanel(!!pick && JSON.stringify(pick) !== savedPick, saving);
   const alive = useRef(false);
   const saveRequest = useRef<AbortController | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; saveRequest.current?.abort(); }; }, []);
@@ -80,13 +83,13 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
     const controller = new AbortController();
     setSettingsLoading(true); setSettingsError('');
     void read<Settings>('settings', controller.signal).then(checkedSettings).then(value => {
-      if (!controller.signal.aborted) setPick(value);
+      if (!controller.signal.aborted) { setPick(value); setSavedPick(JSON.stringify(value)); }
     }, error => { if (!controller.signal.aborted) setSettingsError(errorMessage(error)); })
       .finally(() => { if (!controller.signal.aborted) setSettingsLoading(false); });
     return () => controller.abort();
   }, [settingsAttempt]);
   useEffect(() => {
-    if (workspaceId) return;
+    if (workspaceId || !panel.active) return;
     const controller = new AbortController();
     setUsage({});
     for (const engine of ENGINES) {
@@ -99,11 +102,11 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
       });
     }
     return () => controller.abort();
-  }, [usageAttempt]);
+  }, [usageAttempt, panel.active]);
   const loadingUsage = !workspaceId && ENGINES.some(engine => !usage[engine]);
   const set = (engine: EngineName, value: Partial<Settings[EngineName]>) => {
     setPick(previous => previous ? {...previous, [engine]: {...previous[engine], ...value}} : previous);
-    setError('');
+    setError(''); setNotice('');
   };
   const close = () => { if (!saving) onClose(); };
   const submit = async (event: FormEvent) => {
@@ -111,7 +114,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
     if (!pick || settingsLoading || settingsError || saving) return;
     setSaving(true); setError('');
     const controller = new AbortController(); saveRequest.current = controller;
-    try { await saveSettings(pick, AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])); if (alive.current) onClose(); }
+    try { await saveSettings(pick, AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])); if (alive.current) { setSavedPick(JSON.stringify(pick)); if (panel.embedded) setNotice('저장했습니다'); else onClose(); } }
     catch (error) {
       if (alive.current) {
         const message = errorMessage(error);
@@ -119,7 +122,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
       }
     } finally { if (saveRequest.current === controller) saveRequest.current = null; if (alive.current) setSaving(false); }
   };
-  return <Modal title="기본 모델·사용량" wide onClose={close}>
+  return <SettingsEditor title="기본 모델·사용량" wide onClose={close}>
     <form onSubmit={submit} className="model-dialog-form">
       <div className="model-dialog-scroll">
         <p className="muted small model-dialog-intro">모델·effort 태그 없이 시작하는 새 작업의 기본값입니다. 작업에서 태그를 지정하면 해당 작업에 유지됩니다.</p>
@@ -154,14 +157,15 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
       </div>
       <footer className="model-dialog-footer">
         {error && <p className="error small" role="alert">{error}</p>}
+        {notice && <p className="muted small" role="status">{notice}</p>}
         <div className="form-actions">
           {!workspaceId && <button type="button" className="btn" disabled={loadingUsage || saving} onClick={() => setUsageAttempt(value => value + 1)}>
             <RefreshCw aria-hidden="true" />{loadingUsage ? '조회 중…' : '사용량 새로고침'}</button>}
           <span className="spacer" />
-          <button type="button" className="btn" disabled={saving} onClick={close}>취소</button>
+          {!panel.embedded && <button type="button" className="btn" disabled={saving} onClick={close}>취소</button>}
           <button className="btn primary" disabled={!pick || settingsLoading || !!settingsError || saving}>{saving ? '저장 중…' : '저장'}</button>
         </div>
       </footer>
     </form>
-  </Modal>;
+  </SettingsEditor>;
 }

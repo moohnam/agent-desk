@@ -1,3 +1,4 @@
+import { useSettingsPanel } from './settingsPanel.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { connectorApi, type ConnectorAuthorization, type ConnectorService, type ConnectorStatus, type ConnectorTool } from './connectorApi.ts';
 
@@ -6,6 +7,7 @@ const statusLabels = { authorizing: '승인 대기', connected: '연결됨', dis
 type Details = { authorization?: ConnectorAuthorization; tools?: ConnectorTool[]; error?: string; notice?: string };
 type Session = {
   alive: boolean;
+  visible: boolean;
   busy: boolean;
   request?: AbortController;
   timer?: ReturnType<typeof setTimeout>;
@@ -27,6 +29,7 @@ function LocalConnectors() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<ConnectorService>();
   const [error, setError] = useState('');
+  const panel = useSettingsPanel(false, !!busy);
   const session = useRef<Session | null>(null);
 
   function stopRequest(context: Session) {
@@ -39,7 +42,7 @@ function LocalConnectors() {
   const current = (context: Session, controller: AbortController) => context.alive && context.request === controller && !controller.signal.aborted;
 
   async function refresh(context: Session) {
-    if (!context.alive || context.busy) return;
+    if (!context.alive || !context.visible || context.busy) return;
     const controller = stopRequest(context);
     setLoading(true);
     try {
@@ -61,18 +64,24 @@ function LocalConnectors() {
     } finally {
       if (current(context, controller)) {
         setLoading(false);
-        if (context.items.some(item => item.status === 'authorizing'))
+        if (context.visible && context.items.some(item => item.status === 'authorizing'))
           context.timer = setTimeout(() => { void refresh(context); }, 3000);
       }
     }
   }
 
   useEffect(() => {
-    const context: Session = { alive: true, busy: false, items: [] };
+    const context: Session = { alive: true, visible: panel.active, busy: false, items: [] };
     session.current = context;
-    void refresh(context);
     return () => { context.alive = false; context.request?.abort(); clearTimeout(context.timer); };
   }, []);
+  useEffect(() => {
+    const context = session.current;
+    if (!context) return;
+    context.visible = panel.active;
+    if (panel.active) void refresh(context);
+    else { clearTimeout(context.timer); if (!context.busy) context.request?.abort(); }
+  }, [panel.active]);
 
   async function act(item: ConnectorStatus, action: 'connect' | 'disconnect' | 'tools') {
     const context = session.current;

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api } from './api.ts';
-import { Modal } from './Modal.tsx';
+import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 import { safeChannelUrl } from './channelEntries.ts';
 import { BotGuide } from './BotGuide.tsx';
 import type { Channel, ChannelTokenReceipt } from './types.ts';
@@ -20,6 +20,7 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string>();
   const [confirmRotate, setConfirmRotate] = useState<string>();
+  useSettingsPanel(!!name.trim() || !!url.trim() || !!editing || !!receipt, busy);
   const perform = async (action: () => Promise<unknown>) => {
     if (busy) return;
     setBusy(true); setError('');
@@ -40,7 +41,7 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
       reset();
     });
   };
-  return <Modal title="읽기 전용 채널" wide onClose={onClose}>
+  return <SettingsEditor title="읽기 전용 채널" wide onClose={onClose}>
     <div className="channel-manager">
       <p className="muted small">봇이 보내는 알림과 RSS·Atom 구독을 F1 컬럼에서 읽습니다. 읽음 위치는 이 허브에 연결된 모든 기기가 공유합니다.</p>
       <details className="channel-guide" open={channels.length === 0}>
@@ -99,5 +100,5 @@ export function ChannelsDialog({ channels, onClose, onOpen, onChanged }: {
       </li>)}</ul>
       {!channels.length && <p className="muted">아직 채널이 없습니다. 위에서 채널을 추가해 주세요.</p>}
     </div>
-  </Modal>;
+  </SettingsEditor>;
 }

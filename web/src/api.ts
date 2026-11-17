@@ -280,6 +280,7 @@ export const api = {
   /** Only the engines and keys given change; null clears one. */
   saveSettings: (s: { [E in keyof Settings]?: Partial<Settings[E]> }, signal?: AbortSignal) => call<Settings>('PUT', '/settings', s, signal),
   skills: (source='') => call<Skill[]>('GET', '/skills',undefined,undefined,source),
+  createSkillFromContent: (content: string) => call<Skill>('POST', '/skills', { content }),
   createSkill: (name: string, description: string) => call<Skill>('POST', '/skills', { name, description }),
   deleteSkill: (name: string) => call('DELETE', `/skills/${name}`),
   readSkillFile: (name: string, path: string) =>

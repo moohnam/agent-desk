@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Modal } from './Modal.tsx';
+import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 
 interface Instructions { text: string; revision: string; defaults: string }
 class RequestError extends Error {
@@ -33,6 +33,7 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
   const [latest, setLatest] = useState<Instructions>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const panel = useSettingsPanel(!!saved && text !== saved.text, busy);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError('');
@@ -61,7 +62,7 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
       setError(errorMessage(error));
     } finally { setBusy(false); }
   };
-  return <Modal title="기본 지침" wide onClose={close}>
+  return <SettingsEditor title="기본 지침" wide onClose={close}>
     <form className="form instructions-form" onSubmit={event => {event.preventDefault(); if (!conflict) void save();}}>
       <p className="muted small">이 허브에서 시작하는 로컬·원격 실행에 전달합니다. 기존 대화는 재접속·문맥 재구성 후에도 시작할 때의 지침을 유지합니다.</p>
       {loading && <p className="muted small" role="status">{load.kind === 'initial' ? '기본 지침을 불러오는 중…' : '서버의 변경 내용을 불러오는 중…'}</p>}
@@ -83,8 +84,8 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
         {!saved && !loading && <button className="btn" type="button" onClick={() => setLoad(previous => ({kind: 'initial', attempt: previous.attempt + 1}))}>다시 불러오기</button>}
         <button className="btn" type="button" disabled={!saved || busy} onClick={() => {setText(saved!.defaults); setNotice('');}}>기본값 불러오기</button>
         <button className="btn primary" type="submit" disabled={!saved || busy || loading || conflict || text === saved.text}>{busy ? '저장 중…' : '저장'}</button>
-        <button className="btn" type="button" onClick={close} disabled={busy}>닫기</button>
+        {!panel.embedded && <button className="btn" type="button" onClick={close} disabled={busy}>닫기</button>}
       </div>
     </form>
-  </Modal>;
+  </SettingsEditor>;
 }

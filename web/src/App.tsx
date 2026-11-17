@@ -3,7 +3,7 @@ import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
-import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -1335,6 +1335,7 @@ export function App() {
             {notifyState === 'on' ? <Bell /> : <BellOff />}</button>
           <button className="btn" title={`실행 위치 필터${locationFilter ? ' (필터 적용 중)' : ''}`} aria-label="실행 위치 필터"
             aria-haspopup="dialog" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)}><Network /></button>
+          {!workspaceId && <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" aria-haspopup="dialog" onClick={() => setSkillsOpen(true)}><Puzzle /></button>}
           <button className="btn" title="설정: 에이전트·연결·러너 관리" aria-label="설정" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings /></button>
           {hub.local && <button className="btn" title="다른 기기 연결: 접속 요청, 연결한 기기, QR 코드" aria-label="다른 기기 연결" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
@@ -1439,8 +1440,7 @@ export function App() {
           }} />
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
-        onModels={() => setModelOpen(true)} onSkills={workspaceId ? undefined : () => setSkillsOpen(true)}
-        onChannels={workspaceId ? undefined : () => setChannelsOpen(true)} onRunners={() => setRunnersOpen(true)} />}
+        channels={[...hub.channels.values()]} onOpenChannel={openChannel} onChanged={hub.refresh} manageChannels={!workspaceId} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}

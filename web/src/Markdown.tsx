@@ -1,3 +1,4 @@
+import { rehypeMentions } from './markdownMentions.ts';
 import { scheduleLayoutRead } from './layoutBatch.ts';
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type ExtraProps, type Components } from 'react-markdown';
@@ -20,10 +21,11 @@ function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraPr
 }
 
 /**
- * Agent replies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
+ * Conversation bodies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
  * go to `onLocalLink` (the hub opens them, since a web page can't reach local apps or files).
  */
-export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase }: { text: string; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
+export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase, mentions = false }: { text: string; mentions?: boolean; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
+  const rehypePlugins = useMemo(() => mentions ? [...MARKDOWN_REHYPE_PLUGINS, rehypeMentions] : MARKDOWN_REHYPE_PLUGINS, [mentions]);
   const normalizedText = useMemo(() => normalizeMathNotation(text), [text]);
   const components = useMemo<Components>(() => ({
         pre: CodeBlock,
@@ -46,7 +48,7 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
 
   }), [resourceBase, onLocalLink, taskId, linkBase]);
   return (
-    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={rehypePlugins}
       urlTransform={transformUrl} components={components}>
       {normalizedText}
     </ReactMarkdown>

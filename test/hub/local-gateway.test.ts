@@ -130,6 +130,11 @@ test('local gateway forwards compose and retains one offline message across its 
     assert.ok((await api('/skills')).body.some((item: any) => item.name === 'gateway-check'));
     assert.deepEqual(gateway.hub.skills.list(), []);
     const file = await api('/skills/gateway-check/file?path=SKILL.md');
+    const draftText = '---\nname: gateway-draft\ndescription: draft test\n---\n\n# 내용 그대로\n';
+    const draftSkill = await api('/skills', 'POST', {content: draftText});
+    assert.equal(draftSkill.status, 201);
+    assert.equal(authority.hub.skills.readFile('gateway-draft', 'SKILL.md').content, draftText);
+    assert.equal((await api('/skills', 'POST', {content: draftText})).status, 409);
     assert.equal(file.status, 200);
     assert.match(file.body.content, /source skill/);
 
@@ -282,7 +287,7 @@ test('local gateway forwards compose and retains one offline message across its 
     gateway = await makeGateway(authorityUrl, true);
     assert.equal(gateway.links.deliveries('local-authority').filter(row => row.status === null).length, 1);
     await listen(authorityServer, port);
-    await wait(() => gateway!.links.deliveries('local-authority').length === 0);
+    await wait(() => gateway!.links.deliveries('local-authority').filter(row => row.status === null).length === 0);
     assert.equal((gateway.store.database.prepare('SELECT status FROM workspace_delivery WHERE id=?').get(operationId) as {status:number}).status, 202);
     assert.equal(authority.hub.store.queued().filter(row => row.text === 'offline once').length, 1);
     assert.equal((await api('/state')).body.tasks[0].id, taskId);

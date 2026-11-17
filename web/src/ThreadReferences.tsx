@@ -19,8 +19,8 @@ const ReferenceCard = memo(function ReferenceCard({ event, task, onError }: {
       <b>{event.kind === 'user' ? '나' : event.kind === 'assistant' || event.kind === 'update' ? ENGINE_LABEL[engineOf(task.engine)] : event.kind === 'status' ? '알림' : '질문·승인'}</b>
       <time dateTime={event.ts}>{new Date(event.ts).toLocaleString('ko-KR')}</time>
     </div>
-    {event.kind === 'assistant' || event.kind === 'update'
-      ? <div className="body md"><Markdown text={String(p.text ?? '')} taskId={task.id} onLocalLink={open} /></div>
+    {event.kind === 'assistant' || event.kind === 'update' || event.kind === 'user'
+      ? <div className="body md"><Markdown text={String(p.text ?? '')} mentions={event.kind === 'user'} taskId={task.id} onLocalLink={open} /></div>
       : event.kind === 'approval'
         ? <><strong>{p.toolName}</strong><pre>{JSON.stringify(p.input, null, 2)}</pre></>
         : <div className="body">{String(p.text ?? p.detail?.message ?? '')}</div>}

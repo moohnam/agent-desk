@@ -1,3 +1,4 @@
+import { useSettingsPanel } from './settingsPanel.tsx';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { SharedWorkspaceView, WorkspaceDelivery } from '../../shared/workspace.ts';
 import { Modal } from './Modal.tsx';
@@ -37,30 +38,33 @@ export function WorkspaceDialog({value,onChange,onClose}:{value:string;onChange:
   </div></Modal>;
 }
 export function WorkspaceDeliveries() {
+  const panel=useSettingsPanel();
   const links=useSources();
   const [open,setOpen]=useState<string>();
   return <section className="workspace-deliveries">
     <h3>공유 러너 전달 내역</h3>
-    {links.length ? links.map(l=><button key={l.id} className="btn" onClick={()=>setOpen(l.id)} aria-label={`${l.name} 전달 내역`}>
+    {links.length ? links.map(l=><button key={l.id} className="btn" aria-expanded={open===l.id} onClick={()=>setOpen(open===l.id?undefined:l.id)} aria-label={`${l.name} 전달 내역`}>
       {l.name} · {l.pending ? `전달 대기 ${l.pending}개` : '전달 내역 보기'}
     </button>) : <p className="muted small">연결한 공유 러너가 없습니다.</p>}
-    {open&&<Deliveries workspaceId={open} onClose={()=>setOpen(undefined)}/>}
+    {open&&panel.active&&<Deliveries workspaceId={open} inline={panel.embedded} onClose={()=>setOpen(undefined)}/>}
   </section>;
 }
-function Deliveries({workspaceId,onClose}:{workspaceId:string;onClose:()=>void}) {
+function Deliveries({workspaceId,onClose,inline=false}:{workspaceId:string;onClose:()=>void;inline?:boolean}) {
   const [items,setItems]=useState<WorkspaceDelivery[]>([]),[error,setError]=useState('');
   useEffect(()=>{let alive=true;const refresh=()=>workspaceCall<WorkspaceDelivery[]>(`/${workspaceId}/deliveries`).then(v=>{if(alive){setItems(v);setError('');}},e=>{if(alive)setError(e.message);});void refresh();const t=setInterval(refresh,2000);return()=>{alive=false;clearInterval(t);};},[workspaceId]);
-  return <Modal title="공유 러너 전달 내역" onClose={onClose}><div className="form">
+  const content=<div className="form">
     <p className="muted small">아직 전달하지 못했거나 처리에 실패한 최근 100건입니다. 연결이 복구되면 대기 입력을 순서대로 전달합니다.</p>
     {!items.length&&<p>미전달·실패한 요청이 없습니다.</p>}
     {items.map(i=><div key={i.id} className="field-group"><strong>{i.status===null?'연결 대기':'처리 실패'}</strong><p className="small">{i.path.includes('/messages')?'답글':i.path==='/compose'?'새 지시':i.path.includes('/approvals/')?'승인·질문 답변':'작업 조작'} · {i.id.slice(0,8)}</p>{i.error&&<p className="error">{i.error}</p>}{i.text&&<button className="btn" onClick={()=>{void navigator.clipboard.writeText(i.text!).catch(()=>setError('본문을 복사하지 못했습니다'));}}>실패한 입력 복사</button>}</div>)}
     {error&&<p className="error">{error}</p>}
-  </div></Modal>;
+  </div>;
+  return inline?content:<Modal title="공유 러너 전달 내역" onClose={onClose}>{content}</Modal>;
 }
 export function WorkspaceConnections() {
   const [links,setLinks]=useState<SharedWorkspaceView[]>([]);
   const [name,setName]=useState(''),[url,setUrl]=useState(''),[token,setToken]=useState(''),[edit,setEdit]=useState<string>();
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
+  useSettingsPanel(!!name.trim()||!!url.trim()||!!token,busy);
   const refresh=()=>workspaceCall<SharedWorkspaceView[]>('').then(v=>{setLinks(v);void discoverSources(true);});
   useEffect(()=>{void refresh().catch(e=>setError(e.message));},[]);
   return <section className="form">
@@ -69,7 +73,7 @@ export function WorkspaceConnections() {
     {links.map(l=><div key={l.id} className="field-group"><strong>{l.name}</strong> · 미전달 {l.pending}개
       <div className="row">
       <button className="btn" onClick={()=>{setEdit(l.id);setName(l.name);setUrl(l.url);setToken('');}}>연결 갱신</button>
-      <button className="btn" disabled={!!l.pending} onClick={()=>{void workspaceCall(`/${l.id}`,'DELETE').then(refresh).catch(e=>setError(e.message));}}>연결 제거</button></div>
+      <button className="btn" disabled={busy||!!l.pending} onClick={async()=>{if(busy)return;setBusy(true);try{await workspaceCall(`/${l.id}`,'DELETE');await refresh();}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}}}>연결 제거</button></div>
     </div>)}
     <form className="form" onSubmit={async e=>{e.preventDefault();if(busy)return;setBusy(true);setError('');try{await workspaceCall(edit?`/${edit}`:'',edit?'PUT':'POST',{name,url,token});setName('');setUrl('');setToken('');setEdit(undefined);await refresh();}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}}}>
       <label>작업공간 이름<input className="input" required value={name} onChange={e=>setName(e.target.value)}/></label>

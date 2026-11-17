@@ -24,3 +24,16 @@
 .instructions-form { min-height: 0; overflow-y: auto; }
 .instructions-form .form-actions { flex-wrap: wrap; }
 .instructions-conflict { display: flex; flex-direction: column; gap: 10px; }
+
+.settings-pages { min-width: 0; }
+.settings-content[hidden], .settings-panel-body[hidden] { display: none; }
+.settings-disclosure > .settings-row { width: 100%; text-align: left; background: none; color: inherit; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.settings-disclosure > .settings-row > span { display: flex; flex-direction: column; gap: 4px; }
+.settings-disclosure > .settings-row > svg { width: 16px; height: 16px; flex-shrink: 0; transition: transform .15s; }
+.settings-disclosure > .settings-row[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.settings-disclosure > .settings-row:focus-visible { outline: 2px solid var(--line); outline-offset: 2px; }
+.settings-panel-body { padding: 12px 0 18px; }
+.settings-panel-body > .form { padding: 0; }
+.settings-panel-body .model-dialog-scroll { overflow: visible; padding: 0; }
+.settings-panel-body .model-dialog-footer { padding: 12px 0 0; }
+.settings-panel-body .channel-manager { padding: 0; }
