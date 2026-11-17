@@ -130,3 +130,20 @@ test('idle sweep removes expired raw grants and jobs while preserving tokens for
     f.broker.authorize(token);
   } finally { f.close(); assert.doesNotThrow(() => t.mock.timers.tick(60_000)); }
 });
+
+test('expiry found by another peer poll is notified once by the next sweep',t=>{
+  t.mock.timers.enable({apis:['setInterval']});
+  let now=1000;const idle:string[]=[];
+  const f=fixture({now:()=>now,onIdle:sessionId=>idle.push(sessionId)});
+  try {
+    f.broker.open('session-A','task-A',{...f.context(),expiresAt:1100});
+    now=1200;
+    f.broker.poll('peer-B');
+    assert.equal(f.broker.hasAuthority('session-A'),false);
+    assert.deepEqual(idle,[]);
+    t.mock.timers.tick(60_000);
+    assert.deepEqual(idle,['session-A']);
+    t.mock.timers.tick(60_000);
+    assert.deepEqual(idle,['session-A']);
+  } finally {f.close();}
+});

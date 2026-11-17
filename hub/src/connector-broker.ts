@@ -19,6 +19,7 @@ interface JobRow {
   acknowledged: number; consumed: number;
 }
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+const EXPIRED_GRANT_MESSAGE = '이 요청의 외부 조회 권한이 만료되었습니다. 원래 요청을 보낸 허브의 대화 입력창에서 다시 보내세요. 대기 메시지가 있다면 먼저 내용을 복사하고 해당 메시지를 취소하세요. ‘지금 보내기’만 다시 눌러서는 갱신되지 않습니다';
 const id = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f]/.test(value);
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -37,6 +38,7 @@ export class ConnectorBroker {
   private waitMs: number;
   private waiters = new Map<string, Set<() => void>>();
   private sessionCalls = new Map<string, number>();
+  private expiredSessions = new Set<string>();
   private onIdle?: (sessionId: string) => void;
   private shouldAuthorizePeer?: (peerId: string) => boolean;
   private closed = false;
@@ -59,7 +61,7 @@ export class ConnectorBroker {
       epoch TEXT NOT NULL, policy TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS connector_job_peer ON connector_job(peer_id,status,expires_at);`);
     this.prune();
-    this.sweepTimer = setInterval(() => { if (!this.closed) this.prune(); }, 60_000);
+    this.sweepTimer = setInterval(() => { if (!this.closed) this.prune(true); }, 60_000);
     this.sweepTimer.unref();
   }
 
@@ -75,19 +77,31 @@ export class ConnectorBroker {
     if (this.shouldAuthorizePeer ? !this.shouldAuthorizePeer(peerId) : !this.db.prepare('SELECT 1 FROM workspace_peer WHERE id=? AND revoked=0').get(peerId))
       throw new HttpError(403, '외부 조회를 전달한 허브 권한이 취소되었습니다');
   }
-  private checked(context: ConnectorRequestContext): ConnectorRequestContext {
+  private checked(context: ConnectorRequestContext, allowExpired = false): ConnectorRequestContext {
     if (!context || context.workspaceId !== this.workspaceId || !id(context.hubId) || !id(context.sourcePeerId) || !id(context.requestId)
       || typeof context.capability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(context.capability)
-      || !Number.isSafeInteger(context.expiresAt) || context.expiresAt <= this.now() || !Array.isArray(context.connections)
+      || !Number.isSafeInteger(context.expiresAt) || !Array.isArray(context.connections)
       || context.connections.length > 2 || new Set(context.connections.map(c => c?.service)).size !== context.connections.length
       || context.connections.some(c => !c || !['jira', 'slack'].includes(c.service) || !id(c.generation) || !Array.isArray(c.tools)
         || c.tools.length > 100 || c.tools.some(tool => !id(tool))))
       throw new HttpError(403, '외부 조회 요청 문맥이 올바르지 않거나 만료되었습니다');
+    if (!allowExpired && context.expiresAt <= this.now()) throw new HttpError(403, EXPIRED_GRANT_MESSAGE);
     this.peer(context.sourcePeerId);
     return JSON.parse(JSON.stringify(context));
   }
   private row(sessionId: string) { return this.db.prepare('SELECT * FROM connector_runtime WHERE session_id=?').get(sessionId) as SessionRow | undefined; }
   hasSession(sessionId: string): boolean { return !!this.row(sessionId)?.active; }
+  /** An expired grant cannot authorize tools, even before the periodic sweep removes it. */
+  hasAuthority(sessionId: string): boolean {
+    const row = this.row(sessionId), context = row?.active && this.context(row);
+    return !!context && context.expiresAt > this.now();
+  }
+  /** Expiry removes tool access, not the text of an already accepted user input. */
+  inputContext(context: ConnectorExecutionContext | null | undefined): ConnectorExecutionContext | null | undefined {
+    if (!context) return context;
+    const checked = this.checked(context, true);
+    return checked.expiresAt > this.now() ? checked : null;
+  }
   private context(row: SessionRow): ConnectorRequestContext | undefined { return row.context ? JSON.parse(row.context) : undefined; }
   stored(sessionId: string): ConnectorExecutionContext | undefined {
     const row = this.row(sessionId);
@@ -136,6 +150,15 @@ export class ConnectorBroker {
       return policy(current) === policy(context);
     } catch { return false; }
   }
+  /** Explains an already-blocked switch; never grants authority or changes admission. */
+  switchBlockedMessage(sessionId: string, context?: ConnectorRequestContext): string {
+    if (context && context.expiresAt <= this.now()) return EXPIRED_GRANT_MESSAGE;
+    const row = this.row(sessionId), current = row && this.context(row);
+    const reason = !current || current.expiresAt <= this.now()
+      ? '이전 외부 조회 권한이 만료되었거나 없어 새 입력의 권한을 확인해야 합니다.'
+      : '실행 중인 작업과 새 입력의 외부 연결 권한이 다르거나 유효성을 확인할 수 없습니다.';
+    return reason + ' 현재 작업·서브 에이전트·백그라운드 작업·외부 조회가 끝날 때까지 기다려 주세요. 대기 메시지는 종료 후 자동으로 전송을 시도합니다. 권한 만료 안내가 나오면 내용을 복사한 뒤 대기 메시지를 취소하고 원래 허브의 입력창에서 다시 보내세요';
+  }
   busy(sessionId: string): boolean {
     return !!this.sessionCalls.get(sessionId) || !!this.db.prepare("SELECT 1 FROM connector_job WHERE session_id=? AND status='pending' AND expires_at>? LIMIT 1").get(sessionId, this.now());
   }
@@ -177,16 +200,25 @@ export class ConnectorBroker {
   }
   private job(callId: string) { return this.db.prepare('SELECT * FROM connector_job WHERE id=?').get(callId) as JobRow | undefined; }
   private wake(callId: string) { for (const resolve of this.waiters.get(callId) ?? []) resolve(); }
-  private prune() {
+  private prune(notify = false) {
     const expired = this.db.prepare('SELECT id FROM connector_job WHERE expires_at<=?').all(this.now()) as { id: string }[];
     this.db.prepare('DELETE FROM connector_job WHERE expires_at<=?').run(this.now());
     for (const { id } of expired) this.wake(id);
     // Preserve the process token so a later user input can activate a fresh grant.
-    this.db.prepare("UPDATE connector_runtime SET context=NULL WHERE context IS NOT NULL AND json_extract(context,'$.expiresAt')<=?").run(this.now());
+    const cleared = this.db.prepare("UPDATE connector_runtime SET context=NULL WHERE context IS NOT NULL AND json_extract(context,'$.expiresAt')<=? RETURNING session_id")
+      .all(this.now()) as { session_id: string }[];
+    for (const { session_id } of cleared) this.expiredSessions.add(session_id);
     this.db.prepare('DELETE FROM connector_runtime WHERE session_id NOT IN (SELECT id FROM session)').run();
     this.db.prepare('DELETE FROM connector_approval WHERE session_id NOT IN (SELECT id FROM session)').run();
     if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='approval'").get())
       this.db.prepare("DELETE FROM connector_approval WHERE approval_id NOT IN (SELECT id FROM approval WHERE status='pending')").run();
+    // A turn may already be idle while a background command continues. Expiry removes
+    // the authority barrier, so retry its queued text without granting the command new access.
+    if (notify) {
+      const sessions = [...this.expiredSessions];
+      this.expiredSessions.clear();
+      for (const sessionId of sessions) if (!this.busy(sessionId)) this.onIdle?.(sessionId);
+    }
   }
   async invoke(token: string, method: ConnectorMethod, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<unknown> {
     requireAdmission();
@@ -297,5 +329,5 @@ export class ConnectorBroker {
       this.db.prepare('UPDATE connector_job SET acknowledged=1,completion=CASE WHEN consumed=1 THEN NULL ELSE completion END WHERE id=?').run(callId);
     }
   }
-  close() { this.closed = true; clearInterval(this.sweepTimer); for (const callId of this.waiters.keys()) this.wake(callId); }
+  close() { this.closed = true; clearInterval(this.sweepTimer); this.expiredSessions.clear(); for (const callId of this.waiters.keys()) this.wake(callId); }
 }

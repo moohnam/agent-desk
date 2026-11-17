@@ -66,9 +66,10 @@ export class Hub extends DeskCore {
   private connectorPending(sessionId: string) {
     return this.busy.has(sessionId) || !!this.background.get(sessionId)?.length || !!this.connectorBroker?.busy(sessionId);
   }
-  private connectorSwitchBlocked(sessionId: string, context: ConnectorExecutionContext | null | undefined) {
+  private connectorSwitchBlocked(sessionId: string, context: ConnectorExecutionContext | null | undefined, textOnly = true) {
     return this.store.getSession(sessionId)?.engine !== 'agy' && context !== undefined && this.connectorPending(sessionId)
-      && !!this.connectorBroker && !this.connectorBroker.samePolicy(sessionId, context ?? undefined);
+      && !!this.connectorBroker && (!textOnly || this.connectorBroker.hasAuthority(sessionId) || this.connectorBroker.busy(sessionId))
+      && !this.connectorBroker.samePolicy(sessionId, context ?? undefined);
   }
   private unsupportedConnector(session: Session, context: ConnectorExecutionContext | null | undefined) {
     if (session.engine !== 'agy') return false;
@@ -77,10 +78,9 @@ export class Hub extends DeskCore {
     }});
     return true;
   }
-  private startConnector(sessionId: string) {
+  private startConnector(sessionId: string, context = this.connectorContext.getStore()) {
     const broker = this.connectorBroker;
     const session = this.store.getSession(sessionId)!;
-    const context = this.connectorContext.getStore();
     // An explicit user request may supply authority; internal resumes retain only a still-valid grant.
     let accepted = context;
     if (accepted === undefined && broker) {
@@ -95,16 +95,18 @@ export class Hub extends DeskCore {
     return {url:this.connectorMcpUrl, token:broker.open(sessionId,session.task_id,accepted ?? undefined)};
   }
   private activateConnector(sessionId: string, context: ConnectorExecutionContext | null | undefined) {
-    if (context === undefined) return;
-    if (this.unsupportedConnector(this.store.getSession(sessionId)!,context)) return;
+    if (context === undefined) return false;
+    if (this.unsupportedConnector(this.store.getSession(sessionId)!,context)) return false;
     const broker = this.connectorBroker;
-    if (this.connectorSwitchBlocked(sessionId,context)) throw new HttpError(409, '현재 작업과 외부 조회가 끝난 뒤 다른 허브의 연결 권한을 사용할 수 있습니다. 메시지는 대기열에 보관됩니다');
+    if (this.connectorSwitchBlocked(sessionId,context)) throw new HttpError(409, broker!.switchBlockedMessage(sessionId,context ?? undefined));
     if (!broker?.hasSession(sessionId)) {
       if (context) throw new HttpError(409, '이전에 시작한 실행에는 외부 연결 도구가 없습니다. 실행을 닫고 메시지를 다시 보내 재개해 주세요');
-      return;
+      return false;
     }
     // Steering is part of the current turn, so it must retain the original grant.
     if (!this.connectorPending(sessionId)) broker.activate(sessionId,this.store.getSession(sessionId)!.task_id,context ?? undefined);
+    else return !!context && !broker.samePolicy(sessionId,context);
+    return false;
   }
 
   /** Set by the gateway. A shared runner never reads another machine's instruction file. */
@@ -461,7 +463,7 @@ export class Hub extends DeskCore {
     const model = c.model && c.model !== session.model ? c.model : undefined;
     const effort = c.effort && c.effort !== session.effort ? c.effort : undefined;
     if ((model || effort || (c.mode && c.mode !== session.permission_mode))
-      && this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()))
+      && this.connectorSwitchBlocked(session.id,this.connectorContext.getStore(),false))
       throw new HttpError(409, '다른 외부 연결 계정의 작업이 끝난 뒤 실행 설정을 바꿀 수 있습니다');
     if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...(context && { channel_context: context }) });
     if (model || effort) {
@@ -527,19 +529,30 @@ export class Hub extends DeskCore {
   private dispatch(sessionId: string, body: string, skills: string[], steer = false, skillSnapshot?: SkillSnapshot) {
     requireAdmission();
     const session = this.store.getSession(sessionId)!;
+    const supplied = this.connectorContext.getStore();
+    const context = this.connectorBroker ? this.connectorBroker.inputContext(supplied) : supplied;
+    let unavailable = !!supplied && context === null;
+    const warn = () => {
+      if (!unavailable) return;
+      const message = '메시지는 전달했습니다. 외부 조회 권한이 만료되었거나 진행 중인 작업에 새 권한을 적용할 수 없어 이 입력의 Slack·Jira·Confluence 조회는 활성화하지 않았습니다. 외부 조회가 필요하면 현재 작업과 백그라운드 작업이 끝난 뒤 원래 허브에서 다시 요청하세요.';
+      this.addEvent(sessionId,session.task_id,'status',{kind:'status',state:'warning',detail:{message}});
+      body += '\n\n[데스크 안내] ' + message;
+    };
     // Also protect already-running local daemons: updating their module would end live engines.
     // Remote runners choose their own skills path and add this in the adapter instead.
     if (steer && !skillSnapshot && session.engine === 'codex' && !this.remotes.canQueue(sessionId)) {
       body = steeringSkillText(body, skills, this.skills.home);
     }
     if (this.runner.has(sessionId)) {
-      this.activateConnector(sessionId,this.connectorContext.getStore());
+      unavailable = this.activateConnector(sessionId,context) || unavailable;
+      warn();
       this.runner.handle({ type: 'send', sessionId, text: body, skills, steer, skillSnapshot });
     } else {
       // A new engine process: whatever ran in the background before went with the old one.
       this.background.delete(sessionId);
+      warn();
       this.runner.handle({
-        type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId, sessionId), engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
+        type: 'start', sessionId, connectorMcp: this.startConnector(sessionId,context), instructions: this.startInstructions(sessionId, sessionId), engine: engineOf(session.engine), cwd: session.cwd, prompt: body,
         resume: session.engine_session_id ?? undefined, permissionMode: session.permission_mode,
         model: session.model ?? undefined, effort: session.effort ?? undefined, skills, skillsHome: this.skills.home, skillSnapshot,
       });
@@ -567,7 +580,7 @@ export class Hub extends DeskCore {
     if (!this.remotes.ready(sessionId) || this.busy.has(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
     if (next?.skill_snapshot && !this.remotes.canSnapshot(sessionId)) return;
-    if (!next || this.connectorSwitchBlocked(sessionId,next.connector_context)) return;
+    if (!next || this.connectorSwitchBlocked(sessionId,next.connector_context,next.kind !== 'reset')) return;
     this.connectorContext.run(next.connector_context, () => {
       if (!this.store.dequeue(next.id)) return;
       if (next.kind === 'reset') { this.reset(this.store.getSession(sessionId)!, next.body, next.created_at); return; }
@@ -620,7 +633,7 @@ export class Hub extends DeskCore {
     this.requireRunner(q.session_id);
     this.requireSkillSnapshotRunner(q.skill_snapshot, q.session_id);
     if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
-    if (this.connectorSwitchBlocked(q.session_id,q.connector_context)) throw new HttpError(409, '현재 작업과 외부 조회가 끝난 뒤 계정을 바꿀 수 있습니다. 메시지는 대기열에 보관됩니다');
+    if (this.connectorSwitchBlocked(q.session_id,q.connector_context)) throw new HttpError(409, this.connectorBroker!.switchBlockedMessage(q.session_id,q.connector_context ?? undefined));
     if (!this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const steer = this.runner.has(q.session_id) && this.busy.has(q.session_id);
     this.sendQueued(q, steer ? 'now' : 'later');

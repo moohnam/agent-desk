@@ -66,17 +66,90 @@ test('in-flight connector calls also delay authority changes and completion drai
   } finally {f.close();}
 });
 
-test('expired queued authority preserves text and emits a visible failure instead of dropping it',()=>{
+test('expired queued authority delivers text without tools once the active turn ends',async()=>{
   const f=fixture();
   try {
     f.hub.withConnectorContext(f.context('B'),()=>f.hub.sendMessage(f.task.id,'보관할 메시지'));
     const q=f.store.queued()[0];q.connector_context!.expiresAt=1;
     f.store.database.prepare('UPDATE queued SET connector_context_json=? WHERE id=?').run(JSON.stringify(q.connector_context),q.id);
-    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
-    assert.equal(f.store.queued()[0].id,q.id);
-    assert.match(JSON.stringify(f.store.listEvents(f.task.id,1)[0]?.payload),/대기 메시지를 보관/);
+    // A still-authorized running turn must not lend its account to an expired input.
     assert.throws(()=>f.hub.sendQueuedNow(f.task.id,q.id),/만료/);
-    assert.equal(f.store.queued()[0].id,q.id);
+    assert.equal(f.store.queued().length,1);
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    assert.equal(f.store.queued().length,0);
+    const send=f.sent.at(-1) as Extract<HubToRunner,{type:'send'}>;
+    assert.equal(send.type,'send');assert.match(send.text,/보관할 메시지/);
+    assert.match(send.text,/조회는 활성화하지 않았습니다/);
+    assert.deepEqual(await f.broker.invoke(f.start.connectorMcp!.token,'list'),{connections:[]});
+    assert.match(JSON.stringify(f.store.listEvents(f.task.id)),/메시지는 전달했습니다/);
+  } finally {f.close();}
+});
+
+test('expired previous grants allow same-account steering without renewing background authority',async()=>{
+  const f=fixture();
+  try {
+    const expired=f.context();expired.expiresAt=1;
+    f.store.database.prepare('UPDATE connector_runtime SET context=? WHERE session_id=?').run(JSON.stringify(expired),f.start.sessionId);
+    f.hub.withConnectorContext(f.context('A','new-input'),()=>f.hub.sendMessage(f.task.id,'#now 같은 계정'));
+    assert.equal(f.store.queued().length,0);
+    const send=f.sent.at(-1) as Extract<HubToRunner,{type:'send'}>;
+    assert.equal(send.type,'send');assert.equal(send.steer,true);
+    assert.match(send.text,/같은 계정/);assert.match(send.text,/조회는 활성화하지 않았습니다/);
+    await assert.rejects(f.broker.invoke(f.start.connectorMcp!.token,'list'),/만료/);
+    assert.throws(()=>f.hub.withConnectorContext(f.context(),()=>f.hub.sendMessage(f.task.id,'#high')),/실행 설정/);
+  } finally {f.close();}
+});
+
+test('ordinary follow-ups during background work need no new external authority',async()=>{
+  const f=fixture();
+  try {
+    f.broker.activate(f.start.sessionId,f.task.id);
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[{id:'bench',type:'local_bash',description:'측정 종료 대기'}]});
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    f.hub.withConnectorContext(f.context('B','question'),()=>f.hub.sendMessage(f.task.id,'러너 재시작해도 되나요?'));
+    assert.equal(f.store.queued().length,0);
+    const send=f.sent.at(-1) as Extract<HubToRunner,{type:'send'}>;
+    assert.equal(send.type,'send');assert.match(send.text,/러너 재시작해도 되나요/);
+    assert.equal(f.broker.stored(f.start.sessionId),undefined);
+    assert.deepEqual(await f.broker.invoke(f.start.connectorMcp!.token,'list'),{connections:[]});
+    // A later input can activate fresh authority only after all work has ended.
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[]});
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    f.hub.withConnectorContext(f.context('B','read'),()=>f.hub.sendMessage(f.task.id,'이제 조회하세요'));
+    assert.equal(f.broker.stored(f.start.sessionId)?.requestId,'read');
+  } finally {f.close();}
+});
+
+test('grant expiry retries waiting text while background work remains, without installing a new grant',async t=>{
+  t.mock.timers.enable({apis:['Date','setInterval'],now:Date.now()});
+  const f=fixture();
+  try {
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[{id:'bench',type:'local_bash',description:'측정 종료 대기'}]});
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    f.hub.withConnectorContext(f.context('B','queued'),()=>f.hub.sendMessage(f.task.id,'측정 진행은 어떤가요?'));
+    assert.equal(f.store.queued().length,1);
+    const before=f.sent.length;
+    t.mock.timers.tick(60_001);
+    assert.equal(f.store.queued().length,0);
+    assert.equal(f.sent.length,before+1);
+    const send=f.sent.at(-1) as Extract<HubToRunner,{type:'send'}>;
+    assert.equal(send.type,'send');assert.match(send.text,/측정 진행은 어떤가요/);
+    assert.deepEqual(await f.broker.invoke(f.start.connectorMcp!.token,'list'),{connections:[]});
+    t.mock.timers.tick(60_000);
+    assert.equal(f.sent.length,before+1);
+  } finally {f.close();}
+});
+
+test('text-only delivery does not release queued session resets into background work',()=>{
+  const f=fixture();
+  try {
+    f.say({type:'background',sessionId:f.start.sessionId,tasks:[{id:'bench',type:'local_bash',description:'측정 종료 대기'}]});
+    f.hub.withConnectorContext(f.context(),()=>f.hub.resetContext(f.task.id,'새 세션'));
+    f.store.database.prepare('UPDATE connector_runtime SET context=NULL WHERE session_id=?').run(f.start.sessionId);
+    const commands=f.sent.length;
+    f.say({type:'busy',sessionId:f.start.sessionId,busy:false});
+    assert.equal(f.store.queued().length,1);
+    assert.equal(f.sent.length,commands);
   } finally {f.close();}
 });
 
