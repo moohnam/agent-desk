@@ -1,3 +1,4 @@
+import { AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { api } from './api.ts';
 import { ComposeField } from './Compose.tsx';
@@ -30,6 +31,8 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
   const [taskId, setTaskId] = useState(channel?.conversation_task_id ?? null);
   const [received, setReceived] = useState<TaskView>();
   const task = taskId ? tasks.get(taskId) ?? (received?.id === taskId ? received : undefined) : undefined;
+  const answerTarget = useAnswerTarget(taskId ?? '');
+  useEffect(() => { if (answerTarget) inputRef.current?.focus(); }, [answerTarget, inputRef]);
   const projectId = task?.project_id ?? (project || (projects.length === 1 ? projects[0].id : ''));
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
@@ -76,6 +79,18 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
     catch (error) { onError(error instanceof Error ? error.message : String(error)); }
   };
   const submit = async (fromShortcut = false) => {
+    if (answerTarget) {
+      if (pending.current || !text.trim()) return;
+      pending.current = true; setBusy(true); shortcut.current.reset();
+      const version = revision.current, submitted = getDraft(draftKey);
+      try {
+        await submitAnswer(answerTarget, text);
+        if (version === revision.current && (mounted.current || getDraft(draftKey) === submitted)) { setText(''); setDraft(draftKey, null, { empty: true }); }
+        setNote('답변을 반영했습니다. 여러 질문은 모든 답을 모아 보냅니다.');
+      } catch (error) { onError(error instanceof Error ? error.message : String(error)); }
+      finally { pending.current = false; setBusy(false); }
+      return;
+    }
     if (fromShortcut && shortcut.current.active) { await promote(shortcut.current.repeat()); return; }
     if (pending.current || !channel || !text.trim() || (!task && !projects.some((p) => p.id === projectId))) return;
     shortcut.current.reset();
@@ -113,7 +128,8 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
         {!placed.length && <p className="empty">{taskId && !history.loaded ? '대화를 불러오는 중…' : '알림을 자료로 선택하고 요약이나 정리를 요청해 보세요. 같은 대화를 계속 이어갑니다.'}</p>}
       </div>
     </div>
-    <div className="reply-box channel-chat-compose">
+    <div className="reply-box channel-chat-compose" data-answer-task={taskId ?? undefined}>
+      {taskId && <AnswerDestination taskId={taskId} />}
       {!task && <label className="channel-project">대화할 프로젝트<select className="input" aria-label="채널 대화 프로젝트" value={projectId} disabled={busy} onChange={(event) => { edited(); setProject(event.target.value); }}>
         <option value="">프로젝트 선택</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select></label>}
@@ -130,12 +146,12 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
       </li>)}</ol>}
       <ComposeField value={text} onChange={(value) => { edited(); setText(value); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()}
         inputRef={inputRef} projects={projects} tasks={[...tasks.values()]} mentions="refer" rows={2}
-        placeholder={sources.size ? '선택한 글에 대해 질문하거나 정리를 요청하세요…' : '이전 대화에 이어 질문하세요…'} />
+        placeholder={answerTarget ? '선택한 질문에 답하세요…' : sources.size ? '선택한 글에 대해 질문하거나 정리를 요청하세요…' : '이전 대화에 이어 질문하세요…'} />
       {note && <p className="reply-note" role="status">{note}</p>}
       {!projects.length && !task && <p className="muted small">일반 작성창에서 프로젝트를 먼저 등록해 주세요.</p>}
       <div className="reply-tools">
         {task?.status === 'running' && <button className="link" onClick={() => void api.interrupt(task.id).catch((error) => onError(error.message))}>중단</button>}
-        <span className="spacer" /><button className="btn primary" disabled={busy || !channel || !text.trim() || (!task && !projects.some((p) => p.id === projectId))} onClick={() => void submit()}>{busy ? '보내는 중…' : task?.status === 'running' ? '대기열에 보내기' : '보내기'}</button>
+        <span className="spacer" /><button className="btn primary" disabled={busy || !channel || !text.trim() || (!task && !projects.some((p) => p.id === projectId))} onClick={() => void submit()}>{busy ? '보내는 중…' : answerTarget ? '답변 반영' : task?.status === 'running' ? '대기열에 보내기' : '보내기'}</button>
       </div>
     </div>
   </>;

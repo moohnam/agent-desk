@@ -1,3 +1,4 @@
+import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Settings, Smartphone, SquarePen } from 'lucide-react';
@@ -1125,6 +1126,18 @@ export function App() {
 
   // Post handlers go through the latest state: a memoized post keeps the closures of the render that drew it.
   const postActions = useRef({ select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask });
+  useEffect(() => {
+    const openAnswer = (event: Event) => {
+      const taskId = (event as CustomEvent).detail?.taskId;
+      if (typeof taskId !== 'string') return;
+      const box = [...document.querySelectorAll<HTMLElement>('[data-answer-task]')].find(el => el.dataset.answerTask === taskId);
+      if (box) box.querySelector('textarea')?.focus();
+      else postActions.current.openThread(taskId);
+    };
+    window.addEventListener(ANSWER_COMPOSE, openAnswer);
+    return () => window.removeEventListener(ANSWER_COMPOSE, openAnswer);
+  }, []);
+
   postActions.current = { select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask };
   const renderPost = ({ post: p, up, down }: PlacedPost, colId: string, i: number, inThread: boolean) => (
     <PostView key={p.id} post={p} task={hub.tasks.get(p.taskId)} model={models.get(p.taskId)} up={up} down={down}
@@ -1257,10 +1270,7 @@ export function App() {
             )}
           </div>
         </div>
-        {threadTaskView && (threadTaskView.source === 'external' ? (
-          <ExternalNote pending={!!questionOf(threadTaskView.id)}
-            onAnswer={() => { const q = questionOf(threadTaskView.id); if (q) answerQuestion(threadTaskView.id, q); }} />
-        ) : handoff?.open ? (
+        {threadTaskView && (handoff?.open && threadTaskView.source !== 'external' ? (
           <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
             onError={setToast} onDone={setToast} />
         ) : (

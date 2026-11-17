@@ -1,3 +1,4 @@
+import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
@@ -390,6 +391,13 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
 }) {
   // Mounted per task (keyed by its id): the box restores the task's unsent reply and keeps it as a
   // draft until it is sent, across other threads and reloads.
+  const answerTarget = useAnswerTarget(task.id);
+  useEffect(() => {
+    if (answerTarget) inputRef.current?.focus();
+    const focus = (event: Event) => { if ((event as CustomEvent).detail?.taskId === task.id) inputRef.current?.focus(); };
+    window.addEventListener(ANSWER_COMPOSE, focus);
+    return () => window.removeEventListener(ANSWER_COMPOSE, focus);
+  }, [answerTarget, inputRef, task.id]);
   const draftKey = `reply:${task.id}`;
   const [text, setText] = useState(() => getDraft<{ text: string }>(draftKey)?.text ?? '');
   const [busy, setBusy] = useState(false);
@@ -439,7 +447,23 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     } catch (e) { onError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
+  const answerBusy = useRef(false);
   const submit = async (fromShortcut = false) => {
+    if (answerTarget) {
+      if (busy || answerBusy.current || !text.trim()) return;
+      answerBusy.current = true; setBusy(true); shortcut.current.reset();
+      const unchanged = revision.current, submitted = getDraft(draftKey);
+      try {
+        await submitAnswer(answerTarget, text);
+        if (revision.current === unchanged && (mounted.current || getDraft(draftKey) === submitted)) {
+          setDraft(draftKey, null, { empty: true }); setText(''); setPick(null);
+        }
+        setSent('답변을 반영했습니다. 여러 질문은 모든 답을 모아 보냅니다.');
+      } catch (e) { onError(e instanceof Error ? e.message : String(e)); }
+      finally { answerBusy.current = false; setBusy(false); }
+      return;
+    }
+    if (task.source === 'external') return;
     if (fromShortcut && shortcut.current.active) { await promote(shortcut.current.repeat()); return; }
     if (!ok || busy) return;
     shortcut.current.reset();
@@ -493,7 +517,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const choices: Delivery[] = running ? ['later', 'now', 'new', 'fork'] : ['new', 'fork'];
 
   return (
-    <div className="reply-box">
+    <div className="reply-box" data-answer-task={task.id}>
       {(task.queued ?? []).length > 0 && (
         <ol className="queued" aria-label="대기 중인 메시지">
           {(task.queued ?? []).map((q, i, all) => (
@@ -518,12 +542,14 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
           ))}
         </ol>
       )}
+      <AnswerDestination taskId={task.id} />
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
       <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2}
         projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]}
-        placeholder={running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
+        placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">
+        {!answerTarget && task.source !== 'external' && <>
         <button className="toggle" aria-pressed={auto} disabled={busy}
           title={auto ? '누르면 #ask: 매번 확인' : '누르면 #auto: 자동 승인'}
           onClick={() => { shortcut.current.reset(); void send(auto ? '#ask' : '#auto'); }}>#auto</button>
@@ -533,9 +559,10 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
             onClick={() => { edited(); setPick(pick === d ? null : d); }}>#{d}</button>
         ))}
         {running && <button className="btn stop-btn" title="중단 (s) · 대기 중인 메시지도 취소" aria-label="중단" onClick={() => api.interrupt(task.id).catch((e) => onError(e.message))}><Square /> <kbd>s</kbd></button>}
+        </>}
         <span className="spacer" />
         <span><kbd>⌘</kbd><kbd>↵</kbd></span>
-        <button className="btn primary" disabled={!ok || busy} onClick={() => void submit()}>{branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
+        <button className="btn primary" disabled={busy || (answerTarget ? !text.trim() : task.source === 'external' || !ok)} onClick={() => void submit()}>{answerTarget ? '답변 반영' : branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
       </div>
     </div>
   );

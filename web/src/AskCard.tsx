@@ -1,7 +1,8 @@
+import { useAnswerWriter, answerOperation, useAnswerPending } from './answerComposer.tsx';
 import { useEffect, useState } from 'react';
 import { ASK_USER, type Answers } from '../../shared/protocol.ts';
 import { api } from './api.ts';
-import { getDraft, setDraft, useDraftSync } from './drafts.ts';
+import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
 import type { Approval, Post } from './types.ts';
 
 /** A multiple-choice question an engine session asks (Claude's AskUserQuestion, Codex's request_user_input). */
@@ -34,6 +35,8 @@ export function AskCard({ post, approval, onError }: {
   post: Post; approval: Approval | undefined; onError?: (msg: string) => void;
 }) {
   const p = post.event.payload;
+  const operationKey = `${post.taskId}:approval:${p.approvalId}`;
+  const sending = useAnswerPending(operationKey);
   const qs: AskQuestion[] = Array.isArray(p.input?.questions) ? p.input.questions : [];
   const r = post.resolution?.payload;
   // Unsent choices are kept as a draft (drafts.ts) while the question waits; a secret answer never is.
@@ -54,26 +57,41 @@ export function AskCard({ post, approval, onError }: {
     const empty = !!outcome || kept.every((x) => !x.labels.length && !x.other.trim());
     setDraft(draftKey, kept, { taskId: post.taskId, empty });
   }, [draftKey, picks, outcome, post.taskId]);
-  useDraftSync<Pick[]>(draftKey, (v) => setPicks(v?.length === qs.length ? v : qs.map(() => EMPTY)));
+  useDraftSync<Pick[]>(draftKey, (v) => setPicks(previous => v?.length === qs.length ? v.map((p, i) => qs[i].secret ? previous[i] ?? EMPTY : p) : qs.map(() => EMPTY)));
 
-  const set = (i: number, f: (p: Pick) => Pick) => setPicks((ps) => ps.map((x, k) => (k === i ? f(x) : x)));
+  const savePicks = (next: Pick[]) => {
+    setPicks(next);
+    setSharedDraft(draftKey, next.map((p, i) => qs[i].secret ? { ...p, other: '' } : p), { taskId: post.taskId, empty: false });
+  };
+  const set = (i: number, f: (p: Pick) => Pick) => {
+    const next = picks.map((x, k) => k === i ? f(x) : x);
+    if (qs[i].secret) setPicks(next); else savePicks(next);
+  };
   const choose = (i: number, label: string) => set(i, (x) => qs[i].multiSelect
     ? { ...x, labels: x.labels.includes(label) ? x.labels.filter((l) => l !== label) : [...x.labels, label] }
     : { ...x, labels: [label], otherOn: false });
   const ready = qs.length > 0 && qs.every((q, i) => answerOf(q, picks[i]) !== '');
 
   const submit = async () => {
-    if (!ready || busy || !approval) return;
+    if (!ready || busy || sending || !approval) return;
     const out: Answers = Object.fromEntries(qs.map((q, i) => [q.question, answerOf(q, picks[i])]));
     setBusy(true);
-    try { await api.resolve(approval.id, true, undefined, out); setSent(out); }
+    try { await answerOperation(operationKey, () => api.resolve(approval.id, true, undefined, out)); setSent(out); }
     catch (e) { onError?.(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
+  const write = useAnswerWriter(post.taskId, `approval:${p.approvalId}`, !outcome && !!approval && !busy && !sending, async (index, text) => {
+    const next = picks.map((p, i) => i === index ? { ...p, other: text, otherOn: true, labels: qs[i].multiSelect ? p.labels : [] } : p);
+    if (!qs.some(q => q.secret) && qs.every((q, i) => answerOf(q, next[i]))) {
+      const out = Object.fromEntries(qs.map((q, i) => [q.question, answerOf(q, next[i])]));
+      await answerOperation(operationKey, () => api.resolve(approval!.id, true, undefined, out)); setSent(out);
+    }
+    savePicks(next);
+  });
   const skip = async () => {
-    if (busy || !approval) return;
+    if (busy || sending || !approval) return;
     setBusy(true);
-    try { await api.resolve(approval.id, false, '사용자가 답하지 않고 넘겼습니다. 질문 없이 판단해 진행하세요.'); }
+    try { await answerOperation(operationKey, () => api.resolve(approval.id, false, '사용자가 답하지 않고 넘겼습니다. 질문 없이 판단해 진행하세요.')); }
     catch (e) { onError?.(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
@@ -114,7 +132,7 @@ export function AskCard({ post, approval, onError }: {
                 {opts.map((o, k) => {
                   const on = pick.labels.includes(o.label);
                   return (
-                    <button key={o.label} type="button" className={`ask-opt${on ? ' on' : ''}`} disabled={busy}
+                    <button key={o.label} type="button" className={`ask-opt${on ? ' on' : ''}`} disabled={busy || sending}
                       role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={on}
                       data-question={i === 0 && k === 0 ? approval!.id : undefined}
                       onClick={() => choose(i, o.label)}>
@@ -123,9 +141,9 @@ export function AskCard({ post, approval, onError }: {
                     </button>
                   );
                 })}
-                <button type="button" className={`ask-opt${pick.otherOn ? ' on' : ''}`} disabled={busy}
+                <button type="button" className={`ask-opt${pick.otherOn ? ' on' : ''}`} disabled={busy || sending}
                   role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={pick.otherOn}
-                  onClick={() => set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] }))}>
+                  onClick={() => { if (!q.secret && pick.otherOn) set(i, x => ({ ...x, otherOn: false, other: '' })); else if (!q.secret) write(q.question, i); else set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] })); }}>
                   <span className="mark">{q.multiSelect ? (pick.otherOn ? '☑' : '☐') : (pick.otherOn ? '◉' : '○')}</span>
                   <span><b>기타</b><span className="desc">직접 입력</span></span>
                 </button>
@@ -134,26 +152,26 @@ export function AskCard({ post, approval, onError }: {
             {shown?.preview && <pre className="mono ask-preview">{shown.preview}</pre>}
             {(pick.otherOn || opts.length === 0) && (q.secret ? (
               // A secret (a password or token) is typed blind and kept out of autofill.
-              <input className="input" type="password" autoComplete="off" value={pick.other} disabled={busy}
+              <input className="input" type="password" autoComplete="off" value={pick.other} disabled={busy || sending}
                 autoFocus={opts.length > 0} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
                 placeholder="답 입력…"
                 onChange={(e) => set(i, (x) => ({ ...x, other: e.target.value }))}
                 onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); } }} />
             ) : (
-              <textarea className="input" rows={2} value={pick.other} disabled={busy} autoFocus={opts.length > 0}
-                data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
-                placeholder="답 입력…"
-                onChange={(e) => set(i, (x) => ({ ...x, other: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); } }} />
+              <div>
+                <button className="link" disabled={busy || sending} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
+                  onClick={() => write(q.question, i)}>대화창에서 답하기</button>
+                {pick.other && <div className="resolution">작성한 답: {pick.other}</div>}
+              </div>
             ))}
           </div>
         );
       })}
       <div className="approve-actions">
-        <button className="no" disabled={busy} title="답하지 않고 에이전트가 알아서 진행하게 합니다" onClick={() => void skip()}>답하지 않기</button>
+        <button className="no" disabled={busy || sending} title="답하지 않고 에이전트가 알아서 진행하게 합니다" onClick={() => void skip()}>답하지 않기</button>
         <span className="spacer" />
         <span className="muted"><kbd>⌘</kbd><kbd>↵</kbd></span>
-        <button className="yes" disabled={!ready || busy} onClick={() => void submit()}>답하기</button>
+        <button className="yes" disabled={!ready || busy || sending} onClick={() => void submit()}>답하기</button>
       </div>
     </div>
   );

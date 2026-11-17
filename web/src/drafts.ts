@@ -102,6 +102,12 @@ export function setDraft<T>(key: string, value: T, opts: { taskId?: string; empt
   changed(key);
 }
 
+/** Shares a question's partial answers between its feed and thread cards in the same window. */
+export function setSharedDraft<T>(key: string, value: T, opts: { taskId?: string; empty: boolean }) {
+  setDraft(key, value, opts);
+  keyListeners.get(key)?.forEach(fn => fn(opts.empty ? undefined : value));
+}
+
 /** Drops drafts `keep` rejects: their task was deleted, or their question was answered elsewhere. */
 export function pruneDrafts(keep: (key: string, d: Draft) => boolean) {
   const gone = [...drafts].filter(([k, d]) => !keep(k, d)).map(([k]) => k);

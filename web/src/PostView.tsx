@@ -1,3 +1,4 @@
+import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, PenLine } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
@@ -6,7 +7,7 @@ import { api } from './api.ts';
 import { asyncAnswerText } from './asyncAnswers.ts';
 import type { AsyncQuestion } from '../../shared/protocol.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
-import { getDraft, setDraft, useDraftSync } from './drafts.ts';
+import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
 import { useNow } from './clock.ts';
 import { LongText, Markdown } from './Markdown.tsx';
@@ -230,22 +231,31 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
  */
 function AsyncChoices({ post, running, onError }: { post: Post; running: boolean; onError?: (msg: string) => void }) {
   const questions = post.event.payload.questions as AsyncQuestion[];
-  const [picks, setPicks] = useState<string[]>(() => questions.map(() => ''));
+  const draftKey = `async-answer:${post.taskId}:${post.id}`;
+  const [picks, setPicks] = useState<string[]>(() => getDraft<string[]>(draftKey) ?? questions.map(() => ''));
+  useDraftSync<string[]>(draftKey, value => setPicks(value ?? questions.map(() => '')));
+  const savePicks = (next: string[]) => { setPicks(next); setSharedDraft(draftKey, next, { taskId: post.taskId, empty: false }); };
   const [sent, setSent] = useState<string>();
   const sending = useRef(false);
   const answer = post.resolution?.payload.text as string | undefined;
   const done = sent ?? answer;
-  const send = (text: string) => {
-    if (done || sending.current) return;
+  const send = async (text: string) => {
+    if (done || sending.current) throw new Error('이미 답했거나 답변을 전송 중입니다.');
     sending.current = true;
-    setSent(text);
-    api.send(post.taskId, running ? `${text} #now` : text)
-      .catch((err) => { setSent(undefined); onError?.(`답을 보내지 못했습니다: ${err instanceof Error ? err.message : err}`); })
-      .finally(() => { sending.current = false; });
+    try { await answerOperation(`${post.taskId}:async:${post.id}`, async () => { await api.send(post.taskId, running ? `${text} #now` : text); }); setSent(text); setSharedDraft(draftKey, null, { empty: true }); }
+    catch (err) { setSent(undefined); throw err; }
+    finally { sending.current = false; }
   };
-  const pick = (i: number, text: string) => setPicks((prev) => prev.map((p, k) => k === i ? text : p));
+  const write = useAnswerWriter(post.taskId, `async:${post.id}`, !done, async (index, value) => {
+    const next = picks.map((p, i) => i === index ? value : p);
+    const complete = asyncAnswerText(questions, next);
+    if (complete) await send(complete);
+    if (!complete) savePicks(next);
+  });
+  const deliver = (value: string) => { void send(value).catch(err => onError?.(`답을 보내지 못했습니다: ${err instanceof Error ? err.message : err}`)); };
+  const pick = (i: number, text: string) => savePicks(picks.map((p, k) => k === i ? text : p));
   const text = asyncAnswerText(questions, picks);
-  const submit = () => { if (text) send(text); };
+  const submit = () => { if (text) deliver(text); };
   return (
     <div className={`ask-card async${done ? ' resolved' : ''}`} onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}>
@@ -256,15 +266,13 @@ function AsyncChoices({ post, running, onError }: { post: Post; running: boolean
             {q.options.map((o) => (
               <button key={o} type="button" role="radio" aria-checked={picks[i] === o}
                 className={`ask-opt${picks[i] === o ? ' on' : ''}`} disabled={!!done}
-                onClick={() => { pick(i, o); if (questions.length === 1) send(o); }}>
+                onClick={() => { pick(i, o); if (questions.length === 1) deliver(o); }}>
                 <span className="mark">{picks[i] === o ? '●' : '○'}</span><span>{o}</span>
               </button>
             ))}
           </div>
-          {!q.options.length && (
-            <textarea className="input" rows={2} aria-label={q.title} placeholder="답 입력…" value={picks[i]} disabled={!!done}
-              onChange={(e) => pick(i, e.target.value)} />
-          )}
+          {!done && <button className="link" onClick={() => write(q.title, i)}>대화창에서 답하기</button>}
+          {!q.options.length && picks[i] && <div className="resolution">작성한 답: {picks[i]}</div>}
         </div>
       ))}
       {!done && (questions.length > 1 || !questions[0]?.options.length) && (
@@ -286,25 +294,13 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   const onLocalLink = useMemo(() => openLink(post.taskId, onError), [post.taskId, onError]);
   const body = useMemo(() => <Markdown text={String(p.text ?? '')} taskId={post.taskId} onLocalLink={onLocalLink} />, [p.text, post.taskId, onLocalLink]);
   const r = post.resolution;
-  // An unsent answer is kept as a draft (drafts.ts) while the question waits.
-  const draftKey = `question:${p.questionId}`;
-  const [text, setText] = useState(() => getDraft<string>(draftKey) ?? '');
-  const [busy, setBusy] = useState(false);
-  // Shown between a successful answer and its `user` event arriving.
   const [sent, setSent] = useState<string | null>(null);
   const answer = r?.kind === 'user' ? String(r.payload.text ?? '') : sent;
   const outcome = answer != null ? 'answered' : r ? 'cancelled' : question ? null : 'closed';
-  useEffect(() => { setDraft(draftKey, text, { taskId: post.taskId, empty: !!outcome || !text.trim() }); }, [draftKey, text, outcome, post.taskId]);
-  useDraftSync<string>(draftKey, (v) => setText(v ?? ''));
-
-  const submit = async () => {
-    const body = text.trim();
-    if (!body || busy || !question) return;
-    setBusy(true);
-    try { await api.answer(question.id, body); setSent(body); setText(''); }
-    catch (e) { onError?.(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  };
+  const write = useAnswerWriter(post.taskId, `question:${p.questionId}`, !outcome && !!question, async (_, text) => {
+    await answerOperation(`${post.taskId}:question:${p.questionId}`, () => api.answer(question!.id, text)); setSent(text);
+    setDraft(`question:${p.questionId}`, null, { empty: true });
+  });
 
   return (
     <div className={`approve-card question-card${outcome ? ' resolved' : ''}`}>
@@ -318,17 +314,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
         </div>
       ) : (
         <div className="answer" onClick={(e) => e.stopPropagation()}>
-          <textarea className="input" rows={2} value={text} data-question={question!.id} disabled={busy}
-            placeholder="답 입력…" onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); }
-              else if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); }
-            }} />
-          <div className="approve-actions">
-            <span className="spacer" />
-            <span className="muted"><kbd>⌘</kbd><kbd>↵</kbd></span>
-            <button className="yes" disabled={!text.trim() || busy} onClick={() => void submit()}>답하기</button>
-          </div>
+          <button className="link" data-question={question!.id} onClick={() => write(String(p.text ?? '에이전트의 질문'))}>대화창에서 답하기</button>
         </div>
       )}
     </div>
