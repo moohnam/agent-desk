@@ -28,7 +28,7 @@ const ATLASSIAN_READ = new Set(['atlassianUserInfo', 'getAccessibleAtlassianReso
   'searchConfluence', 'getConfluenceContent', 'listConfluenceContent', 'listConfluenceSpaces',
   'getConfluenceSpace', 'listConfluenceComments']);
 // Only allow named read operations, never a generic execute/proxy tool, even if it claims readOnlyHint.
-const SLACK_READ = new Set(['slack_search_all', 'slack_search_messages', 'slack_search_channels',
+const SLACK_READ = new Set(['slack_search_all', 'slack_search_messages', 'slack_search_public', 'slack_search_public_and_private', 'slack_search_channels',
   'slack_read_channel', 'slack_read_thread']);
 export const connectorReadTool = (service: ConnectorService, tool: Tool) =>
   (service === 'jira' ? ATLASSIAN_READ : SLACK_READ).has(tool.name)
@@ -56,7 +56,7 @@ export interface ConnectorOptions {
 const TTL = 10 * 60_000;
 const LIMIT = 2 * 1024 * 1024;
 
-/** Initial foundation: one local-owner connection per service. No runner/peer access or tool injection. */
+/** Hub-owned OAuth connections. Runners access reads through request-scoped authority grants. */
 export class Connectors {
   private vault: ConnectorVault<Credentials>;
   private saved?: Credentials;

@@ -36,6 +36,7 @@ function fixture() {
   let tokenStatus = 200;
   let v2Issuer = false;
   let confluence = false;
+  let slackSearch = false;
   let block: Promise<void> | undefined;
   let onCall: (() => void) | undefined;
   const fake: typeof fetch = async (input, init) => {
@@ -66,6 +67,9 @@ function fixture() {
     let result: unknown;
     if (rpc.method === 'initialize') result = { protocolVersion: '2025-03-26', serverInfo: { name: 'fake-official-service', version: '1' }, capabilities: { tools: {} } };
     else if (rpc.method === 'tools/list') result = { ...(repeatedCursor ? { nextCursor: 'same-cursor' } : {}), tools: [
+      ...(slackSearch ? ['slack_search_public', 'slack_search_public_and_private'].map(name => ({
+        name, inputSchema: { type: 'object' }, annotations: { readOnlyHint: true },
+      })) : []),
       ...(confluence ? [
         { name: 'searchConfluence', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
         { name: 'getConfluenceContent', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
@@ -100,6 +104,7 @@ function fixture() {
     token: (value: Record<string, unknown>, status = 200) => { tokenOverride = value; tokenStatus = status; },
     v2Issuer: () => { v2Issuer = true; },
     confluence: () => { confluence = true; },
+    slackSearch: () => { slackSearch = true; },
     block: (wait: Promise<void>, started: () => void) => { block = wait; onCall = started; },
     close: () => { connectors.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -744,4 +749,24 @@ test('HTTP connector grants recheck runner capability after a same-workspace dow
     await links.close(); authority.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     store.database.close(); f.close();
   }
+});
+
+test('current Slack message search tools are exposed and callable while writes remain blocked', async () => {
+  const f = fixture();
+  try {
+    f.slackSearch();
+    await f.connect('slack');
+    const names = (await f.connectors.tools('slack')).map(tool => tool.name);
+    for (const name of ['slack_search_public', 'slack_search_public_and_private']) {
+      assert.ok(names.includes(name));
+      const result = await f.connectors.read('slack', name, { keywords: ['fixture'], limit: 1 });
+      assert.equal(result.tool, name);
+      assert.ok(f.requests.some(request => {
+        try { const body = JSON.parse(request.body); return body.method === 'tools/call' && body.params.name === name; }
+        catch { return false; }
+      }));
+    }
+    assert.ok(!names.includes('slack_send_message'));
+    assert.throws(() => f.connectors.read('slack', 'slack_send_message', {}), /읽기 도구/);
+  } finally { f.close(); }
 });
