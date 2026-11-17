@@ -37,3 +37,15 @@
 .settings-panel-body .model-dialog-scroll { overflow: visible; padding: 0; }
 .settings-panel-body .model-dialog-footer { padding: 12px 0 0; }
 .settings-panel-body .channel-manager { padding: 0; }
+
+.settings-button { position: relative; }
+.settings-update-badge { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent, #6a9fff); box-shadow: 0 0 0 2px var(--bg); }
+.updates-panel { display: flex; flex-direction: column; gap: 12px; }
+.updates-panel p { margin: 0; }
+.update-versions { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; margin: 0; font-size: 13px; }
+.update-versions dt { color: var(--muted); }
+.update-versions dd { margin: 0; overflow-wrap: anywhere; }
+.update-summary { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.update-summary ul { margin: 0; padding-left: 18px; max-height: 180px; overflow-y: auto; }
+.update-summary li { padding: 3px 0; overflow-wrap: anywhere; }
+.update-approval { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }

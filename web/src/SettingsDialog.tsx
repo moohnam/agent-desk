@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Bot, ChevronDown, Plug, Server } from 'lucide-react';
+import { Bot, ChevronDown, Package, Plug, Server } from 'lucide-react';
 import { Modal } from './Modal.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { InstructionsDialog } from './InstructionsDialog.tsx';
@@ -9,12 +9,15 @@ import { ConnectorsPanel } from './Connectors.tsx';
 import { WorkspaceDeliveries } from './Workspaces.tsx';
 import { SettingsPanelContext, type PanelGuard } from './settingsPanel.tsx';
 import type { Channel } from './types.ts';
+import { Updates } from './Updates.tsx';
+import type { UpdatesState } from './useUpdates.ts';
 import './settings-dialog.css';
 
 const SECTIONS = [
   { id: 'agent', label: '에이전트', Icon: Bot },
   { id: 'connections', label: '연결', Icon: Plug },
   { id: 'runners', label: '러너', Icon: Server },
+  { id: 'version', label: '버전 정보', Icon: Package },
 ] as const;
 
 function SettingSection({title, description, visible, register, children, preload=false}: {
@@ -35,9 +38,9 @@ function SettingSection({title, description, visible, register, children, preloa
 }
 
 /** Editors stay mounted after first expansion so folding or changing sections preserves drafts. */
-export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChanged, manageChannels=true }: {
+export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChanged, manageChannels=true, updates }: {
   local:boolean; onClose:()=>void; channels:Channel[]; onOpenChannel:(channel:Channel)=>void;
-  onChanged:()=>Promise<unknown>; manageChannels?:boolean;
+  onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState;
 }) {
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
   const [notice,setNotice]=useState('');
@@ -67,6 +70,9 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
         <section className="settings-content" hidden={section!=='runners'} aria-label="러너">
           {local?panel('runners','러너 연결 관리','원격 머신 등록과 공유 러너 연결',<RunnersDialog onClose={close}/>):<p className="muted small">러너 등록과 연결 관리는 허브가 실행 중인 기기에서 할 수 있습니다.</p>}
           {panel('runners','공유 러너 전달 내역','연결 대기 또는 처리에 실패한 요청',<WorkspaceDeliveries/>)}
+        </section>
+        <section className="settings-content" hidden={section!=='version'} aria-label="버전 정보">
+          {panel('version','Agent Desk 버전','현재 버전, 변경 요약과 업데이트 적용',<Updates state={updates} local={local}/>)}
         </section>
       </div>
     </div>

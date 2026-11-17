@@ -19,7 +19,8 @@ export interface UpdateConfig {
   roles: RuntimeRole[]; environment: Record<string, string>; intervalMs: number;
 }
 type CandidateIdentity = Pick<RuntimeStatus, 'owner' | 'commit' | 'instance' | 'pid'>;
-export interface UpdateState { current?: string; candidate?: string; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
+export interface UpdateApproval { commit: string; mode: 'immediate' | 'when-idle'; token: string }
+export interface UpdateState { current?: string; candidate?: string; attempted?: string; spentApproval?: string; approval?: UpdateApproval; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const within = (base: string, path: string) => { const rel = relative(base, path); return !rel || (!rel.startsWith('..') && !isAbsolute(rel)); };
 const persistentEnvironmentPath = (key: string) => /(?:_DB|_DIR|_FILE|_HOME|RUNNER_LOG|AGENT_DESK_UPLOADS)$/.test(key);
@@ -77,6 +78,7 @@ export class UpdateWorker {
   private readonly commandTimeoutMs: number;
   private prepareToken?: string;
   private prepareUncertain = false;
+  private activating = false;
   constructor(config: UpdateConfig, options: { node?: string; commandTimeoutMs?: number } = {}) {
     this.config = validateUpdateConfig(config); this.node = options.node ?? process.execPath;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 15 * 60_000;
@@ -86,12 +88,58 @@ export class UpdateWorker {
   socket(role: RuntimeRole) { return join(this.config.dataDir, 'update-control', `${role}.sock`); }
   state(): UpdateState {
     assertTrustedPath(this.statePath, {kind: 'file', private: true, allowMissing: true});
-    if (!existsSync(this.statePath)) return { phase: 'preparing' };
-    const state = JSON.parse(readFileSync(this.statePath, 'utf8')) as UpdateState;
-    if ((state.current && !sha(state.current)) || (state.candidate && !sha(state.candidate))) throw new Error('배포 상태의 커밋 형식이 잘못되었습니다');
-    return state;
+    const state: UpdateState = existsSync(this.statePath) ? JSON.parse(readFileSync(this.statePath, 'utf8')) : { phase: 'preparing' };
+    if ([state.current, state.candidate, state.attempted].some(value => value !== undefined && !sha(value))) throw new Error('배포 상태의 커밋 형식이 잘못되었습니다');
+    return { ...state, approval: this.readApproval() };
   }
-  private save(state: UpdateState) { writePrivateJson(this.statePath, state); }
+  private save({ approval: _approval, ...state }: UpdateState) { writePrivateJson(this.statePath, state); }
+  private get approvalPath() { return join(this.config.deploymentDir, 'approval.json'); }
+  private readApproval(): UpdateApproval | undefined {
+    assertTrustedPath(this.approvalPath, {kind: 'file', private: true, allowMissing: true});
+    let value: UpdateApproval;
+    try { value = JSON.parse(readFileSync(this.approvalPath, 'utf8')) as UpdateApproval; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    if (!sha(value.commit) || !['immediate', 'when-idle'].includes(value.mode) || typeof value.token !== 'string' || !value.token)
+      throw new Error('업데이트 승인 형식이 잘못되었습니다');
+    return value;
+  }
+  private changeApproval<T>(change: () => T): T {
+    const lock = join(this.config.deploymentDir, 'approval.lock');
+    try { writePrivateJson(lock, {host: hostname(), pid: process.pid}, true); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('업데이트 승인 변경 잠금이 있습니다. 진행 중인 변경 또는 이전 프로세스의 종료를 확인하세요');
+      throw error;
+    }
+    try { return change(); } finally { unlinkSync(lock); }
+  }
+  /** Records only an explicitly reviewed, verified SHA. The locked worker performs activation. */
+  approve(commit: string, mode: UpdateApproval['mode']): UpdateApproval {
+    if (!sha(commit) || !['immediate', 'when-idle'].includes(mode)) throw new Error('정확한 40자 커밋과 승인 방식을 지정하세요');
+    return this.changeApproval(() => {
+      const state = this.state();
+      if (state.phase === 'switching') throw new Error('이미 업데이트를 적용 중입니다');
+      if (state.approval) throw new Error('기존 업데이트 승인을 먼저 취소하세요');
+      if (state.candidate !== commit) throw new Error('현재 확인한 업데이트 후보와 승인 커밋이 다릅니다');
+      this.deploymentPaths(commit);
+      if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 후보는 승인할 수 없습니다');
+      const approval = {commit, mode, token: randomUUID()};
+      writePrivateJson(this.approvalPath, approval);
+      return approval;
+    });
+  }
+  /** Cross-process cancellation never rewrites deployment state or another approval. */
+  cancelApproval(commit?: string, token?: string): boolean {
+    return this.changeApproval(() => {
+      if (this.state().phase === 'switching') throw new Error('이미 업데이트를 적용 중이라 취소할 수 없습니다');
+      const approval = this.readApproval();
+      if (!approval || (commit !== undefined && approval.commit !== commit) || (token !== undefined && approval.token !== token)) return false;
+      unlinkSync(this.approvalPath); return true;
+    });
+  }
+  private requireApproval(approval: UpdateApproval) {
+    const current = this.readApproval();
+    if (!current || current.token !== approval.token || current.commit !== approval.commit) throw new Error('업데이트 승인이 취소되거나 바뀌었습니다');
+  }
   private marker(commit: string) { return join(this.config.deploymentDir, 'verified', commit + '.json'); }
   private owner() { return createHash('sha256').update(this.config.deploymentDir).digest('hex'); }
   claim() {
@@ -157,11 +205,17 @@ export class UpdateWorker {
   }
   async prepare(): Promise<string> {
     if (!this.lock) throw new Error('워커 잠금이 필요합니다');
+    if (this.activating) throw new Error('업데이트 적용 중에는 후보를 준비할 수 없습니다');
     const marker = this.preparationIdle();
     const token = randomUUID(), identity = {version:1,host:hostname(),pid:process.pid,token,startedAt:new Date().toISOString()};
     writePrivateJson(marker,identity,true);
     this.prepareToken = token; this.prepareUncertain = false;
-    try { return await this.prepareRelease(); }
+    try {
+      const commit = await this.prepareRelease(), state = this.state();
+      const attempted = state.attempted ?? ((state.phase === 'failed' || state.phase === 'switching') ? state.candidate : undefined);
+      this.save({...state, candidate: commit, attempted, phase: state.phase === 'switching' ? 'failed' : commit === state.current ? 'active' : 'waiting', error: undefined});
+      return commit;
+    }
     catch (error) {
       if (this.prepareUncertain) throw new Error(`준비 명령이 중단되어 후손 프로세스의 종료를 확인하지 못했습니다. 준비 표시를 자동 삭제하지 않았습니다: ${marker}`,{cause:error});
       throw error;
@@ -276,7 +330,7 @@ export class UpdateWorker {
     }
   }
   /** Only a candidate this supervisor launched may bypass readiness for a graceful cleanup. */
-  private async cleanupFailedCandidate(role: RuntimeRole, runtime: RuntimeStatus) {
+  private async cleanupFailedCandidate(role: RuntimeRole, runtime: RuntimeStatus, beforeStop?: () => void) {
     const started = this.state().started?.[role];
     if (runtime.ready || !started || started.owner !== this.owner() || started.owner !== runtime.owner
       || started.commit !== runtime.commit || started.instance !== runtime.instance || started.pid !== runtime.pid)
@@ -285,6 +339,7 @@ export class UpdateWorker {
     const hold = await controlRequest(this.socket(role), { action: 'prepare-failed-candidate', instance: runtime.instance, owner: runtime.owner, commit: runtime.commit });
     if (!hold.ok || !hold.lease) throw new Error(`${role} 실패 후보 정리 준비 실패: ${hold.error ?? '소유권 확인 실패'}`);
     try {
+      beforeStop?.();
       const reply = await controlRequest(this.socket(role), { action: 'stop', instance: runtime.instance, lease: hold.lease });
       if (!reply.ok) throw new Error(reply.error);
       for (const deadline = Date.now() + 10_000; alive(runtime.pid);) {
@@ -334,7 +389,31 @@ export class UpdateWorker {
   }
   async activate(commit: string): Promise<boolean> {
     if (!this.lock || !sha(commit)) throw new Error('워커 잠금과 고정 커밋이 필요합니다');
-    this.preparationIdle();
+    const approval = this.readApproval();
+    if (!approval || approval.commit !== commit) {
+      this.preparationIdle();
+      throw new Error('정확한 커밋에 대한 명시적 업데이트 승인이 필요합니다');
+    }
+    if (this.state().spentApproval === approval.token) throw new Error('이미 사용한 업데이트 승인입니다. 취소 후 다시 승인하세요');
+    if (this.activating) throw new Error('이미 업데이트를 적용 중입니다');
+    this.activating = true;
+    let waiting = false;
+    try { this.preparationIdle(); const activated = await this.activateApproved(commit, approval); waiting = !activated; return activated; }
+    catch (error) {
+      this.save({...this.state(), phase: 'failed', error: error instanceof Error ? error.message : String(error)});
+      throw error;
+    }
+    finally {
+      this.activating = false;
+      if (!waiting || approval.mode === 'immediate') {
+        // Persist consumption before cleanup, so a competing/crashed approval writer cannot make a failed approval reusable.
+        this.save({...this.state(), spentApproval: approval.token});
+        // A consumed/cancelled approval cannot remove a newer approval.
+        this.changeApproval(() => { if (this.readApproval()?.token === approval.token) unlinkSync(this.approvalPath); });
+      }
+    }
+  }
+  private async activateApproved(commit: string, approval: UpdateApproval): Promise<boolean> {
     this.deploymentPaths(commit); this.protectedPaths();
     if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 후보는 실행할 수 없습니다');
     const previous = this.state(), prepared: { role: RuntimeRole; runtime: RuntimeStatus; lease: string }[] = [];
@@ -342,25 +421,36 @@ export class UpdateWorker {
     const head = await exec('git', ['-C', release, 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
     if (head.stdout.trim() !== commit) throw new Error('후보 체크아웃의 커밋이 바뀌었습니다');
     await this.command('git', ['diff', '--exit-code', 'HEAD', '--'], release);
-    const anchor = (previous.phase === 'failed' || previous.phase === 'switching') ? previous.candidate ?? previous.current : previous.current;
+    const anchor = previous.attempted ?? ((previous.phase === 'failed' || previous.phase === 'switching') ? previous.candidate ?? previous.current : previous.current);
     if (anchor && anchor !== commit) {
       try { await this.command('git', ['--git-dir', join(this.config.deploymentDir, 'repository.git'), 'merge-base', '--is-ancestor', anchor, commit], this.config.deploymentDir); }
       catch { throw new Error('자동 업데이트는 이전 실행 후보의 후속 커밋만 적용합니다. DB를 되돌리지 않았습니다'); }
     }
+    let switching = false;
+    const beginSwitch = () => {
+      if (switching) return;
+      this.changeApproval(() => {
+        this.requireApproval(approval);
+        // Commit the cancellation boundary immediately before the first stop, including failed-candidate cleanup.
+        this.save({ ...this.state(), attempted: commit, phase: 'switching', error: undefined });
+        unlinkSync(this.approvalPath); switching = true;
+      });
+    };
     try {
       for (const role of this.config.roles) if (!await this.observe(role)) await this.preflight(role, this.environment(role, commit));
       // Freeze input owners before their daemons; start later in the reverse dependency order.
       for (const role of [...this.config.roles].reverse()) {
         let runtime = await this.observe(role);
-        if (runtime && !runtime.ready) { await this.cleanupFailedCandidate(role, runtime); runtime = undefined; }
+        if (runtime && !runtime.ready) { if (!switching) this.requireApproval(approval); await this.cleanupFailedCandidate(role, runtime, beginSwitch); runtime = undefined; }
         if (!runtime || runtime.commit === commit) continue;
         const reply = await controlRequest(this.socket(role), { action: 'prepare', instance: runtime.instance });
         if (!reply.ok || !reply.lease) {
-          this.save({ ...previous, candidate: commit, phase: 'waiting', error: reply.error }); return false;
+          if (switching) throw new Error(reply.error ?? '실패 후보 정리 후 다른 런타임이 유휴 상태가 아닙니다');
+          this.save({ ...previous, phase: 'waiting', error: reply.error }); return false;
         }
         prepared.push({ role, runtime, lease: reply.lease });
       }
-      this.save({ ...previous, candidate: commit, phase: 'switching', error: undefined });
+      beginSwitch();
       for (const item of prepared) {
         const reply = await controlRequest(this.socket(item.role), { action: 'stop', instance: item.runtime.instance, lease: item.lease });
         if (!reply.ok) throw new Error(reply.error);
@@ -370,12 +460,13 @@ export class UpdateWorker {
         }
       }
       for (const role of this.config.roles) await this.start(role, commit);
-      this.save({ current: commit, phase: 'active' });
+      const completed = this.state();
+      this.save({ ...completed, current: commit, attempted: undefined, started: undefined, phase: completed.candidate && completed.candidate !== commit ? 'waiting' : 'active', error: undefined });
       try { await this.pruneReleases(); }
-      catch (error) { this.save({ current: commit, phase: 'active', error: `오래된 릴리스 정리를 건너뛰었습니다: ${error instanceof Error ? error.message : String(error)}` }); }
+      catch (error) { this.save({ ...this.state(), error: `오래된 릴리스 정리를 건너뛰었습니다: ${error instanceof Error ? error.message : String(error)}` }); }
       return true;
     } catch (error) {
-      this.save({ ...previous, started: this.state().started, candidate: commit, phase: 'failed', error: error instanceof Error ? error.message : String(error) }); throw error;
+      this.save({ ...this.state(), started: this.state().started, attempted: commit, phase: 'failed', error: error instanceof Error ? error.message : String(error) }); throw error;
     } finally {
       await Promise.allSettled(prepared.map(item => controlRequest(this.socket(item.role), { action: 'cancel', instance: item.runtime.instance, lease: item.lease })));
     }
@@ -393,7 +484,7 @@ export class UpdateWorker {
       if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(path) !== path) throw new Error('릴리스 정리 경로가 일반 배포 디렉터리가 아닙니다');
       assertTrustedPath(path, {kind: 'directory'});
     }
-    const state = this.state(), keep = new Set<string>([state.current, state.candidate, ...Object.values(state.started ?? {}).map(value => value?.commit)].filter((value): value is string => !!value));
+    const state = this.state(), keep = new Set<string>([state.current, state.candidate, state.attempted, state.approval?.commit, ...Object.values(state.started ?? {}).map(value => value?.commit)].filter((value): value is string => !!value));
     for (const role of this.config.roles) {
       const runtime = await this.observe(role);
       if (!runtime) throw new Error(`${role} 실행 상태를 확인하지 못해 릴리스 정리를 건너뜁니다`);
@@ -432,9 +523,11 @@ export class UpdateWorker {
     return removed;
   }
   async cycle(): Promise<boolean> {
-    const state = this.state();
-    // Resume an interrupted activation at its exact SHA. Never launch an old binary over a possibly migrated DB.
-    if (state.candidate && state.phase === 'switching') return this.activate(state.candidate);
-    const commit = await this.prepare(); return this.activate(commit);
+    if (!this.lock) throw new Error('워커 잠금이 필요합니다');
+    const approval = this.readApproval();
+    if (approval) return this.activate(approval.commit);
+    await this.prepare();
+    const pending = this.readApproval();
+    return pending ? this.activate(pending.commit) : false;
   }
 }

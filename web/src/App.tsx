@@ -3,13 +3,15 @@ import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
-import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Settings, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
+import { useUpdates } from './useUpdates.ts';
+import { UpdateSettingsButton } from './Updates.tsx';
 import { RunnersDialog } from './Runners.tsx';
 import { WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
 import { workspaceId } from './workspace.ts';
@@ -78,6 +80,9 @@ const ColumnDeck = memo(function ColumnDeck({ inactive, phone, elementRef, child
 
 export function App() {
   const hub = useHub();
+  const updates = useUpdates();
+  const updateVersion = updates.view?.latest ?? updates.view?.available;
+  const newVersion = !!updates.view?.current && !!updateVersion && updateVersion !== updates.view.current;
   const [locationFilter,setLocationFilter]=useState(initialLocation);
   const changeLocation=(value:string)=>{setLocationFilter(value);try{localStorage.setItem('agent-desk.location',value);}catch{/* optional preference */}};
   const visibleTasks=useMemo(()=>new Map([...hub.tasks].filter(([,t])=>inLocation(t,locationFilter))),[hub.tasks,locationFilter]);
@@ -1336,7 +1341,7 @@ export function App() {
           <button className="btn" title={`실행 위치 필터${locationFilter ? ' (필터 적용 중)' : ''}`} aria-label="실행 위치 필터"
             aria-haspopup="dialog" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)}><Network /></button>
           {!workspaceId && <button className="btn" title="스킬 관리: #스킬이름으로 메시지에 적용" aria-label="스킬" aria-haspopup="dialog" onClick={() => setSkillsOpen(true)}><Puzzle /></button>}
-          <button className="btn" title="설정: 에이전트·연결·러너 관리" aria-label="설정" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings /></button>
+          <UpdateSettingsButton available={newVersion} open={settingsOpen} onOpen={() => setSettingsOpen(true)} />
           {hub.local && <button className="btn" title="다른 기기 연결: 접속 요청, 연결한 기기, QR 코드" aria-label="다른 기기 연결" onClick={() => setAccessOpen(true)}><Smartphone /></button>}
           <button className="btn help-btn" title="단축키 (?)" aria-label="단축키" onClick={() => setHelp(true)}><Keyboard /></button>
         </div>
@@ -1440,7 +1445,7 @@ export function App() {
           }} />
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
-        channels={[...hub.channels.values()]} onOpenChannel={openChannel} onChanged={hub.refresh} manageChannels={!workspaceId} />}
+        channels={[...hub.channels.values()]} onOpenChannel={openChannel} onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}

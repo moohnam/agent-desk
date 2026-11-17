@@ -28,6 +28,7 @@ import { workspaceApi, workspaceRoute } from './workspace-api.ts';
 import { WorkspaceLinks } from './workspace-links.ts';
 import { handleBrokerMcp } from './request-broker.ts';
 import { ENGINES, parseCompose, type EngineName } from '../../shared/compose.ts';
+import { UpdateService } from './update-service.ts';
 
 const WEB_DIST = config.webDist;
 const MIME: Record<string, string> = {
@@ -101,9 +102,10 @@ $('send').onclick = async () => {
 </script></body></html>`;
 
 /** `uploadsDir`: where files sent from other devices (a phone) are saved. */
-export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string; connectors?: Connectors; instructions?: InstructionStore } = {}) {
+export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, options: { openTarget?: typeof openTarget; workspaces?: WorkspaceLinks; localAuthorityId?: string; connectors?: Connectors; instructions?: InstructionStore; updates?: UpdateService } = {}) {
   const workspaces = options.workspaces ?? new WorkspaceLinks(hub.store,hub.skills);
   const instructions = options.instructions ?? new InstructionStore(join(dirname(uploadsDir), 'instructions.md'));
+  const updates = options.updates ?? new UpdateService();
   hub.defaultInstructions = () => instructions.read().text;
   workspaces.instructions = hub.defaultInstructions;
   const localAuthorityId = options.localAuthorityId;
@@ -283,6 +285,17 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         throw new HttpError(404, '외부 연결 요청을 찾을 수 없습니다');
       }
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+      if (url.pathname === '/api/updates' || url.pathname.startsWith('/api/updates/')) {
+        res.setHeader('cache-control', 'no-store');
+        if (req.method === 'GET' && url.pathname === '/api/updates') return send(res, 200, await updates.view());
+        if (req.method !== 'POST') throw new HttpError(405, '지원하지 않는 업데이트 요청입니다');
+        if (!access.isLocal(req)) throw new HttpError(403, '업데이트 확인과 승인은 이 머신에서만 할 수 있습니다.');
+        if (url.pathname === '/api/updates/check') return send(res, 202, await updates.check());
+        const body = await readJson(req);
+        if (url.pathname === '/api/updates/approve') return send(res, 202, await updates.approve(body.commit, body.mode));
+        if (url.pathname === '/api/updates/cancel') return send(res, 200, await updates.cancel(body.commit));
+        throw new HttpError(404, '업데이트 요청을 찾을 수 없습니다');
+      }
       if (url.pathname === '/api/instructions') {
         res.setHeader('cache-control', 'no-store');
         if (req.method === 'GET') return send(res, 200, instructions.read());
@@ -565,6 +578,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       directTimer = setInterval(pollDirect, 100); directTimer.unref();
     }
   });
-  server.on('close', () => { closingConnectors = true; clearInterval(directTimer); directWorkspace?.connectorBroker?.close(); connectorAuthority.close(); connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
+  server.on('close', () => { updates.close(); closingConnectors = true; clearInterval(directTimer); directWorkspace?.connectorBroker?.close(); connectorAuthority.close(); connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
   return server;
 }

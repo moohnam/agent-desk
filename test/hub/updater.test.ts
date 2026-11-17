@@ -68,28 +68,37 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>existsSy
   const config: UpdateConfig = { version: 1, enabled: true, source, ref: 'main', deploymentDir: deploy, dataDir: data, roles: ['shared'], environment: { AGENT_DESK_SHARED_PORT: String(port) }, intervalMs: 1000 };
   writeFileSync(join(data, 'agent-desk.db'), '원본 DB 유지'); writeFileSync(join(data, 'instructions.md'), '사용자 지침 유지');
   let worker = new UpdateWorker(config); worker.claim();
+  const apply = async (mode: 'immediate' | 'when-idle' = 'immediate') => { const commit = await worker.prepare(); worker.approve(commit, mode); return worker.cycle(); };
   try {
     assert.throws(() => new UpdateWorker(config).claim(), /이미/);
     await new Promise<void>(resolve => portProbe.listen(port, '127.0.0.1', resolve));
-    await assert.rejects(worker.cycle(), /기존 프로세스/);
+    await assert.rejects(apply(), /기존 프로세스/);
     assert.equal(existsSync(join(data, 'starts.txt')), false);
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지');
     await new Promise<void>(resolve => portProbe.close(() => resolve()));
-    assert.equal(await worker.cycle(), true); assert.equal(worker.state().current, v1);
+    assert.equal(await worker.cycle(), false); assert.equal(existsSync(join(data, 'starts.txt')), false, 'bootstrap requires explicit approval');
+    assert.equal(await apply(), true); assert.equal(worker.state().current, v1);
     const first = (await worker.status())[0].runtime!;
     assert.equal(first.commit, v1); assert.equal(first.ready, true);
     await assert.rejects(new UpdateWorker({ ...config, deploymentDir: join(dir, 'other-deployment') }).status(), /소유자/);
     worker.close(); worker = new UpdateWorker(config); worker.claim();
-    assert.equal(await worker.cycle(), true); assert.equal((await worker.status())[0].runtime!.pid, first.pid);
+    assert.equal(await worker.cycle(), false); assert.equal((await worker.status())[0].runtime!.pid, first.pid);
     writeFileSync(join(data, 'busy'), 'busy'); const v2 = commit('two');
-    assert.equal(await worker.cycle(), false); assert.equal(worker.state().phase, 'waiting');
+    assert.equal(await apply(), false); assert.equal(worker.state().approval, undefined, 'apply now must not become a deferred approval');
+    assert.equal(await worker.cycle(), false); assert.equal((await worker.status())[0].runtime!.pid, first.pid);
+    assert.equal(await apply('when-idle'), false); assert.equal(worker.state().phase, 'waiting');
     assert.equal((await worker.status())[0].runtime!.pid, first.pid);
     assert.ok(existsSync(join(deploy, 'verified', v2 + '.json')));
+    assert.equal(worker.cancelApproval(v1), false, 'an unrelated SHA cannot cancel the reviewed approval');
+    const newer = commit('unapproved-three'); assert.equal(await worker.prepare(), newer);
+    assert.equal(worker.state().approval?.commit, v2, 'new discoveries never replace the approved SHA');
+    worker.close(); worker = new UpdateWorker(config); worker.claim();
     rmSync(join(data, 'busy')); assert.equal(await worker.cycle(), true);
     assert.equal(worker.state().current, v2); assert.notEqual((await worker.status())[0].runtime!.pid, first.pid);
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지');
     assert.equal(readFileSync(join(data, 'instructions.md'), 'utf8'), '사용자 지침 유지');
     assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\ntwo\n');
+    assert.equal(worker.state().candidate, newer);
     pkg.scripts.build = 'node -e "process.exit(7)"'; writeFileSync(join(source, 'package.json'), JSON.stringify(pkg));
     const bad = commit('bad-build'); await assert.rejects(worker.cycle());
     assert.equal((await worker.status())[0].runtime!.commit, v2); assert.equal(worker.state().current, v2);
@@ -100,18 +109,20 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>existsSy
     writeFileSync(join(source, 'hub/src/runner/shared.ts'), `import {appendFileSync} from 'node:fs';
 appendFileSync(process.env.AGENT_DESK_DB,';forward-migration'); process.exit(17);`);
     git('add', '.'); git('commit', '-m', 'startup failure'); const broken = git('rev-parse', 'HEAD');
-    await assert.rejects(worker.cycle(), /준비 전에 종료/);
+    await assert.rejects(apply(), /준비 전에 종료/);
     assert.equal(worker.state().phase, 'failed'); assert.equal(worker.state().candidate, broken);
+    assert.equal(worker.state().approval, undefined, 'failed activation consumes its approval');
+    assert.equal(await worker.cycle(), false, 'a failed SHA cannot restart without another explicit approval');
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지;forward-migration');
     assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\ntwo\n');
-    const repaired = commit('four'); assert.equal(await worker.cycle(), true);
+    const repaired = commit('four'); assert.equal(await apply(), true);
     assert.equal(worker.state().current, repaired);
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지;forward-migration');
     assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\ntwo\nfour\n');
     // A failed candidate can remain alive with its control socket but never become ready.
     writeFileSync(join(source, 'hub/src/runner/shared.ts'), runtime('unready').replace('ready:()=>true', 'ready:()=>false'));
     git('add', '.'); git('commit', '-m', 'unready candidate'); const unready = git('rev-parse', 'HEAD');
-    await assert.rejects(worker.cycle(), /준비 확인 시간이 초과/);
+    await assert.rejects(apply(), /준비 확인 시간이 초과/);
     const failed = (await worker.status())[0].runtime!;
     assert.equal(failed.ready, false); assert.equal(failed.commit, unready);
     assert.equal(worker.state().started?.shared?.instance, failed.instance);
@@ -121,9 +132,9 @@ appendFileSync(process.env.AGENT_DESK_DB,';forward-migration'); process.exit(17)
     // Ownership survives a supervisor restart; a non-idle candidate still cannot be cleaned up.
     worker.close(); worker = new UpdateWorker(config); worker.claim();
     writeFileSync(join(data, 'busy'), 'busy'); const next = commit('five');
-    await assert.rejects(worker.cycle(), /미완료 작업/);
+    await assert.rejects(apply(), /미완료 작업/);
     assert.equal((await worker.status())[0].runtime!.instance, failed.instance);
-    rmSync(join(data, 'busy')); assert.equal(await worker.cycle(), true);
+    rmSync(join(data, 'busy')); assert.equal(await apply(), true);
     assert.equal(worker.state().current, next); assert.equal(worker.state().started, undefined);
     assert.notEqual((await worker.status())[0].runtime!.instance, failed.instance);
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지;forward-migration');
@@ -170,7 +181,7 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
   const port = (probe.address() as {port: number}).port;
   await new Promise<void>(resolve => probe.close(() => resolve()));
   const config: UpdateConfig = {version: 1, enabled: true, source, ref: 'main', deploymentDir: deploy, dataDir: data,
-    roles: ['shared'], environment: {AGENT_DESK_SHARED_PORT: String(port)}, intervalMs: 1000};
+    roles: ['shared'], environment: {AGENT_DESK_SHARED_PORT: String(port)}, intervalMs: 300_000};
   const configPath = join(dir, 'update.json'); writePrivateJson(configPath, config);
   writeFileSync(join(data, 'agent-desk.db'), 'original-data');
   const observer = new UpdateWorker(config), children: ChildProcess[] = [];
@@ -195,6 +206,10 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
     }
     throw new Error(label + '\n' + diagnostics);
   };
+  const approveCommit = async (commit: string) => {
+    await waitFor(() => observer.state().candidate === commit, 'candidate was not prepared');
+    execFileSync(process.execPath, [fileURLToPath(new URL('../../hub/src/update-cli.ts', import.meta.url)), 'approve', configPath, commit, 'immediate'], {stdio: ['ignore', 'pipe', 'pipe']});
+  };
   const active = async (commit: string) => {
     const state = observer.state();
     if (state.phase !== 'active' || state.current !== commit) return;
@@ -207,13 +222,14 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
   };
   try {
     const firstWorker = launch();
+    await approveCommit(firstCommit);
     const firstRuntime = await waitFor(() => active(firstCommit), 'first runtime did not become ready');
     await stopWorker(firstWorker, 'SIGTERM');
     assert.equal(firstWorker.exitCode, 0); assert.equal(existsSync(join(deploy, 'worker.lock')), false);
     assert.equal((await observer.status())[0].runtime?.pid, firstRuntime.pid, 'SIGTERM must leave the runtime alive');
 
     const secondWorker = launch();
-    await waitFor(() => reports.get(secondWorker)?.includes('"activated":true') && existsSync(join(deploy, 'worker.lock'))
+    await waitFor(() => reports.get(secondWorker)?.includes('"activated":false') && existsSync(join(deploy, 'worker.lock'))
       && JSON.parse(readFileSync(join(deploy, 'worker.lock'), 'utf8')).pid === secondWorker.pid, 'replacement worker did not claim the deployment');
     assert.equal((await observer.status())[0].runtime?.instance, firstRuntime.instance);
     await stopWorker(secondWorker, 'SIGKILL');
@@ -223,6 +239,7 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
     const brokenCommit = commit(`import {appendFileSync} from 'node:fs';
 appendFileSync(process.env.AGENT_DESK_DB,';forward-migration');process.exit(17);`, 'fails after forward migration');
     const thirdWorker = launch();
+    await approveCommit(brokenCommit);
     await waitFor(() => {const state = observer.state(); return state.phase === 'failed' && state.candidate === brokenCommit;}, 'startup failure was not recorded');
     await stopWorker(thirdWorker, 'SIGTERM');
     assert.equal(thirdWorker.exitCode, 0);
@@ -231,6 +248,7 @@ appendFileSync(process.env.AGENT_DESK_DB,';forward-migration');process.exit(17);
 
     const repairedCommit = commit(runtime('repaired'), 'forward repair');
     const fourthWorker = launch();
+    await approveCommit(repairedCommit);
     const repairedRuntime = await waitFor(() => active(repairedCommit), 'restarted worker did not recover with the forward repair');
     await stopWorker(fourthWorker, 'SIGTERM');
     assert.equal(fourthWorker.exitCode, 0); assert.notEqual(repairedRuntime.pid, firstRuntime.pid);
@@ -529,7 +547,8 @@ test('prepare and activate reject writable Git metadata, release trees, markers 
     chmodSync(marker, 0o666); await assert.rejects(worker.prepare(), /쓰기 권한/); chmodSync(marker, 0o600);
     const entry = join(release, 'hub/src/runner/shared.ts'); chmodSync(entry, 0o666);
     await assert.rejects(worker.prepare(), /쓰기 권한/); // Cached verification must not bypass the tree check.
-    await assert.rejects(worker.activate(commit), /쓰기 권한/);
+    writePrivateJson(worker.statePath, {candidate: commit, phase: 'waiting'});
+    await assert.rejects(async () => {worker!.approve(commit, 'immediate'); await worker!.activate(commit);}, /쓰기 권한/);
     assert.equal(existsSync(executed), false);
     chmodSync(entry, 0o644);
     const internal = join(release, 'internal-link'); symlinkSync(entry, internal);
@@ -558,6 +577,68 @@ function prepareGuardFixture() {
   const config:UpdateConfig={version:1,enabled:true,source,ref:'main',deploymentDir:deploy,dataDir:data,roles:['shared'],environment:{AGENT_DESK_SHARED_PORT:'65431'},intervalMs:1000};
   return {dir,data,deploy,bin,marker,config,commit,fakeNpm};
 }
+
+test('approval is exact, cross-process cancellable and never reused after failure or an unapproved interrupted switch', async () => {
+  const f = prepareGuardFixture(), previousPath = process.env.PATH;
+  f.fakeNpm('process.exit(0)'); process.env.PATH = f.bin + ':' + previousPath;
+  const worker = new UpdateWorker(f.config); worker.claim();
+  const configPath = join(f.dir, 'update.json'); writePrivateJson(configPath, f.config);
+  try {
+    assert.equal(await worker.cycle(), false); assert.equal(worker.state().candidate, f.commit);
+    await assert.rejects(worker.activate(f.commit), /명시적 업데이트 승인/);
+    assert.throws(() => worker.approve(f.commit.slice(0, 7), 'immediate'), /40자/);
+    assert.throws(() => worker.approve('a'.repeat(40), 'when-idle'), /후보/);
+    const first = worker.approve(f.commit, 'when-idle');
+    assert.equal(new UpdateWorker(f.config).state().approval?.token, first.token);
+    assert.throws(() => worker.approve(f.commit, 'immediate'), /먼저 취소/);
+    assert.equal(worker.cancelApproval(f.commit, 'stale-token'), false);
+    const result = execFileSync(process.execPath, [fileURLToPath(new URL('../../hub/src/update-cli.ts', import.meta.url)), 'cancel', configPath, f.commit], {encoding: 'utf8'});
+    assert.equal(JSON.parse(result).cancelled, true, 'cancellation works while the worker lock remains owned');
+    const second = worker.approve(f.commit, 'immediate');
+    assert.notEqual(second.token, first.token);
+    assert.equal(worker.cancelApproval(f.commit, first.token), false);
+    const internal = worker as unknown as {activateApproved: () => Promise<boolean>};
+    internal.activateApproved = async () => {throw new Error('fixture activation failed');};
+    await assert.rejects(worker.cycle(), /fixture activation failed/);
+    assert.equal(worker.state().approval, undefined);
+    worker.approve(f.commit, 'immediate'); writePrivateJson(f.marker, {pid: process.pid});
+    await assert.rejects(worker.cycle(), /이전 업데이트 준비/);
+    assert.equal(worker.state().phase, 'failed'); assert.match(worker.state().error!, /이전 업데이트 준비/);
+    assert.equal(worker.state().approval, undefined); unlinkSync(f.marker);
+    const competing = worker.approve(f.commit, 'immediate'), approvalLock = join(f.deploy, 'approval.lock');
+    internal.activateApproved = async () => {writePrivateJson(approvalLock, {pid: process.pid}, true); throw new Error('fixture competing writer');};
+    await assert.rejects(worker.cycle(), /승인 변경 잠금/);
+    assert.equal(worker.state().spentApproval, competing.token);
+    unlinkSync(approvalLock);
+    await assert.rejects(worker.cycle(), /이미 사용한 업데이트 승인/, 'cleanup contention cannot make a failed approval reusable');
+    assert.equal(worker.cancelApproval(f.commit), true);
+    writePrivateJson(worker.statePath, {candidate: f.commit, attempted: f.commit, phase: 'switching'});
+    assert.throws(() => worker.cancelApproval(f.commit), /적용 중이라 취소/);
+    assert.equal(await worker.cycle(), false, 'an interrupted switch cannot launch without its original approval');
+    assert.equal(worker.state().attempted, f.commit);
+  } finally {worker.close(); process.env.PATH = previousPath; rmSync(f.dir, {recursive: true, force: true});}
+});
+
+test('cancellation during maintenance preparation prevents the first runtime stop', async () => {
+  const f = prepareGuardFixture(), previousPath = process.env.PATH, previousOwner = process.env.AGENT_DESK_UPDATE_OWNER;
+  f.fakeNpm('process.exit(0)'); process.env.PATH = f.bin + ':' + previousPath;
+  const worker = new UpdateWorker(f.config); worker.claim();
+  process.env.AGENT_DESK_UPDATE_OWNER = createHash('sha256').update(f.deploy).digest('hex');
+  let server: Awaited<ReturnType<typeof registerRuntimeControl>>, observations = 0, stops = 0;
+  try {
+    await worker.prepare(); worker.approve(f.commit, 'immediate');
+    server = await registerRuntimeControl({role: 'shared', socket: worker.socket('shared'), commit: 'a'.repeat(40), ready: () => true,
+      blockers: () => {if (++observations === 3) assert.equal(worker.cancelApproval(f.commit), true); return [];},
+      stop: () => {stops++;}});
+    await assert.rejects(worker.cycle(), /승인이 취소/);
+    assert.equal(stops, 0); assert.equal(worker.state().approval, undefined);
+    assert.doesNotThrow(requireAdmission, 'the cancelled attempt releases its maintenance hold');
+  } finally {
+    if (server!) await new Promise<void>(resolve => server!.close(() => resolve()));
+    if (previousOwner === undefined) delete process.env.AGENT_DESK_UPDATE_OWNER; else process.env.AGENT_DESK_UPDATE_OWNER = previousOwner;
+    worker.close(); process.env.PATH = previousPath; rmSync(f.dir, {recursive: true, force: true});
+  }
+});
 
 test('prepare crash guard blocks a replacement worker while orphan npm remains and allows explicit recovery only after it ends',{timeout:30_000},async()=>{
   const f=prepareGuardFixture(),configPath=join(f.dir,'update.json'),capture=join(f.data,'npm.jsonl');

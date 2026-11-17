@@ -1,5 +1,6 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
 import type { AccessView, ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
+import type { UpdateView } from '../../shared/update.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, HubMessage, Project, Settings, Skill, TaskView } from './types.ts';
 import { workspaceId, SharedPending } from './workspace.ts';
 import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
@@ -188,6 +189,10 @@ export const FEED_PAGE = 1000;
 
 export const api = {
   remember,
+  updates: (signal?: AbortSignal) => call<UpdateView>('GET', '/updates', undefined, signal),
+  checkUpdates: (signal?: AbortSignal) => call<UpdateView>('POST', '/updates/check', {}, signal),
+  approveUpdate: (commit: string, mode: 'immediate' | 'when-idle', signal?: AbortSignal) => call<UpdateView>('POST', '/updates/approve', { commit, mode }, signal),
+  cancelUpdate: (commit: string, signal?: AbortSignal) => call<UpdateView>('POST', '/updates/cancel', { commit }, signal),
   runners: () => call<import('../../shared/remote.ts').RemoteRunnerView[]>('GET', '/runners'),
   rotateRunner: (id: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', `/runners/${encodeURIComponent(id)}/token`),
   registerRunner: (address: string) => call<{runner: import('../../shared/remote.ts').RemoteRunnerView; token: string}>('POST', '/runners', {address}),
