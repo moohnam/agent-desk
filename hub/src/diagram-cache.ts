@@ -12,6 +12,8 @@ export class DiagramCache {
   private cache = new Map<string,Cached>();
   private jobs = new Map<string,Job>();
   private queue:Promise<unknown> = Promise.resolve();
+  /** Cancelled/replaced jobs still occupy the promise chain until their turn settles. */
+  private queued = 0;
   private bytes = 0;
   private stopped = false;
   private timer = setInterval(()=>this.expire(),60_000);
@@ -30,9 +32,10 @@ export class DiagramCache {
     let job=this.jobs.get(key);
     if(job?.controller.signal.aborted){this.jobs.delete(key);job=undefined;}
     if(!job){
-      if(this.jobs.size>=16)throw new HttpError(429,'도표 요청이 많습니다. 잠시 뒤 다시 시도해 주세요');
+      if(this.queued>=16)throw new HttpError(429,'도표 요청이 많습니다. 잠시 뒤 다시 시도해 주세요');
       const accepted=Date.now();
       const item:Job={result:Promise.resolve({image:'',background:''}),readers:0,controller:new AbortController()};
+      this.queued++;
       item.result=this.queue.then(async()=>{
         if(this.stopped||!item.readers)throw new DOMException('도표 요청이 취소됐습니다','AbortError');
         if(Date.now()-accepted>30_000)throw new HttpError(504,'도표 대기 시간이 초과됐습니다');
@@ -46,7 +49,7 @@ export class DiagramCache {
           this.cache.set(key,{result,at:Date.now(),bytes});this.bytes+=bytes;
         }
         return result;
-      }).finally(()=>{if(this.jobs.get(key)===item)this.jobs.delete(key);});
+      }).finally(()=>{this.queued--;if(this.jobs.get(key)===item)this.jobs.delete(key);});
       this.jobs.set(key,item);this.queue=item.result.then(()=>{},()=>{});job=item;
     }
     job.readers++;

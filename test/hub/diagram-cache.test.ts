@@ -105,3 +105,27 @@ test('queue wait is included in the forty-second generation budget',async t=>{
   t.mock.timers.tick(15_001);await rejected;
  }finally{release();cache.close();}
 });
+
+test('cancel and retry cannot grow the promise queue beyond its limit',async()=>{
+ let release!:()=>void,entered!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;});
+ const started=new Promise<void>(resolve=>{entered=resolve;});
+ const draws:string[]=[];
+ const cache=new DiagramCache(async text=>{draws.push(text);if(text==='first'){entered();await gate;}return svg(text);});
+ try {
+  const first=cache.render('first','v');await started;
+  // These readers settle immediately, but their abandoned jobs remain behind the active job.
+  for(let n=0;n<15;n++){
+   const controller=new AbortController();
+   const pending=cache.render('same','v',controller.signal);
+   controller.abort();await assert.rejects(pending,{name:'AbortError'});
+  }
+  for(let n=0;n<100;n++)await assert.rejects(cache.render('same','v'),{status:429});
+  // Attaching a reader to an existing live job remains possible even at capacity.
+  const shared=cache.render('first','v');release();
+  await first;await shared;
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(await cache.render('same','v'),svg('same'));
+  assert.deepEqual(draws,['first','same']);
+ }finally{release();cache.close();}
+});

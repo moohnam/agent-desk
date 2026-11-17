@@ -259,3 +259,16 @@ test('diagram syntax errors and aborts do not retry or leave a live renderer', a
   assert.equal(frames, 2, 'abort is not retried');
   assert.equal(removed, 2, 'abort releases the iframe');
 });
+
+test('fallback queue bounds cancelled work until it settles, then accepts new work',async()=>{
+ for(let round=0;round<2;round++){
+  const pending:Promise<unknown>[]=[];
+  for(let i=0;i<16;i++){
+   const controller=new AbortController();
+   pending.push(assert.rejects(renderMermaid('graph LR\nA-->B',controller.signal),{name:'AbortError'}));
+   controller.abort();
+  }
+  await assert.rejects(renderMermaid('overflow'),/요청이 많/);
+  await Promise.all(pending);
+ }
+});

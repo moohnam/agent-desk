@@ -1,3 +1,5 @@
+import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
+import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
@@ -20,19 +22,18 @@ import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
 import { SessionsDialog, openSessions } from './Sessions.tsx';
 import { stalledMinutes } from './format.ts';
-import { HandoffPanel, pickable, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
-import { PostView } from './PostView.tsx';
+import { HandoffPanel, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { pruneDrafts, useDraftTasks } from './drafts.ts';
 import { keepTaskDraft } from './draftRetention.ts';
 import { DEFAULT_WIDTH, SAVE_DELAY, useColumnWidths, useColumns } from './columns.ts';
-import { buildPosts, matches, placeFeed, placeThread } from './posts.ts';
+import { buildPosts, placeThread } from './posts.ts';
 import { projectColor } from './projects.ts';
 import type { Approval, Channel, ColumnDef, HubEvent, PlacedPost, Post, TaskStatus, TaskView } from './types.ts';
 import { useColumnFeeds, useHub, useTaskEvents } from './useHub.ts';
 import { SearchHead } from './Search.tsx';
 import { parseSearch, taskSearchQuery } from './search.ts';
 import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, defaultColumn, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
-import { SEARCH, THREAD, firstPostBelow, isAllFilter, modelsOf, newestPerTask, observeThreadSize } from './layout.ts';
+import { SEARCH, THREAD, firstPostBelow, isAllFilter, observeThreadSize } from './layout.ts';
 import { PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
@@ -292,8 +293,9 @@ export function App() {
     if (!posts) postsCache.current.set(f.events, posts = buildPosts(f.events).reverse());
     return [id, posts];
   })), [feeds]);
-  const models = useMemo(() => modelsOf(hub.events, threadEvents, ...[...feeds.values()].map((f) => f.events)),
-    [hub.events, threadEvents, feeds]);
+  const lookupModels = useMemo(createModelLookup, []);
+  const models = useMemo(() => lookupModels(hub.events, threadEvents, ...[...feeds.values()].map((f) => f.events)),
+    [hub.events, threadEvents, feeds, lookupModels]);
   const projectsById = useMemo(() => new Map(hub.projects.map((p) => [p.id, p])), [hub.projects]);
 
   // The newest post of a running task shows a "working" marker.
@@ -311,24 +313,24 @@ export function App() {
     const k = deckDefs.findIndex((c) => c.id === after);
     return k < 0 ? deckDefs.length : k + 1;
   };
+  const layoutFeed = useMemo(createFeedLayout, []);
   const lastDeck = useRef(new Map<string, DeckColumn>());
   const deck: DeckColumn[] = useMemo(() => {
     const column = (id: string, placed: PlacedPost[], def?: ColumnDef): DeckColumn => {
       // The same posts under the same filter: the same object, so the column is not drawn again.
       const old = lastDeck.current.get(id);
-      if (old && old.placed.length === placed.length
-        && placed.every((x, k) => x.post === old.placed[k].post && x.up === old.placed[k].up && x.down === old.placed[k].down)
+      if (old && (old.placed === placed || old.placed.length === placed.length
+        && placed.every((x, k) => x.post === old.placed[k].post && x.up === old.placed[k].up && x.down === old.placed[k].down))
         && (old.def === def || JSON.stringify(old.def) === JSON.stringify(def))) return old;
       return { id, def, placed, posts: placed.map((x) => x.post) };
     };
     const cols = deckDefs.map((c) => {
-      const posts = (c.channelId ? [] : columnPosts.get(c.id) ?? []).filter((p) => matches(c.filter, p, hub.tasks.get(p.taskId)));
-      return column(c.id, c.byTask ? newestPerTask(posts) : placeFeed(posts), c);
+      return column(c.id, layoutFeed(c.channelId ? [] : columnPosts.get(c.id) ?? [], c, hub.tasks), c);
     });
     if (threadTask) cols.splice(threadSlot(threadAfter), 0, column(THREAD, placeThread(threadPosts)));
     lastDeck.current = new Map(cols.map((c) => [c.id, c]));
     return cols;
-  }, [deckDefs, columnPosts, hub.tasks, threadTask, threadPosts, threadAfter]);
+  }, [deckDefs, columnPosts, hub.tasks, threadTask, threadPosts, threadAfter, layoutFeed]);
 
   // Feed columns follow new posts only while scrolled to the top; further down, the reading
   // position stays put and a "새 글 N개" button counts the posts that arrived above it.
@@ -859,7 +861,11 @@ export function App() {
     el.scrollIntoView({ block: 'nearest' });
     el.focus();
   };
-  useEffect(() => { requestAnimationFrame(tryFocusQuestion); }, [threadPosts]);
+  useEffect(() => {
+    if (!questionFocus.current) return;
+    const frame = requestAnimationFrame(tryFocusQuestion);
+    return () => cancelAnimationFrame(frame);
+  }, [threadPosts]);
   /** Opens the task's thread with the cursor in that question's answer box (or first option). */
   const answerQuestion = (taskId: string, questionId: string) => {
     setQueueFocus(null);
@@ -1126,8 +1132,8 @@ export function App() {
   const menuCol = menu ? deck.findIndex((c) => c.id === menu.colId) : -1;
   const menuDef = menu ? columns.findIndex((c) => c.id === menu.colId) : -1;
 
-  // Post handlers go through the latest state: a memoized post keeps the closures of the render that drew it.
-  const postActions = useRef({ select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask });
+  // The global answer shortcut must open the thread using the latest App state.
+  const postActions = useRef({ openThread });
   useEffect(() => {
     const openAnswer = (event: Event) => {
       const taskId = (event as CustomEvent).detail?.taskId;
@@ -1140,34 +1146,20 @@ export function App() {
     return () => window.removeEventListener(ANSWER_COMPOSE, openAnswer);
   }, []);
 
-  postActions.current = { select, toggleExpanded, approvalFor, allow, setDenying, openThread, setActive, setDrawer, deck, references, threadTask };
-  const renderPost = ({ post: p, up, down }: PlacedPost, colId: string, i: number, inThread: boolean) => (
-    <PostView key={p.id} post={p} task={hub.tasks.get(p.taskId)} model={models.get(p.taskId)} up={up} down={down}
-      approval={p.kind === 'approval' ? hub.approvals.get(p.event.payload.approvalId) : undefined}
-      question={p.kind === 'question' ? hub.questions.get(p.event.payload.questionId) : undefined} onError={setToast}
-      colId={colId} selected={i === activeIdx && selection[colId] === p.id} flash={flash === p.id}
-      expanded={expanded.has(p.id)} working={working.has(p.id)} inThread={inThread}
-      draft={draftPosts.has(`${colId}:${p.id}`)}
-      picked={inThread && handoff?.open && pickable(p.event) ? handoff.picked.includes(p.event.id) : undefined}
-      referenced={inThread && canReference && p.taskId === threadTask ? referencedIds.has(p.id) : undefined}
-      onReference={() => {
-        const a = postActions.current;
-        if (a.threadTask !== p.taskId) return;
-        if (!a.references.ids.includes(p.id)) a.setDrawer(false);
-        a.references.toggle(p.id);
-      }}
-      onPick={() => togglePick(p.taskId, p.event.id)}
-      onSelect={() => {
-        const a = postActions.current;
-        const k = a.deck.findIndex((c) => c.id === colId);
-        if (k >= 0) a.setActive(k);
-        a.select(colId, p.id);
-      }}
-      onToggle={() => postActions.current.toggleExpanded(p.id)}
-      onAllow={() => { const a = postActions.current.approvalFor(p); if (a) postActions.current.allow(a); }}
-      onDeny={() => { const a = postActions.current.approvalFor(p); if (a) postActions.current.setDenying(a); }}
-      onOpenThread={inThread ? undefined : () => postActions.current.openThread(p.taskId, { from: colId, post: p.id })} />
-  );
+  postActions.current = { openThread };
+  const threadActions = useRef<ThreadPostActions>(null!);
+  threadActions.current = {
+    select: p => { const k = deck.findIndex(c => c.id === THREAD); if (k >= 0) setActive(k); select(THREAD, p.id); },
+    toggle: p => toggleExpanded(p.id),
+    allow: p => { const a = approvalFor(p); if (a) allow(a); },
+    deny: p => { const a = approvalFor(p); if (a) setDenying(a); },
+    reference: p => {
+      if (threadTask !== p.taskId) return;
+      if (!references.ids.includes(p.id)) setDrawer(false);
+      references.toggle(p.id);
+    },
+    pick: p => togglePick(p.taskId, p.event.id),
+  };
 
   // Per feed column, what it shows of the tasks, approvals and the rest; kept the same object while
   // that part is unchanged, so a hub update or a move between columns redraws only the columns it touches.
@@ -1175,7 +1167,7 @@ export function App() {
   const columnCtx = useMemo(() => {
     const out = new Map<string, ColumnCtx>();
     for (const col of deck) {
-      if (col.id === THREAD || col.def?.channelId) continue;
+      if (col.def?.channelId) continue;
       const c: ColumnCtx = { tasks: new Map(), models: new Map(), approvals: new Map(), questions: new Map(), working: new Set(), drafts: new Set() };
       const addTask = (id: string) => { const t = hub.tasks.get(id); if (t) c.tasks.set(id, t); };
       for (const id of col.def?.filter.taskIds ?? []) addTask(id);
@@ -1266,7 +1258,10 @@ export function App() {
                 </button>
               </div>
             )}
-            {col.placed.map((pp) => renderPost(pp, col.id, i, true))}
+            <ThreadPosts col={col} ctx={columnCtx.get(col.id)!}
+              selected={i === activeIdx ? selection[col.id] : undefined} flash={flash} expanded={expanded}
+              picked={handoff?.open ? handoff.picked : undefined} referenced={canReference ? referencedIds : undefined}
+              taskId={threadTask} actions={threadActions} onError={setToast} />
             {col.posts.length === 0 && (
               <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
             )}

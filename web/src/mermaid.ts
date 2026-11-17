@@ -51,6 +51,7 @@ export function mermaidSource(node: Element | undefined): string | null {
 /** A short-lived document lets the browser reclaim Mermaid's private module/DOM caches. */
 const RENDERER_IDLE_MS = 5000;
 const RENDERER_TIMEOUT_MS = 30_000;
+export class DiagramBusyError extends Error {}
 class RendererInfrastructureError extends Error {}
 interface Renderer {
   frame: HTMLIFrameElement;
@@ -62,6 +63,7 @@ interface Renderer {
 }
 let renderer: Renderer | undefined;
 let rendering: Promise<void> = Promise.resolve();
+let queuedRenders = 0;
 let requestId = 0;
 
 function getRenderer(): Renderer {
@@ -114,6 +116,8 @@ function getRenderer(): Renderer {
 export async function renderMermaid(source: string, signal?: AbortSignal): Promise<DiagramResult> {
   if (source.length > MAX_DIAGRAM_TEXT) throw new Error('도표가 너무 커서 원문으로 표시합니다.');
   signal?.throwIfAborted();
+  if (queuedRenders >= 16) throw new DiagramBusyError('도표 요청이 많습니다. 잠시 뒤 다시 시도해 주세요.');
+  queuedRenders++;
   const render = async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted();
@@ -142,7 +146,7 @@ export async function renderMermaid(source: string, signal?: AbortSignal): Promi
     }
     throw new Error('도표를 그리지 못했습니다.');
   };
-  const result = rendering.then(render);
+  const result = rendering.then(render).finally(() => { queuedRenders--; });
   // Queue completion must not retain the last image as a fulfilled Promise's value.
   rendering = result.then(() => {}, () => {});
   return result;

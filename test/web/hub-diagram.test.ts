@@ -12,7 +12,7 @@ test('hub SVG results are returned without loading a client renderer',async t=>{
 });
 
 test('syntax and authorization errors do not fall back to another renderer',async t=>{
- for(const status of [401,403,422,429,504]){
+ for(const status of [401,403,422,504]){
   const mock=t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({error:'expected '+status}),{status}));
   await assert.rejects(renderDiagram('bad source'),new RegExp('expected '+status));mock.mock.restore();
  }
@@ -25,4 +25,24 @@ test('caller cancellation aborts the hub fetch and does not turn into a fallback
  });
  const controller=new AbortController();const result=renderDiagram('a',controller.signal);
  await entered;controller.abort();await assert.rejects(result,{name:'AbortError'});
+});
+
+test('temporary congestion retries after backoff and returns a successful diagram',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let calls=0;
+ const result={image:'data:image/svg+xml;utf8,<svg/>',background:'#fff'};
+ t.mock.method(globalThis,'fetch',async()=>++calls===1?new Response('{"error":"busy"}',{status:429}):new Response(JSON.stringify(result)));
+ const pending=renderDiagram('a');await new Promise(r=>setImmediate(r));
+ assert.equal(calls,1);t.mock.timers.tick(1000);
+ assert.deepEqual(await pending,result);assert.equal(calls,2);
+});
+
+test('congestion retries are bounded and cancellation clears the pending retry',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return new Response('{"error":"busy"}',{status:429});});
+ const pending=assert.rejects(renderDiagram('a'),/busy/);
+ for(const delay of [1000,2000,4000]){await new Promise(r=>setImmediate(r));t.mock.timers.tick(delay);}
+ await pending;assert.equal(calls,4);
+ const controller=new AbortController();const cancelled=assert.rejects(renderDiagram('a',controller.signal),{name:'AbortError'});
+ await new Promise(r=>setImmediate(r));controller.abort();await cancelled;
+ t.mock.timers.tick(10000);await new Promise(r=>setImmediate(r));assert.equal(calls,5);
 });
