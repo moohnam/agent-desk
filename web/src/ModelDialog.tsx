@@ -64,7 +64,7 @@ function UsageRows({ state }: {state: UsageState | undefined}) {
 }
 
 /** New-task defaults and the hub CLI accounts' plan usage share one editor. */
-export function ModelDialog({ onClose }: { onClose: () => void }) {
+export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => void; prefetchUsage?:boolean }) {
   const [savedPick, setSavedPick] = useState('');
   const [notice, setNotice] = useState('');
   const [pick, setPick] = useState<Settings>();
@@ -76,6 +76,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const panel = useSettingsPanel(!!pick && JSON.stringify(pick) !== savedPick, saving);
+  const usageActive = prefetchUsage || panel.active;
   const alive = useRef(false);
   const saveRequest = useRef<AbortController | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; saveRequest.current?.abort(); }; }, []);
@@ -89,7 +90,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
     return () => controller.abort();
   }, [settingsAttempt]);
   useEffect(() => {
-    if (workspaceId || !panel.active) return;
+    if (workspaceId || !usageActive) return;
     const controller = new AbortController();
     setUsage({});
     for (const engine of ENGINES) {
@@ -102,7 +103,7 @@ export function ModelDialog({ onClose }: { onClose: () => void }) {
       });
     }
     return () => controller.abort();
-  }, [usageAttempt, panel.active]);
+  }, [usageAttempt, usageActive]);
   const loadingUsage = !workspaceId && ENGINES.some(engine => !usage[engine]);
   const set = (engine: EngineName, value: Partial<Settings[EngineName]>) => {
     setPick(previous => previous ? {...previous, [engine]: {...previous[engine], ...value}} : previous);

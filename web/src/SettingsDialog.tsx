@@ -17,9 +17,9 @@ const SECTIONS = [
   { id: 'runners', label: '러너', Icon: Server },
 ] as const;
 
-function SettingSection({title, description, visible, register, children}: {
+function SettingSection({title, description, visible, register, children, preload=false}: {
   title:string; description:string; visible:boolean;
-  register:(id:string,state:PanelGuard)=>()=>void; children:ReactNode;
+  register:(id:string,state:PanelGuard)=>()=>void; children:ReactNode; preload?:boolean;
 }) {
   const [open,setOpen]=useState(false),[visited,setVisited]=useState(false);
   const context=useMemo(()=>({active:visible&&open,register}),[visible,open,register]);
@@ -29,7 +29,7 @@ function SettingSection({title, description, visible, register, children}: {
       <ChevronDown aria-hidden="true" />
     </button>
     <div className="settings-panel-body" hidden={!open}>
-      {visited&&<SettingsPanelContext.Provider value={context}>{children}</SettingsPanelContext.Provider>}
+      {(preload||visited)&&<SettingsPanelContext.Provider value={context}>{children}</SettingsPanelContext.Provider>}
     </div>
   </div>;
 }
@@ -48,7 +48,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
     return ![...guards.current.values()].some(state=>state.dirty)||window.confirm('저장하지 않은 설정이 있습니다. 버리고 닫을까요?');
   };
   const close=()=>{if(canClose())onClose();};
-  const panel=(id:typeof section,title:string,description:string,children:ReactNode)=><SettingSection title={title} description={description} visible={section===id} register={register}>{children}</SettingSection>;
+  const panel=(id:typeof section,title:string,description:string,children:ReactNode,preload=false)=><SettingSection title={title} description={description} visible={section===id} register={register} preload={preload}>{children}</SettingSection>;
   return <Modal title="설정" wide onClose={close}>
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="설정 항목">
@@ -57,7 +57,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
       <div className="settings-pages">
         {notice&&<p className="muted small" role="status">{notice}</p>}
         <section className="settings-content" hidden={section!=='agent'} aria-label="에이전트">
-          {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close}/>)}
+          {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close} prefetchUsage/>,true)}
           {panel('agent','기본 지침','이 허브에서 시작하는 실행에 전달할 공통 지침',<InstructionsDialog onClose={close}/>)}
         </section>
         <section className="settings-content" hidden={section!=='connections'} aria-label="연결">
