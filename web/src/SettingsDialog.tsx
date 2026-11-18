@@ -61,7 +61,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
         {SECTIONS.map(({id,label,Icon})=>{
           const showUpdate = id === 'version' && updateAvailable;
           return <button key={id} className="btn" aria-pressed={section===id} aria-label={showUpdate ? `${label}: 새 버전 있음` : undefined}
-            data-update={showUpdate ? '' : undefined} onClick={()=>{setSection(id);setNotice('');}}>
+            data-update={showUpdate ? '' : undefined} onClick={()=>{setSection(id);setNotice('');if(id==='version')updates.refreshLatest();}}>
             <Icon aria-hidden="true"/>{label}
           </button>;
         })}

@@ -287,7 +287,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       if ((parts[0] === 'api' || url.pathname === '/mcp') && !sameOrigin(req)) throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
       if (url.pathname === '/api/updates' || url.pathname.startsWith('/api/updates/')) {
         res.setHeader('cache-control', 'no-store');
-        if (req.method === 'GET' && url.pathname === '/api/updates') return send(res, 200, await updates.view());
+        if (req.method === 'GET' && url.pathname === '/api/updates') return send(res, 200, await updates.view(url.searchParams.get('refresh') === '1'));
         if (req.method !== 'POST') throw new HttpError(405, '지원하지 않는 업데이트 요청입니다');
         if (!access.isLocal(req)) throw new HttpError(403, '업데이트 확인과 승인은 이 머신에서만 할 수 있습니다.');
         if (url.pathname === '/api/updates/check') return send(res, 202, await updates.check());

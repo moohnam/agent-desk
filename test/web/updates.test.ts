@@ -35,13 +35,13 @@ function hooks() {
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 function harness() {
   const h = hooks(), calls: any[][] = [];
-  const requests: {signal: AbortSignal; resolve: (v: UpdateView) => void}[] = [];
+  const requests: {signal: AbortSignal; fresh: boolean; resolve: (v: UpdateView) => void}[] = [];
   const timers = new Map<number, {callback: () => void; delay: number}>(); let seq = 0;
   const listeners = new Map<string, () => void>();
   const document = {hidden: false, addEventListener: (event: string, fn: () => void) => listeners.set(event, fn), removeEventListener: (event: string) => listeners.delete(event)};
   let approved = status({approval: {commit: b, mode: 'when-idle'}, phase: 'waiting'}), fail = '', hang = false;
   const api = {
-    updates: (signal: AbortSignal) => {calls.push(['get']); return new Promise<UpdateView>(resolve => requests.push({signal, resolve}));},
+    updates: (signal: AbortSignal, fresh: boolean) => {calls.push(['get']); return new Promise<UpdateView>(resolve => requests.push({signal, fresh, resolve}));},
     checkUpdates: async () => {calls.push(['check']); return status({checking: true, phase: 'checking'});},
     approveUpdate: async (commit: string, mode: string, signal: AbortSignal) => {calls.push(['approve', commit, mode]); if (hang) return new Promise<UpdateView>((_, reject) => signal.addEventListener('abort', () => reject(Error('aborted')), {once: true})); if (fail) throw Error(fail); return approved;},
     cancelUpdate: async (commit: string) => {calls.push(['cancel', commit]); return status();},
@@ -66,6 +66,7 @@ test('badge status polling never checks or approves; hidden/unmounted readers ab
   x.requests[0].resolve(status()); await settle();
   assert.equal(x.render().view, null); assert.equal(x.timers.size, 0);
   x.document.hidden = false; x.listeners.get('visibilitychange')!();
+  assert.equal(x.requests[1].fresh, true);
   x.requests[1].resolve(status()); await settle();
   assert.equal(x.render().view.available, b);
   x.run(60_000); assert.deepEqual(x.calls, [['get'], ['get'], ['get']]);
@@ -91,6 +92,22 @@ test('approval pins the rendered commit; busy failures never become an automatic
   x.h.unmount();
 });
 
+test('page load and on-demand version refresh read Git without preparing or approving', async () => {
+  const x = harness(); x.render();
+  assert.equal(x.requests[0].fresh, true);
+  x.requests[0].resolve(status()); await settle();
+  x.run(60_000);
+  assert.equal(x.requests[1].fresh, false);
+  x.render().refreshLatest();
+  // A regular read finishing just after the user clicks cannot postpone the refresh.
+  x.requests[1].resolve(status()); await settle(); x.run(0);
+  assert.equal(x.requests[2].fresh, true);
+  x.requests[2].resolve(status({latest: c})); await settle();
+  assert.equal(x.render().view.latest, c); assert.equal(x.render().view.available, b);
+  assert.deepEqual(x.calls, [['get'], ['get'], ['get']]);
+  x.h.unmount();
+});
+
 test('a poll started before approval cannot overwrite its result; accepted transitions receive a quick follow-up', async () => {
   const x = harness(); x.render(); x.requests[0].resolve(status()); await settle();
   x.run(60_000); const stale = x.requests[1];
@@ -104,7 +121,7 @@ test('a poll started before approval cannot overwrite its result; accepted trans
 test('an unconfirmed approval times out, releases the settings guard and only reloads status', async () => {
   const x = harness(); x.render(); x.requests[0].resolve(status()); await settle(); x.hang();
   const pending = x.render().approve(b, 'immediate'); assert.equal(x.render().busy, true);
-  x.run(30_000); await pending;
+  x.run(15_000); await pending;
   assert.equal(x.render().busy, false); assert.match(x.render().error, /반영되었을 수/);
   x.run(0); x.requests[1].resolve(status({approval: {commit: b, mode: 'immediate'}})); await settle();
   assert.equal(x.render().view.approval.commit, b);
@@ -147,8 +164,7 @@ test('only explicit controls approve/cancel a specific prepared SHA; discovered 
   state.view = status({latest: c}); tree = ui.Updates({state, local: true});
   assert.match(text(tree), /발견한 버전과 준비된 버전이 다릅니다/);
   assert.ok(button(tree, '새 버전 준비'));
-  assert.equal(button(tree, '지금 적용').props.disabled, true);
-  assert.equal(button(tree, '작업 종료 후 적용').props.disabled, true);
+  button(tree, '지금 적용').props.onClick(); assert.deepEqual(calls.at(-1), [b, 'immediate']);
   state.view = status(); tree = ui.Updates({state, local: false}); assert.equal(button(tree, '지금 적용').props.disabled, true);
 });
 

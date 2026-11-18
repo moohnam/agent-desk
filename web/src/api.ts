@@ -191,7 +191,7 @@ export const FEED_PAGE = 1000;
 
 export const api = {
   remember,
-  updates: (signal?: AbortSignal) => call<UpdateView>('GET', '/updates', undefined, signal),
+  updates: (signal?: AbortSignal, refreshLatest = false) => call<UpdateView>('GET', refreshLatest ? '/updates?refresh=1' : '/updates', undefined, signal),
   checkUpdates: (signal?: AbortSignal) => call<UpdateView>('POST', '/updates/check', {}, signal),
   approveUpdate: (commit: string, mode: 'immediate' | 'when-idle', signal?: AbortSignal) => call<UpdateView>('POST', '/updates/approve', { commit, mode }, signal),
   cancelUpdate: (commit: string, signal?: AbortSignal) => call<UpdateView>('POST', '/updates/cancel', { commit }, signal),

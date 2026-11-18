@@ -14,11 +14,13 @@ export function useUpdates() {
   const revision = useRef(0);
   const settleUntil = useRef(0);
   const mounted = useRef(false);
-  const refresh = useRef<() => void>(() => {});
+  const refresh = useRef<(fresh?: boolean) => void>(() => {});
 
   useEffect(() => {
     mounted.current = true;
     let disposed = false;
+    let refreshRequested = true;
+    let readingFresh = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = (delay: number) => {
       clearTimeout(timer);
@@ -27,13 +29,16 @@ export function useUpdates() {
     const poll = async () => {
       if (disposed || document.hidden) return;
       if (action.current) { schedule(2000); return; }
+      const fresh = refreshRequested;
+      refreshRequested = false;
       request.current?.abort();
       const controller = new AbortController(); request.current = controller;
+      readingFresh = fresh;
       const seq = ++revision.current;
       let timedOut = false;
-      const timeout = setTimeout(() => {timedOut = true; controller.abort();}, 10_000);
+      const timeout = setTimeout(() => {timedOut = true; controller.abort();}, fresh ? 20_000 : 10_000);
       try {
-        const next = await api.updates(controller.signal);
+        const next = await api.updates(controller.signal, fresh);
         if (!disposed && !controller.signal.aborted && revision.current === seq) {
           latest.current = next; setView(next); setReadError('');
         }
@@ -41,15 +46,16 @@ export function useUpdates() {
         if (!disposed && (!controller.signal.aborted || timedOut) && revision.current === seq) setReadError(timedOut ? '버전 정보 요청 시간이 초과되었습니다.' : e instanceof Error ? e.message : String(e));
       } finally {
         clearTimeout(timeout);
-        if (request.current === controller) request.current = null;
+        if (request.current === controller) { request.current = null; readingFresh = false; }
         const current = latest.current;
-        if (revision.current === seq) schedule(Date.now() < settleUntil.current || current?.checking || ['waiting', 'switching'].includes(current?.phase ?? '') ? 2000 : 60_000);
+        const interval = Date.now() < settleUntil.current || current?.checking || ['waiting', 'switching'].includes(current?.phase ?? '') ? 2000 : 60_000;
+        if (revision.current === seq) schedule(refreshRequested ? 0 : interval);
       }
     };
-    refresh.current = () => schedule(0);
+    refresh.current = (fresh = false) => { refreshRequested ||= fresh; schedule(0); };
     const visibility = () => {
       clearTimeout(timer);
-      if (document.hidden) { ++revision.current; request.current?.abort(); }
+      if (document.hidden) { refreshRequested ||= readingFresh; ++revision.current; request.current?.abort(); }
       else void poll();
     };
     document.addEventListener('visibilitychange', visibility);
@@ -69,8 +75,7 @@ export function useUpdates() {
     }
     const controller = new AbortController(); action.current = controller;
     let timedOut = false;
-    // Approval includes a fresh Git lookup in addition to checking managed runtime status.
-    const timeout = setTimeout(() => {timedOut = true; controller.abort();}, kind === 'approve' ? 30_000 : 15_000);
+    const timeout = setTimeout(() => {timedOut = true; controller.abort();}, 15_000);
     ++revision.current; request.current?.abort();
     setBusy(true); setError('');
     try {
@@ -89,6 +94,7 @@ export function useUpdates() {
     }
   }, []);
   return {view, error: error || readError, unavailable: !!readError, busy,
+    refreshLatest: () => refresh.current(true),
     check: () => run('check'),
     approve: (commit: string, mode: 'immediate' | 'when-idle') => run('approve', commit, mode),
     cancel: (commit: string) => run('cancel', commit),
