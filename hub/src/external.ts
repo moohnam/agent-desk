@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 import type { Project, Question, Task, TaskView } from '../../shared/api.ts';
-import { DEFAULT_ENGINE, DEFAULT_MODE, ENGINE_LABEL, HANDOFF_ENGINES, engineOf, type HandoffEngine } from '../../shared/compose.ts';
+import { DEFAULT_ENGINE, ENGINE_LABEL, HANDOFF_ENGINES, engineOf, type HandoffEngine } from '../../shared/compose.ts';
 import { OWNER, type DeskCore } from './core.ts';
 import { now } from './db.ts';
 import { HttpError } from './errors.ts';
@@ -53,7 +53,7 @@ export class ExternalSessions {
     const sessionId = randomUUID();
     this.core.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: null, cwd, source: 'external',
-      status: 'running', runner_id: 'mcp', created_at: ts, permission_mode: DEFAULT_MODE,
+      status: 'running', runner_id: 'mcp', created_at: ts, permission_mode: 'default',
       model: null, effort: null,
     });
     this.core.addEvent(sessionId, task.id, 'status', { kind: 'status', state: 'started', detail: { source: 'external', engine, cwd } });
@@ -173,7 +173,7 @@ export class ExternalSessions {
     this.core.store.createSession({
       id: sessionId, task_id: task.id, engine, engine_session_id: found.id, cwd,
       source: 'app', status: 'idle', runner_id: this.core.runnerId, created_at: ts,
-      permission_mode: DEFAULT_MODE, model: null, effort: null,
+      permission_mode: 'default', model: null, effort: null,
     });
     const history = a.taskId ? [] : found.events;
     this.core.store.importEvents(sessionId, task.id, history.map((e) => ({

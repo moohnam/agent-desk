@@ -5,8 +5,8 @@ import { CONNECTOR_SCOPES, connectorTags } from './connector-tags.ts';
 //   @name:/path    define a project (or reuse it) and start a new task there
 //   #tag           each tag maps to one effect and applies to this message only. Some effects
 //                  change state that later messages see:
-//     #auto          switch the session to automatic approval (stays until #ask)
-//     #ask           switch the session to ask before each tool use (DEFAULT_MODE; the SDK's 'default')
+//     #auto          automatic approval (new tasks default to this; stays until #ask)
+//     #ask           switch the session to the engine's interactive approval mode
 //     #<engine>      engine for a new task (ENGINE_INFO; default claude); an existing task keeps its engine
 //     #<model>       a model of an engine (ENGINE_INFO.models: a Claude alias, or a Codex or agy family whose
 //                    latest version runs); stays with the task until another model tag. A model tag also picks
@@ -25,7 +25,7 @@ import { CONNECTOR_SCOPES, connectorTags } from './connector-tags.ts';
 export type PermissionMode = 'auto' | 'default';
 
 /** Mode for new work when no tag is given. */
-export const DEFAULT_MODE: PermissionMode = 'default';
+export const DEFAULT_MODE: PermissionMode = 'auto';
 
 export const MODE_TAGS: Record<string, PermissionMode> = { auto: 'auto', ask: 'default' };
 export const MODE_LABEL: Record<PermissionMode, string> = { auto: '#auto', default: '#ask' };
@@ -139,8 +139,8 @@ const EFFORT_HELP: Record<Effort, string> = {
 /** Every built-in tag and what it does, in the order the compose box suggests them. */
 export const TAG_HELP: { tag: string; help: string }[] = [
   ...CONNECTOR_SCOPES.map(tag => ({tag, help: `이번 요청에만 ${tag === 'slack' ? 'Slack' : tag === 'jira' ? 'Jira' : 'Confluence'} 읽기·검색 허용`})),
-  { tag: 'auto', help: '이제부터 자동 승인' },
-  { tag: 'ask', help: '이제부터 매번 확인 (기본)' },
+  { tag: 'auto', help: '이제부터 자동 승인 (일반 새 작업 기본)' },
+  { tag: 'ask', help: '이제부터 매번 확인' },
   ...ENGINES.map((e) => ({ tag: e, help: `새 작업을 ${ENGINE_INFO[e].tagLabel}로${e === DEFAULT_ENGINE ? ' (기본)' : ''}` })),
   ...MODEL_TAGS.map((m) => ({ tag: m, help: `${MODEL_INFO[m].help} (작업에 유지)` })),
   ...EFFORT_TAGS.map((t) => ({ tag: t, help: `${EFFORT_HELP[t]} (작업에 유지)` })),

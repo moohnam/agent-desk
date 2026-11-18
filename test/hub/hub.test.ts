@@ -74,6 +74,18 @@ test('compose starts a task in a new project and sends the runner a start', () =
   assert.equal(hub.store.listProjects()[0].root_path, dir);
   const start = runner.last('start')!;
   assert.deepEqual([start.engine, start.model, start.prompt, start.cwd], ['codex', 'astra', '테스트 고쳐 줘', dir]);
+  assert.equal(view.permission_mode, 'auto');
+  assert.equal(start.permissionMode, 'auto');
+});
+
+test('an explicit ask task keeps its permission mode when continued without a tag', () => {
+  const { hub, runner, dir } = setup();
+  const ask = hub.compose(`@web:${dir} #ask 먼저 확인해 줘`);
+  assert.equal(runner.last('start')?.permissionMode, 'default');
+  assert.equal(hub.compose('@web 기존 작업을 이어 줘').permission_mode, 'default');
+  const fresh = hub.compose('@web #new 새 작업을 시작해 줘');
+  assert.notEqual(fresh.id, ask.id);
+  assert.equal(runner.last('start')?.permissionMode, 'auto');
 });
 
 test('task title updates trim, publish, reject empty or missing tasks, and keep long explicit titles', () => {

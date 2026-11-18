@@ -346,12 +346,14 @@ test('the shipped shared CLI starts without a model turn and accepts independent
  }finally{processChild.kill('SIGTERM');await exit;rmSync(dir,{recursive:true,force:true});}
 });
 
-test('shared task creation preserves the standard default approval mode',()=>{
+test('shared task creation defaults to auto and respects an explicit ask mode',()=>{
  const f=fixture();try{
   const peer=f.runtime.workspace.grant('api');
   const project=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/projects',body:{name:'standard',root_path:`shared@worker:${f.project}`}}).body;
-  const result=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/tasks',body:{project_id:project.id,prompt:'mode test',permission_mode:'default'}});
-  assert.equal(result.status,201);f.runtime.exchange();assert.equal(f.starts[0].permissionMode,'default');
+  const auto=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/tasks',body:{project_id:project.id,prompt:'auto mode test'}});
+  const ask=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/tasks',body:{project_id:project.id,prompt:'ask mode test',permission_mode:'default'}});
+  assert.equal(auto.status,201);assert.equal(ask.status,201);
+  f.runtime.exchange();assert.deepEqual(f.starts.map(start=>start.permissionMode),['auto','default']);
  }finally{f.close();}
 });
 

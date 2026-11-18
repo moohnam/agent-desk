@@ -567,7 +567,8 @@ export class Hub extends DeskCore {
       return { task: this.taskView(this.store.getTask(existing.id)!), ...receipt };
     }
     if (typeof input.project_id !== 'string' || !input.project_id) throw new HttpError(400, '처음 대화할 프로젝트를 선택해 주세요');
-    const task = this.createTask(input.project_id, `${channel.name} · 채널 대화`, input.text, DEFAULT_MODE, undefined, false, context);
+    // Channel snapshots come from external publishers. Automatic approval here is opt-in via #auto.
+    const task = this.createTask(input.project_id, `${channel.name} · 채널 대화`, input.text, 'default', undefined, false, context);
     this.store.updateChannel(channelId, { conversation_task_id: task.id, updated_at: now() });
     this.publish({ type: 'channel', channel: this.store.getChannel(channelId)! });
     return { task };

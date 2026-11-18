@@ -257,7 +257,7 @@ function interpretNew(text: string, projects: Project[], tasks: TaskView[], skil
   if (problem) ok = false;
   rows.push(problem ? { label: '모델', value: problem, tone: 'bad' } : { label: '모델', value: modelRow(engine, c, continuing, settings) });
   const mode = c.mode ?? (continuing ? continuing.permission_mode : null);
-  rows.push({ label: '승인', value: c.mode ? `${MODE_LABEL[c.mode]}로 전환` : mode ? `${MODE_LABEL[mode]} (작업 유지)` : `${MODE_LABEL[DEFAULT_MODE]} 매번 확인 (기본)` });
+  rows.push({ label: '승인', value: c.mode ? `${MODE_LABEL[c.mode]}로 전환` : mode ? `${MODE_LABEL[mode]} (작업 유지)` : `${MODE_LABEL[DEFAULT_MODE]} 자동 승인 (기본)` });
   if (c.skills.length) rows.push({ label: '스킬', value: `${c.skills.map((k) => `#${k}`).join(' ')} (이 메시지에만)` });
   const delivery = continuing ? deliveryText(continuing, c.delivery) : c.delivery && c.delivery !== 'new' ? `새 작업이라 #${c.delivery}는 무시` : null;
   if (delivery) rows.push({ label: '전달', value: delivery });
@@ -371,8 +371,8 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
           <code>@프로젝트#2</code><span>그 프로젝트의 2번 작업 이어가기</span>
           <code>#new</code><span>같은 프로젝트에서 새 작업 시작 (이전 대화 없이)</span>
           <code>@이름:/경로</code><span>프로젝트를 만들고 새 작업 시작</span>
-          <code>#auto</code><span>이제부터 자동 승인</span>
-          <code>#ask</code><span>이제부터 매번 확인 (기본)</span>
+          <code>#auto</code><span>이제부터 자동 승인 (새 작업 기본)</span>
+          <code>#ask</code><span>이제부터 매번 확인</span>
           {ENGINES.map((e) => <Fragment key={e}><code>#{e}</code><span>새 작업을 {ENGINE_INFO[e].tagLabel}로{e === DEFAULT_ENGINE ? ' (기본)' : ''}</span></Fragment>)}
           {ENGINES.map((e) => <Fragment key={e}><code>{modelTagsOf(e)}</code><span>{modelHelpOf(e)} (작업에 유지)</span></Fragment>)}
           <code>#low … #max</code><span>effort 고르기 (작업에 유지, {effortNote()})</span>
@@ -517,6 +517,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   };
 
   const how = content ? deliveryText(task, delivery) : null;
+  const newMode = delivery === 'new' ? ` · 새 작업 승인 ${MODE_LABEL[c.mode ?? DEFAULT_MODE]}` : '';
   // A #new or #fork reply carries its tags into the new task instead of switching this task.
   const switches = branch ? '' : [c.mode && MODE_LABEL[c.mode], c.model && modelLabel(c.model), c.effort && `effort ${c.effort}`]
     .filter(Boolean).join(' · ');
@@ -524,7 +525,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     : problem ? { warn: true, text: `${problem}.` }
     : branch && !content ? { warn: true, text: `#${delivery}로 맡길 지시를 함께 쓰세요.` }
     : switches ? { warn: false, text: `보내면 ${switches}로 전환${content ? '하고 이어서 지시합니다' : '만 합니다'}${modelTag && running ? ' (모델·effort는 다음 턴부터)' : ''}${how ? ` · ${how}` : ''}.` }
-    : how ? { warn: false, text: `${how}${c.skills.length ? ` · 스킬 ${c.skills.map((k) => `#${k}`).join(' ')}` : ''}` }
+    : how ? { warn: false, text: `${how}${newMode}${c.skills.length ? ` · 스킬 ${c.skills.map((k) => `#${k}`).join(' ')}` : ''}` }
     : c.skills.length ? { warn: false, text: `이 답글에 스킬 ${c.skills.map((k) => `#${k}`).join(' ')}을 씁니다.` }
     : sent ? { warn: false, text: sent }
     : null;
