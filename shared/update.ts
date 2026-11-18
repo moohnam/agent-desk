@@ -13,6 +13,7 @@ export interface UpdateView {
   available: string | null;
   latest: string | null;
   discoveryError: string | null;
+  ciPending?: boolean;
   phase: 'not-configured' | 'idle' | 'checking' | 'ready' | 'waiting' | 'switching' | 'active' | 'failed';
   checking: boolean;
   targets: UpdateRole[];

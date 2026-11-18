@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from './api.ts';
 import { documentHref } from './documentLinks.ts';
+import { writeClipboardText } from './clipboard.ts';
 
 /** A supported file's normal click stays in the desk; only its auxiliary click uses the OS. */
 export function DocumentLink({ path, taskId, previewId, onPreview, ...props }: ComponentProps<'a'> & {
@@ -15,7 +16,7 @@ export function DocumentLink({ path, taskId, previewId, onPreview, ...props }: C
   const close = (focus = false) => { setMenu(null); if (focus) anchor.current?.focus(); };
   return <>
     <a {...props} ref={anchor} href={documentHref(taskId,path)} className="local-link"
-      title={`문서 미리보기: ${path} · 가운데 클릭: 기본 앱 · 우클릭: 원본 경로 복사`}
+      title={`문서 미리보기: ${path} · 가운데 클릭: 기본 앱 · 우클릭: 파일 메뉴`}
       onClick={event => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault(); onPreview();
@@ -38,15 +39,17 @@ export function DocumentLink({ path, taskId, previewId, onPreview, ...props }: C
 }
 
 function PathMenu({x,y,path,taskId,previewId,onClose,onCopied}:{x:number;y:number;path:string;taskId:string;previewId?:string;onClose:(focus?:boolean)=>void;onCopied:()=>void}) {
-  const root = useRef<HTMLDivElement>(null), button = useRef<HTMLButtonElement>(null), manual = useRef<HTMLTextAreaElement>(null);
+  const root = useRef<HTMLDivElement>(null), button = useRef<HTMLButtonElement>(null), revealButton = useRef<HTMLButtonElement>(null), manual = useRef<HTMLTextAreaElement>(null);
   const active = useRef(true);
-  const [resolved,setResolved] = useState(''),[error,setError] = useState(''),[fallback,setFallback] = useState(false);
+  const [documentPath,setDocumentPath] = useState<{path:string;canReveal?:boolean}>();
+  const resolved = documentPath?.path;
+  const [error,setError] = useState(''),[fallback,setFallback] = useState(false),[revealing,setRevealing] = useState(false);
   useEffect(() => {
     let alive = true; active.current = true; const controller = new AbortController();
     // Resolve on menu open, leaving the actual copy inside its own user gesture (Safari/WebView).
     void api.filePath(path,taskId,previewId,AbortSignal.any([controller.signal,AbortSignal.timeout(15_000)])).then(value => {
       if (typeof value.path !== 'string' || !value.path.startsWith('/') || value.path.length > 4096 || /[\x00-\x1f]/.test(value.path)) throw new Error('원본 절대 경로를 확인하지 못했습니다');
-      if (alive) setResolved(value.path);
+      if (alive) setDocumentPath(value);
     }).catch(error => { if (alive) {
       const message = error instanceof Error ? error.message : String(error);
       setError(message === 'HTTP 404' || message.startsWith('no route') ? '원본 경로 복사를 사용하려면 허브와 러너를 업데이트해 주세요.' : message);
@@ -65,17 +68,16 @@ function PathMenu({x,y,path,taskId,previewId,onClose,onCopied}:{x:number;y:numbe
     return () => { document.removeEventListener('pointerdown',outside,true); document.removeEventListener('scroll',scroll,true); window.removeEventListener('resize',resize); };
   },[]);
   const copy = async () => {
-    if (!resolved) return;
-    try {
-      if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(resolved); if (active.current) onCopied(); return; }
-    } catch { /* HTTP and browser permissions may require the legacy or manual path. */ }
+    if (!resolved || !button.current) return;
+    const copied = await writeClipboardText(resolved, button.current);
     if (!active.current) return;
-    const field = document.createElement('textarea');
-    field.value = resolved; field.readOnly = true; field.style.cssText = 'position:fixed;opacity:0;left:0;top:0';
-    document.body.append(field); field.select();
-    let copied = false; try { copied = document.execCommand('copy'); } catch { /* Keep a selectable path. */ }
-    field.remove();
     if (copied) onCopied(); else setFallback(true);
+  };
+  const reveal = async () => {
+    if (revealing || !documentPath?.canReveal) return;
+    setRevealing(true); setError('');
+    try { await api.revealFile(path,taskId,previewId); if (active.current) onClose(true); }
+    catch (error) { if (active.current) { setError(error instanceof Error ? error.message : 'Finder에서 파일 위치를 열지 못했습니다.'); setRevealing(false); } }
   };
   return <div ref={root} className="menu" role="menu" aria-label="파일 링크" tabIndex={-1}
     style={{left:Math.max(8,Math.min(x,window.innerWidth-360)),top:Math.max(8,Math.min(y,window.innerHeight-200)),maxWidth:'calc(100vw - 16px)',width:344,maxHeight:192,overflow:'auto'}}
@@ -83,9 +85,16 @@ function PathMenu({x,y,path,taskId,previewId,onClose,onCopied}:{x:number;y:numbe
     onKeyDown={event=>{
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(true); }
       else if (event.key === 'Tab') { event.stopPropagation(); onClose(true); }
-      else if (['ArrowDown','ArrowUp','Home','End'].includes(event.key) && !fallback) { event.preventDefault(); event.stopPropagation(); button.current?.focus(); }
+      else if ((event.key === 'Enter' || event.key === ' ') && event.target instanceof HTMLButtonElement) event.stopPropagation();
+      else if (['ArrowDown','ArrowUp','Home','End'].includes(event.key) && !fallback) {
+        event.preventDefault(); event.stopPropagation();
+        const finder = revealButton.current?.disabled ? null : revealButton.current;
+        const toFinder = event.key === 'End' || event.key !== 'Home' && event.target === button.current;
+        (toFinder ? finder ?? button.current : button.current)?.focus();
+      }
     }}>
     <button ref={button} className="item" role="menuitem" disabled={!resolved} onClick={()=>{void copy();}}>원본 파일 경로 복사</button>
+    {documentPath?.canReveal === true && <button ref={revealButton} className="item" role="menuitem" disabled={revealing} onClick={()=>{void reveal();}}>Finder에서 보기</button>}
     {!resolved && !error && <p className="lbl" role="status">원본 경로를 확인하는 중…</p>}
     {error && <p className="lbl" role="alert">{error}</p>}
     {fallback && <><p className="lbl">자동 복사를 사용할 수 없습니다. 선택된 경로를 직접 복사해 주세요.</p>

@@ -296,8 +296,10 @@ export const api = {
   open: (href: string, taskId?: string) => call<{ ok: true }>('POST', '/open', { href, task_id: taskId }),
   filePath: (href: string, taskId: string, previewId?: string, signal?: AbortSignal) => {
     const [source, task] = splitId(taskId);
-    return call<{path:string}>('GET', '/file-path?' + new URLSearchParams({ href, task_id: task, ...(previewId ? {preview_id:previewId} : {}) }), undefined, signal, source);
+    return call<{path:string;canReveal?:boolean}>('GET', '/file-path?' + new URLSearchParams({ href, task_id: task, ...(previewId ? {preview_id:previewId} : {}) }), undefined, signal, source);
   },
+  revealFile: (href: string, taskId: string, previewId?: string) =>
+    call<{ok:true}>('POST', '/file-reveal', { href, task_id: taskId, preview_id: previewId }),
   /** Addresses (with QR codes) other devices open the desk at; only on the hub's own machine. */
   access: () => call<{ urls: { url: string; qr: string }[] } & AccessView>('GET', '/access'),
   answerAccess: (id: string, allow: boolean) => call<AccessView>('POST', `/access-requests/${id}`, { allow }),

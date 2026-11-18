@@ -1,13 +1,15 @@
 import { rehypeMentions } from './markdownMentions.ts';
 import { scheduleLayoutRead } from './layoutBatch.ts';
-import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { createContext, memo, useContext, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type ExtraProps, type Components } from 'react-markdown';
 import 'katex/dist/katex.min.css';
 import { MermaidBlock } from './MermaidBlock.tsx';
 import { mermaidSource } from './mermaid.ts';
 import { documentPath, isDocumentLink } from './documentLinks.ts';
 import { DocumentLink } from './DocumentLink.tsx';
-import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation } from './markdownMath.ts';
+import { CopyButton } from './CopyButton.tsx';
+import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownMath.ts';
+import { prepareMarkdown } from './markdownSource.ts';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
@@ -16,20 +18,43 @@ const transformUrl = (url: string) => APP_LINK.test(url) ? url : defaultUrlTrans
 export const isLocalLink = (href: string | undefined) =>
   !!href && (APP_LINK.test(href) || (!/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('#') && !href.startsWith('//')));
 
-function CodeBlock({ node, children, ...props }: ComponentProps<'pre'> & ExtraProps) {
+const CopySource = createContext<{ markdown: ReturnType<typeof prepareMarkdown>; onNotice?: (message: string) => void } | null>(null);
+
+function useBlockCopy(node: ExtraProps['node'], label: string) {
+  const source = useContext(CopySource);
+  const position = node?.position;
+  if (!source || position?.start.offset == null || position.end.offset == null) return null;
+  return <CopyButton text={() => source.markdown.blockSource(position)} label={label} onNotice={source.onNotice} />;
+}
+
+function CodeBlock({ node, ...props }: ComponentProps<'pre'> & ExtraProps) {
   const source = mermaidSource(node);
-  return source == null ? <pre {...props}>{children}</pre> : <MermaidBlock source={source} />;
+  const copy = useBlockCopy(node, source == null ? '코드 블록 Markdown 복사' : 'Mermaid Markdown 복사');
+  if (source != null) return <MermaidBlock source={source} copy={copy} />;
+  const pre = <pre {...props} />;
+  return copy ? <div className="markdown-copy-block">{pre}{copy}</div> : pre;
+}
+
+function Table({ node, ...props }: ComponentProps<'table'> & ExtraProps) {
+  const copy = useBlockCopy(node, '표 Markdown 복사');
+  const table = <table {...props} />;
+  return copy ? <div className="markdown-copy-block">{table}{copy}</div> : table;
 }
 
 /**
  * Conversation bodies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
  * go to `onLocalLink` (the hub opens them, since a web page can't reach local apps or files).
  */
-export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase, taskId, linkBase, mentions = false }: { text: string; mentions?: boolean; onLocalLink?: (href: string) => void; resourceBase?: string; taskId?: string; linkBase?: string }) {
+export const Markdown = memo(function Markdown({ text, onLocalLink, onNotice, resourceBase, taskId, linkBase, mentions = false }: {
+  text: string; mentions?: boolean; onLocalLink?: (href: string) => void; onNotice?: (message: string) => void;
+  resourceBase?: string; taskId?: string; linkBase?: string;
+}) {
   const rehypePlugins = useMemo(() => mentions ? [...MARKDOWN_REHYPE_PLUGINS, rehypeMentions] : MARKDOWN_REHYPE_PLUGINS, [mentions]);
-  const normalizedText = useMemo(() => normalizeMathNotation(text), [text]);
+  const markdown = useMemo(() => prepareMarkdown(text), [text]);
+  const copySource = useMemo(() => ({ markdown, onNotice }), [markdown, onNotice]);
   const components = useMemo<Components>(() => ({
         pre: CodeBlock,
+        table: Table,
         ...(resourceBase ? { img: ({ node: _, src, ...props }: ComponentProps<'img'> & ExtraProps) => {
           // Document images stay in its capability directory; no absolute filesystem requests.
           const path=typeof src==='string'&&!/^(?:[a-z][a-z\d+.-]*:|[~/])/i.test(src)&&!src.split('/').includes('..')
@@ -46,13 +71,14 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, resourceBase
               e.preventDefault();onLocalLink(path);
             }} />;
         },
-
   }), [resourceBase, onLocalLink, taskId, linkBase]);
   return (
-    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={rehypePlugins}
-      urlTransform={transformUrl} components={components}>
-      {normalizedText}
-    </ReactMarkdown>
+    <CopySource.Provider value={copySource}>
+      <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={rehypePlugins}
+        urlTransform={transformUrl} components={components}>
+        {markdown.text}
+      </ReactMarkdown>
+    </CopySource.Provider>
   );
 });
 

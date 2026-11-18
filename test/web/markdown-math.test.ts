@@ -3,10 +3,12 @@ import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
+import type { ExtraProps } from 'react-markdown';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import type { Root } from 'mdast';
 import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation } from '../../web/src/markdownMath.ts';
+import { prepareMarkdown } from '../../web/src/markdownSource.ts';
 
 const render = (source: string) => renderToStaticMarkup(React.createElement(ReactMarkdown, {
   remarkPlugins: MARKDOWN_REMARK_PLUGINS, rehypePlugins: MARKDOWN_REHYPE_PLUGINS,
@@ -114,4 +116,23 @@ test('math coexists with Korean strong text, soft breaks, and untouched code AST
   if (tree.children[0].type === 'code') assert.equal(tree.children[0].value, 'flowchart LR\n A["$x$"] --> B');
   assert.equal(tree.children[1].type, 'paragraph');
   if (tree.children[1].type === 'paragraph') assert.equal(tree.children[1].children[0].type, 'inlineCode');
+});
+
+test('copy uses the original source of rendered code and tables after math normalization', () => {
+  const blocks = [
+    ['> ~~~~ts linenums', '>   const n = 3;', '> ~~~~'].join('\r\n'),
+    [String.raw`| \(x^2\) | *값* |`, '| :--- | ---: |', String.raw`| a\|b | \(\alpha\) |`].join('\r\n'),
+    ['```mermaid', 'graph LR', '    A --> B', '```'].join('\r\n'),
+    '    indented code',
+  ];
+  const source = '\ufeff' + [String.raw`한글과 이모지 🍀 \(\sqrt{2}\)`, String.raw`\[\alpha\]`, ...blocks, '끝'].join('\r\n\r\n');
+  const { text, blockSource } = prepareMarkdown(source);
+  assert.notEqual(text, source);
+  const result: string[] = [];
+  const collect = ({ node }: ExtraProps) => { result.push(blockSource(node!.position!)); return null; };
+  renderToStaticMarkup(React.createElement(ReactMarkdown, {
+    remarkPlugins: MARKDOWN_REMARK_PLUGINS, rehypePlugins: MARKDOWN_REHYPE_PLUGINS,
+    components: { pre: collect, table: collect },
+  }, text));
+  assert.deepEqual(result, blocks);
 });

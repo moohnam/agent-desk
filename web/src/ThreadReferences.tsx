@@ -6,6 +6,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { Markdown } from './Markdown.tsx';
+import { CopyButton } from './CopyButton.tsx';
 import { referenceEvents, referenceOrder, type ReferenceEntry } from './threadReferences.ts';
 import type { HubEvent, TaskView } from './types.ts';
 
@@ -14,14 +15,16 @@ const ReferenceCard = memo(function ReferenceCard({ event, task, onError }: {
   event: HubEvent; task: TaskView; onError: (message: string) => void;
 }) {
   const p = event.payload;
+  const markdown = event.kind === 'assistant' || event.kind === 'update' || event.kind === 'user';
   const open = useMemo(() => (href: string) => { if(previewLink(task.id,href))return; void api.open(href, task.id).catch((e: Error) => onError(e.message)); }, [task.id, onError]);
   return <>
     <div className="reference-author">
       <b>{event.kind === 'user' ? '나' : event.kind === 'assistant' || event.kind === 'update' ? ENGINE_LABEL[engineOf(task.engine)] : event.kind === 'status' ? '알림' : '질문·승인'}</b>
       <time dateTime={event.ts}>{new Date(event.ts).toLocaleString('ko-KR')}</time>
+      {markdown && typeof p.text === 'string' && p.text && <CopyButton text={p.text} label="메시지 Markdown 원문 복사" onNotice={onError} />}
     </div>
-    {event.kind === 'assistant' || event.kind === 'update' || event.kind === 'user'
-      ? <div className="body md"><Markdown text={String(p.text ?? '')} mentions={event.kind === 'user'} taskId={task.id} onLocalLink={open} /></div>
+    {markdown
+      ? <div className="body md"><Markdown text={String(p.text ?? '')} mentions={event.kind === 'user'} taskId={task.id} onLocalLink={open} onNotice={onError} /></div>
       : event.kind === 'approval'
         ? <><strong>{p.toolName}</strong><pre>{JSON.stringify(p.input, null, 2)}</pre></>
         : <div className="body">{String(p.text ?? p.detail?.message ?? '')}</div>}

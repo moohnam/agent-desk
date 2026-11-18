@@ -11,6 +11,7 @@ import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
 import { useNow } from './clock.ts';
 import { LongText, Markdown } from './Markdown.tsx';
+import { CopyButton } from './CopyButton.tsx';
 import { ChannelSources } from './ChannelSources.tsx';
 import { modelShort } from './projects.ts';
 import { NoteEditor } from './Note.tsx';
@@ -123,8 +124,9 @@ function PostViewInner(props: Props) {
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} />
-    : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink]);
+  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
+    : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink, props.onError]);
+  const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
   const engine = task?.engine ?? 'claude';
   const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
     : [engine, ENGINE_SHORT[engineOf(engine)]];
@@ -174,6 +176,7 @@ function PostViewInner(props: Props) {
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
             <RelTime iso={post.event.ts} />
           </time>
+          {copyText && <CopyButton text={copyText} label="메시지 Markdown 원문 복사" className="reference-button" onNotice={props.onError} />}
           {canEditNote && !editing && <>
             {props.onAttachNote && <button type="button" className="icon-btn reference-button" title="에이전트 지시에 첨부" aria-label="에이전트 지시에 첨부"
               disabled={deleting} onClick={props.onAttachNote}><Paperclip /></button>}
@@ -319,7 +322,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
 }) {
   const p = post.event.payload;
   const onLocalLink = useMemo(() => openLink(post.taskId, onError), [post.taskId, onError]);
-  const body = useMemo(() => <Markdown text={String(p.text ?? '')} taskId={post.taskId} onLocalLink={onLocalLink} />, [p.text, post.taskId, onLocalLink]);
+  const body = useMemo(() => <Markdown text={String(p.text ?? '')} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={onError} />, [p.text, post.taskId, onLocalLink, onError]);
   const r = post.resolution;
   const [sent, setSent] = useState<string | null>(null);
   const answer = r?.kind === 'user' ? String(r.payload.text ?? '') : sent;

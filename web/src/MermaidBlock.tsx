@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Modal } from './Modal.tsx';
 import { renderWhenVisible } from './mermaid.ts';
@@ -15,7 +15,7 @@ function diagramWidth(image:string) {
   }catch{return undefined;}
 }
 
-export const MermaidBlock = memo(function MermaidBlock({ source }: { source: string }) {
+export const MermaidBlock = memo(function MermaidBlock({ source, copy }: { source: string; copy?: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [result, setResult] = useState<{ source: string; image?: string; background?: string; width?:string; error?: string }>();
   const [large, setLarge] = useState(false);
@@ -37,6 +37,7 @@ export const MermaidBlock = memo(function MermaidBlock({ source }: { source: str
       <div className="mermaid-tools">
         <span className="muted small">Mermaid</span><span className="spacer" />
         {current?.image && <button className="link" onClick={() => setLarge(true)}>크게 보기</button>}
+        {copy}
       </div>
       {current?.image ? <div className="mermaid-canvas" style={{ backgroundColor: current.background }}><img src={current.image} alt="Mermaid 도표" style={{width:current.width}} /></div>
         : current?.error ? <p className="muted small" role="alert">{current.error}</p>

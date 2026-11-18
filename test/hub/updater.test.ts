@@ -578,6 +578,46 @@ function prepareGuardFixture(role: 'shared' | 'remote' = 'shared') {
   return {dir,data,deploy,bin,marker,config,commit,fakeNpm};
 }
 
+test('official updates require the exact commit CI result before preparation and replace a legacy local verification', async () => {
+  const f = prepareGuardFixture(), previousPath = process.env.PATH;
+  const source = 'https://github.com/moohnam/agent-desk.git', capture = join(f.data, 'commands');
+  const config = {...f.config, source};
+  // Exercise real Git operations on the fixture, including the official source check, without network access.
+  writeFileSync(join(f.bin, 'git'), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';
+const args=process.argv.slice(2); const source=${JSON.stringify(source)};
+if (args[0]==='clone' && args.at(-2)===source) args[args.length-2]=${JSON.stringify(f.config.source)};
+if (args.slice(2).join(' ')==='remote get-url origin') console.log(source);
+else process.exit(spawnSync('git',args,{env:{...process.env,PATH:${JSON.stringify(previousPath)}},stdio:'inherit'}).status ?? 1);
+`, {mode:0o755});
+  f.fakeNpm(`import {appendFileSync} from 'node:fs'; appendFileSync(${JSON.stringify(capture)},process.argv.slice(2).join(' ')+'\\n');`);
+  let passed = false;
+  const checked: string[] = [];
+  const worker = new UpdateWorker(config,{ciPassed: async commit => { checked.push(commit); return passed; }});
+  process.env.PATH = f.bin + ':' + previousPath;
+  try {
+    worker.claim();
+    writePrivateJson(worker.statePath, {candidate:f.commit,phase:'waiting'});
+    writePrivateJson(join(f.deploy, 'verified', f.commit + '.json'), {commit:f.commit,policy:createHash('sha256').update(JSON.stringify({source,node:process.version,checks:1})).digest('hex')});
+    assert.throws(() => worker.approve(f.commit,'immediate'),/검증하지 않은/);
+    await assert.rejects(worker.prepare(),/GitHub CI 통과/);
+    assert.equal(existsSync(capture),false);
+    assert.equal(worker.isVerifiedCandidate(f.commit),false);
+    passed = true;
+    assert.equal(await worker.prepare(),f.commit);
+    assert.equal(readFileSync(capture,'utf8'),'ci --ignore-scripts --no-audit --no-fund\nrun build\n');
+    assert.equal(worker.isVerifiedCandidate(f.commit),true);
+    assert.equal(await worker.prepare(),f.commit,'same already verified release can be reused');
+    assert.deepEqual(checked,[f.commit,f.commit]);
+    assert.doesNotThrow(() => worker.approve(f.commit,'immediate'));
+    writeFileSync(join(f.deploy,'releases',f.commit,'package.json'),'{}');
+    await assert.rejects(worker.prepare(),/Command failed/);
+    assert.equal(readFileSync(capture,'utf8'),'ci --ignore-scripts --no-audit --no-fund\nrun build\n');
+  } finally {
+    worker.close(); process.env.PATH = previousPath;
+    rmSync(f.dir,{recursive:true,force:true});
+  }
+});
+
 test('processes reclaim a stale legacy worker lock exclusively', {timeout: 15_000}, async () => {
   const f = prepareGuardFixture(), configPath = join(f.dir, 'update.json'), lock = join(f.deploy, 'worker.lock');
   writePrivateJson(configPath, f.config);

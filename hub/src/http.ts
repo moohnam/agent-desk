@@ -349,14 +349,29 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
         return send(res,200,document);
       }
-      if (req.method === 'GET' && (url.pathname === '/api/file-path' || /^\/api\/workspaces\/[^/]+\/file-path$/.test(url.pathname))) {
-        const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
-        if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
+      const reveal = req.method === 'POST' && (url.pathname === '/api/file-reveal' || /^\/api\/workspaces\/[^/]+\/file-reveal$/.test(url.pathname));
+      if (reveal || req.method === 'GET' && (url.pathname === '/api/file-path' || /^\/api\/workspaces\/[^/]+\/file-path$/.test(url.pathname))) {
+        const input = reveal ? await readJson(req) : {
+          task_id: url.searchParams.get('task_id'), href: url.searchParams.get('href'), preview_id: url.searchParams.get('preview_id'),
+        };
+        const { task_id: task, href, preview_id: previewId } = input;
+        if (typeof task !== 'string' || !task || typeof href !== 'string' || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
         const source = parts[1] === 'workspaces' ? id : workspaces.legacyOwner('task', task) ?? '';
-        const approved = previews.approvedPath(url.searchParams.get('preview_id'), source, task, href);
-        if (source || localAuthorityId) return send(res, 200, { path: await workspaces.documentPath(source || localAuthorityId!, task, href, approved) });
-        if (remoteLocation(hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
-        return send(res, 200, { path: await workspaceDocumentPath(hub, task, href, approved) });
+        let canReveal = process.platform === 'darwin' && local && !source && localOrigin(req.headers.origin);
+        if (reveal && !canReveal) throw new HttpError(403, 'Finder에서는 이 Mac의 파일만 볼 수 있습니다.');
+        const approved = previews.approvedPath(typeof previewId === 'string' ? previewId : null, source, task, href);
+        if (!source && !localAuthorityId && remoteLocation(hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
+        const path = source || localAuthorityId ? await workspaces.documentPath(source || localAuthorityId!, task, href, approved)
+          : await workspaceDocumentPath(hub, task, href, approved);
+        if (canReveal && localAuthorityId) {
+          // The split local authority also knows whether an old task belongs to a legacy remote runner.
+          const target = await workspaces.read(localAuthorityId, '/open-target?' + new URLSearchParams({href,task_id:task})).catch(() => undefined);
+          canReveal = target?.status === 200 && target.body?.kind === 'file';
+        }
+        if (!reveal) return send(res, 200, { path, ...(canReveal && { canReveal }) });
+        if (!canReveal) throw new HttpError(403, 'Finder에서는 이 Mac의 파일만 볼 수 있습니다.');
+        await (options.openTarget ?? openTarget)({ kind: 'file', path, reveal: true });
+        return send(res, 200, { ok: true });
       }
       if(req.method==='GET'&&url.pathname==='/api/streams') {
         const token=access.token;

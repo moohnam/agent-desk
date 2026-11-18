@@ -38,6 +38,7 @@ export function Updates({state, local}: {state: UpdatesState; local: boolean}) {
     <p className="muted small" role="status">{phase}</p>
     {view && !view.current && <p className="muted small">현재 실행 버전을 알 수 없어 원격 버전과 비교할 수 없습니다.</p>}
     {view?.discoveryError && <p className="muted small">자동 버전 확인 실패: {view.discoveryError} 새 버전 확인 버튼으로 다시 확인해 주세요.</p>}
+    {view?.ciPending && <p className="muted small">최신 커밋의 GitHub CI 통과 기록이 없습니다.</p>}
     {view?.summary && <div className="update-summary">
       <strong>준비된 버전의 변경 요약</strong>
       <p className="muted small"><code>{view.available}</code> 기준</p>

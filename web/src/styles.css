@@ -305,6 +305,8 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 13px; }
 .md th, .md td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; }
+.markdown-copy-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px; margin-bottom: 8px; }
+.md .markdown-copy-block > :is(pre, table) { margin: 0; }
 .md a { color: var(--accent); }
 /* Opens in a local app (via the hub), not a browser tab. */
 .md a.local-link { text-decoration-style: dotted; }

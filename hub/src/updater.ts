@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { controlRequest, type RuntimeRole, type RuntimeStatus } from './runtime-control.ts';
 import { assertTrustedPath, assertTrustedTree, destinationPath } from './trusted-path.ts';
 import { resolveLocalLaunchSettings } from './runner/local-launch.ts';
+import { updateCiPassed, usesUpdateCi } from './update-ci.ts';
 
 const exec = promisify(execFile);
 const ROLES: RuntimeRole[] = ['daemon', 'local', 'hub', 'shared', 'remote'];
@@ -90,14 +91,16 @@ export class UpdateWorker {
   private lock?: { path: string; database: DatabaseSync; token: string };
   private readonly node: string;
   private readonly commandTimeoutMs: number;
+  private readonly ciPassed: (commit: string) => Promise<boolean>;
   private prepareToken?: string;
   private prepareUncertain = false;
   private activating = false;
   /** Whether the activation in progress has stopped a runtime: only then is a failure an unfinished switch. */
   private switched = false;
-  constructor(config: UpdateConfig, options: { node?: string; commandTimeoutMs?: number } = {}) {
+  constructor(config: UpdateConfig, options: { node?: string; commandTimeoutMs?: number; ciPassed?: (commit: string) => Promise<boolean> } = {}) {
     this.config = validateUpdateConfig(config); this.node = options.node ?? process.execPath;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 15 * 60_000;
+    this.ciPassed = options.ciPassed ?? updateCiPassed;
     if (!Number.isSafeInteger(this.commandTimeoutMs) || this.commandTimeoutMs < 1) throw new Error('명령 제한 시간은 양의 정수여야 합니다');
     this.statePath = join(this.config.deploymentDir, 'state.json');
   }
@@ -137,7 +140,7 @@ export class UpdateWorker {
       if (state.approval) throw new Error('기존 업데이트 승인을 먼저 취소하세요');
       if (state.candidate !== commit) throw new Error('현재 확인한 업데이트 후보와 승인 커밋이 다릅니다');
       this.deploymentPaths(commit);
-      if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 후보는 승인할 수 없습니다');
+      if (!this.isVerifiedCandidate(commit)) throw new Error('검증하지 않은 후보는 승인할 수 없습니다');
       const approval = {commit, mode, token: randomUUID()};
       writePrivateJson(this.approvalPath, approval);
       return approval;
@@ -157,6 +160,19 @@ export class UpdateWorker {
     if (!current || current.token !== approval.token || current.commit !== approval.commit) throw new Error('업데이트 승인이 취소되거나 바뀌었습니다');
   }
   private marker(commit: string) { return join(this.config.deploymentDir, 'verified', commit + '.json'); }
+  private verificationPolicy() {
+    const checks = usesUpdateCi(this.config) ? 'github-main-ci-v1' : 1;
+    return createHash('sha256').update(JSON.stringify({ source: this.config.source, node: process.version, checks })).digest('hex');
+  }
+  isVerifiedCandidate(commit: string): boolean {
+    if (!sha(commit)) return false;
+    const marker = this.marker(commit);
+    assertTrustedPath(marker, {kind: 'file', private: true, allowMissing: true});
+    if (!existsSync(marker)) return false;
+    if (!usesUpdateCi(this.config)) return true;
+    const recorded = JSON.parse(readFileSync(marker, 'utf8'));
+    return recorded?.commit === commit && recorded.policy === this.verificationPolicy();
+  }
   private owner() { return createHash('sha256').update(this.config.deploymentDir).digest('hex'); }
   claim() {
     if (this.lock) throw new UpdateWorkerBusyError();
@@ -302,23 +318,36 @@ export class UpdateWorker {
       await this.command('git', ['--git-dir', mirror, 'fetch', '--prune', 'origin'], root);
     }
     assertTrustedTree(mirror);
-    const resolved = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', this.config.ref + '^{commit}'], { maxBuffer: 4096 });
+    const ci = usesUpdateCi(this.config), ref = ci ? 'refs/heads/main' : this.config.ref;
+    const resolved = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', ref + '^{commit}'], { maxBuffer: 4096 });
     const commit = resolved.stdout.trim();
     if (!sha(commit)) throw new Error('Git 커밋을 고정하지 못했습니다');
     this.deploymentPaths(commit);
     const release = join(root, 'releases', commit), marker = this.marker(commit);
-    const policy = createHash('sha256').update(JSON.stringify({ source: this.config.source, node: process.version, checks: 1 })).digest('hex');
-    if (existsSync(marker) && JSON.parse(readFileSync(marker, 'utf8')).policy === policy && existsSync(release)) return commit;
+    const policy = this.verificationPolicy();
+    if (existsSync(marker) && JSON.parse(readFileSync(marker, 'utf8')).policy === policy && (!ci || this.isVerifiedCandidate(commit)) && existsSync(release)) {
+      if (ci) await this.verifyCheckout(release,commit);
+      return commit;
+    }
+    if (ci && !await this.ciPassed(commit)) throw new Error('이 커밋의 GitHub CI 통과가 아직 확인되지 않았습니다.');
     mkdirSync(dirname(release), { recursive: true, mode: 0o700 });
     if (!existsSync(release)) await this.command('git', ['--git-dir', mirror, 'worktree', 'add', '--detach', release, commit], root);
+    if (ci) await this.verifyCheckout(release,commit);
     // An incomplete candidate remains isolated for inspection; npm ci recreates only its dependencies.
-    for (const args of [['ci', '--ignore-scripts', '--no-audit', '--no-fund'], ['run', 'typecheck'], ['run', 'build'], ['test']]) {
+    const install = ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], build = ['run', 'build'];
+    const commands = ci ? [install, build] : [install, ['run', 'typecheck'], build, ['test']];
+    for (const args of commands) {
       assertTrustedTree(release);
       await this.command('npm', args, release);
     }
     assertTrustedTree(release);
     for (const role of this.config.roles) if (!existsSync(join(release, ENTRY[role]))) throw new Error(`후보에 실행 진입점이 없습니다: ${role}`);
     writePrivateJson(marker, { commit, policy }); return commit;
+  }
+  private async verifyCheckout(release: string, commit: string) {
+    const head = await exec('git', ['-C', release, 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
+    if (head.stdout.trim() !== commit) throw new Error('후보 체크아웃의 커밋이 바뀌었습니다');
+    await this.command('git', ['diff', '--exit-code', 'HEAD', '--'], release);
   }
   private environment(role: RuntimeRole, commit: string): NodeJS.ProcessEnv {
     const d = this.config.dataDir;
@@ -471,12 +500,10 @@ export class UpdateWorker {
   }
   private async activateApproved(commit: string, approval: UpdateApproval): Promise<boolean> {
     this.deploymentPaths(commit); this.protectedPaths();
-    if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 후보는 실행할 수 없습니다');
+    if (!this.isVerifiedCandidate(commit)) throw new Error('검증하지 않은 후보는 실행할 수 없습니다');
     const previous = this.state(), prepared: { role: RuntimeRole; runtime: RuntimeStatus; lease: string }[] = [];
     const release = join(this.config.deploymentDir, 'releases', commit);
-    const head = await exec('git', ['-C', release, 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
-    if (head.stdout.trim() !== commit) throw new Error('후보 체크아웃의 커밋이 바뀌었습니다');
-    await this.command('git', ['diff', '--exit-code', 'HEAD', '--'], release);
+    await this.verifyCheckout(release,commit);
     const anchor = previous.attempted ?? ((previous.phase === 'failed' || previous.phase === 'switching') ? previous.candidate ?? previous.current : previous.current);
     if (anchor && anchor !== commit) {
       try { await this.command('git', ['--git-dir', join(this.config.deploymentDir, 'repository.git'), 'merge-base', '--is-ancestor', anchor, commit], this.config.deploymentDir); }

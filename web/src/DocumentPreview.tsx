@@ -6,6 +6,7 @@ import { previewLink } from './documentLinks.ts';
 import { DocumentLink } from './DocumentLink.tsx';
 import { splitId } from './federation.ts';
 import { ReferenceMoveButtons } from './ReferenceMoveButtons.tsx';
+import { CopyButton } from './CopyButton.tsx';
 
 const releasePreview=(url:string)=>fetch('/api/preview',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id:url.split('/')[2]}),keepalive:true}).catch(()=>{});
 class PermissionRequired extends Error { constructor(readonly path:string) { super('문서 접근 확인이 필요합니다'); } }
@@ -92,6 +93,7 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
   },[preview,visible]);
   return <section ref={ref} className="reference-card document-card">
     <div className="reference-tools"><FileText/><DocumentLink path={href} taskId={taskId} previewId={preview?.url.split('/')[2]} onPreview={()=>openLink(href)}><strong>{preview?.name??href.split('/').at(-1)}</strong></DocumentLink><span className="spacer"/>
+      {preview?.kind === 'markdown' && typeof preview.text === 'string' && <CopyButton text={preview.text} label="문서 Markdown 원문 복사" onNotice={onError} />}
       <ReferenceMoveButtons first={first} last={last} onMove={direction=>onMove(href,direction)}/>
       <button className="icon-btn" title="원본 파일 다시 가져오기" aria-label="문서 새로고침" disabled={loading} onClick={()=>{setReady(true);setRequest(value=>({revision:value.revision+1,refresh:true}));}}><RotateCw/></button>
       <button className="icon-btn" title="문서 닫기" aria-label="문서 닫기" onClick={remove}><X/></button>
@@ -110,6 +112,6 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
     {preview?.kind==='html'&&frameReady&&<iframe title={preview.name} src={preview.url} sandbox="" referrerPolicy="no-referrer" className="document-frame"/>}
     {preview?.kind==='html'&&!frameReady&&<div className="document-frame"/>}
     {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url} taskId={taskId} linkBase={href}
-      onLocalLink={openLink}/></div>}
+      onLocalLink={openLink} onNotice={onError}/></div>}
   </section>;
 });

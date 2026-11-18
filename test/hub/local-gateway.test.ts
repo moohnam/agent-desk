@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -123,6 +123,21 @@ test('local gateway forwards compose and retains one offline message across its 
     assert.equal(openedFile.status, 200, JSON.stringify(openedFile.body));
     assert.equal(opened.length, 1);
     assert.deepEqual(opened[0], {kind: 'file', path: original, reveal: false});
+    const mac = process.platform === 'darwin';
+    const fileParams = new URLSearchParams({task_id:taskId,href:'report.html'});
+    const sourceFile = realpathSync(original);
+    assert.deepEqual((await api('/file-path?' + fileParams)).body,{path:sourceFile,...(mac && {canReveal:true})});
+    assert.equal((await api('/file-reveal','POST',Object.fromEntries(fileParams))).status,mac ? 200 : 403);
+    if (mac) assert.deepEqual(opened[1],{kind:'file',path:sourceFile,reveal:true});
+    const localTask = authority.hub.store.getTask(taskId)!;
+    authority.hub.store.createProject({id:'legacy-remote-project', name:'legacy-remote', root_path:`ws20:${project}`, created_at:localTask.created_at});
+    const legacyTask = authority.hub.store.createTask({...localTask, id:'legacy-remote-task', project_id:'legacy-remote-project'});
+    const localSession = authority.hub.store.latestSession(taskId)!;
+    authority.hub.store.createSession({...localSession, id:'legacy-remote-session', task_id:legacyTask.id, cwd:`ws20:${project}`, status:'parked'});
+    const remoteFile = new URLSearchParams({task_id:legacyTask.id,href:'report.html'});
+    assert.equal((await api('/file-path?' + remoteFile)).status,409);
+    assert.notEqual((await api('/file-reveal','POST',Object.fromEntries(remoteFile))).status,200);
+    assert.equal(opened.length,mac ? 2 : 1);
 
     const skill = await api('/skills', 'POST', {name: 'gateway-check', description: 'source skill'});
     assert.equal(skill.status, 201, JSON.stringify(skill.body));

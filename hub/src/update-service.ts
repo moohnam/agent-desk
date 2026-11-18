@@ -8,6 +8,7 @@ import type { UpdateMode, UpdateSummary, UpdateView } from '../../shared/update.
 import { HttpError } from './errors.ts';
 import { assertTrustedPath } from './trusted-path.ts';
 import { readUpdateConfig, UpdateWorker, type UpdateApproval, type UpdateConfig } from './updater.ts';
+import { updateCiPassed, usesUpdateCi } from './update-ci.ts';
 
 const exec = promisify(execFile);
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
@@ -25,6 +26,7 @@ interface WorkerView {
   status: UpdateWorker['status'];
   approve: UpdateWorker['approve'];
   cancelApproval: UpdateWorker['cancelApproval'];
+  isVerifiedCandidate: UpdateWorker['isVerifiedCandidate'];
 }
 interface Options {
   configPath?: string;
@@ -33,6 +35,7 @@ interface Options {
   runCheck?: (configPath: string) => Promise<void>;
   launchApproval?: (configPath: string, token: string) => Promise<void>;
   discover?: (config: UpdateConfig) => Promise<string | null>;
+  ciPassed?: (commit: string) => Promise<boolean>;
 }
 
 /** Local settings facade. It never enables a service or adopts an unmanaged runtime. */
@@ -49,15 +52,18 @@ export class UpdateService {
   private summaryCache?: { key: string; value: UpdateSummary | null };
   private summaryPending?: { key: string; value: Promise<UpdateSummary | null> };
   private runtimeCache?: { key: string; until: number; value: ReturnType<WorkerView['status']> };
-  private discovery?: { key: string; until: number; latest: string | null; error: string | null; pending?: Promise<void> };
+  private discovery?: { key: string; until: number; latest: string | null; error: string | null; ciPending?: boolean; pending?: Promise<void> };
   private discoveryChild?: ChildProcess;
   private closed = false;
   private readonly discoverOverride?: Options['discover'];
+  private readonly ciPassed: (commit: string) => Promise<boolean>;
+  private ciLookup?: { commit: string; until: number; result: Promise<boolean> };
 
   constructor(options: Options = {}) {
     this.configPath = options.configPath ?? join(homedir(), '.local/share/agent-desk/update.json');
     this.current = options.current === undefined ? STARTED_SHA : options.current;
     this.discoverOverride = options.discover;
+    this.ciPassed = options.ciPassed ?? updateCiPassed;
     this.workerFactory = options.worker ?? (config => new UpdateWorker(config));
     this.runCheck = options.runCheck ?? (async path => { await exec(process.execPath, [CLI, 'check', path], { timeout: 20 * 60_000, maxBuffer: 64 * 1024 }); });
     this.launchApproval = options.launchApproval ?? ((path, token) => new Promise((resolve, reject) => {
@@ -83,7 +89,7 @@ export class UpdateService {
     if (this.closed) return this.discovery;
     const entry = { key, until: Date.now() + 300_000, latest: null, error: null } as NonNullable<UpdateService['discovery']>;
     this.discovery = entry;
-    const ref = config.ref;
+    const ci = usesUpdateCi(config), ref = ci ? 'refs/heads/main' : config.ref;
     // A pinned SHA cannot announce a moving version; custom rev expressions use explicit prepare.
     if (/^[a-f0-9]{40}$/.test(ref)) { entry.latest = ref; return entry; }
     const names = ref.startsWith('refs/heads/') || ref.startsWith('refs/tags/') ? [ref]
@@ -93,20 +99,35 @@ export class UpdateService {
       return entry;
     }
     entry.pending = (async () => {
-      if (this.discoverOverride) { entry.latest = await this.discoverOverride(config); return; }
-      const operation = exec('git', ['ls-remote', '--', config.source, ...names, ...names.filter(name => name.startsWith('refs/tags/')).map(name => `${name}^{}`)],
-        { timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
-      this.discoveryChild = operation.child;
-      const response = await operation;
-      const refs = new Map(response.stdout.trim().split('\n').filter(Boolean).map(line => {
-        const [commit, name] = line.split(/\s+/); return [name, commit] as const;
-      }));
-      const commits = new Set(names.map(name => refs.get(name + '^{}') ?? refs.get(name)).filter(sha));
-      if (commits.size !== 1) throw new Error('remote ref missing or ambiguous');
-      entry.latest = [...commits][0];
-    })().catch(() => { entry.error = '새 버전을 자동으로 찾지 못했습니다. 새 버전 확인으로 다시 시도하세요.'; })
+      let commit: string | null;
+      if (this.discoverOverride) commit = await this.discoverOverride(config);
+      else {
+        const operation = exec('git', ['ls-remote', '--', config.source, ...names, ...names.filter(name => name.startsWith('refs/tags/')).map(name => `${name}^{}`)],
+          { timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+        this.discoveryChild = operation.child;
+        const response = await operation;
+        const refs = new Map(response.stdout.trim().split('\n').filter(Boolean).map(line => {
+          const [commit, name] = line.split(/\s+/); return [name, commit] as const;
+        }));
+        const commits = new Set(names.map(name => refs.get(name + '^{}') ?? refs.get(name)).filter(sha));
+        if (commits.size !== 1) throw new Error('remote ref missing or ambiguous');
+        commit = [...commits][0];
+      }
+      if (commit && ci && !await this.checkCi(commit)) {
+        entry.ciPending = true;
+        entry.until = Date.now() + 30_000;
+      } else entry.latest = commit;
+    })().catch(() => { entry.error = ci ? 'Git 또는 GitHub CI에 접속하지 못했습니다.' : '새 버전을 자동으로 찾지 못했습니다.'; })
       .finally(() => { entry.pending = undefined; this.discoveryChild = undefined; });
     return entry;
+  }
+
+  private checkCi(commit: string) {
+    if (this.ciLookup?.commit === commit && this.ciLookup.until > Date.now()) return this.ciLookup.result;
+    const lookup = { commit, until: Infinity, result: this.ciPassed(commit) };
+    this.ciLookup = lookup;
+    void lookup.result.then(passed => { lookup.until = Date.now() + (passed ? 300_000 : 30_000); }, () => { lookup.until = Date.now() + 30_000; });
+    return lookup.result;
   }
 
   close() { this.closed = true; this.discoveryChild?.kill(); }
@@ -173,11 +194,13 @@ export class UpdateService {
     const result: UpdateView = { ...initial, configured: true, targets: config.roles, phase: busyChecking ? 'checking' : 'idle' };
     result.latest = discovered?.latest ?? null;
     result.discoveryError = discovered?.error ?? null;
+    if (discovered?.ciPending) result.ciPending = true;
     try {
       const state = worker.state();
-      result.available = sha(state.candidate) ? state.candidate : null;
+      result.available = sha(state.candidate) && (!usesUpdateCi(config) || worker.isVerifiedCandidate(state.candidate)) ? state.candidate : null;
       if (!busyChecking) result.phase = state.phase === 'preparing' ? (result.available ? 'ready' : 'idle') : state.phase;
       if (!busyChecking && state.phase === 'waiting' && !state.approval && !state.error && result.available) result.phase = 'ready';
+      else if (!busyChecking && state.phase === 'waiting' && !state.approval && !state.error && !result.available) result.phase = 'idle';
       const waitingForWork = state.phase === 'waiting' && state.error === '작업이 유휴 상태가 아닙니다';
       if (state.phase === 'failed' || (state.error && !waitingForWork)) {
         result.error = '업데이트 처리 중 문제가 발생했습니다. 이 머신의 워커 상태를 확인하세요.';

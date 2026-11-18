@@ -16,7 +16,7 @@ const command = /\\[a-zA-Z]+/;
 const equation = /^[\w\s.+*/^{}()-]+=[\w\s.+*/^{}()=-]+$/;
 
 /** Normalize alternate math notation outside Markdown code, links, HTML, and existing math. */
-export function normalizeMathNotation(source: string): string {
+export function normalizeMathNotation(source: string, onReplace?: (offset: number, original: string, replacement: string) => void): string {
   if (!/\\[([]|\([^\n)]*\\[a-zA-Z]|^\s*\[\s*$/m.test(source)) return source;
   const ranges: [number, number][] = [];
   const protect = (node: Root | RootContent) => {
@@ -29,22 +29,25 @@ export function normalizeMathNotation(source: string): string {
   };
   protect(notationParser.parse(source));
 
-  const normalize = (text: string) => text.replace(
+  const normalize = (start: number, end: number) => source.slice(start, end).replace(
     /(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]|(?<!\\)\\\(([^\n]*?)(?<!\\)\\\)|^([ \t]*)\[[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*\](?=[ \t]*(?:\r?$))|(?<![\\\w])\(([^\n()]*\\[a-zA-Z][^\n()]*)\)/gm,
-    (whole, display: string | undefined, inline: string | undefined, indent: string | undefined, legacyBlock: string | undefined, legacyInline: string | undefined) => {
-      if (display != null) return `\n$$\n${display.trim()}\n$$\n`;
-      if (inline != null) return `$${inline}$`;
-      if (legacyBlock != null) return command.test(legacyBlock) || equation.test(legacyBlock.trim())
-        ? `${indent}$$\n${legacyBlock.trim()}\n${indent}$$` : whole;
-      return `$${legacyInline}$`;
+    (whole: string, display: string | undefined, inline: string | undefined, indent: string | undefined, legacyBlock: string | undefined, legacyInline: string | undefined, offset: number) => {
+      let replacement = whole;
+      if (display != null) replacement = `\n$$\n${display.trim()}\n$$\n`;
+      else if (inline != null) replacement = `$${inline}$`;
+      else if (legacyBlock == null) replacement = `$${legacyInline}$`;
+      else if (command.test(legacyBlock) || equation.test(legacyBlock.trim()))
+        replacement = `${indent}$$\n${legacyBlock.trim()}\n${indent}$$`;
+      if (replacement !== whole) onReplace?.(start + offset, whole, replacement);
+      return replacement;
     },
   );
   let result = '', cursor = 0;
   for (const [start, end] of ranges) {
-    result += normalize(source.slice(cursor, start)) + source.slice(start, end);
+    result += normalize(cursor, start) + source.slice(start, end);
     cursor = end;
   }
-  return result + normalize(source.slice(cursor));
+  return result + normalize(cursor, source.length);
 }
 
 /** Avoid interpreting ordinary dollar amounts ("$5 and $10") as one math expression. */

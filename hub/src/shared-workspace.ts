@@ -206,6 +206,7 @@ export class SharedWorkspace {
         if (req.method === 'GET' && url.pathname === '/v1/file-path') {
           const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
           if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
+          if (this.localAuthority && remoteLocation(this.hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
           const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined);
           this.assertPeer(peer);
           return json(res, 200, { path });

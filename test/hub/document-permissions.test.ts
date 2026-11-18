@@ -10,6 +10,7 @@ import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
 import { Access } from '../../hub/src/access.ts';
 import { createHttpServer } from '../../hub/src/http.ts';
+import type { LinkTarget } from '../../hub/src/open.ts';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { DocumentPermissionError, workspaceFile } from '../../hub/src/shared-files.ts';
 import { DocumentPreviews } from '../../hub/src/document-previews.ts';
@@ -86,7 +87,8 @@ test('local and remote HTTP previews require explicit canonical approval and kee
   const local = make('local'), remote = make('remote');
   const authority = new SharedWorkspace(remote.hub), peer = authority.grant('preview'), runner = authority.server();
   const links = new WorkspaceLinks(local.store);
-  const gateway = createHttpServer(local.hub, new Access(join(dir, 'access-token'), 4317), join(dir, 'uploads'), {workspaces: links});
+  const access = new Access(join(dir, 'access-token'), 4317), opened: LinkTarget[] = [];
+  const gateway = createHttpServer(local.hub, access, join(dir, 'uploads'), {workspaces: links, openTarget: async target => { opened.push(target); }});
   try {
     const runnerUrl = await listen(runner), url = await listen(gateway);
     const source = await links.attach({name: 'fixture', url: runnerUrl, token: peer.token});
@@ -113,9 +115,18 @@ test('local and remote HTTP previews require explicit canonical approval and kee
         const response = await fetch(url + (owner ? `/api/workspaces/${owner}` : '/api') + '/file-path?' + new URLSearchParams({task_id:taskId,href,...(previewId ? {preview_id:previewId} : {})}));
         return {status:response.status,body:await response.json() as any};
       };
+      const reveal = (href: string, previewId?: string, requestHeaders: Record<string, string> = {}) => fetch(
+        url + (owner ? `/api/workspaces/${owner}` : '/api') + '/file-reveal',
+        {method: 'POST', headers: {'content-type': 'application/json', ...requestHeaders}, body: JSON.stringify({ task_id: task, href, preview_id: previewId })},
+      );
       const grant = allowed.body.url.split('/')[2];
       assert.equal((await metadata(alias)).status,403,'outside metadata needs the existing document grant');
-      assert.deepEqual(await metadata(alias,grant),{status:200,body:{path:first}},'return the remote source, not the hub preview copy');
+      const localFinder = !owner && process.platform === 'darwin';
+      assert.deepEqual(await metadata(alias,grant),{status:200,body:{path:first,...(localFinder && {canReveal:true})}},'return the source, with Finder capability only for local Mac files');
+      assert.equal((await reveal(alias)).status,403,'Finder respects document approval');
+      assert.equal((await reveal(alias,grant,{origin:'https://other.example'})).status,403);
+      assert.equal((await reveal(alias,grant)).status,localFinder ? 200 : 403);
+      if (localFinder) assert.deepEqual(opened,[{kind:'file',path:first,reveal:true}]);
       assert.equal((await metadata(second,grant)).status,403,'one grant cannot authorize a sibling document');
       assert.notEqual((await metadata(alias,grant,'wrong-task')).status,200);
       assert.equal(await fetch(url + allowed.body.url).then(r => r.text()), '<html><head></head><body><h1>first fixture</h1></body></html>');
@@ -123,10 +134,17 @@ test('local and remote HTTP previews require explicit canonical approval and kee
       assert.equal((await post(input)).status, 403, 'an approved cache must not satisfy an unapproved request');
       await unlink(alias); await symlink(second, alias);
       assert.equal((await metadata(alias,grant)).status,403,'a redirected source cannot reuse the old grant');
+      assert.equal((await reveal(alias,grant)).status,403,'a redirected source cannot be revealed');
       const changed = await post({...input, approved_path: first}); assert.equal(changed.status, 403); assert.equal(changed.body.path, second);
       const replacement = await post({...input, approved_path: second}); assert.equal(replacement.status, 200);
       assert.equal(await fetch(url + replacement.body.url).then(r => r.text()), '<html><head></head><body><h1>second fixture</h1></body></html>');
     }
+    access.isLocal = () => false;
+    access.hostAllowed = () => true;
+    const cookie = access.addDevice('phone','test')[0].split(';')[0];
+    const fromPhone = await fetch(url + '/api/file-reveal', {method:'POST',headers:{'content-type':'application/json',cookie},body:JSON.stringify({task_id:local.task.id,href:alias})});
+    assert.equal(fromPhone.status,403);
+    assert.equal(opened.length,process.platform === 'darwin' ? 1 : 0);
     await assert.rejects(links.fetchFile(source.id, remote.task.id, alias), {status: 403});
     const invalid = await fetch(runnerUrl + '/v1/file?' + new URLSearchParams({task_id: remote.task.id, href: alias, approved_path: 'relative.html'}), {headers});
     assert.equal(invalid.status, 400);

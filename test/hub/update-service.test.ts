@@ -33,7 +33,9 @@ function fixture() {
     cancelApproval: (commit?: string, token?: string) => {
       if (!state.approval || commit && state.approval.commit !== commit || token && state.approval.token !== token) return false;
       delete state.approval; return true;
-    } };
+    },
+    isVerifiedCandidate: (_commit: string) => true,
+  };
   const options = { configPath, current: old, worker: () => worker, runCheck: async () => { checks++; },
     launchApproval: async () => { launches++; }, discover: async () => { discoveries++; return next; } };
   const service = new UpdateService(options);
@@ -60,6 +62,36 @@ test('update view reports missing/unsafe config without exposing paths, environm
     writeFileSync(f.configPath, '{"environment":"secret-value"}', { mode: 0o600 });
     const unsafe = await f.service.view();
     assert.equal(unsafe.phase, 'failed'); assert.equal(JSON.stringify(unsafe).includes('secret-value'), false);
+  } finally { f.close(); }
+});
+
+test('official discovery hides unverified main and legacy prepared candidates', async () => {
+  const f = fixture();
+  try {
+    writePrivateJson(f.configPath, {...f.config, source:'https://github.com/moohnam/agent-desk.git', ref:'main'});
+    f.worker.isVerifiedCandidate = () => false;
+    const pending = new UpdateService({...f.options, ciPassed: async commit => {
+      assert.equal(commit, next);
+      return false;
+    }});
+    const waiting = await pending.view(true);
+    assert.equal(waiting.latest, null);
+    assert.equal(waiting.available, null);
+    assert.equal(waiting.ciPending, true);
+    assert.equal(waiting.canApply, false);
+    f.state.error = 'legacy candidate was rejected';
+    assert.equal((await pending.view()).phase,'failed');
+    await pending.check();
+    assert.equal(f.counts().checks,1);
+    delete f.state.error;
+    pending.close();
+    f.worker.isVerifiedCandidate = commit => commit === next;
+    const passed = new UpdateService({...f.options, ciPassed: async commit => commit === next});
+    const ready = await passed.view(true);
+    assert.equal(ready.latest, next);
+    assert.equal(ready.available, next);
+    assert.equal(ready.canApply, true);
+    passed.close();
   } finally { f.close(); }
 });
 
