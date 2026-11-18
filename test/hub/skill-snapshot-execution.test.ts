@@ -112,6 +112,7 @@ test('old local daemon rejects pinned skills and continues to accept plain input
   skills.writeFile('parent', 'SKILL.md', '---\nname: parent\ndescription: parent\n---\nversion one');
   const snapshot = collectSkillBundle(skills, ['parent'])!;
   const commands: HubToRunner[] = [], sockets = new Set<Socket>();
+  let onCommand: (() => void) | undefined;
   const server = createServer(socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket));
     let buffer = '';
@@ -122,7 +123,7 @@ test('old local daemon rejects pinned skills and continues to accept plain input
         const value = JSON.parse(line) as HubToRunner;
         if (value.type === 'auth') socket.write(JSON.stringify({ type: 'hello', runnerId: 'local-fake', host: 'test',
           capabilities: { engines: ['codex'], close: true }, sessions: [], protocolVersion: 1 }) + '\n');
-        else commands.push(value);
+        else { commands.push(value); onCommand?.(); }
       }
     });
   });
@@ -144,7 +145,15 @@ test('old local daemon rejects pinned skills and continues to accept plain input
     client.handle({ type: 'start', sessionId: 's', engine: 'codex', cwd: temp, prompt: '일반 원문', permissionMode: 'default' });
     assert.throws(() => client.handle({ type: 'send', sessionId: 's', text: '추가 원문', skills: ['parent'], steer: true, skillSnapshot: snapshot }), /고정 스킬 버전/);
     client.handle({ type: 'send', sessionId: 's', text: '일반 추가', steer: true });
-    await new Promise<void>(resolve => setTimeout(resolve, 30));
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('runner commands timeout')), 1000);
+      onCommand = () => {
+        if (commands.length < 2) return;
+        clearTimeout(timeout);
+        resolve();
+      };
+      onCommand();
+    });
     assert.equal(commands.length, 2);
     const [start, send] = commands;
     assert.equal(start.type, 'start'); assert.equal(send.type, 'send');
