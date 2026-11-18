@@ -144,6 +144,10 @@ test('only explicit controls approve/cancel a specific prepared SHA; discovered 
   tree = ui.Updates({state, local: true}); button(tree, '예약 취소').props.onClick(); assert.deepEqual(calls.at(-1), ['cancel', b]);
   state.view = status({available: null, summary: null}); tree = ui.Updates({state, local: true});
   assert.ok(text(tree).includes(b)); assert.equal(button(tree, '지금 적용'), undefined); assert.ok(button(tree, '새 버전 준비'));
+  state.view = status({latest: c}); tree = ui.Updates({state, local: true});
+  assert.match(text(tree), /발견한 버전과 준비된 버전이 다릅니다/);
+  assert.ok(button(tree, '새 버전 준비'));
+  button(tree, '지금 적용').props.onClick(); assert.deepEqual(calls.at(-1), [b, 'immediate']);
   state.view = status(); tree = ui.Updates({state, local: false}); assert.equal(button(tree, '지금 적용').props.disabled, true);
 });
 
