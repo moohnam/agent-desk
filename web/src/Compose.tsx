@@ -76,57 +76,70 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
 
 type Mentions = 'route' | 'refer';
 
-export function ResizableEditor({ inputRef, resizeFrom = 'top', children }: {
+export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top', children }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
+  rows: number;
   resizeFrom?: 'top' | 'bottom';
-  children: (control: { id: string; height: number | undefined }) => ReactNode;
+  children: (control: { id: string; rows: number }) => ReactNode;
 }) {
   const id = useId();
-  const [height, setHeight] = useState<number>();
-  const drag = useRef<{ pointer: number; x: number; y: number; height: number; moved: boolean } | null>(null);
+  const [rows, setRows] = useState<number>();
+  const measure = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    const style = getComputedStyle(input), line = parseFloat(style.lineHeight);
+    if (!Number.isFinite(line) || line <= 0) return;
+    const inset = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth].reduce((total, value) => total + parseFloat(value), 0);
+    const visible = Math.max(2, Math.round((input.offsetHeight - inset) / line));
+    const maxRows = Math.max(2, Math.floor((Math.min(620, window.innerHeight / 2) - inset) / line));
+    return { visible, maxRows, line };
+  };
+  const drag = useRef<{ pointer: number; x: number; y: number; size: NonNullable<ReturnType<typeof measure>>; moved: boolean } | null>(null);
   const lastTap = useRef<{ time: number; pointerType: string } | null>(null);
-  const resize = (next: number) => setHeight(Math.round(Math.max(48, Math.min(next, 620, window.innerHeight / 2))));
-  const resizeBy = (height: number, dy: number) => resize(height + dy * (resizeFrom === 'top' ? -1 : 1));
+  const resize = (next: number, max: number) => setRows(Math.max(2, Math.min(next, max)));
+  const resizeBy = ({ visible, maxRows, line }: NonNullable<ReturnType<typeof measure>>, dy: number) =>
+    resize(visible + Math.round(dy / line * (resizeFrom === 'top' ? -1 : 1)), maxRows);
   const grip = <button type="button" className="compose-height-grip" aria-controls={id}
     aria-label="입력창 높이 조절" title="끌거나 방향키로 높이 조절 · 더블클릭 또는 Home으로 기본 크기"
     onMouseDown={e => e.preventDefault()}
     onPointerDown={e => {
-      if (e.button !== 0 || drag.current || !inputRef.current) return;
+      if (e.button !== 0 || drag.current) return;
+      const size = measure();
+      if (!size) return;
       e.currentTarget.setPointerCapture(e.pointerId);
-      drag.current = { pointer: e.pointerId, x: e.clientX, y: e.clientY, height: inputRef.current.offsetHeight, moved: false };
+      drag.current = { pointer: e.pointerId, x: e.clientX, y: e.clientY, size, moved: false };
     }}
     onPointerMove={e => {
       const start = drag.current;
       if (start?.pointer !== e.pointerId) return;
       const dy = e.clientY - start.y;
       start.moved ||= Math.abs(dy) >= 4 || Math.abs(e.clientX - start.x) >= 4;
-      if (start.moved) resizeBy(start.height, dy);
+      if (start.moved) resizeBy(start.size, dy);
     }}
     onPointerUp={e => {
       const start = drag.current;
       if (start?.pointer !== e.pointerId) return;
       const dy = e.clientY - start.y;
       const tap = !start.moved && Math.abs(dy) < 4 && Math.abs(e.clientX - start.x) < 4;
-      if (!tap) resizeBy(start.height, dy);
+      if (!tap) resizeBy(start.size, dy);
       const last = lastTap.current;
       if (tap && last?.pointerType === e.pointerType && e.timeStamp - last.time <= 500) {
-        setHeight(undefined);
+        setRows(undefined);
         lastTap.current = null;
       } else lastTap.current = tap ? { time: e.timeStamp, pointerType: e.pointerType } : null;
     }}
     onLostPointerCapture={e => { if (drag.current?.pointer === e.pointerId) drag.current = null; }}
-    onClick={e => { if (e.detail === 0 && inputRef.current) resize(inputRef.current.offsetHeight + 64); }}
+    onClick={e => { const size = e.detail === 0 && measure(); if (size) resize(size.visible + 1, size.maxRows); }}
     onKeyDown={e => {
       if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); return; }
-      const input = inputRef.current;
-      if (!input || !['ArrowUp', 'ArrowDown', 'Home'].includes(e.key)) return;
+      if (!['ArrowUp', 'ArrowDown', 'Home'].includes(e.key)) return;
       e.preventDefault(); e.stopPropagation();
-      if (e.key === 'Home') setHeight(undefined);
-      else resize(input.offsetHeight + (e.key === 'ArrowUp' ? 24 : -24));
+      if (e.key === 'Home') setRows(undefined);
+      else { const size = measure(); if (size) resize(size.visible + (e.key === 'ArrowUp' ? 1 : -1), size.maxRows); }
     }} />;
   return <div className="compose-editor">
     {resizeFrom === 'top' && grip}
-    {children({ id, height })}
+    {children({ id, rows: rows ?? defaultRows })}
     {resizeFrom === 'bottom' && grip}
   </div>;
 }
@@ -137,7 +150,7 @@ export function ResizableEditor({ inputRef, resizeFrom = 'top', children }: {
  */
 export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top' }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
-  /** Esc with no list open; without it, Esc leaves the field. */
+  /** Esc with no list open; by default it is handled by the containing view. */
   onEscape?: () => void;
   onBlur?: () => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -196,13 +209,15 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
   };
 
   return (
-    <ResizableEditor inputRef={inputRef} resizeFrom={resizeFrom}>{({ id, height }) => (
+    <ResizableEditor inputRef={inputRef} rows={rows} resizeFrom={resizeFrom}>{({ id, rows }) => (
     <div className={`cmp-field${files.over ? ' drop-over' : ''}`} {...browserDrop}>
-      <textarea id={id} ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder} style={{height}}
+      <textarea id={id} ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder}
         onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); setDismissed(false); }}
         onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onBlur={() => { setDismissed(true); onBlur?.(); }} onFocus={() => setDismissed(false)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return;
+          if (e.key === 'Escape' && e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!e.repeat) onSubmit(); return; }
           if (open && sug) {
             if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
@@ -210,7 +225,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
             if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setDismissed(true); return; }
           }
-          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (onEscape) onEscape(); else e.currentTarget.blur(); }
+          if (e.key === 'Escape' && onEscape) { e.preventDefault(); e.stopPropagation(); onEscape(); }
         }} />
       {!app && (
         <>

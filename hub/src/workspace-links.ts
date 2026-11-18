@@ -46,7 +46,6 @@ export class WorkspaceLinks {
   private connectorPolling = new Map<string,Promise<void>>();
   private lastSync = new Map<string,number>();
   private sourceCache?:{at:number;versions:Map<string,SkillBundle>};
-  private skillCapability = new Map<string,boolean>();
   private timer:NodeJS.Timeout;
   private stopped = false;
   private requests = new Map<AbortController,string>();
@@ -60,12 +59,14 @@ export class WorkspaceLinks {
       CREATE TABLE IF NOT EXISTS workspace_view_index(seq INTEGER PRIMARY KEY AUTOINCREMENT,link_id TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS remote_legacy(runner_id TEXT PRIMARY KEY,link_id TEXT NOT NULL,address TEXT NOT NULL,fingerprint TEXT NOT NULL,legacy_json TEXT NOT NULL);
       INSERT INTO workspace_view_index(link_id) SELECT id FROM workspace_link l WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index v WHERE v.link_id=l.id);
-      CREATE TABLE IF NOT EXISTS workspace_delivery_attempt (id TEXT PRIMARY KEY, accepted_at TEXT, attempted_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, failure TEXT, failed_at TEXT, completed_at TEXT);
+      CREATE TABLE IF NOT EXISTS workspace_delivery_attempt (id TEXT PRIMARY KEY, accepted_at TEXT, attempted_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, failure TEXT, failed_at TEXT, completed_at TEXT, unsent_attempts INTEGER);
       CREATE INDEX IF NOT EXISTS workspace_delivery_pending ON workspace_delivery(link_id,status,seq);`);
     if(!(this.db.prepare('PRAGMA table_info(remote_legacy)').all() as {name:string}[]).some(c=>c.name==='link_id'))
       this.db.exec('ALTER TABLE remote_legacy ADD COLUMN link_id TEXT; UPDATE remote_legacy SET link_id=runner_id WHERE link_id IS NULL');
     if(!(this.db.prepare('PRAGMA table_info(workspace_delivery)').all() as {name:string}[]).some(c=>c.name==='prepared_payload'))
       this.db.exec('ALTER TABLE workspace_delivery ADD COLUMN prepared_payload TEXT');
+    if(!(this.db.prepare('PRAGMA table_info(workspace_delivery_attempt)').all() as {name:string}[]).some(c=>c.name==='unsent_attempts'))
+      this.db.exec('ALTER TABLE workspace_delivery_attempt ADD COLUMN unsent_attempts INTEGER');
     this.timer=setInterval(()=>{for(const link of this.rows()){
       void this.flush(link.id);
       void this.pollConnectors(link.id);
@@ -129,7 +130,6 @@ export class WorkspaceLinks {
     const reply=await this.request(link,'/v1/identity');
     if(!('status' in reply)||reply.status!==200||reply.body.version!==1||typeof reply.body.workspace_id!=='string')throw new HttpError(409,'공유 러너 연결을 확인하지 못했습니다');
     link.workspace_id=reply.body.workspace_id;
-    this.skillCapability.set(link.id,reply.body.capabilities?.skill_snapshots===1);
     const legacy=this.legacy(link.id);
     if(legacy.some(row=>!(reply.body.migration?.runner_id===row.runner_id&&reply.body.migration?.address===row.address
       &&reply.body.migration?.fingerprint===row.fingerprint)
@@ -160,7 +160,6 @@ export class WorkspaceLinks {
       ||reply.body.migration?.runner_id!==marker.runner_id||reply.body.migration?.address!==marker.address
       ||reply.body.migration?.fingerprint!==marker.fingerprint)throw new Error('활성 원격 작업공간이 원본 이관 기록과 일치하지 않습니다');
     link.workspace_id=reply.body.workspace_id;
-    this.skillCapability.set(link.id,reply.body.capabilities?.skill_snapshots===1);
     this.db.exec('BEGIN IMMEDIATE');
     try{
       const old=this.db.prepare('SELECT * FROM remote_legacy WHERE runner_id=?').get(runnerId) as Legacy|undefined;
@@ -338,13 +337,10 @@ export class WorkspaceLinks {
       .some(match=>!RESERVED_TAGS.includes(match[1].toLowerCase()));
   }
   private async supportsSkillSnapshots(id:string) {
-    if(this.skillCapability.get(id))return true;
     try {
       const reply=await this.request(this.link(id),'/v1/skills/manifest');
-      if('status' in reply&&reply.status===200&&reply.body?.hashes&&typeof reply.body.hashes==='object'){
-        this.skillCapability.set(id,true);return true;
-      }
-      if('status' in reply&&reply.status===404){this.skillCapability.set(id,false);return false;}
+      if('status' in reply&&reply.status===200&&reply.body?.hashes&&typeof reply.body.hashes==='object')return true;
+      if('status' in reply&&reply.status===404)return false;
     } catch { /* The caller retries after the connection returns. */ }
     return null;
   }
@@ -437,6 +433,7 @@ export class WorkspaceLinks {
         throw new HttpError(429,'미전달 입력 한도에 도달했습니다. 연결 복구 후 다시 보내세요');
       this.db.prepare('INSERT INTO workspace_delivery(id,link_id,digest,payload,prepared_payload) VALUES(?,?,?,?,?)')
         .run(op.id,id,hash,payload,prepared);
+      this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id,accepted_at,unsent_attempts) VALUES(?,?,0)').run(op.id,new Date().toISOString());
       this.db.exec('RELEASE connector_enqueue');
       } catch (error) { this.db.exec('ROLLBACK TO connector_enqueue; RELEASE connector_enqueue'); throw error; }
     }
@@ -451,8 +448,12 @@ export class WorkspaceLinks {
         const row=this.db.prepare('SELECT * FROM workspace_delivery WHERE link_id=? AND status IS NULL ORDER BY seq LIMIT 1').get(id) as Delivery|undefined;
         if(!row)break;
         this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id) VALUES(?)').run(row.id);
+        const attempt=this.db.prepare('SELECT attempts,unsent_attempts FROM workspace_delivery_attempt WHERE id=?').get(row.id) as {attempts:number;unsent_attempts:number|null};
+        // Older gateways increment attempts but cannot mark their attempts as unsent.
+        const mayHaveSent=attempt.unsent_attempts!==attempt.attempts;
         const failure=(value:string)=>this.db.prepare('UPDATE workspace_delivery_attempt SET failure=?,failed_at=? WHERE id=?').run(value,new Date().toISOString(),row.id);
-        this.db.prepare('UPDATE workspace_delivery_attempt SET attempted_at=?,attempts=attempts+1 WHERE id=?').run(new Date().toISOString(),row.id);
+        this.db.prepare('UPDATE workspace_delivery_attempt SET attempted_at=?,attempts=attempts+1,unsent_attempts=? WHERE id=?')
+          .run(new Date().toISOString(),mayHaveSent?null:attempt.attempts+1,row.id);
         if(this.stopped)break;
         try {
           const op=JSON.parse(row.payload) as WorkspaceOperation;
@@ -462,46 +463,40 @@ export class WorkspaceLinks {
             this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
               .run(status,JSON.stringify(body),status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
           };
+          const receipt = async () => {
+            const reply = await this.request(this.link(id), '/v1/receipts/' + encodeURIComponent(op.id));
+            if (this.stopped) return 'unavailable';
+            if ('status' in reply && reply.status === 200 && Number.isInteger(reply.body?.status) && reply.body.status >= 200 && reply.body.status < 500) {
+              complete(reply.body.status, reply.body.body);
+              return 'recorded';
+            }
+            if ('status' in reply && reply.status === 404 && (!mayHaveSent || reply.body?.code === 'receipt_not_found' || reply.body?.error === '처리 기록이 없습니다')) return 'missing';
+            failure('receipt_unavailable');
+            return 'unavailable';
+          };
+          const unsupported = async (feature: string, error: string) => {
+            const state = await receipt();
+            if (state === 'missing') complete(409,{code:'unsupported_feature',feature,error});
+            return state !== 'unavailable';
+          };
           const literalNote = isNoteInput(op.method, op.path, op.body);
           if (literalNote || op.body.note_context !== undefined) {
             const identity = await this.request(this.link(id), '/v1/identity');
             if (!('status' in identity) || identity.status !== 200) { failure('notes_capability_unavailable'); break; }
             if (identity.body?.capabilities?.notes !== 1) {
-              // The runner may have committed the write before it rolled back to an older version.
-              const receipt = await this.request(this.link(id), '/v1/receipts/' + encodeURIComponent(op.id));
-              if (this.stopped) break;
-              if ('status' in receipt && receipt.status === 200 && Number.isInteger(receipt.body?.status)) {
-                complete(receipt.body.status, receipt.body.body);
-                continue;
-              }
-              if (!('status' in receipt) || receipt.status !== 404) { failure('receipt_unavailable'); break; }
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({error:'공유 러너가 메모를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요'}),row.id);
+              if (!await unsupported('notes','공유 러너가 메모를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요')) break;
               continue;
             }
           }
           const selection=op.body.__desk_connector_selection as {scopes:ConnectorScope[];policy:ConnectorPolicy[];hubId:string}|undefined;
           let connectorGrant = op.body.__desk_connector_grant as { expiresAt?: number; inputScoped?:true;capability?:string } | null | undefined;
           if(connectorGrant&&!connectorGrant.inputScoped) {
-            const identity=await this.request(this.link(id),'/v1/identity');
-            if(!('status'in identity)||identity.status!==200){failure('connector_capability_unavailable');break;}
-            if(identity.body?.capabilities?.connector_tags!==1) {
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({error:'업데이트 전 대기 입력입니다. 러너를 업데이트한 뒤 내용을 확인하고 다시 보내세요'}),row.id);
-              continue;
-            }
             // Do not rewrite an operation already committed before a lost response.
-            const receipt=await this.request(this.link(id),'/v1/receipts/'+encodeURIComponent(op.id));
-            if(!('status'in receipt)){failure('receipt_unavailable');break;}
-            if(receipt.status===200&&Number.isInteger(receipt.body?.status)) {
-              this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
-                .run(receipt.body.status,JSON.stringify(receipt.body.body),receipt.body.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
-              continue;
-            }
-            if(receipt.status!==404){failure('receipt_unavailable');break;}
+            const state=await receipt();
+            if(state==='unavailable')break;
+            if(state==='recorded')continue;
             if(connectorInputScopes(op.method,op.path,op.body).length) {
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({error:'업데이트 전 입력의 권한은 자동 승계하지 않습니다. 내용을 확인하고 태그와 함께 다시 보내세요'}),row.id);
+              complete(409,{error:'업데이트 전 입력의 권한은 자동 승계하지 않습니다. 내용을 확인하고 태그와 함께 다시 보내세요'});
               continue;
             }
             if(connectorGrant.capability)this.connectorAuthority?.revoke(connectorGrant.capability);
@@ -511,24 +506,16 @@ export class WorkspaceLinks {
           }
           if (connectorGrant && (!Number.isSafeInteger(connectorGrant.expiresAt) || connectorGrant.expiresAt! <= Date.now())) {
             // A lost response must not turn an already committed input into an expiry error.
-            const receipt=await this.request(this.link(id),'/v1/receipts/'+encodeURIComponent(op.id));
-            if(!('status'in receipt)){failure('receipt_unavailable');break;}
-            if(receipt.status===200&&Number.isInteger(receipt.body?.status)) {
-              this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
-                .run(receipt.body.status,JSON.stringify(receipt.body.body),receipt.body.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
-              continue;
-            }
-            if(receipt.status!==404){failure('receipt_unavailable');break;}
-            this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-              .run(JSON.stringify({ error: '대기 중 외부 연결 허가가 만료되었습니다. 현재 연결을 확인하고 입력을 다시 보내주세요' }), row.id);
+            const state=await receipt();
+            if(state==='unavailable')break;
+            if(state==='missing')complete(409,{error:'대기 중 외부 연결 허가가 만료되었습니다. 현재 연결을 확인하고 입력을 다시 보내주세요'});
             continue;
           }
           if (selection || op.body.__desk_connector_grant) {
             const identity = await this.request(this.link(id), '/v1/identity');
             if (!('status' in identity) || identity.status !== 200) { failure('connector_capability_unavailable'); break; }
             if (identity.body?.capabilities?.connectors !== 1 || ((selection || connectorGrant?.inputScoped) && identity.body?.capabilities?.connector_tags !== 1)) {
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({ error: '공유 러너가 요청별 외부 연결을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요' }), row.id);
+              if (!await unsupported('connectors','공유 러너가 요청별 외부 연결을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요')) break;
               continue;
             }
             if (selection) {
@@ -552,8 +539,7 @@ export class WorkspaceLinks {
             const identity = await this.request(this.link(id), '/v1/identity');
             if (!('status' in identity) || identity.status !== 200) { failure('instructions_capability_unavailable'); break; }
             if (identity.body?.capabilities?.instructions !== 1) {
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({error:'공유 러너가 사용자 지침을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요'}),row.id);
+              if (!await unsupported('instructions','공유 러너가 사용자 지침을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요')) break;
               continue;
             }
           }
@@ -569,13 +555,13 @@ export class WorkspaceLinks {
             const supported=await this.supportsSkillSnapshots(id);
             if(supported===null){failure('skill_manifest_unavailable');break;}
             if(!supported){
-              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
-                .run(JSON.stringify({error:'공유 러너가 스킬 스냅샷을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내세요'}),row.id);
+              if (!await unsupported('skill_snapshots','공유 러너가 스킬 스냅샷을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내세요')) break;
               continue;
             }
           }
           const ref=bundle?{version:bundle.version,selected:bundle.selected,hashes:bundle.hashes,digest:bundle.digest}:null;
           const requestBody=JSON.stringify(ref?{...op,body:{...op.body,__desk_skill_ref:ref}}:op);
+          this.db.prepare('UPDATE workspace_delivery_attempt SET unsent_attempts=NULL WHERE id=?').run(row.id);
           let r=await this.request(this.link(id),'/v1/operation',{method:'POST',body:requestBody});
           if(bundle&&'status' in r&&r.status===409&&r.body?.code==='skill_missing'){
             const prepared=await this.request(this.link(id),'/v1/skills/prepare',
@@ -585,7 +571,10 @@ export class WorkspaceLinks {
             else r=await this.request(this.link(id),'/v1/operation',{method:'POST',body:requestBody});
           }
           if(this.stopped)break;
-          if(!('status' in r)||r.status>=500||r.status===401||r.status===403||(r.status===409&&r.body?.code==='workspace_mismatch')){failure('status' in r?`http_${r.status}`:'invalid_response');break;}
+          const requestDenied = 'status' in r && r.status===403 && !!op.body.__desk_connector_grant
+            && (r.body?.code==='connector_permission' || r.body?.error==='사용자 입력과 외부 연결 허가가 일치하지 않거나 만료되었습니다'
+              || r.body?.error==='입력 태그와 외부 조회 권한 범위가 일치하지 않습니다');
+          if(!('status' in r)||r.status>=500||r.status===401||r.status===403&&!requestDenied||(r.status===409&&r.body?.code==='workspace_mismatch')){failure('status' in r?`http_${r.status}`:'invalid_response');break;}
           complete(r.status, r.body);
         }catch(error){failure(error instanceof Error ? error.name : 'request_failed');break;}
       }

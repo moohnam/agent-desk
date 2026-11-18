@@ -139,6 +139,7 @@ export function ChannelColumn({ def, channel, active, keyboardEnabled, width, sy
     if (!active || !keyboardEnabled) return;
     const key = (event: KeyboardEvent) => {
       if (modalOpen() || event.metaKey || event.ctrlKey || event.altKey || (event.target as HTMLElement).closest('input,textarea,select')) return;
+      if (event.key === 'Escape' && (event.defaultPrevented || event.isComposing || event.repeat || (event.target as HTMLElement).closest('.compose'))) return;
       if (['Enter', ' '].includes(event.key) && (event.target as HTMLElement).closest('button,a,summary')) return;
       const at = entries.findIndex((entry) => entry.id === selected);
       const pressed = latinKey(event);

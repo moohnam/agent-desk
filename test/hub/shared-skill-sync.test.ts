@@ -128,11 +128,11 @@ test('gateway freezes the selected files at enqueue while offline and stores pro
 test('an older target receives plain work but keeps tagged work with a clear update error', async () => {
   const f=fixture(),store=new Store(join(f.dir,'legacy-gateway.db'));
   const links=new WorkspaceLinks(store,f.source);
-  let operations=0;
+  let operations=0,supportsSnapshots=true;
   const old=createServer((req,res)=>{
     res.setHeader('content-type','application/json');
-    if(req.url==='/v1/identity')return res.end(JSON.stringify({version:1,workspace_id:'legacy-target'}));
-    if(req.url==='/v1/skills/manifest'){res.statusCode=404;return res.end('{}');}
+    if(req.url==='/v1/identity')return res.end(JSON.stringify({version:1,workspace_id:'legacy-target',capabilities:{skill_snapshots:supportsSnapshots?1:0}}));
+    if(req.url==='/v1/skills/manifest'){res.statusCode=supportsSnapshots?200:404;return res.end(supportsSnapshots?'{"hashes":{}}':'{}');}
     if(req.url==='/v1/operation'){operations++;res.statusCode=201;return res.end(JSON.stringify({id:'accepted'}));}
     res.statusCode=404;res.end('{}');
   });
@@ -144,18 +144,21 @@ test('an older target receives plain work but keeps tagged work with a clear upd
   try {
     const url=await listen(old);
     const link=await links.attach({name:'old',url,token:'a'.repeat(43)});
+    links.enqueue(link.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:'#parent before downgrade'}});
+    await links.flush(link.id);
+    assert.equal(operations,1);
+    supportsSnapshots=false;
     const tagged={id:randomUUID(),method:'POST',path:'/compose',body:{text:'#parent run'}};
-    links.enqueue(link.id,tagged);await links.flush(link.id);
+    const plain={id:randomUUID(),method:'POST',path:'/compose',body:{text:'plain work'}};
+    links.enqueue(link.id,tagged);links.enqueue(link.id,plain);await links.flush(link.id);
     const blocked=store.database.prepare('SELECT status,result,payload FROM workspace_delivery WHERE id=?').get(tagged.id) as
       {status:number;result:string;payload:string};
     assert.equal(blocked.status,409);
+    assert.equal(JSON.parse(blocked.result).code,'unsupported_feature');
     assert.match(JSON.parse(blocked.result).error,/업데이트/);
     assert.equal(JSON.parse(blocked.payload).body.text,tagged.body.text);
-    assert.equal(operations,0);
-    const plain={id:randomUUID(),method:'POST',path:'/compose',body:{text:'plain work'}};
-    links.enqueue(link.id,plain);await links.flush(link.id);
     assert.equal((store.database.prepare('SELECT status FROM workspace_delivery WHERE id=?').get(plain.id) as {status:number}).status,201);
-    assert.equal(operations,1);
+    assert.equal(operations,2);
   } finally {
     await links.close();store.database.close();
     old.closeAllConnections();await new Promise<void>(resolve=>old.close(()=>resolve()));f.close();

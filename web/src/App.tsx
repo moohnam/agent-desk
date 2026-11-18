@@ -37,7 +37,7 @@ import { SearchHead } from './Search.tsx';
 import { parseSearch, taskSearchQuery } from './search.ts';
 import { ORDERED, SORT_LABEL, VIEWS, VIEW_MAX, applyOrder, defaultColumn, viewColumns, viewColumnLimit, useView, type View, type ViewSort } from './views.ts';
 import { SEARCH, THREAD, firstPostBelow, isAllFilter, observeThreadSize } from './layout.ts';
-import { PHONE, isNarrow, useMedia } from './media.ts';
+import { NARROW, PHONE, isNarrow, useMedia } from './media.ts';
 import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
@@ -229,6 +229,8 @@ export function App() {
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
   const phone = useMedia(PHONE);
+  const narrow = useMedia(NARROW);
+  const drawerOverlays = drawer && narrow;
   // Search metadata for every column, without fetching the hidden columns' feeds.
   const finderColumns = useMemo(() => {
     if (phone) return phoneChannel && (!locationFilter||locationFilter==='local') ? [{ id: `phone-channel:${phoneChannel}`, title: hub.channels.get(phoneChannel)?.name ?? '채널', channelId: phoneChannel, filter: {} }] : [PHONE_FEED];
@@ -1181,7 +1183,7 @@ export function App() {
   // The deck's keys (deckKeys.ts). Registered again each render, so the handler sees the current state.
   useEffect(() => {
     const keys: DeckKeyContext = {
-      help, menu, phone, drawer, editable, queue, queueFocus, activeCol, activeIdx, selectedPost, threadTask, tasks: hub.tasks,
+      help, menu, phone, drawer, searchOpen: search != null, editable, queue, queueFocus, activeCol, activeIdx, selectedPost, threadTask, tasks: hub.tasks,
       handoff, pendingG, pendingDelete,
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
@@ -1285,7 +1287,7 @@ export function App() {
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
     if (col.def?.channelId) return <ChannelColumn key={col.id} def={col.def} channel={hub.channels.get(col.def.channelId)}
-      active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
+      active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help && !drawerOverlays} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
       onPress={() => { setActive(i); setQueueFocus(null); }} onResize={(px) => setWidth(col.id, px)} onManage={() => setChannelsOpen(true)}
       onClose={() => phone ? setPhoneChannel(null) : deleteColumn(col.id)} onError={setToast} onRead={() => {}}
       chat={{ projects: hub.projects.filter(p=>!splitId(p.id)[0]), tasks: hub.tasks, approvals: hub.approvals, questions: hub.questions, onEvent: hub.onEvent,
@@ -1446,7 +1448,7 @@ export function App() {
               openThread(task.id, { from: columns.find((c) => !c.channelId && isAllFilter(c.filter))?.id });
             }} />
         )}
-        <div className="deck-space">
+        <div className="deck-space" inert={drawerOverlays}>
         {canRead && threadTaskView && (referencesVisible || (referenceTask === threadTask && (references.ids.length > 0 || !!references.files?.length))) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
           visible={referencesVisible}
           ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onMove={references.move} onResolveFile={references.resolveFile}
@@ -1470,7 +1472,7 @@ export function App() {
         </div>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
-          <div inert={documentOverlay && referencesVisible} className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
+          <div inert={drawerOverlays || documentOverlay && referencesVisible} className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
             style={paneCover ? undefined : { flexBasis: paneWidth }}>
             {!paneCover && <SplitHandle split={split} onResize={resizeSplit} />}
             {renderColumn(deck[threadIdx], threadIdx)}

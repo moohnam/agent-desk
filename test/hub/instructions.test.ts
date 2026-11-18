@@ -67,6 +67,7 @@ test('shared instruction support is rechecked after a runner version change', as
   let supported = true, operations = 0, identities = 0;
   (links as unknown as {request: (link: unknown, path: string) => Promise<unknown>}).request = async (_link, path) => {
     if (path === '/v1/identity') {identities++;return {status:200,body:{capabilities:{instructions:supported?1:undefined}}};}
+    if (path.startsWith('/v1/receipts/')) return {status:404,body:{code:'receipt_not_found'}};
     operations++;return {status:201,body:{id:'task'}};
   };
   try {

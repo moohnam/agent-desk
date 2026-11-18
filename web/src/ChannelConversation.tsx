@@ -145,7 +145,7 @@ export function ChannelConversation({ channel, channelId, projects, tasks, appro
         <button className="link" onClick={() => void promote({ taskId: task!.id, queuedId: q.id })}>지금 보내기</button>
         <button className="link" onClick={() => { shortcut.current.reset(); void api.cancelQueued(task!.id, q.id).catch((error) => onError(error.message)); }}>취소</button>
       </li>)}</ol>}
-      <ComposeField value={text} onChange={(value) => { edited(); setText(value); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()}
+      <ComposeField value={text} onChange={(value) => { edited(); setText(value); }} onSubmit={() => void submit(true)} onEscape={onBrowse} onBlur={() => shortcut.current.reset()}
         inputRef={inputRef} projects={projects} tasks={[...tasks.values()]} mentions="refer" rows={2}
         placeholder={answerTarget ? '선택한 질문에 답하세요…' : sources.size ? '선택한 글에 대해 질문하거나 정리를 요청하세요…' : '이전 대화에 이어 질문하세요…'} />
       {note && <p className="reply-note" role="status">{note}</p>}

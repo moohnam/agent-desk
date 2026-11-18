@@ -45,8 +45,8 @@ export function NoteReply({ task, inputRef, onError, onSend }: {
   };
 
   return <form className="reply-box" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-    <ResizableEditor inputRef={inputRef}>{({ id, height }) => <div className="cmp-field">
-      <textarea id={id} className="input" rows={2} ref={inputRef} value={text} style={{ height }} aria-label="메모 글" placeholder="메모를 작성하세요"
+    <ResizableEditor inputRef={inputRef} rows={2}>{({ id, rows }) => <div className="cmp-field">
+      <textarea id={id} className="input" rows={rows} ref={inputRef} value={text} aria-label="메모 글" placeholder="메모를 작성하세요"
         onChange={(event) => edit(event.target.value)} onKeyDown={(event) => {
           if (event.nativeEvent.isComposing || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
           event.preventDefault();
@@ -83,8 +83,8 @@ export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: ()
   };
 
   return <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-    <ResizableEditor inputRef={inputRef} resizeFrom="bottom">{({ id, height }) => <div className="cmp-field">
-      <textarea id={id} ref={inputRef} className="input" rows={4} autoFocus value={text} disabled={busy} style={{ height }} aria-label="메모 글 수정"
+    <ResizableEditor inputRef={inputRef} rows={4} resizeFrom="bottom">{({ id, rows }) => <div className="cmp-field">
+      <textarea id={id} ref={inputRef} className="input" rows={rows} autoFocus value={text} disabled={busy} aria-label="메모 글 수정"
         onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) return;
           if (event.key === 'Escape') { event.stopPropagation(); if (!busy) onClose(); }

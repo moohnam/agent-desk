@@ -45,6 +45,12 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+class ConnectorPermissionError extends HttpError {
+  readonly code = 'connector_permission';
+  // v1 hubs retry connection-level 403s, so request-scope conflicts use 409.
+  constructor(message: string) { super(409, message); }
+}
+
 /** One canonical workspace, many separately revocable hub credentials. */
 export class SharedWorkspace {
   readonly id: string;
@@ -126,10 +132,10 @@ export class SharedWorkspace {
       if (!connectorUserInput(op.method, op.path) || grant.requestId !== op.id || grant.workspaceId !== this.id
         || typeof grant.hubId !== 'string' || typeof grant.capability !== 'string' || !Array.isArray(grant.connections)
         || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= Date.now())
-        throw new HttpError(403, '사용자 입력과 외부 연결 허가가 일치하지 않거나 만료되었습니다');
+        throw new ConnectorPermissionError('사용자 입력과 외부 연결 허가가 일치하지 않거나 만료되었습니다');
       if(grant.inputScoped!==true || !scopes.length || grant.connections.some(c=>!c || !['slack','jira'].includes(c.service)
         || !Array.isArray(c.tools) || !connectorTagTools(scopes,c.service).length || c.tools.some(tool=>!connectorTagTools(scopes,c.service).includes(tool))))
-        throw new HttpError(403,'입력 태그와 외부 조회 권한 범위가 일치하지 않습니다');
+        throw new ConnectorPermissionError('입력 태그와 외부 조회 권한 범위가 일치하지 않습니다');
       connectorContext = { ...grant, sourcePeerId: peer };
     } else if(scopes.length)throw new HttpError(409,'외부 조회 태그의 권한이 전달되지 않았습니다. 원래 허브의 연결과 업데이트 상태를 확인해 주세요');
     return this.hub.atomic(() => {
@@ -213,7 +219,7 @@ export class SharedWorkspace {
         }
         if(req.method==='GET'&&url.pathname.startsWith('/v1/receipts/')) {
           const receipt=this.db.prepare('SELECT result FROM workspace_receipt WHERE id=? AND peer_id=?').get(url.pathname.slice('/v1/receipts/'.length),peer) as {result:string}|undefined;
-          return receipt?json(res,200,JSON.parse(receipt.result)):json(res,404,{error:'처리 기록이 없습니다'});
+          return receipt?json(res,200,JSON.parse(receipt.result)):json(res,404,{code:'receipt_not_found',error:'처리 기록이 없습니다'});
         }
         if (url.pathname.startsWith('/v1/connectors/') && this.connectorBroker) {
           if (req.method === 'GET' && url.pathname === '/v1/connectors/poll') return json(res, 200, this.connectorBroker.poll(peer));
@@ -302,7 +308,7 @@ export class SharedWorkspace {
           return;
         }
         throw new HttpError(404,'지원하지 않는 공유 API입니다');
-      } catch(e) { if (res.headersSent) res.destroy(); else json(res,e instanceof HttpError?e.status:500,{error:e instanceof HttpError?e.message:'공유 작업공간 처리에 실패했습니다',...(e instanceof DocumentPermissionError?{code:e.code,path:e.path}:{})}); }
+      } catch(e) { if (res.headersSent) res.destroy(); else json(res,e instanceof HttpError?e.status:500,{error:e instanceof HttpError?e.message:'공유 작업공간 처리에 실패했습니다',...(e instanceof DocumentPermissionError?{code:e.code,path:e.path}:e instanceof ConnectorPermissionError?{code:e.code}:{})}); }
     });
     server.on('listening', () => {
       const address = server.address();

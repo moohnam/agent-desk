@@ -9,6 +9,7 @@ import type { QueueItem } from './ApprovalQueue.tsx';
 import { latinKey, nextMineIndex, nextTaskIndex, nextUserIndex, replyTaskId } from './keys.ts';
 import { SEARCH, THREAD } from './layout.ts';
 import { modalOpen } from './Modal.tsx';
+import { isNarrow } from './media.ts';
 import type { Approval, ColumnDef, Post, TaskView } from './types.ts';
 import { VIEWS, type View } from './views.ts';
 
@@ -82,6 +83,7 @@ export interface DeckKeyContext {
   menu: unknown;
   phone: boolean;
   drawer: boolean;
+  searchOpen: boolean;
   /** Whether the view's columns can be changed (F1). */
   editable: boolean;
   queue: QueueItem[];
@@ -147,6 +149,17 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     const references = ev.ctrlKey && !ev.shiftKey && !ev.metaKey && !ev.altKey && ev.code === 'Semicolon';
     // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
     if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine && !references) || ev.altKey) return;
+    if (ev.key === 'Escape') {
+      if (ev.defaultPrevented || ev.isComposing || ev.repeat) return;
+      const target = ev.target instanceof Element ? ev.target : null;
+      if (target?.closest('select')) return;
+      const drawerHasKeys = drawer && (isNarrow() || !!target?.closest('.compose'));
+      const close = help ? () => setHelp(false) : drawerHasKeys ? () => setDrawer(false)
+        : queueFocus != null ? () => setQueueFocus(null) : activeCol?.id === SEARCH ? closeSearch
+        : threadTask ? closeThread : c.searchOpen ? closeSearch : drawer ? () => setDrawer(false) : undefined;
+      if (close) { ev.preventDefault(); close(); }
+      return;
+    }
     if (references) {
       if (!help && threadTask && c.toggleReferences && !ev.isComposing && !ev.defaultPrevented) {
         ev.preventDefault();
@@ -160,7 +173,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     const t = ev.target as HTMLElement;
     if (t.closest('input, textarea, select')) return;
     const e = { key: latinKey(ev), preventDefault: () => ev.preventDefault() };
-    if (help && !mine) { if (e.key === 'Escape' || e.key === '?' || e.key === 'q') setHelp(false); return; }
+    if (help && !mine) { if (e.key === '?' || e.key === 'q') setHelp(false); return; }
 
     if (queueFocus != null) {
       const item = queue[queueFocus];
@@ -174,7 +187,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
           else if (item) setToast('질문은 Enter로 스레드를 열어 답합니다.');
           break;
         case 'Enter': if (item) openQueueItem(item); break;
-        case 'Escape': case 'q': case 'a': setQueueFocus(null); break;
+        case 'q': case 'a': setQueueFocus(null); break;
         case '?': setHelp(true); break;
         default: used = false;
       }
@@ -241,7 +254,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       case 'H': moveColumn(activeIdx, -1); break;
       case 'L': moveColumn(activeIdx, 1); break;
       case 'Enter': if (selectedPost && activeCol?.id !== THREAD) openThread(selectedPost.taskId, { from: activeCol?.id, post: selectedPost.id }); break;
-      case 'Escape': case 'q':
+      case 'q':
         if (activeCol?.id === SEARCH) closeSearch();
         else if (threadTask) closeThread();
         else if (drawer) setDrawer(false);

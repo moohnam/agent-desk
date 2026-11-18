@@ -720,15 +720,19 @@ test('HTTP connector direct hub uses the same request authority and session MCP 
 test('HTTP connector grants recheck runner capability after a same-workspace downgrade', async () => {
   const f = fixture(), store = new Store(':memory:'), links = new WorkspaceLinks(store);
   const authority = new ConnectorAuthority(store.database, f.connectors); links.connectorAuthority = authority;
-  let supported = true, submitted = 0;
+  let supported = true, submitted = 0, denied: {error:string;code?:string} | undefined;
   const server = createServer(async (req, res) => {
     if (req.url === '/v1/identity') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ version: 1, workspace_id: 'stable-workspace', capabilities: { connectors: supported ? 1 : undefined, connector_tags: supported ? 1 : undefined } }));
+    } else if (req.url?.startsWith('/v1/receipts/')) {
+      res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"code":"receipt_not_found"}');
     } else if (req.url === '/v1/operation') {
       for await (const _ of req) { /* Drain the operation without interpreting private fields. */ }
       submitted++;
-      res.writeHead(201, { 'content-type': 'application/json' }); res.end('{"accepted":true}');
+      const rejection = denied; denied = undefined;
+      res.writeHead(rejection ? 403 : 201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(rejection ?? {accepted:true}));
     } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end('[]'); }
   });
   try {
@@ -756,6 +760,23 @@ test('HTTP connector grants recheck runner capability after a same-workspace dow
     await links.flush(link.id);assert.equal(submitted,2);
     assert.equal(links.deliveries(link.id).find(delivery=>delivery.id===changed)!.status,409);
     assert.match(links.deliveries(link.id).find(delivery=>delivery.id===changed)!.error,/계정이나 권한이 바뀌/);
+    for (const error of [{code:'connector_permission',error:'범위 오류'}, {error:'입력 태그와 외부 조회 권한 범위가 일치하지 않습니다'}]) {
+      denied = error;
+      const rejected=randomUUID(), plain=randomUUID();
+      links.enqueue(link.id,{id:rejected,method:'POST',path:'/tasks/example/messages',body:{text:'#jira 조회'}});
+      links.enqueue(link.id,{id:plain,method:'POST',path:'/tasks/example/messages',body:{text:'일반 대화'}});
+      await links.flush(link.id);
+      const status=(id:string)=>(store.database.prepare('SELECT status FROM workspace_delivery WHERE id=?').get(id) as {status:number|null}).status;
+      assert.equal(status(rejected),403);
+      assert.equal(status(plain),201);
+    }
+    denied = {error:'연결 권한이 없습니다'};
+    const blocked=randomUUID(), behind=randomUUID();
+    links.enqueue(link.id,{id:blocked,method:'POST',path:'/tasks/example/messages',body:{text:'#jira 조회'}});
+    links.enqueue(link.id,{id:behind,method:'POST',path:'/tasks/example/messages',body:{text:'일반 대화'}});
+    await links.flush(link.id);
+    assert.equal(links.deliveries(link.id).find(row=>row.id===blocked)?.status,null);
+    assert.equal(links.deliveries(link.id).find(row=>row.id===behind)?.status,null);
   } finally {
     await links.close(); authority.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     store.database.close(); f.close();

@@ -319,9 +319,10 @@ test('a workspace gateway delivers note operations without reading connector or 
 
 test('a rolled-back workspace preserves note receipts and rejects only new unsupported writes', async () => {
   const store = new Store(':memory:'), links = new WorkspaceLinks(store);
-  const committed = randomUUID(), missing = randomUUID(), unavailable = randomUUID();
+  const committed = randomUUID(), missing = randomUUID(), unavailable = randomUUID(), following = randomUUID();
   const result = { status: 201, body: { id: 'saved-note', kind: 'note' } };
   const requests: string[] = [];
+  let receiptEndpoint = false;
   try {
     store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('test', 'test', 'http://localhost/', 'workspace', 'hidden');
     (links as any).request = async (_link: unknown, path: string) => {
@@ -329,11 +330,17 @@ test('a rolled-back workspace preserves note receipts and rejects only new unsup
       if (path === '/v1/identity') return { status: 200, body: { capabilities: {} } };
       if (path === `/v1/receipts/${committed}`) return { status: 200, body: result };
       if (path === `/v1/receipts/${missing}`) return { status: 404, body: {} };
+      if (path === `/v1/receipts/${unavailable}`) return { status: 404, body: receiptEndpoint ? {code:'receipt_not_found'} : {error:'지원하지 않는 공유 API입니다'} };
+      if (path === '/v1/operation') return {status:201,body:{id:'following'}};
       return { status: 503, body: {} };
     };
     for (const id of [committed, missing, unavailable]) {
       links.enqueue('test', { id, method: 'POST', path: '/compose', body: { text: '@web #note memo' } });
     }
+    const attempt=store.database.prepare('UPDATE workspace_delivery_attempt SET attempts=?,unsent_attempts=? WHERE id=?');
+    attempt.run(1,null,committed);
+    attempt.run(2,1,unavailable); // A rolled-back gateway attempted the write without marking it unsent.
+    links.enqueue('test',{id:following,method:'POST',path:'/compose',body:{text:'일반 대화'}});
     await links.flush('test');
     const deliveries = new Map(links.deliveries('test').map(row => [row.id, row]));
     const saved = store.database.prepare('SELECT status, payload, result FROM workspace_delivery WHERE id=?').get(committed) as
@@ -343,7 +350,12 @@ test('a rolled-back workspace preserves note receipts and rejects only new unsup
     assert.deepEqual(JSON.parse(saved.payload), { id: committed, method: 'POST', path: '/compose' });
     assert.equal(deliveries.get(missing)?.status, 409);
     assert.equal(deliveries.get(unavailable)?.status, null);
+    assert.equal(deliveries.get(following)?.status, null);
     assert.equal(requests.includes('/v1/operation'), false);
+    receiptEndpoint = true;
+    await links.flush('test');
+    assert.equal(links.deliveries('test').find(row=>row.id===unavailable)?.status,409);
+    assert.equal(requests.filter(path=>path==='/v1/operation').length,1);
   } finally {
     await links.close(); store.database.close();
   }

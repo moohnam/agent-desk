@@ -48,7 +48,11 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
             onBlur={() => setDismissed(true)} onFocus={() => setDismissed(false)}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
-              if (e.key === 'Escape') { e.preventDefault(); if (plain && value.trim()) onDone(); else onClose(); return; }
+              if (e.key === 'Escape') {
+                e.preventDefault(); e.stopPropagation();
+                if (!e.repeat) { if (open && sug) setDismissed(true); else onClose(); }
+                return;
+              }
               if (open && sug) {
                 if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
                 if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((cur - 1 + sug.items.length) % sug.items.length); return; }

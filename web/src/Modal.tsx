@@ -23,7 +23,7 @@ document.addEventListener('keydown', (e) => {
     } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     return;
   }
-  if (e.key !== 'Escape') return;
+  if (e.key !== 'Escape' || e.isComposing || e.repeat) return;
   e.preventDefault();
   e.stopPropagation();
   top.close();
