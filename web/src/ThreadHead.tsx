@@ -17,6 +17,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
   handoff: 'open' | 'kept' | null; onHandoff: () => void;
   references?: { open: boolean; count: number }; onReferences?: () => void;
 }) {
+  const isNote = task?.kind === 'note';
   const turns = events.filter((e) => e.kind === 'status' && e.payload.state === 'turn_done').length;
   const [titleEdit, setTitleEdit] = useState<TitleEdit>();
   const activeTask = useRef(task?.id);
@@ -89,7 +90,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         {draft && <DraftBadge />}
         {references && <button className="icon-btn" aria-label="고정한 글 창" aria-pressed={references.open}
           title="고정 글·문서 창 열기 / 닫기 (Ctrl ;) · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
-        {task?.source === 'app' && (
+        {task?.source === 'app' && !isNote && (
           <button className={`icon-btn${handoff === 'kept' ? ' kept' : ''}`} aria-pressed={handoff === 'open'}
             title={handoff === 'kept' ? '컨텍스트 재구성 이어서 하기 (X) · 쓰던 정리본이 있습니다' : handoff === 'open' ? '컨텍스트 재구성 패널 닫기 (X)' : '컨텍스트 재구성: 글을 골라 정리본을 만들고 새 세션으로 넘기기 (X)'}
             aria-label="컨텍스트 재구성" onClick={onHandoff}><ListRestart /></button>
@@ -98,7 +99,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
       </div>
       {editing?.error && <p className="thread-title-error" role="alert">{editing.error}</p>}
-      {task && (
+      {task && !isNote && (
         <div className="meta">
           <span title={project?.root_path}><span className="pdot" style={{ background: projectColor(task.project_id) }} />{task.project_name}
             <span className="seq" title={`@${task.project_name}#${task.seq}로 이 작업에 보낼 수 있습니다`}>#{task.seq}</span></span>

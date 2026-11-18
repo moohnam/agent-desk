@@ -4,7 +4,7 @@ import { suggestSearch, type SearchOption } from './search.ts';
 import type { Project, TaskView } from './types.ts';
 
 /**
- * The search column's head: a query field with `#key:value` completion, the match count, and
+ * The search panel's head: a query field with `#key:value` completion, the match count, and
  * buttons to keep the search as a column or close it.
  */
 export function SearchHead({ value, onChange, inputRef, projects, tasks, count, unknown, onDone, onClose, onSave, plain }: {
@@ -42,20 +42,19 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
         <span className="search-icon" aria-hidden>⌕</span>
         <div className="search-field">
           <input ref={inputRef} className="input" value={value} spellCheck={false} autoComplete="off"
-            placeholder={plain ? '이 채널의 제목·본문 검색' : '검색어 · #project: #status: #kind: #task:'}
+            aria-label={plain ? '채널 검색' : '검색어'} placeholder={plain ? '이 채널의 제목·본문 검색' : '검색어 · #project: #status: #kind: #task:'}
             onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); setDismissed(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onBlur={() => setDismissed(true)} onFocus={() => setDismissed(false)}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Escape') { e.preventDefault(); if (plain && value.trim()) onDone(); else onClose(); return; }
               if (open && sug) {
                 if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
                 if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((cur - 1 + sug.items.length) % sug.items.length); return; }
                 if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
-                if (e.key === 'Escape') { e.preventDefault(); setDismissed(true); return; }
               }
               if (e.key === 'Enter') { e.preventDefault(); onDone(); return; }
-              if (e.key === 'Escape') { e.preventDefault(); if (value.trim()) onDone(); else onClose(); }
             }} />
           {open && sug && (
             <div className="ac" role="listbox" onMouseDown={(e) => e.preventDefault()}>
@@ -74,7 +73,7 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
           )}
         </div>
         {onSave && <button className="icon-btn" title="이 검색을 컬럼으로 저장" disabled={!value.trim()} aria-label="검색을 컬럼으로 저장" onClick={onSave}><Save /></button>}
-        <button className="icon-btn" title="검색 닫기 (결과에서 q · 빈 검색창에서 Esc)" aria-label="검색 닫기" onClick={onClose}><X /></button>
+        <button className="icon-btn" title="검색 닫기 (Esc)" aria-label="검색 닫기" onClick={onClose}><X /></button>
       </div>
       <div className="search-meta">
         {value.trim() ? <span>글 {count}개</span> : <span>/ 로 언제든 검색 · Enter: 결과로 이동</span>}

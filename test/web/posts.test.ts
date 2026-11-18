@@ -65,6 +65,15 @@ test('merging a page already held keeps the same objects, unless it brings a cut
   assert.equal(mergeEvents([whole], [b])[0], whole);
 });
 
+test('merging notes keeps the latest revision even if an older page arrives whole', () => {
+  const original = ev('user', { text: 'first', revision: 0 });
+  const latest = { ...original, payload: { text: 'last…', revision: 2, clipped: true } };
+  const whole = { ...original, payload: { text: 'last version', revision: 2 } };
+  assert.equal(mergeEvents([original], [latest])[0], latest);
+  assert.equal(mergeEvents([latest], [original])[0], latest);
+  assert.equal(mergeEvents([latest], [whole])[0], whole);
+});
+
 test('a column filter matches by task, kind, status and text', () => {
   const [post] = buildPosts([ev('assistant', { text: 'Fixed the build' })]);
   const task = { id: 't1', project_id: 'p1', status: 'done', title: 'CI' } as TaskView;

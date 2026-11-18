@@ -113,8 +113,13 @@ function verifySkillBundle(files:SkillFile[],target:SkillStore) {
     throw new Error(`대상 ${name} 스킬 파일 일부가 빠졌습니다`);
 }
 const placeholders=(values:unknown[])=>values.map(()=>'?').join(',');
-const select=(db:DatabaseSync,table:Table,where='1',args:(string|number)[]=[]):Row[]=>
-  db.prepare(`SELECT * FROM ${table} WHERE ${where} ORDER BY rowid`).all(...args) as Row[];
+const select=(db:DatabaseSync,table:Table,where='1',args:(string|number)[]=[]):Row[]=> {
+  const rows = db.prepare(`SELECT * FROM ${table} WHERE ${where} ORDER BY rowid`).all(...args) as Row[];
+  // Keep the fingerprint identical for ordinary rows in bundles produced before notes were added.
+  const optional = table === 'task' ? 'kind' : table === 'queued' ? 'note_context_json' : undefined;
+  if (optional) for (const row of rows) if (row[optional] === null) delete row[optional];
+  return rows;
+};
 const inIds=(column:string,values:string[])=>values.length?`${column} IN (${placeholders(values)})`:'0';
 
 function collect(db:DatabaseSync,runnerId:string,skills?:SkillStore):RemoteTransfer {

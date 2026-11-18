@@ -3,8 +3,8 @@
 import type { Hub } from './hub.ts';
 import { HttpError } from './errors.ts';
 import { feedEvent } from './db.ts';
-import { parseFeedParams, type FeedFilter, type MessageReceipt } from '../../shared/api.ts';
-import { parseCompose } from '../../shared/compose.ts';
+import { parseFeedParams, type FeedFilter, type MessageReceipt, type NoteContext } from '../../shared/api.ts';
+import { parseCompose, parseNoteCompose } from '../../shared/compose.ts';
 export interface WorkspaceResult { status: number; body: any }
 const reply = (status: number, body: unknown): WorkspaceResult => ({ status, body });
 /** Question answers from a request body: string values keyed by question text, else none. */
@@ -28,6 +28,22 @@ function feedFilter(url: URL): FeedFilter {
   return parseFeedParams((name) => url.searchParams.get(name));
 }
 
+function noteContext(raw: unknown): { note_context?: NoteContext } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw) || raw.length > 20 || raw.some(note => !note || typeof note.title !== 'string' || !note.title.trim()
+      || typeof note.text !== 'string' || !note.text.trim()))
+    throw new HttpError(400, '메모 자료는 제목과 본문을 갖춘 게시글 최대 20개까지 첨부할 수 있습니다');
+  const notes: NoteContext = raw.map(({ title, text }) => ({ title, text }));
+  if (Buffer.byteLength(JSON.stringify(notes)) > 256 * 1024)
+    throw new HttpError(400, '첨부한 메모 자료가 너무 큽니다 (최대 256 KiB)');
+  return notes.length ? { note_context: notes } : {};
+}
+
+function noteEventId(input: string): number {
+  const id = Number(input);
+  if (!/^\d+$/.test(input) || !Number.isSafeInteger(id) || id < 1) throw new HttpError(400, '메모 게시글 ID가 잘못되었습니다');
+  return id;
+}
 
 const routes = [
   'GET /settings',
@@ -41,6 +57,8 @@ const routes = [
   'GET /tasks/:id/events',
   'PATCH /tasks/:id',
   'POST /tasks/:id/messages',
+  'PATCH /tasks/:id/notes/:id',
+  'DELETE /tasks/:id/notes/:id',
   'DELETE /tasks/:id/queue/:id',
   'POST /tasks/:id/queue/:id/send',
   'PUT /tasks/:id/queue/:id',
@@ -91,12 +109,20 @@ const localAuthorityRoutes = new Set([
 export function localAuthorityRoute(method:string,pathname:string) {
   return localAuthorityRoutes.has(workspaceRoute(method,pathname) ?? '');
 }
+/** Note writes do not participate in connector, skill snapshot or instruction selection. */
+export function isNoteInput(method: string, path: string, body: Record<string, unknown>, hub?: Hub): boolean {
+  const route = workspaceRoute(method, path);
+  if (route === 'PATCH /tasks/:id/notes/:id' || route === 'DELETE /tasks/:id/notes/:id') return true;
+  if (typeof body.text !== 'string') return false;
+  if (route === 'POST /compose') return body.note_only === true || !!parseNoteCompose(body.text) || !!hub?.noteReplyTarget(body.text);
+  return route === 'POST /tasks/:id/messages' && (body.note_only === true || hub?.store.getTask(path.split('/')[2])?.kind === 'note');
+}
 /** Existing-session controls must work even if the defaults file or a new runner feature is unavailable. */
 export function needsDefaultInstructions(method: string, path: string, body: Record<string, unknown>): boolean {
   const route = workspaceRoute(method, path);
   if (route === 'POST /tasks' || route === 'POST /channels/:id/messages') return true;
   if (route !== 'POST /compose' && route !== 'POST /tasks/:id/messages') return false;
-  if (typeof body.text !== 'string') return false;
+  if (typeof body.text !== 'string' || isNoteInput(method, path, body)) return false;
   const composed = parseCompose(body.text, [], route === 'POST /compose');
   if (composed.delivery === 'new' || composed.delivery === 'fork') return true;
   // A project-only mention or channel can create its first conversation; the remote store decides.
@@ -106,7 +132,7 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
   const parts = ['api', ...url.pathname.split('/').filter(Boolean)];
   const id = parts[2];
   const route = workspaceRoute(method, url.pathname);
-  const required = route === 'POST /compose' || route === 'POST /tasks/:id/messages' || route === 'POST /tasks/:id/reset' ? ['text']
+  const required = route === 'POST /compose' || route === 'POST /tasks/:id/messages' || route === 'POST /tasks/:id/reset' || route === 'PATCH /tasks/:id/notes/:id' ? ['text']
     : route === 'POST /projects' ? ['name','root_path'] : route === 'POST /tasks' ? ['project_id','prompt']
     : route === 'POST /questions/:id' ? ['answer'] : [];
   if (required.some(key=>typeof body[key] !== 'string')) throw new HttpError(400,'필수 입력은 문자열이어야 합니다');
@@ -130,7 +156,7 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         }
         case 'POST /compose': {
           const b = body;
-          return reply(201, hub.compose(b.text));
+          return reply(201, hub.compose(b.text, noteContext(b.note_context), b.note_only === true));
         }
         case 'GET /feed': {
           // A column's events (feedFilter); tool payloads come cut (feedEvent).
@@ -163,9 +189,14 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         case 'POST /tasks/:id/messages': {
           const b = body;
           const receipt: MessageReceipt = {};
-          const task_id = hub.sendMessage(id, b.text, false, receipt);
+          const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), b.note_only === true);
           return reply(202, { ok: true, task_id, ...receipt });
         }
+        case 'PATCH /tasks/:id/notes/:id':
+          return reply(200, hub.updateNote(id, noteEventId(parts[4]), body.text));
+        case 'DELETE /tasks/:id/notes/:id':
+          hub.deleteNote(id, noteEventId(parts[4]));
+          return reply(200, { ok: true });
         case 'DELETE /tasks/:id/queue/:id':
           hub.cancelQueued(id, parts[4]);
           return reply(200, { ok: true });

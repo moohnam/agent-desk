@@ -13,6 +13,7 @@ export interface Project { id: string; name: string; root_path: string; created_
 export interface Task {
   id: string; project_id: string; title: string; status: TaskStatus;
   checkpoint_md: string | null; created_by: string; created_at: string; updated_at: string;
+  kind?: 'note';
   /** The task's number within its project (1, 2, …); `@project#seq` names it. */
   seq: number;
 }
@@ -39,6 +40,9 @@ export type QueuedKind = 'handoff' | 'reset';
 /** Optional queue receipt for the message just sent, absent when it was delivered directly. */
 /** `answered`: the message went to the agent as the answer to its waiting question. */
 export interface MessageReceipt { queued_id?: string; answered?: boolean }
+
+/** Immutable text selected from a note and attached to an agent message. */
+export type NoteContext = { title: string; text: string }[];
 
 /** Independent, read-only content; never an agent task or session. */
 export interface Channel {
@@ -89,7 +93,7 @@ export interface TaskView<E = WireEvent> extends Task {
   /** A Codex async question waiting for my next message, which answers it; null when none. */
   pending_ask: { event_id: number; text: string; ts: string } | null;
   /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string; kind?: QueuedKind; channel_entry_count?: number }[];
+  queued: { id: string; text: string; created_at: string; kind?: QueuedKind; channel_entry_count?: number; note_context_count?: number }[];
   /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
   background: BackgroundTask[];
 }
@@ -99,6 +103,8 @@ export type Settings = Record<EngineName, { model: ModelName | null; effort: Eff
 
 export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'event'; event: E }
+  | { type: 'event_updated'; event: E }
+  | { type: 'event_removed'; task_id: string; event_id: number }
   | { type: 'task'; task: TaskView<E> }
   | { type: 'approval'; approval: A }
   | { type: 'question'; question: Question }

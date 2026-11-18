@@ -2,22 +2,23 @@ import {useModelCatalogs} from './modelCatalogs.ts';
 import {catalogModelTags,catalogsForTarget,type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
   DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, TAG_HELP, effortNote, modelEngine,
-  modelHelpOf, modelProblem, modelTagsOf, parseCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
+  modelHelpOf, modelProblem, modelTagsOf, parseCompose, parseComposeTarget, parseNoteCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { composeSource, splitId } from './federation.ts';
 import { useSources } from './Workspaces.tsx';
 import { SharedPending } from './workspace.ts';
-import type { MessageReceipt } from '../../shared/api.ts';
+import type { MessageReceipt, NoteContext } from '../../shared/api.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
 import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
 import { Modal } from './Modal.tsx';
+import { NotePreview } from './NotePreview.tsx';
 import { QueuedShortcut, type QueuedTarget } from './queuedShortcut.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
@@ -61,11 +62,13 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
   const hash = /(^|\s)#([a-z0-9-]*)$/i.exec(before);
   if (hash) {
     const q = hash[2].toLowerCase();
-    const skillOptions: Option[] = skills.map((k) => ({
+    const creatingNote = mentions === 'route' && /^\s*(?:@[^\s:@#]+\s+)?$/.test(before.slice(0, hash.index + hash[1].length));
+    const skillOptions: Option[] = skills.filter(k => !creatingNote || k.name !== 'note').map((k) => ({
       key: `skill:${k.name}`, insert: k.name, label: `#${k.name}`, desc: `스킬 · ${k.description || '설명 없음'}`, space: true,
     }));
     const modelOptions: Option[] = Object.entries(models).map(([tag,model]) => ({key:`model:${tag}`,insert:tag,label:`#${tag}`,desc:`${ENGINE_LABEL[modelEngine(model)]} · ${modelLabel(model)}`,space:true}));
-    const items = [...TAG_OPTIONS, ...modelOptions, ...skillOptions].filter((t) => t.insert.startsWith(q) && t.insert !== q);
+    const noteOption: Option[] = creatingNote ? [{ key: 'create:note', insert: 'note', label: '#note', desc: '등록된 프로젝트에 메모 작업 만들기', space: true }] : [];
+    const items = [...noteOption, ...TAG_OPTIONS, ...modelOptions, ...skillOptions].filter((t) => t.insert.startsWith(q) && t.insert !== q);
     return { start: caret - q.length, items, total: items.length };
   }
   return null;
@@ -73,17 +76,73 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
 
 type Mentions = 'route' | 'refer';
 
+export function ResizableEditor({ inputRef, resizeFrom = 'top', children }: {
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  resizeFrom?: 'top' | 'bottom';
+  children: (control: { id: string; height: number | undefined }) => ReactNode;
+}) {
+  const id = useId();
+  const [height, setHeight] = useState<number>();
+  const drag = useRef<{ pointer: number; x: number; y: number; height: number; moved: boolean } | null>(null);
+  const lastTap = useRef<{ time: number; pointerType: string } | null>(null);
+  const resize = (next: number) => setHeight(Math.round(Math.max(48, Math.min(next, 620, window.innerHeight / 2))));
+  const resizeBy = (height: number, dy: number) => resize(height + dy * (resizeFrom === 'top' ? -1 : 1));
+  const grip = <button type="button" className="compose-height-grip" aria-controls={id}
+    aria-label="입력창 높이 조절" title="끌거나 방향키로 높이 조절 · 더블클릭 또는 Home으로 기본 크기"
+    onMouseDown={e => e.preventDefault()}
+    onPointerDown={e => {
+      if (e.button !== 0 || drag.current || !inputRef.current) return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      drag.current = { pointer: e.pointerId, x: e.clientX, y: e.clientY, height: inputRef.current.offsetHeight, moved: false };
+    }}
+    onPointerMove={e => {
+      const start = drag.current;
+      if (start?.pointer !== e.pointerId) return;
+      const dy = e.clientY - start.y;
+      start.moved ||= Math.abs(dy) >= 4 || Math.abs(e.clientX - start.x) >= 4;
+      if (start.moved) resizeBy(start.height, dy);
+    }}
+    onPointerUp={e => {
+      const start = drag.current;
+      if (start?.pointer !== e.pointerId) return;
+      const dy = e.clientY - start.y;
+      const tap = !start.moved && Math.abs(dy) < 4 && Math.abs(e.clientX - start.x) < 4;
+      if (!tap) resizeBy(start.height, dy);
+      const last = lastTap.current;
+      if (tap && last?.pointerType === e.pointerType && e.timeStamp - last.time <= 500) {
+        setHeight(undefined);
+        lastTap.current = null;
+      } else lastTap.current = tap ? { time: e.timeStamp, pointerType: e.pointerType } : null;
+    }}
+    onLostPointerCapture={e => { if (drag.current?.pointer === e.pointerId) drag.current = null; }}
+    onClick={e => { if (e.detail === 0 && inputRef.current) resize(inputRef.current.offsetHeight + 64); }}
+    onKeyDown={e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); return; }
+      const input = inputRef.current;
+      if (!input || !['ArrowUp', 'ArrowDown', 'Home'].includes(e.key)) return;
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Home') setHeight(undefined);
+      else resize(input.offsetHeight + (e.key === 'ArrowUp' ? 24 : -24));
+    }} />;
+  return <div className="compose-editor">
+    {resizeFrom === 'top' && grip}
+    {children({ id, height })}
+    {resizeFrom === 'bottom' && grip}
+  </div>;
+}
+
 /**
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId }: {
+export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top' }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; without it, Esc leaves the field. */
   onEscape?: () => void;
   onBlur?: () => void;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string; runnerId?:string;
+  resizeFrom?: 'top' | 'bottom';
 }) {
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
@@ -137,8 +196,9 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
   };
 
   return (
+    <ResizableEditor inputRef={inputRef} resizeFrom={resizeFrom}>{({ id, height }) => (
     <div className={`cmp-field${files.over ? ' drop-over' : ''}`} {...browserDrop}>
-      <textarea ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder}
+      <textarea id={id} ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder} style={{height}}
         onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); setDismissed(false); }}
         onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onBlur={() => { setDismissed(true); onBlur?.(); }} onFocus={() => setDismissed(false)}
@@ -182,6 +242,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
         </div>
       )}
     </div>
+    )}</ResizableEditor>
   );
 }
 
@@ -216,9 +277,31 @@ function deliveryText(task: TaskView, d: Delivery | undefined): string | null {
   return `지금 턴이 끝난 뒤 보내기${(task.queued ?? []).length ? ` · 앞에 ${(task.queued ?? []).length}개 대기 중` : ''}${d ? '' : ' (기본)'}`;
 }
 
-function interpretNew(text: string, projects: Project[], tasks: TaskView[], skills: Skill[], settings: Settings, runners:RunnerModelCatalog[] = []) {
-  const mention = parseCompose(text).mention;
-  const project = mention && projects.find(p=>p.name.toLowerCase()===mention.name.toLowerCase());
+function interpretNew(text: string, projects: Project[], tasks: TaskView[], skills: Skill[], settings: Settings,
+  runners: RunnerModelCatalog[], noteAttachment?: NoteContext[number]): { ok: boolean; rows: Row[]; noteOnly?: boolean; createsNote?: boolean } {
+  const route = parseComposeTarget(text);
+  const { mention } = route;
+  const project = mention && projects.find(p => p.name.toLowerCase() === mention.name.toLowerCase());
+  const addressed = project && mention?.no && !mention.path && !/^\s*#note(?=\s|$)/.test(text)
+    ? tasks.find(t => t.project_id === project.id && t.seq === mention.no) : undefined;
+  const note = parseNoteCompose(text);
+  if (addressed?.kind === 'note' || note) {
+    const rows: Row[] = [];
+    if (noteAttachment) rows.push({ label: '첨부', value: '첨부한 메모를 받을 에이전트 작업을 지정하세요', tone: 'bad' });
+    if (addressed?.kind === 'note') {
+      const body = route.text.trim();
+      rows.push({ label: '대상', value: `@${project!.name}#${addressed.seq} › “${addressed.title}”` },
+        body ? { label: '메모 글', value: body } : { label: '메모 글', value: '내용을 입력하세요', tone: 'bad' });
+      return { ok: !!body && !noteAttachment, rows, noteOnly: true };
+    }
+    const destination = note?.mention;
+    const registered = destination && projects.find(p => p.name.toLowerCase() === destination.name.toLowerCase());
+    const valid = registered && destination?.no == null && !destination?.path;
+    rows.push(valid ? { label: '대상', value: `@${registered.name} · 새 메모` }
+      : { label: '대상', value: '등록된 @프로젝트를 입력하세요', tone: 'bad' });
+    rows.push(note?.title ? { label: '제목', value: note.title } : { label: '제목', value: '메모 제목을 입력하세요', tone: 'bad' });
+    return { ok: !!valid && !!note?.title && !noteAttachment, rows, createsNote: true };
+  }
   const modelTags = catalogModelTags(catalogsForTarget(runners,{rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
   const c = parseCompose(text, skillNames(skills),true,modelTags);
   const rows: Row[] = [];
@@ -243,7 +326,7 @@ function interpretNew(text: string, projects: Project[], tasks: TaskView[], skil
     rows.push(continuing ? { label: '대상', value: `@${project.name}#${continuing.seq} › “${continuing.title}” 이어가기` }
       : { label: '대상', value: `@${project.name}#${c.mention.no} 작업이 없습니다`, tone: 'bad' });
   } else {
-    continuing = tasks.filter((t) => t.project_id === project.id).sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+    continuing = tasks.filter((t) => t.project_id === project.id && t.kind !== 'note').sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
     // Naming another engine than the latest task's starts a new task (hub.compose).
     const want = wantedEngine(c);
     if (continuing && want && want !== (continuing.engine ?? DEFAULT_ENGINE)) continuing = undefined;
@@ -282,9 +365,10 @@ function Preview({ ok, rows }: { ok: boolean; rows: Row[] }) {
 // ── 작성 서랍 ──
 
 /** Left drawer for new work: `@project` continues its last task, `@name:/path` starts a project. */
-export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef, onClose, onSent }: {
+export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef, onClose, onSent, noteAttachment, onClearNoteAttachment }: {
   projects: Project[]; tasks: TaskView[]; inputRef: RefObject<HTMLTextAreaElement | null>;
   onClose: () => void; onSent: (task: TaskView) => void;
+  noteAttachment?: NoteContext[number]; onClearNoteAttachment?: (attachment: NoteContext[number]) => void;
 }) {
   const sources=useSources();
   const [target,setTarget]=useState(()=>getDraft<string>('drawer-target')??'auto');
@@ -296,6 +380,8 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
   const [text, setText] = useState(() => getDraft<string>('drawer') ?? '');
   const revision = useRef(0);
   const mounted = useRef(true);
+  const latestAttachment = useRef(noteAttachment);
+  latestAttachment.current = noteAttachment;
   const editText = (value: string) => { revision.current++; setText(value); };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setDraft('drawer', text, { empty: !text.trim() }); }, [text]);
@@ -307,7 +393,8 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
   const skills = useSkills(selectedSource);
   const settings = useSettings(selectedSource);
   const inventory = useModelCatalogs(selectedSource);
-  const hint = useMemo(() => interpretNew(text, projects, tasks, skills, settings,inventory.runners), [text, projects, tasks, skills, settings,inventory.runners]);
+  const hint = useMemo(() => interpretNew(text, projects, tasks, skills, settings, inventory.runners, noteAttachment),
+    [text, projects, tasks, skills, settings, inventory.runners, noteAttachment]);
   const recent = useMemo(() => rankProjects(projects, tasks)[0]?.project.name, [projects, tasks]);
 
   const submit = async () => {
@@ -316,19 +403,24 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
     const submittedDraft = getDraft('drawer');
     const clearSubmitted = () => {
       // A delayed response must preserve edits made here or after reopening the drawer.
-      if (revision.current !== unchanged || (!mounted.current && getDraft('drawer') !== submittedDraft)) return false;
+      if (revision.current !== unchanged || latestAttachment.current !== noteAttachment || (!mounted.current && getDraft('drawer') !== submittedDraft)) return false;
       setDraft('drawer', '', { empty: true });
       setText('');
       return true;
     };
     setBusy(true); setError(null);
     try {
-      const task = await api.compose(text,target==='auto'?undefined:target);
+      const task = await api.compose(text, target === 'auto' ? undefined : target,
+        noteAttachment ? [noteAttachment] : undefined, hint.noteOnly);
+      if (noteAttachment) onClearNoteAttachment?.(noteAttachment);
       // onSent closes the drawer in the same render, before the effect would see the empty text.
       if (clearSubmitted() && mounted.current) onSent(task);
       else if (mounted.current) setError('이전 지시를 보냈습니다. 현재 작성 중인 내용은 보관했습니다.');
     } catch (e) {
-      if (e instanceof SharedPending) clearSubmitted();
+      if (e instanceof SharedPending) {
+        clearSubmitted();
+        if (noteAttachment) onClearNoteAttachment?.(noteAttachment);
+      }
       setError(e instanceof Error ? e.message : String(e));
     } finally { setBusy(false); }
   };
@@ -349,26 +441,34 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
           <option value="auto">프로젝트에 따라 자동 선택</option><option value="">이 허브 · 로컬/원격 러너</option>
           {sources.map(s=><option key={s.id} value={s.id}>{s.name} · 공유</option>)}
         </select></label>}
-        <ComposeField value={text} onChange={editText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6}
+        <ComposeField value={text} onChange={editText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6} resizeFrom="bottom"
           projects={projects} tasks={tasks} mentions="route" source={selectedSource}
-          placeholder={'@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
+          placeholder={noteAttachment ? '@프로젝트 지시 또는 @프로젝트#작업번호 지시'
+            : '@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
+        {noteAttachment && <div className="note-attachment">
+          <NotePreview note={noteAttachment} />
+          <button type="button" className="icon-btn" title="메모 첨부 해제" aria-label="메모 첨부 해제" disabled={busy}
+            onClick={() => onClearNoteAttachment?.(noteAttachment)}><X /></button>
+        </div>}
         <Preview ok={hint.ok} rows={hint.rows} />
         {error && <p className="error">{error}</p>}
         <div className="cmp-actions">
           <span><kbd>⌘</kbd><kbd>↵</kbd> 보내기</span>
           <span className="spacer" />
-          <button className="btn primary" disabled={!hint.ok || busy} onClick={submit}>게시</button>
+          <button className="btn primary" disabled={!hint.ok || busy} onClick={submit}>{hint.createsNote ? '메모 만들기' : '게시'}</button>
         </div>
         <div className="examples">
           <span className="lbl">예시 넣기</span>
           {recent && <button onClick={() => example(`@${recent} 이어서 테스트를 돌리고 결과를 정리해줘`)}>@{recent} 이어서 테스트를 돌리고…</button>}
           <button onClick={() => example('@demo:/tmp/demo 간단한 README를 써줘')}>@demo:/tmp/demo 간단한 README를…</button>
           {recent && <button onClick={() => example(`@${recent} #auto 린트 오류를 모두 고쳐줘`)}>@{recent} #auto 린트 오류를…</button>}
+          {recent && !noteAttachment && <button onClick={() => example(`@${recent} #note 회의 메모`)}>@{recent} #note 회의 메모</button>}
         </div>
         <div className="syntax">
           <span className="lbl">문법</span>
-          <code>@프로젝트</code><span>그 프로젝트의 마지막 작업 이어가기</span>
+          <code>@프로젝트</code><span>그 프로젝트의 최근 에이전트 작업 이어가기</span>
           <code>@프로젝트#2</code><span>그 프로젝트의 2번 작업 이어가기</span>
+          <code>@프로젝트 #note 제목</code><span>프로젝트에 메모 만들기</span>
           <code>#new</code><span>같은 프로젝트에서 새 작업 시작 (이전 대화 없이)</span>
           <code>@이름:/경로</code><span>프로젝트를 만들고 새 작업 시작</span>
           <code>#auto</code><span>이제부터 자동 승인 (새 작업 기본)</span>
@@ -548,8 +648,10 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
                 {!q.kind && <>
                   <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
                     onClick={() => { shortcut.current.reset(); api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message)); }}>지금 보내기</button>
-                  {q.channel_entry_count === undefined && <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>}
+                  {q.channel_entry_count === undefined && q.note_context_count === undefined &&
+                    <button className="link" title="대기열에서 빼서 입력창에서 고치기" onClick={() => void editQueued(q)}>편집</button>}
                   {q.channel_entry_count !== undefined && <span className="muted small">채널 자료 {q.channel_entry_count}개</span>}
+                  {q.note_context_count !== undefined && <span className="muted small">첨부 메모 {q.note_context_count}개</span>}
                 </>}
                 <button className="link" onClick={() => { shortcut.current.reset(); api.cancelQueued(task.id, q.id).catch((e) => onError(e.message)); }}>취소</button>
               </span>

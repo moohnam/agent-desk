@@ -6,6 +6,7 @@ import { mergeEvents, mergeTaskEvents } from './posts.ts';
 import { assignProjectColors, forgetProjectColors } from './projects.ts';
 import { compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
 import { confirmedMissingTask } from './draftRetention.ts';
+import { noteRevision, onNoteChange, reportNoteChange, visibleNoteEvents } from './noteEvents.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
 import type { AccessView } from '../../shared/api.ts';
 
@@ -105,7 +106,8 @@ export function useHub() {
             knownTasks.current = new Set(nextTasks.keys());
             // Columns own history paging; the global stream needs only task previews and live events.
             const previews = [...nextTasks.values()].flatMap(task => task.last_event ?? []);
-            setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)), previews.filter(e => !deleted.current.has(e.task_id)), FEED_CAP));
+            setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)),
+              visibleNoteEvents(previews.filter(e => !deleted.current.has(e.task_id))), FEED_CAP));
             const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
             assignProjectColors(nextProjects);
             setProjects(nextProjects);
@@ -215,11 +217,13 @@ export function useHub() {
         }
         return next;
       });
-      const liveEvents = events.filter(e => !deleted.current.has(e.task_id));
+      const liveEvents = visibleNoteEvents(events.filter(e => !deleted.current.has(e.task_id)));
       if (liveEvents.length) {
         setEvents((prev) => mergeEvents(prev, liveEvents, FEED_CAP));
         for (const e of liveEvents) listeners.current.forEach((fn) => fn(e, currentTasks.current.get(e.task_id)));
       }
+      // Publish new posts before their edits so a thread can update them even in one batch.
+      for (const m of ms) if (m.type === 'event_updated' || m.type === 'event_removed') reportNoteChange(m);
       for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
     const streams=new Map<string,ReturnType<typeof openSourceStream>>();
@@ -242,10 +246,14 @@ export function useHub() {
       }
     };
     const unsubscribe=subscribeSources(update);
+    const unsubscribeNotes = onNoteChange(change => {
+      if (change.type === 'event_removed') setEvents(visibleNoteEvents);
+      else if (!deleted.current.has(change.event.task_id)) setEvents(prev => mergeEvents(prev, [change.event], FEED_CAP));
+    });
     update();
     const poll=setInterval(()=>{void discoverSources(true).catch(()=>{});},5000);
     void discoverSources(true).then(update,()=>{});
-    return()=>{subscribed.current=false;unsubscribe();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
+    return()=>{subscribed.current=false;unsubscribe();unsubscribeNotes();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
   }, [refresh, commitTasks]);
 
   const onEvent = useCallback((fn: (e: HubEvent, task?: TaskView) => void) => {
@@ -287,6 +295,12 @@ function accepts(q: FeedQuery, e: HubEvent, task: TaskView | undefined): boolean
   if (q.taskIds && !q.taskIds.includes(e.task_id)) return false;
   if (q.projectIds && (!task || !q.projectIds.includes(task.project_id))) return false;
   return !q.kinds || q.kinds.includes(e.kind);
+}
+
+function matchesNoteQuery(q: FeedQuery, event: HubEvent, task: TaskView | undefined): boolean {
+  const query = q.q?.toLowerCase();
+  return accepts(q, event, task) && (!query || String(event.payload.text ?? '').toLowerCase().includes(query)
+    || !!task?.title.toLowerCase().includes(query));
 }
 
 /** `total`: the column's posts in the hub's database, and their tasks; unknown until counted. */
@@ -368,11 +382,33 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     for (const controller of requests.current.get(key) ?? []) controller.abort();
     requests.current.delete(key);
   };
+  const recheckNotes = (key: string, notes: HubEvent[]) => {
+    const tasks = new Map<string, HubEvent[]>();
+    for (const event of notes) {
+      const held = tasks.get(event.task_id);
+      if (held) held.push(event);
+      else tasks.set(event.task_id, [event]);
+    }
+    for (const [taskId, events] of tasks) for (let offset = 0; offset < events.length; offset += 500) {
+      const held = new Map(events.slice(offset, offset + 500).map(event => [event.id, event]));
+      request(key, signal => api.events(taskId, { ids: [...held.keys()] }, signal), page => {
+        const received = new Map(visibleNoteEvents(page.events).map(event => [event.id, event]));
+        const task = current.current.tasks.get(taskId);
+        set(key, entry => ({ ...entry, events: entry.events.flatMap(event => {
+          if (held.get(event.id) !== event) return [event];
+          const updated = received.get(event.id);
+          if (!updated || !matchesNoteQuery(entry.q, updated, task)) return [];
+          return [(noteRevision(updated) ?? 0) > (noteRevision(event) ?? 0) ? updated : event];
+        }) }));
+      });
+    }
+  };
   const loadNewest = (key: string, epoch: number) => {
     const entry = cache.current.get(key);
     if (!entry) return;
     const token = entry.token;
     const limit = NEWEST_FEED_PAGE;
+    const savedNotes = new Set(entry.events.filter(event => noteRevision(event) !== undefined));
     set(key, e => ({ ...e, loading: true, requestedAt: epoch }));
     const retry = () => {
       if (retries.current.has(key)) return;
@@ -387,16 +423,23 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     request(key, signal => api.feedPage(limit, undefined, entry.q, signal, page => {
       if (signal.aborted || cache.current.get(key)?.token !== token) return;
       // Partial pages never advance the paging boundary or replace already visible posts.
-      set(key, e => ({ ...e, events: mergeEvents(e.events, page.events) }));
+      set(key, e => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page.events)) }));
     }), page => {
+      const oldest = page.complete && page.events.length >= limit ? page.events[0] : undefined;
+      const ids = page.complete && savedNotes.size ? new Set(page.events.map(event => event.id)) : undefined;
+      const older = oldest && ids ? [...savedNotes].filter(event => !ids.has(event.id) && compareEvents(event, oldest) < 0) : [];
+      const checkOlder = new Set(older);
       set(key, e => {
         // Keep every readable source's posts while an unavailable source catches up.
-        return { ...e, events: mergeEvents(e.events, page.events),
+        const received = visibleNoteEvents(page.events);
+        // A note missing in the fresh page's range was deleted or stopped matching this query.
+        const kept = ids ? e.events.filter(event => !savedNotes.has(event) || ids.has(event.id) || checkOlder.has(event)) : e.events;
+        return { ...e, events: mergeEvents(kept, received),
           more: page.complete ? page.events.length >= limit : e.more,
           olderCursor: page.complete ? page.events[0] : e.olderCursor,
           loading: false, at: page.complete ? epoch : e.at };
       });
-      if (page.complete) cancelRetry(key);
+      if (page.complete) { cancelRetry(key); recheckNotes(key, older); }
       else retry();
     }, () => { set(key, e => ({ ...e, loading: false })); retry(); });
   };
@@ -468,6 +511,28 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     if (any) bump();
   }), [onEvent]);
 
+  useEffect(() => onNoteChange(change => {
+    let changed = false;
+    for (const [key, entry] of cache.current) {
+      let events = entry.events;
+      if (change.type === 'event_removed') events = visibleNoteEvents(events);
+      else {
+        const event = change.event;
+        const task = current.current.tasks.get(event.task_id);
+        const held = events.some(e => e.id === event.id);
+        if (matchesNoteQuery(entry.q, event, task)) {
+          if (held || entry.live) events = mergeEvents(events, [event]);
+        } else if (held) events = events.filter(e => e.id !== event.id);
+      }
+      if (events !== entry.events) {
+        cache.current.set(key, compactFeed({ ...entry, events }, entry.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+        if (entry.live) count(key, COUNT_EVERY);
+        changed = true;
+      }
+    }
+    if (changed) bump();
+  }), []);
+
   useEffect(() => {
     if (!gone.size) return;
     let changed = false;
@@ -516,7 +581,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     reading.current.add(id);
     set(key, (e) => ({ ...e, loading: true }));
     request(key, signal => api.feed(FEED_PAGE, before, cur.q, signal),
-      (page) => set(key, (e) => ({ ...e, events: mergeEvents(e.events, page), olderCursor: page[0] ?? e.olderCursor,
+      (page) => set(key, (e) => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page)), olderCursor: page[0] ?? e.olderCursor,
         more: page.length >= FEED_PAGE, loading: false })),
       () => set(key, (e) => ({ ...e, loading: false })));
   }, []);
@@ -586,9 +651,12 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     if (!taskId) { publish(undefined); return; }
     const held = previous?.taskId === taskId ? previous : cache.current.get(taskId);
     cache.current.delete(taskId);
-    publish({ taskId, events: held?.events ?? EMPTY_TASK_EVENTS, more: held?.more ?? false, cursor: held?.cursor ?? null,
+    const kept = visibleNoteEvents(held?.events ?? EMPTY_TASK_EVENTS);
+    const oldestNote = held?.events.find(e => noteRevision(e) !== undefined)?.id;
+    const oldNotes = oldestNote == null ? undefined : new Set(kept);
+    publish({ taskId, events: kept, more: held?.more ?? false, cursor: held?.cursor ?? null,
       firstLive: held?.firstLive ?? null, since, reload, loaded: false, loadingEarlier: false });
-    const floor = () => historyFloor(active.current, since);
+    const floor = () => historyFloor(active.current, oldestNote == null ? since : Math.min(oldestNote, since ?? Infinity));
     const controller = new AbortController();
     let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -610,8 +678,12 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
         if (gapBeforeLive()) throw new Error('Incomplete task history');
         const current = active.current!;
         const latest = page.events.at(-1)?.id;
-        publish({ ...current, events: mergeTaskEvents(current.events, page.events),
-          more: !page.events.length || (current.events.length > 0 && current.events[0].id < page.events[0].id) ? current.more : page.more,
+        // Revalidate the entire held range of an editable thread. Live edits and newly posted
+        // events that arrived after the read began still take precedence.
+        const retained = oldNotes ? current.events.filter(event => !oldNotes.has(event)) : current.events;
+        const keepsEarlier = current.events.length > 0 && (!page.events.length || current.events[0].id < page.events[0].id);
+        publish({ ...current, events: mergeTaskEvents(retained, visibleNoteEvents(page.events)),
+          more: !oldNotes && keepsEarlier ? current.more : page.more,
           cursor: latest == null ? current.cursor : Math.max(current.cursor ?? 0, latest), firstLive: null, loaded: true });
       } catch {
         if (!alive) return;
@@ -629,7 +701,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       api.events(taskId, { ids }, controller.signal).then((page) => {
         if (!alive) return;
         const current = active.current!;
-        publish({ ...current, events: mergeTaskEvents(current.events, page.events) });
+        publish({ ...current, events: mergeTaskEvents(current.events, visibleNoteEvents(page.events)) });
       }).catch(() => {});
     };
     const off = onEvent((e) => {
@@ -639,6 +711,25 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
         firstLive: current.cursor == null ? Math.min(current.firstLive ?? e.id, e.id) : null });
       if (e.payload?.clipped) {
         cut.add(e.id);
+        timer ??= setTimeout(fetchWhole, WHOLE_DELAY_MS);
+      }
+    });
+    const offNotes = onNoteChange(change => {
+      const current = active.current!;
+      if (change.type === 'event_removed') {
+        if (change.task_id !== taskId) return;
+        cut.delete(change.event_id);
+        const events = visibleNoteEvents(current.events);
+        const firstLive = current.firstLive === change.event_id ? events[0]?.id ?? null : current.firstLive;
+        if (events !== current.events || firstLive !== current.firstLive) publish({ ...current, events, firstLive });
+        return;
+      }
+      const event = change.event;
+      if (event.task_id !== taskId || !current.events.some(held => held.id === event.id)) return;
+      const events = mergeTaskEvents(current.events, [event]);
+      if (events !== current.events) publish({ ...current, events });
+      if (event.payload.clipped) {
+        cut.add(event.id);
         timer ??= setTimeout(fetchWhole, WHOLE_DELAY_MS);
       }
     });
@@ -652,13 +743,13 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       api.events(taskId, { before: oldest.id }, controller.signal).then(page => {
         if (!alive) return;
         const latest = active.current!;
-        publish({ ...latest, events: mergeTaskEvents(latest.events, page.events), more: page.more });
+        publish({ ...latest, events: mergeTaskEvents(latest.events, visibleNoteEvents(page.events)), more: page.more });
       }).catch(() => {}).finally(() => {
         if (alive) publish({ ...active.current!, loadingEarlier: false });
       });
     };
     return () => {
-      alive = false; earlier.current = null; off();
+      alive = false; earlier.current = null; off(); offNotes();
       clearTimeout(timer); clearTimeout(retry);
       controller.abort();
     };

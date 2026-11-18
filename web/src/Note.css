@@ -1,0 +1,15 @@
+.note-preview {
+  min-width: 0;
+  margin: 4px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.note-preview > summary { cursor: pointer; }
+.note-preview > div { margin-top: 4px; color: var(--text); white-space: pre-wrap; }
+.note-attachment { display: flex; align-items: flex-start; gap: 4px; }
+.note-attachment > .note-preview { flex: 1; margin: 0; }

@@ -24,10 +24,10 @@ import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
 import { remoteLocation } from '../../shared/remote.ts';
-import { workspaceApi, workspaceRoute } from './workspace-api.ts';
+import { isNoteInput, workspaceApi, workspaceRoute } from './workspace-api.ts';
 import { WorkspaceLinks } from './workspace-links.ts';
 import { handleBrokerMcp } from './request-broker.ts';
-import { ENGINES, parseCompose, type EngineName } from '../../shared/compose.ts';
+import { ENGINES, parseCompose, parseNoteCompose, type EngineName } from '../../shared/compose.ts';
 import { UpdateService } from './update-service.ts';
 
 const WEB_DIST = config.webDist;
@@ -431,7 +431,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
               if(location)owner=workspaces.remoteOwner(location.address)??owner;
             }
             if(workspaceUrl.pathname==='/compose'&&typeof body.text==='string'){
-              const mention=parseCompose(body.text).mention;
+              const mention=(parseNoteCompose(body.text)??parseCompose(body.text)).mention;
               const path=mention?.path;
               const location=path&&remoteLocation(path);
               if(location)owner=workspaces.remoteOwner(location.address)??owner;
@@ -444,7 +444,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         const result = (() => {
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
           return hub.withInputPeer(directPeer, () => hub.atomic(() => {
-            if (!connectorUserInput(req.method!, workspaceUrl.pathname)) return workspaceApi(hub, req.method!, workspaceUrl, body);
+            if (!connectorUserInput(req.method!, workspaceUrl.pathname) || isNoteInput(req.method!, workspaceUrl.pathname, body, hub))
+              return workspaceApi(hub, req.method!, workspaceUrl, body);
             const scopes=connectorInputScopes(req.method!,workspaceUrl.pathname,body);
             const grant = scopes.length ? connectorAuthority.issue({ workspaceId: directWorkspace.id, requestId: randomUUID(),scopes }) : undefined;
             const result = hub.withConnectorIdentity(connectorAuthority.identity(),()=>hub.withConnectorContext(grant ? { ...grant, sourcePeerId: directPeer } : null,

@@ -12,6 +12,7 @@ export interface ThreadPostActions {
   deny(post: Post): void;
   reference(post: Post): void;
   pick(post: Post): void;
+  attach(post: Post): void;
 }
 
 interface Props {
@@ -122,6 +123,7 @@ export class ThreadPosts extends PureComponent<Props, Range, ScrollAnchor> {
         picked={picked && pickable(p.event) ? picked.includes(p.event.id) : undefined}
         referenced={referenced && p.taskId === taskId ? referenced.has(p.id) : undefined}
         onReference={() => actions.current.reference(p)} onPick={() => actions.current.pick(p)}
+        onAttachNote={() => actions.current.attach(p)}
         onSelect={() => actions.current.select(p)} onToggle={() => actions.current.toggle(p)}
         onAllow={() => actions.current.allow(p)} onDeny={() => actions.current.deny(p)} />
     ));

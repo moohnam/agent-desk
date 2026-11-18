@@ -23,6 +23,7 @@ export function Chip({ kind, n, label, hint, title, onClick }: {
 
 /** The status badge, or "응답 없음 N분" for a running app task that has gone quiet. */
 export function StatusBadge({ task, now }: { task: TaskView; now: number }) {
+  if (task.kind === 'note') return <span className="badge">메모</span>;
   const idle = stalledMinutes(task, now);
   if (idle != null) {
     return <span className="badge stalled" title="실행 중인데 3분 넘게 아무 이벤트가 없습니다.">응답 없음 {idle}분</span>;

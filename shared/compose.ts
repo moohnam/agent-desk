@@ -152,9 +152,11 @@ export const TAG_HELP: { tag: string; help: string }[] = [
 /** Skill names: what a #tag can hold, and a safe directory name. */
 export const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+export interface ComposeMention { name: string; no?: number; path?: string }
+
 export interface Composed {
   /** `no`: the task number after `#`. */
-  mention?: { name: string; no?: number; path?: string };
+  mention?: ComposeMention;
   mode?: PermissionMode;
   engine?: EngineName;
   model?: ModelName;
@@ -171,6 +173,28 @@ export const REQUEST_TOOL = 'desk_request';
 
 const MENTION = /(^|\s)@([^\s:@#]+)(?:#(\d+))?(?::(\S+))?/;
 const TAG = /(^|\s)#([a-z0-9][a-z0-9-]*)(?=\s|$)/gi;
+const NOTE_TAG = /^#note(?=\s|$)/;
+const NOTE_TARGET = /^@([^\s:@#]+)(?:#(\d+))?(?::(\S+))?(?=\s|$)/;
+
+/** A leading route and the input with only that route removed. */
+export function parseComposeTarget(text: string): { mention?: ComposeMention; text: string } {
+  const m = MENTION.exec(text);
+  if (!m || !/^(\s*#[^\s#@]+)*\s*$/.test(text.slice(0, m.index))) return { text };
+  return { mention: { name: m[2], no: m[3] ? Number(m[3]) : undefined, path: m[4] },
+    text: text.slice(0, m.index) + m[1] + text.slice(m.index + m[0].length) };
+}
+
+/** `@project #note title` or `#note @project title`, with the title kept literal. */
+export function parseNoteCompose(text: string): { mention?: ComposeMention; title: string } | undefined {
+  const input = text.trim();
+  const noteFirst = NOTE_TAG.test(input);
+  const candidate = noteFirst ? input.slice('#note'.length).trimStart() : input;
+  const m = NOTE_TARGET.exec(candidate);
+  const rest = m ? candidate.slice(m[0].length).trimStart() : candidate;
+  if (!noteFirst && (!m || !NOTE_TAG.test(rest))) return undefined;
+  const mention = m ? { name: m[1], no: m[2] === undefined ? undefined : Number(m[2]), path: m[3] } : undefined;
+  return { mention, title: (noteFirst ? rest : rest.slice('#note'.length)).trim() };
+}
 
 /** Every `@name` or `@name#N` in `text`, in order (paths dropped). */
 export function mentionsIn(text: string): { name: string; no?: number }[] {
@@ -184,13 +208,8 @@ export function mentionsIn(text: string): { name: string; no?: number }[] {
  */
 export function parseCompose(text: string, skills: Iterable<string> = [], route = true, modelTags: Readonly<Record<string, ModelName>> = {}): Composed {
   const known = new Set([...skills].filter(name => !(CONNECTOR_SCOPES as readonly string[]).includes(name)));
-  let body = text;
-  let mention: Composed['mention'];
-  const m = route ? MENTION.exec(body) : null;
-  if (m && /^(\s*#[^\s#@]+)*\s*$/.test(body.slice(0, m.index))) {
-    mention = { name: m[2], no: m[3] ? Number(m[3]) : undefined, path: m[4] };
-    body = body.slice(0, m.index) + m[1] + body.slice(m.index + m[0].length);
-  }
+  const target = route ? parseComposeTarget(text) : { text };
+  let body = target.text;
   let mode: PermissionMode | undefined;
   let engine: EngineName | undefined;
   let model: ModelName | undefined;
@@ -209,7 +228,7 @@ export function parseCompose(text: string, skills: Iterable<string> = [], route 
     if (known.has(t)) { if (!used.includes(t)) used.push(t); return pre; }
     return all;
   });
-  return { mention, mode, engine, model, effort, delivery, skills: used, body: body.trim() };
+  return { mention: target.mention, mode, engine, model, effort, delivery, skills: used, body: body.trim() };
 }
 
 /** Runtime IDs can carry provider suffixes; do not interpolate a catalog ID into a regex. */

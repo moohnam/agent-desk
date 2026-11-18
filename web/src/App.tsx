@@ -21,6 +21,8 @@ import { ChannelsDialog } from './Channels.tsx';
 import { ChannelColumn } from './ChannelColumn.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
+import { NoteReply } from './Note.tsx';
+import type { NoteContext } from '../../shared/api.ts';
 import { SkillsDialog } from './Skills.tsx';
 import { stalledMinutes, taskRunning } from './format.ts';
 import { HandoffPanel, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
@@ -48,7 +50,7 @@ import { Help } from './Help.tsx';
 import { setNotify, useDeskNotifications, useNotifyState } from './notify.ts';
 import { PANE_DEFAULT, PANE_MAX, PANE_MIN, ResizeHandle, SplitHandle } from './handles.tsx';
 
-/** Typing pauses this long before the search column asks the hub again. */
+/** Typing pauses this long before the search panel asks the hub again. */
 const SEARCH_DEBOUNCE_MS = 250;
 const VIEW_ICON = { custom: Columns3, project: Folder, task: ListTodo, status: LayoutDashboard };
 /** "작업별 컬럼으로 나누기" makes at most this many columns at once. */
@@ -137,16 +139,19 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const composeRef = useRef<HTMLTextAreaElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
+  const [noteAttachment, setNoteAttachment] = useState<NoteContext[number]>();
   const pendingDelete = useRef(0);
   const pendingG = useRef(0);
   const jumpIndex = useRef<Record<string, number>>({});
   const [tick, setTick] = useState(0);
   // A question whose answer box should get focus once its thread has rendered it.
   const questionFocus = useRef<{ taskId: string; questionId: string } | null>(null);
-  /** The search column's query; null: no search column. `searchApplied` follows it after a pause. */
+  /** The floating search query; null closes the panel. Apply edits after a pause. */
   const [search, setSearch] = useState<string | null>(null);
   const [searchApplied, setSearchApplied] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchOrigin = useRef<string | undefined>(undefined);
+  const restoreWithoutReveal = useRef<string | undefined>(undefined);
   useEffect(() => {
     const t = setTimeout(() => setSearchApplied(search ?? ''), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
@@ -187,7 +192,8 @@ export function App() {
     setViewLimit(VIEW_MAX);
     // The open thread belonged to the old view's columns; the new view starts without it.
     if (threadTask) { if (history.state?.thread) history.back(); else setThreadTask(null); }
-    // So did the search column.
+    searchOrigin.current = undefined;
+    restoreWithoutReveal.current = undefined;
     setSearch(null); setSearchApplied('');
     setActive(0);
     defaultFocusPending.current = true;
@@ -616,7 +622,14 @@ export function App() {
     const entered = revealedCol.current !== activeCol.id;
     revealedCol.current = activeCol.id;
     // The split thread is always in view; the deck beside it stays where it is.
-    if (!(floatThread && activeCol.id === THREAD)) revealColumn(activeCol.id, activeCol.id === THREAD ? deck[activeIdx - 1]?.id : undefined);
+    if (restoreWithoutReveal.current === activeCol.id) {
+      restoreWithoutReveal.current = undefined;
+      return;
+    }
+    if (!(floatThread && activeCol.id === THREAD)) {
+      const previous = activeCol.id === THREAD ? deck.slice(0, activeIdx).findLast((c) => c.id !== SEARCH)?.id : undefined;
+      revealColumn(activeCol.id, previous);
+    }
     const id = selection[activeCol.id];
     if (id == null || pressing.current) return;
     if (entered && activeCol.id !== THREAD) {
@@ -627,7 +640,7 @@ export function App() {
     else revealPost(activeCol.id, id);
   }, [activeCol?.id, selection]);
   // The thread column eases in where it opens (or moves to) rather than popping up.
-  const threadAt = threadTask ? threadSlot(threadAfter) : null;
+  const threadAt = threadTask ? deckDefs.slice(0, threadSlot(threadAfter)).filter((c) => c.id !== SEARCH).length : null;
   useLayoutEffect(() => {
     if (threadAt == null) return;
     deckRef.current?.querySelector(`section[data-col="${THREAD}"]`)?.animate(
@@ -702,7 +715,9 @@ export function App() {
     threadInteracted.current = false;
     readerSelection.current = null;
     questionFocus.current = null;
-    const after = at.from && at.from !== THREAD ? at.from : threadAfter;
+    const searchFrom = deckDefs.find((c) => c.id === searchOrigin.current && c.id !== SEARCH)?.id;
+    const after = at.from === SEARCH ? searchFrom ?? threadAfter
+      : at.from && at.from !== THREAD ? at.from : threadAfter;
     if (threadTask !== taskId) { references.enter(taskId); setThreadTask(taskId); }
     setThreadAfter(after);
     setThreadFocus(at.post ?? null);
@@ -1102,6 +1117,9 @@ export function App() {
   };
   const openSearch = () => {
     if (phone) { setToast('검색은 PC 화면에서 쓸 수 있습니다.'); return; }
+    if (activeCol?.id !== SEARCH) searchOrigin.current = activeCol?.id;
+    glideStop.current?.();
+    if (referencesVisible) references.show(false);
     const task = activeCol?.id === THREAD && threadTask ? hub.tasks.get(threadTask) : undefined;
     if (task) {
       const query = taskSearchQuery(task);
@@ -1110,9 +1128,26 @@ export function App() {
       setSearchApplied(query);
     } else if (search == null) setSearch('');
     setFocusCol(SEARCH);
-    requestAnimationFrame(() => searchRef.current?.focus());
+    requestAnimationFrame(() => {
+      const input = searchRef.current;
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      if (task) input.setSelectionRange(input.value.length, input.value.length);
+    });
   };
-  const closeSearch = () => { setSearch(null); setSearchApplied(''); };
+  const closeSearch = () => {
+    if (activeCol?.id === SEARCH) {
+      const withoutSearch = deck.filter((c) => c.id !== SEARCH);
+      const origin = Math.max(0, withoutSearch.findIndex((c) => c.id === searchOrigin.current));
+      if (withoutSearch[origin]) {
+        restoreWithoutReveal.current = withoutSearch[origin].id;
+        setActive(origin);
+      }
+    }
+    searchOrigin.current = undefined;
+    setSearch(null);
+    setSearchApplied('');
+  };
   /** Leaves the search field for its results, selecting the first. */
   const searchResults = () => {
     searchRef.current?.blur();
@@ -1122,7 +1157,7 @@ export function App() {
     const first = deck[k].posts[0];
     if (first) select(SEARCH, first.id);
   };
-  /** Keeps the search as a column in its place, the query as its filter and title. */
+  /** Saves the query as a column in the custom view. */
   const saveSearch = () => {
     const text = (search ?? '').trim();
     if (!text) return;
@@ -1132,8 +1167,8 @@ export function App() {
     next.splice(k + 1, 0, def);
     setCustom(next);
     setView('custom');
-    if (threadAfter === SEARCH) setThreadAfter(def.id);
     closeSearch();
+    restoreWithoutReveal.current = undefined;
     setFocusCol(def.id);
     setToast('검색을 컬럼으로 저장했습니다.');
   };
@@ -1191,6 +1226,13 @@ export function App() {
       references.toggle(p.id);
     },
     pick: p => togglePick(p.taskId, p.event.id),
+    attach: p => {
+      const task = hub.tasks.get(p.taskId);
+      const text = p.event.payload.text;
+      if (task?.kind !== 'note' || typeof text !== 'string') return;
+      setNoteAttachment({ title: task.title, text });
+      openDrawer();
+    },
   };
 
   // Per feed column, what it shows of the tasks, approvals and the rest; kept the same object while
@@ -1237,6 +1279,8 @@ export function App() {
   };
 
   const threadIdx = deck.findIndex((c) => c.id === THREAD);
+  const searchIdx = deck.findIndex((c) => c.id === SEARCH);
+  const searchCovered = referencesVisible || (activeCol?.id === THREAD && (!floatThread || paneCover));
   /** One deck column; the thread is drawn outside the deck when it floats. */
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
@@ -1306,7 +1350,9 @@ export function App() {
             )}
           </div>
         </div>
-        {threadTaskView && (handoff?.open && threadTaskView.source !== 'external' ? (
+        {threadTaskView && (threadTaskView.kind === 'note' ? (
+          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+        ) : handoff?.open && threadTaskView.source !== 'external' ? (
           <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
             onError={setToast} onDone={setToast} />
         ) : (
@@ -1389,9 +1435,11 @@ export function App() {
       <div className={`workspace${documentOverlay&&referencesVisible?' document-overlay':''}`} ref={workspaceRef}>
         {drawer && (
           <ComposeDrawer projects={hub.projects} tasks={taskList} inputRef={composeRef}
+            noteAttachment={noteAttachment}
+            onClearNoteAttachment={(attachment) => setNoteAttachment(current => current === attachment ? undefined : current)}
             onClose={() => setDrawer(false)}
             onSent={(task) => {
-              setToast('보냈습니다.');
+              setToast(task.kind === 'note' ? '메모 작업을 저장했습니다.' : '보냈습니다.');
               void hub.refresh();
               // The drawer has done its job; the thread opens beside the column that shows everything.
               setDrawer(false);
@@ -1404,7 +1452,7 @@ export function App() {
           ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
-          {deck.map((col, i) => (floatThread && col.id === THREAD ? null : renderColumn(col, i)))}
+          {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
               <Plus aria-label="컬럼 추가" /><kbd>c</kbd>
@@ -1416,6 +1464,8 @@ export function App() {
             </button>
           )}
         </ColumnDeck>
+        {searchIdx >= 0 && <aside className="search-float" aria-label="검색" aria-hidden={searchCovered} inert={searchCovered}
+          style={{ width: widthOf(SEARCH) }}>{renderColumn(deck[searchIdx], searchIdx)}</aside>}
         </div>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.

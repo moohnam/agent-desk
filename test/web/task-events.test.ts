@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { mergeTaskEvents } from '../../web/src/posts.ts';
+import * as noteEvents from '../../web/src/noteEvents.ts';
 
 type Page = { events: ReturnType<typeof event>[]; more: boolean };
 
@@ -44,7 +45,7 @@ function harness() {
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const imports: Record<string, unknown> = {
     react, './api.ts': { api }, './posts.ts': { mergeTaskEvents }, './federation.ts': {},
-    './projects.ts': {}, './feedCache.ts': {}, './draftRetention.ts': {}, './sourceStream.ts': {},
+    './projects.ts': {}, './feedCache.ts': {}, './draftRetention.ts': {}, './sourceStream.ts': {}, './noteEvents.ts': noteEvents,
   };
   const context = {
     exports: {}, require: (name: string) => { assert.ok(name in imports, `missing ${name}`); return imports[name]; },
@@ -88,6 +89,22 @@ test('failed initial history retries and replaces a cut live event with its whol
   assert.deepEqual(result.events.map(e => e.id), [1, 2]);
   assert.equal(result.events[1].payload.clipped, undefined);
   h.unmount();
+});
+
+test('deleting the first live note during the initial history read does not block an empty thread', async () => {
+  const h = harness();
+  const note = { ...event(44281), session_id: 'note-session', kind: 'user' as const, payload: { text: 'note', revision: 0 } };
+  try {
+    h.render('a');
+    h.live(note);
+    noteEvents.reportNoteChange({ type: 'event_removed', task_id: note.task_id, event_id: note.id });
+    h.requests[0].resolve({ events: [], more: false });
+    await settled();
+    const result = h.render('a');
+    assert.equal(result.loaded, true);
+    assert.equal(result.events.length, 0);
+    assert.equal(h.requests.length, 1);
+  } finally { h.unmount(); }
 });
 
 test('reconnect fills a gap before a newer live event and preserves earlier paging', async () => {

@@ -5,7 +5,7 @@ import type { Hub } from './hub.ts';
 import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
 import { readBody } from './body.ts';
-import { localAuthorityRoute, workspaceApi, workspaceRoute, type WorkspaceResult } from './workspace-api.ts';
+import { isNoteInput, localAuthorityRoute, workspaceApi, workspaceRoute, type WorkspaceResult } from './workspace-api.ts';
 import type { WorkspaceOperation } from '../../shared/workspace.ts';
 import { applySkillBundle, ensureSharedSkillTables, listPeerSkills, peerSkillManifest, peerSkillStore, removeAbsentSkills, restoreSkillBundle, syncSkillVersion, type SkillBundle, type SkillReference } from './shared-skill-sync.ts';
 import type { HubMessage } from '../../shared/api.ts';
@@ -107,15 +107,16 @@ export class SharedWorkspace {
       if (prior.digest !== hash) throw new HttpError(409,'같은 명령 ID의 내용이 바뀌었습니다');
       return JSON.parse(prior.result);
     }
-    if(op.body.__desk_skill_bundle!==undefined)
+    const literalNote = isNoteInput(op.method, op.path, op.body, this.hub);
+    if(!literalNote && op.body.__desk_skill_bundle!==undefined)
       applySkillBundle(this.db,this.hub.skills,peer,op.id,op.body.__desk_skill_bundle as SkillBundle);
-    const snapshot=op.body.__desk_skill_ref
+    const snapshot=literalNote ? undefined : op.body.__desk_skill_ref
       ? restoreSkillBundle(this.hub.skills,peer,op.body.__desk_skill_ref as SkillReference)
       : op.body.__desk_skill_bundle as SkillBundle|undefined;
-    if(op.body.__desk_skill_ref && !snapshot)
+    if(!literalNote && op.body.__desk_skill_ref && !snapshot)
       return {status:409,body:{code:'skill_missing',error:'스킬 버전이 없거나 지문이 다릅니다. 준비 파일을 보내야 합니다'}};
-    const grant = op.body.__desk_connector_grant as ConnectorGrant | null | undefined;
-    const scopes=connectorInputScopes(op.method,op.path,op.body);
+    const grant = literalNote ? undefined : op.body.__desk_connector_grant as ConnectorGrant | null | undefined;
+    const scopes=literalNote ? [] : connectorInputScopes(op.method,op.path,op.body);
     let identity=op.body.__desk_connector_identity as ConnectorIdentity|undefined;
     let connectorContext: ConnectorExecutionContext | null = null;
     if (grant != null && !grant.inputScoped) {
@@ -142,7 +143,7 @@ export class SharedWorkspace {
         return JSON.parse(held.result);
       }
       let result: WorkspaceResult;
-      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(op.body.__desk_instructions, ()=>snapshot
+      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(literalNote ? undefined : op.body.__desk_instructions, ()=>snapshot
         ? this.hub.withSkillSnapshot(snapshot,
           () => workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))
         : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body)))))); }
@@ -199,7 +200,7 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
         if (req.method === 'GET' && url.pathname === '/v1/file-path') {

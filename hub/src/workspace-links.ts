@@ -1,6 +1,6 @@
 import { readSse } from './sse-reader.ts';
 import type { HubMessage } from '../../shared/api.ts';
-import { needsDefaultInstructions } from './workspace-api.ts';
+import { isNoteInput, needsDefaultInstructions } from './workspace-api.ts';
 import { DEFAULT_INSTRUCTIONS } from './instruction-store.ts';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -414,15 +414,16 @@ export class WorkspaceLinks {
       throw new HttpError(400,'내부 지침·스킬 필드는 작업공간 연결에서만 설정합니다');
     if(old&&(old.digest!==hash||old.link_id!==id))throw new HttpError(409,'같은 명령 ID의 내용 또는 대상이 바뀌었습니다');
     if(!old){
+      const literalNote = isNoteInput(op.method, op.path, op.body);
       const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
-      const bundle=text&&this.skills&&this.needsSkillSnapshot(text)
+      const bundle=!literalNote&&text&&this.skills&&this.needsSkillSnapshot(text)
         ? collectSkillBundle(this.skills,text)??EMPTY_SKILL_BUNDLE:null;
       const prepared=bundle?JSON.stringify(bundle):'';
       const preparedOp: WorkspaceOperation = needsDefaultInstructions(op.method, op.path, op.body)
         ? {...op, body: {...op.body, __desk_instructions: this.instructions?.()}} : {...op, body: {...op.body}};
       this.db.exec('SAVEPOINT connector_enqueue');
       try {
-      if (connectorUserInput(op.method, op.path)) {
+      if (!literalNote && connectorUserInput(op.method, op.path)) {
         if(this.connectorAuthority)preparedOp.body.__desk_connector_identity=this.connectorAuthority.identity();
         const scopes=connectorInputScopes(op.method,op.path,op.body);
         if (scopes.length) {
@@ -455,6 +456,30 @@ export class WorkspaceLinks {
         if(this.stopped)break;
         try {
           const op=JSON.parse(row.payload) as WorkspaceOperation;
+          const complete = (status: number, body: unknown) => {
+            this.db.prepare('UPDATE workspace_delivery_attempt SET completed_at=? WHERE id=?').run(new Date().toISOString(),row.id);
+            // Drop prompts and secret answers once delivery is confirmed. Keep the receipt and digest.
+            this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
+              .run(status,JSON.stringify(body),status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
+          };
+          const literalNote = isNoteInput(op.method, op.path, op.body);
+          if (literalNote || op.body.note_context !== undefined) {
+            const identity = await this.request(this.link(id), '/v1/identity');
+            if (!('status' in identity) || identity.status !== 200) { failure('notes_capability_unavailable'); break; }
+            if (identity.body?.capabilities?.notes !== 1) {
+              // The runner may have committed the write before it rolled back to an older version.
+              const receipt = await this.request(this.link(id), '/v1/receipts/' + encodeURIComponent(op.id));
+              if (this.stopped) break;
+              if ('status' in receipt && receipt.status === 200 && Number.isInteger(receipt.body?.status)) {
+                complete(receipt.body.status, receipt.body.body);
+                continue;
+              }
+              if (!('status' in receipt) || receipt.status !== 404) { failure('receipt_unavailable'); break; }
+              this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
+                .run(JSON.stringify({error:'공유 러너가 메모를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요'}),row.id);
+              continue;
+            }
+          }
           const selection=op.body.__desk_connector_selection as {scopes:ConnectorScope[];policy:ConnectorPolicy[];hubId:string}|undefined;
           let connectorGrant = op.body.__desk_connector_grant as { expiresAt?: number; inputScoped?:true;capability?:string } | null | undefined;
           if(connectorGrant&&!connectorGrant.inputScoped) {
@@ -533,7 +558,7 @@ export class WorkspaceLinks {
             }
           }
           const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
-          if(this.skills&&text&&this.needsSkillSnapshot(text)&&!row.prepared_payload){
+          if(!literalNote&&this.skills&&text&&this.needsSkillSnapshot(text)&&!row.prepared_payload){
             this.db.prepare('UPDATE workspace_delivery SET status=409,result=?,prepared_payload=NULL WHERE id=?')
               .run(JSON.stringify({error:'업데이트 전에 접수한 입력의 스킬 버전을 확인할 수 없습니다. 내용을 확인하고 다시 보내세요'}),row.id);
             continue;
@@ -561,10 +586,7 @@ export class WorkspaceLinks {
           }
           if(this.stopped)break;
           if(!('status' in r)||r.status>=500||r.status===401||r.status===403||(r.status===409&&r.body?.code==='workspace_mismatch')){failure('status' in r?`http_${r.status}`:'invalid_response');break;}
-          this.db.prepare('UPDATE workspace_delivery_attempt SET completed_at=? WHERE id=?').run(new Date().toISOString(),row.id);
-          // Drop prompts and secret answers once delivery is confirmed. Keep the receipt and digest.
-          this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
-            .run(r.status,JSON.stringify(r.body),r.status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
+          complete(r.status, r.body);
         }catch(error){failure(error instanceof Error ? error.name : 'request_failed');break;}
       }
     })().finally(()=>this.flushing.delete(id));

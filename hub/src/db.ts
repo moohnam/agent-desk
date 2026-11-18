@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Approval, Channel, ChannelContext, ChannelEntry, ChannelEntryInput, ChannelIngestReceipt, FeedFilter, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
+import type { Approval, Channel, ChannelContext, ChannelEntry, ChannelEntryInput, ChannelIngestReceipt, FeedFilter, NoteContext, Project, QueuedKind, Question, Task, TaskStatus, WireEvent } from '../../shared/api.ts';
 import { REQUEST_TOOL, type Effort, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { ALERT_STATES, type EventKind } from '../../shared/events.ts';
 
@@ -24,8 +24,9 @@ export interface ChannelRecord {
   conversation_task_id?: string | null;
 }
 /** A value with long strings, long lists, and deep nesting cut: enough for a one-line summary. */
+const clipText = (text: string) => text.length > 300 ? `${text.slice(0, 300)}…` : text;
 function clip(v: unknown, depth = 0): unknown {
-  if (typeof v === 'string') return v.length > 300 ? `${v.slice(0, 300)}…` : v;
+  if (typeof v === 'string') return clipText(v);
   if (!v || typeof v !== 'object') return v;
   if (depth >= 3) return '…';
   if (Array.isArray(v)) return v.slice(0, 20).map((x) => clip(x, depth + 1));
@@ -33,14 +34,19 @@ function clip(v: unknown, depth = 0): unknown {
 }
 
 /**
- * An event as feed columns get it: tool calls and results, nearly all of a history's size, keep
- * what their summary line shows; the thread loads them whole. `clipped` marks a cut payload.
+ * An event as feed columns and live streams get it: attachments and tool events keep what their
+ * summary shows. `clipped` marks a payload the thread can fetch whole.
  */
 export function feedEvent(e: Event): Event {
   const p = e.payload as Record<string, unknown>;
-  if (e.kind === 'user' && p.channel_context) {
-    const context = p.channel_context as ChannelContext;
-    return { ...e, payload: { ...p, channel_context: { ...context, entries: context.entries.map((entry) => ({ ...entry, body: '' })) }, clipped: true } };
+  if (e.kind === 'user' && (p.channel_context || p.note_context)) {
+    const channel = p.channel_context as ChannelContext | undefined;
+    const notes = p.note_context as NoteContext | undefined;
+    return { ...e, payload: { ...p,
+      ...(channel && { channel_context: { ...channel, entries: channel.entries.map(entry => ({ ...entry, body: '' })) } }),
+      ...(notes && { note_context: notes.map(({ title }) => ({ title: clipText(title), text: '' })) }),
+      clipped: true,
+    } };
   }
   if (e.kind === 'tool') return { ...e, payload: { ...p, input: clip(p.input), clipped: true } };
   if (e.kind === 'tool_result' && typeof p.text === 'string' && p.text.length > 500) {
@@ -95,6 +101,7 @@ export interface Queued {
   mode: PermissionMode | null; created_at: string; kind?: QueuedKind | null;
   skill_snapshot?: import('../../shared/protocol.ts').SkillSnapshot;
   channel_context?: ChannelContext;
+  note_context?: NoteContext;
   connector_context?: import('./connector-broker.ts').ConnectorExecutionContext | null;
 }
 /**
@@ -117,7 +124,7 @@ CREATE TABLE IF NOT EXISTS task (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), title TEXT NOT NULL,
   status TEXT NOT NULL, checkpoint_md TEXT, created_by TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, seq INTEGER,
-  title_revision INTEGER NOT NULL DEFAULT 0);
+  title_revision INTEGER NOT NULL DEFAULT 0, kind TEXT);
 CREATE TABLE IF NOT EXISTS session (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id), engine TEXT NOT NULL,
   engine_session_id TEXT, cwd TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
@@ -157,6 +164,12 @@ CREATE INDEX IF NOT EXISTS channel_entry_page ON channel_entry(channel_id, id);
 
 export const now = () => new Date().toISOString();
 
+function readTask(row: unknown): Task | undefined {
+  if (!row) return undefined;
+  const { kind, ...task } = row as Omit<Task, 'kind'> & { kind: Task['kind'] | null };
+  return kind === 'note' ? { ...task, kind } : task;
+}
+
 export class Store {
   private db: DatabaseSync;
   /** Remote delivery records share the same transaction as the events they apply. */
@@ -185,6 +198,7 @@ export class Store {
           AND (t.created_at < task.created_at OR (t.created_at = task.created_at AND t.id <= task.id)));`);
     }
     if (!taskCols.some((c) => c.name === 'title_revision')) this.db.exec('ALTER TABLE task ADD COLUMN title_revision INTEGER NOT NULL DEFAULT 0');
+    if (!taskCols.some((c) => c.name === 'kind')) this.db.exec('ALTER TABLE task ADD COLUMN kind TEXT');
     const queuedCols = this.db.prepare('PRAGMA table_info(queued)').all() as { name: string }[];
     if (!queuedCols.some((c) => c.name === 'ord')) {
       // The order messages are sent in; the user can change it. Existing ones keep theirs.
@@ -194,6 +208,7 @@ export class Store {
     if (!queuedCols.some((c) => c.name === 'channel_context_json')) this.db.exec('ALTER TABLE queued ADD COLUMN channel_context_json TEXT');
     if (!queuedCols.some((c) => c.name === 'connector_context_json')) this.db.exec('ALTER TABLE queued ADD COLUMN connector_context_json TEXT');
     if (!queuedCols.some((c) => c.name === 'skill_snapshot_json')) this.db.exec('ALTER TABLE queued ADD COLUMN skill_snapshot_json TEXT');
+    if (!queuedCols.some((c) => c.name === 'note_context_json')) this.db.exec('ALTER TABLE queued ADD COLUMN note_context_json TEXT');
     const channelCols = this.db.prepare('PRAGMA table_info(channel)').all() as { name: string }[];
     if (!channelCols.some((c) => c.name === 'conversation_task_id')) this.db.exec('ALTER TABLE channel ADD COLUMN conversation_task_id TEXT REFERENCES task(id) ON DELETE SET NULL');
     // After the migrations above, since some index columns they add.
@@ -294,8 +309,7 @@ export class Store {
     return this.db.prepare('SELECT * FROM project WHERE lower(name) = lower(?)').get(name) as unknown as Project | undefined;
   }
   latestTaskOfProject(projectId: string): Task | undefined {
-    return this.db.prepare('SELECT * FROM task WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1')
-      .get(projectId) as unknown as Task | undefined;
+    return readTask(this.db.prepare('SELECT * FROM task WHERE project_id = ? AND kind IS NULL ORDER BY updated_at DESC LIMIT 1').get(projectId));
   }
 
   createProject(p: Project) {
@@ -312,19 +326,19 @@ export class Store {
   createTask(t: Omit<Task, 'seq'>): Task {
     const { seq } = this.db.prepare('SELECT coalesce(max(seq), 0) + 1 AS seq FROM task WHERE project_id = ?')
       .get(t.project_id) as { seq: number };
-    this.db.prepare(`INSERT INTO task (id, project_id, title, status, checkpoint_md, created_by, created_at, updated_at, seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(t.id, t.project_id, t.title, t.status, t.checkpoint_md, t.created_by, t.created_at, t.updated_at, seq);
+    this.db.prepare(`INSERT INTO task (id, project_id, title, status, checkpoint_md, created_by, created_at, updated_at, seq, kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(t.id, t.project_id, t.title, t.status, t.checkpoint_md, t.created_by, t.created_at, t.updated_at, seq, t.kind ?? null);
     return { ...t, seq };
   }
   taskBySeq(projectId: string, seq: number): Task | undefined {
-    return this.db.prepare('SELECT * FROM task WHERE project_id = ? AND seq = ?').get(projectId, seq) as unknown as Task | undefined;
+    return readTask(this.db.prepare('SELECT * FROM task WHERE project_id = ? AND seq = ?').get(projectId, seq));
   }
   listTasks(): Task[] {
-    return this.db.prepare('SELECT * FROM task ORDER BY updated_at DESC').all() as unknown as Task[];
+    return this.db.prepare('SELECT * FROM task ORDER BY updated_at DESC').all().map(row => readTask(row)!);
   }
   getTask(id: string): Task | undefined {
-    return this.db.prepare('SELECT * FROM task WHERE id = ?').get(id) as unknown as Task | undefined;
+    return readTask(this.db.prepare('SELECT * FROM task WHERE id = ?').get(id));
   }
   setTaskStatus(id: string, status: TaskStatus) {
     this.db.prepare('UPDATE task SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), id);
@@ -431,6 +445,13 @@ export class Store {
     const r = this.db.prepare('INSERT INTO event (session_id, task_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)')
       .run(sessionId, taskId, ts, kind, JSON.stringify(payload));
     return { id: Number(r.lastInsertRowid), session_id: sessionId, task_id: taskId, ts, kind, payload };
+  }
+  updateUserEvent(taskId: string, id: number, payload: unknown) {
+    this.db.prepare("UPDATE event SET payload_json = ? WHERE task_id = ? AND id = ? AND kind = 'user'")
+      .run(JSON.stringify(payload), taskId, id);
+  }
+  deleteUserEvent(taskId: string, id: number): boolean {
+    return this.db.prepare("DELETE FROM event WHERE task_id = ? AND id = ? AND kind = 'user'").run(taskId, id).changes !== 0;
   }
   /**
    * Adds a taken-over session's history at once, with its original times. The payloads start with
@@ -605,9 +626,9 @@ export class Store {
   }
 
   enqueue(q: Queued) {
-    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, channel_context_json, skill_snapshot_json, connector_context_json, ord)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
-      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null, q.channel_context ? JSON.stringify(q.channel_context) : null, q.skill_snapshot ? JSON.stringify(q.skill_snapshot) : null, q.connector_context === undefined ? null : JSON.stringify(q.connector_context));
+    this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, channel_context_json, skill_snapshot_json, connector_context_json, note_context_json, ord)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
+      .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null, q.channel_context ? JSON.stringify(q.channel_context) : null, q.skill_snapshot ? JSON.stringify(q.skill_snapshot) : null, q.connector_context === undefined ? null : JSON.stringify(q.connector_context), q.note_context ? JSON.stringify(q.note_context) : null);
   }
   /** Hands a session's waiting messages to the session that replaced it. */
   moveQueued(fromSession: string, toSession: string) {
@@ -617,8 +638,8 @@ export class Store {
   queued(by: { sessionId?: string; taskId?: string } = {}): Queued[] {
     const [where, arg] = by.sessionId ? ['WHERE session_id = ?', by.sessionId] : by.taskId ? ['WHERE task_id = ?', by.taskId] : ['', null];
     const stmt = this.db.prepare(`SELECT * FROM queued ${where} ORDER BY ord, created_at, rowid`);
-    const rows = (arg ? stmt.all(arg) : stmt.all()) as unknown as (Omit<Queued, 'skills' | 'skill_snapshot'> & { skills_json: string; channel_context_json: string | null; skill_snapshot_json: string | null; connector_context_json: string | null; ord: number })[];
-    return rows.map(({ skills_json, channel_context_json, skill_snapshot_json, connector_context_json, ord: _, ...q }) => ({ ...q, ...(connector_context_json !== null ? {connector_context:JSON.parse(connector_context_json)} : {}), skills: JSON.parse(skills_json), ...(channel_context_json ? { channel_context: JSON.parse(channel_context_json) } : {}), ...(skill_snapshot_json ? { skill_snapshot: JSON.parse(skill_snapshot_json) } : {}) }));
+    const rows = (arg ? stmt.all(arg) : stmt.all()) as unknown as (Omit<Queued, 'skills' | 'skill_snapshot'> & { skills_json: string; channel_context_json: string | null; skill_snapshot_json: string | null; connector_context_json: string | null; note_context_json: string | null; ord: number })[];
+    return rows.map(({ skills_json, channel_context_json, skill_snapshot_json, connector_context_json, note_context_json, ord: _, ...q }) => ({ ...q, ...(connector_context_json !== null ? {connector_context:JSON.parse(connector_context_json)} : {}), skills: JSON.parse(skills_json), ...(channel_context_json ? { channel_context: JSON.parse(channel_context_json) } : {}), ...(skill_snapshot_json ? { skill_snapshot: JSON.parse(skill_snapshot_json) } : {}), ...(note_context_json ? { note_context: JSON.parse(note_context_json) } : {}) }));
   }
   /** Puts waiting messages in the order of `ids` (all of one task's), reusing their order slots. */
   reorderQueued(ids: string[]) {

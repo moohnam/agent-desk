@@ -1,11 +1,12 @@
 import { compareEvents } from './federation.ts';
 import { ALERT_STATES } from '../../shared/events.ts';
+import { noteRevision } from './noteEvents.ts';
 import type { ColumnFilter, HubEvent, PlacedPost, Post, PostKind, TaskView } from './types.ts';
 
 /**
- * Merges two id-ordered event lists, dropping duplicates and keeping at most `cap` newest. Events
- * don't change once recorded, so one already held stays the same object (posts built from it are
- * not drawn again), unless `b` brings it whole where it was cut (`clipped`). Nothing new: `a` itself.
+ * Merges two id-ordered event lists, dropping duplicates and keeping at most `cap` newest. A held
+ * event stays the same object unless a newer note revision or a whole version of a clipped event arrives.
+ * Nothing new: `a` itself.
  * So `a` is the list already held, `b` what was just fetched, older or newer.
  */
 export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity, compare = compareEvents): HubEvent[] {
@@ -21,7 +22,11 @@ export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity, compar
     let changed = false;
     for (const e of b) {
       const held = byId.get(e.id);
-      if (held && !(held.payload?.clipped && !e.payload?.clipped)) continue;
+      if (held) {
+        const previous = noteRevision(held) ?? 0;
+        const revision = noteRevision(e) ?? 0;
+        if (revision < previous || (revision === previous && !(held.payload?.clipped && !e.payload?.clipped))) continue;
+      }
       byId.set(e.id, e);
       changed = true;
     }

@@ -89,7 +89,11 @@ export class DeskCore {
       pending_approvals: this.store.pendingApprovals().filter((a) => a.task_id === task.id).length,
       pending_questions: this.store.pendingQuestions().filter((q) => q.task_id === task.id).length,
       pending_ask: this.store.openAsyncQuestion(task.id),
-      queued: this.store.queued({ taskId: task.id }).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && { kind: q.kind }), ...(q.channel_context && { channel_entry_count: q.channel_context.entries.length }) })),
+      queued: this.store.queued({ taskId: task.id }).map((q) => ({
+        id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && { kind: q.kind }),
+        ...(q.channel_context && { channel_entry_count: q.channel_context.entries.length }),
+        ...(q.note_context && { note_context_count: q.note_context.length }),
+      })),
       background: (session && this.background.get(session.id)) ?? [],
     };
   }

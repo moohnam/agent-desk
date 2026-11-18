@@ -3,6 +3,8 @@ import * as federation from '../../web/src/federation.ts';
 import * as draftRetention from '../../web/src/draftRetention.ts';
 import * as posts from '../../web/src/posts.ts';
 import * as feedCache from '../../web/src/feedCache.ts';
+import * as noteEvents from '../../web/src/noteEvents.ts';
+import type { HubEvent } from '../../web/src/types.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -13,7 +15,7 @@ import * as modelCatalog from '../../shared/model-catalog.ts';
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
-  imports={ './modelCatalogs.ts':{useModelCatalogs:()=>({runners:[],loading:false,error:'',refresh(){}})},'../../shared/model-catalog.ts':modelCatalog,'./sourceStream.ts':{openSourceStream:()=>new (globals.EventSource as any)()},'./answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},...imports};
+  imports={ './modelCatalogs.ts':{useModelCatalogs:()=>({runners:[],loading:false,error:'',refresh(){}})},'../../shared/model-catalog.ts':modelCatalog,'./sourceStream.ts':{openSourceStream:()=>new (globals.EventSource as any)()},'./answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},'./noteEvents.ts':noteEvents,'./NotePreview.tsx':{NotePreview:()=>null},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
@@ -587,6 +589,47 @@ test('a recovered full newest page paginates the gap before an older cached post
     assert.equal(column?.events[0].id, 1, 'the old cached post remains visible');
     assert.equal(column?.events.some((e: any) => e.id === 901), true, 'the missing middle was fetched');
     assert.equal(column?.more, false);
+  } finally { h.unmount(); }
+});
+
+test('reconnecting keeps valid older notes and removes deleted or newly unmatched notes', async () => {
+  const h = hooks();
+  const make = (id: number): HubEvent => ({ id, task_id: 'notes', session_id: 'session', kind: 'user',
+    ts: String(id), payload: { text: 'needle', revision: 0 } });
+  const [deleted, unmatched, kept] = [12001, 12002, 12003].map(make);
+  const changed = { ...kept, payload: { text: 'needle changed while offline', revision: 1 } };
+  const newest = Array.from({ length: 200 }, (_, i): HubEvent => ({ ...make(12004 + i), task_id: 'work', kind: 'assistant' }));
+  const rechecked: number[][] = [];
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: {
+      feedPage: async () => ({ events: newest, complete: true }),
+      feed: async () => [deleted, unmatched, kept],
+      events: async (_task: string, { ids }: { ids: number[] }) => {
+        rechecked.push(ids);
+        return { events: [{ ...unmatched, payload: { text: 'other text', revision: 1 } }, changed], more: false };
+      },
+      feedCount: async () => ({ posts: 203, tasks: 2 }),
+    }, FEED_PAGE: 1000 },
+    './posts.ts': posts, './feedCache.ts': feedCache, './projects.ts': {},
+  }, { AbortController, window: { setTimeout: () => 1 }, setTimeout: () => 1, clearTimeout() {} });
+  const defs = [{ id: 'search', filter: { query: 'needle' } }];
+  const tasks = new Map([['notes', { title: 'Memo' }]]);
+  const onEvent = () => () => {};
+  let synced = 0;
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, tasks, onEvent, synced));
+  const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
+  try {
+    render(); await settle();
+    render().loadEarlier('search'); await settle();
+    assert.equal(render().feeds.get('search').events.length, 203);
+    synced++;
+    render(); await settle();
+    assert.equal(rechecked.map(ids => ids.join(',')).join('/'), '12001,12002,12003');
+    const recovered = render().feeds.get('search').events;
+    assert.equal(recovered.length, 201);
+    assert.equal(recovered[0], changed);
+    noteEvents.reportNoteChange({ type: 'event_updated', event: { ...kept, payload: { text: 'live nonmatch', revision: 2 } } });
+    assert.equal(render().feeds.get('search').events.length, 200);
   } finally { h.unmount(); }
 });
 

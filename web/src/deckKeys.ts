@@ -34,7 +34,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['/', '내용 검색', '스레드 선택 시 해당 작업만 검색합니다. #task: 필터를 지우면 전체 검색으로 바뀝니다. PC 화면에서 사용합니다.'],
     ['Enter', '선택한 글의 스레드 열기'],
     ['Ctrl ;', '고정 글·문서 창 열기 / 닫기', '스레드에 입력하는 중에도 사용할 수 있습니다.'],
-    ['q / Esc', '스레드·검색·작성 서랍 닫기', '현재 검색 컬럼을 먼저 닫고, 스레드와 작성 서랍 순으로 닫습니다. 열린 창은 Esc로 닫습니다.'],
+    ['q / Esc', '스레드·검색·작성 서랍 닫기', '검색 패널에 포커스가 있으면 패널을 닫습니다. 열린 창은 Esc로 닫습니다.'],
     ['f', '스레드를 분할 / 컬럼으로 보기', '분할 화면의 경계선을 끌어 폭을 조절합니다.'],
     ['t', '스레드 / 이전 컬럼으로 이동', '분할 화면에서 h/l은 스레드를 건너뜁니다.'],
   ] },
@@ -53,7 +53,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['⌘ 0', '기본 크기로 복원'],
     ['F1 – F4', '내 컬럼 / 프로젝트 / 작업 / 상태', 'F2–F4는 자동 구성됩니다. 컬럼 추가·편집·삭제는 F1에서 합니다. Mac은 fn 키가 필요할 수 있습니다.'],
     ['c', '컬럼 추가'],
-    ['e', '컬럼 조건 편집', '이름은 더블클릭으로도 바꿉니다. 검색 컬럼에서는 검색 입력란으로 이동합니다.'],
+    ['e', '컬럼 조건 편집', '이름은 더블클릭으로도 바꿉니다. 검색 패널에서는 검색 입력란으로 이동합니다.'],
     ['p', '선택한 글·스레드의 작업을 컬럼으로 고정'],
     ['v', '작업별 최신 글 / 모든 글 보기'],
     ['< / >', '컬럼 폭 줄이기 / 늘리기'],
@@ -71,6 +71,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['#auto / #ask', '이후 자동 승인 / 매번 확인'],
     ['#later / #now', '턴이 끝난 뒤 전달 / 지금 끼워 넣기', '실행 중인 작업에 보낼 때 적용합니다. 기본은 #later입니다.'],
     ['#new / #fork', '새 작업 / 대화를 이어받은 새 작업', '같은 프로젝트에 만들며 #new는 이전 대화 없이 시작합니다.'],
+    ['@프로젝트 #note 제목', '프로젝트에 메모 작업 만들기', '스레드에서 글을 쓰거나 고쳐 저장하고, 필요하면 에이전트 대화에 첨부할 수 있습니다.'],
   ] },
 ];
 
@@ -241,8 +242,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       case 'L': moveColumn(activeIdx, 1); break;
       case 'Enter': if (selectedPost && activeCol?.id !== THREAD) openThread(selectedPost.taskId, { from: activeCol?.id, post: selectedPost.id }); break;
       case 'Escape': case 'q':
-        // On the search column it closes the search; focus goes back to the column left of it (all).
-        if (activeCol?.id === SEARCH) { closeSearch(); focusColumn(activeIdx - 1); }
+        if (activeCol?.id === SEARCH) closeSearch();
         else if (threadTask) closeThread();
         else if (drawer) setDrawer(false);
         break;
@@ -258,7 +258,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       case 'n': { const a = approvalFor(selectedPost); if (a) setDenying(a); break; }
       case 's': {
         const taskId = selectedPost?.taskId ?? (activeCol?.id === THREAD ? threadTask : null);
-        if (taskId) api.interrupt(taskId).then(() => setToast('중단을 요청했습니다.'), fail);
+        if (taskId && tasks.get(taskId)?.kind !== 'note') api.interrupt(taskId).then(() => setToast('중단을 요청했습니다.'), fail);
         break;
       }
       case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
@@ -266,7 +266,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       case 't': toggleThreadFocus(); break;
       case 'X':
         if (threadTask && tasks.get(threadTask)?.source === 'app') toggleHandoff(threadTask);
-        else setToast(threadTask ? '터미널 작업은 컨텍스트를 재구성할 수 없습니다.' : '열린 스레드가 없습니다.');
+        else setToast(threadTask ? '이 작업은 컨텍스트를 재구성할 수 없습니다.' : '열린 스레드가 없습니다.');
         break;
       case 'x':
         if (handoff?.open && activeCol?.id === THREAD && selectedPost && pickable(selectedPost.event)) togglePick(selectedPost.taskId, selectedPost.event.id);

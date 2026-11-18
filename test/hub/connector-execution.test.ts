@@ -9,6 +9,7 @@ import { SkillStore } from '../../hub/src/skills.ts';
 import { ConnectorBroker, type ConnectorExecutionContext } from '../../hub/src/connector-broker.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { codexMcpProcess, claudeMcpOptions } from '../../hub/src/runner/managed-mcp.ts';
+import { MODE_LABEL } from '../../shared/compose.ts';
 import { checkHubToRunner, type HubToRunner, type RunnerToHub } from '../../shared/protocol.ts';
 
 function fixture(scoped = false) {
@@ -420,8 +421,9 @@ test('cross-account mode and model tags cannot change a running grant before que
   const f=fixture();
   try {
     const original=f.store.getSession(f.start.sessionId)!;
-    const mode=original.permission_mode==='auto'?'ask':'auto';
-    for(const text of [`#${mode}`,`#${mode} 대기할 본문`,'#high','#sol 대기할 본문']) {
+    const mode = original.permission_mode === 'auto' ? 'default' : 'auto';
+    const tag = MODE_LABEL[mode];
+    for(const text of [tag,`${tag} 대기할 본문`,'#high','#sol 대기할 본문']) {
       const commands=f.sent.length, events=f.store.listEvents(f.task.id).length;
       assert.throws(()=>f.hub.withConnectorContext(f.context('B'),()=>f.hub.sendMessage(f.task.id,text)),/실행 설정/);
       assert.equal(f.sent.length,commands);
@@ -431,7 +433,7 @@ test('cross-account mode and model tags cannot change a running grant before que
     }
     f.hub.withConnectorContext(f.context('B'),()=>f.hub.sendMessage(f.task.id,'설정을 바꾸지 않는 대기 입력'));
     assert.equal(f.store.queued().length,1);
-    f.hub.withConnectorContext(f.context('A'),()=>f.hub.sendMessage(f.task.id,`#${mode}`));
+    f.hub.withConnectorContext(f.context('A'),()=>f.hub.sendMessage(f.task.id,tag));
     assert.equal(f.store.getSession(f.start.sessionId)?.permission_mode,mode);
   } finally {f.close();}
 });

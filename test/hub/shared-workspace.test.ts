@@ -281,6 +281,74 @@ for (const engine of ENGINES) test(`${engine}: two ordinary hub APIs share histo
  }finally{streamController?.abort();for(const g of [...gateways])await closeGateway(g);await stop(authority);f.close();}
 });
 
+test('a workspace gateway delivers note operations without reading connector or skill tags in their contents', async () => {
+  const f = fixture(), authority = f.runtime.workspace.server(), url = await listen(authority);
+  const store = new Store(join(f.dir, 'notes-gateway.db'));
+  const links = new WorkspaceLinks(store, new SkillStore(join(f.dir, 'notes-skills')));
+  try {
+    const peer = f.runtime.workspace.grant('notes');
+    const link = await links.attach({ name: 'runner', url, token: peer.token });
+    f.runtime.hub.createProject('web', f.project);
+    async function deliver(method: string, path: string, body: Record<string, unknown>, id = randomUUID()) {
+      links.enqueue(link.id, { id, method, path, body });
+      await links.flush(link.id);
+      const row = store.database.prepare('SELECT status, result FROM workspace_delivery WHERE id=?').get(id) as { status: number; result: string };
+      return { status: row.status, body: JSON.parse(row.result) };
+    }
+    const created = await deliver('POST', '/compose', { text: '@web #note #slack #skill 제목' });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.kind, 'note');
+    const task = `/tasks/${created.body.id}`;
+    const id = randomUUID();
+    const body = { text: '#slack #skill #new 본문', note_only: true };
+    assert.equal((await deliver('POST', `${task}/messages`, body, id)).status, 202);
+    assert.equal((await deliver('POST', `${task}/messages`, body, id)).status, 202);
+    const events = f.runtime.hub.store.listEvents(created.body.id);
+    assert.deepEqual(events.map(e => e.payload), [{ text: body.text, revision: 0 }]);
+    const post = `${task}/notes/${events[0].id}`;
+    const updated = await deliver('PATCH', post, { text: '#jira #new 수정' });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(updated.body.payload, { text: '#jira #new 수정', revision: 1 });
+    assert.equal((await deliver('DELETE', post, {})).status, 200);
+    assert.equal(f.runtime.hub.store.listEvents(created.body.id).length, 0);
+    assert.equal(f.starts.length, 0);
+  } finally {
+    await links.close(); store.database.close(); await stop(authority); f.close();
+  }
+});
+
+test('a rolled-back workspace preserves note receipts and rejects only new unsupported writes', async () => {
+  const store = new Store(':memory:'), links = new WorkspaceLinks(store);
+  const committed = randomUUID(), missing = randomUUID(), unavailable = randomUUID();
+  const result = { status: 201, body: { id: 'saved-note', kind: 'note' } };
+  const requests: string[] = [];
+  try {
+    store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('test', 'test', 'http://localhost/', 'workspace', 'hidden');
+    (links as any).request = async (_link: unknown, path: string) => {
+      requests.push(path);
+      if (path === '/v1/identity') return { status: 200, body: { capabilities: {} } };
+      if (path === `/v1/receipts/${committed}`) return { status: 200, body: result };
+      if (path === `/v1/receipts/${missing}`) return { status: 404, body: {} };
+      return { status: 503, body: {} };
+    };
+    for (const id of [committed, missing, unavailable]) {
+      links.enqueue('test', { id, method: 'POST', path: '/compose', body: { text: '@web #note memo' } });
+    }
+    await links.flush('test');
+    const deliveries = new Map(links.deliveries('test').map(row => [row.id, row]));
+    const saved = store.database.prepare('SELECT status, payload, result FROM workspace_delivery WHERE id=?').get(committed) as
+      { status: number; payload: string; result: string };
+    assert.equal(saved.status, 201);
+    assert.deepEqual(JSON.parse(saved.result), result.body);
+    assert.deepEqual(JSON.parse(saved.payload), { id: committed, method: 'POST', path: '/compose' });
+    assert.equal(deliveries.get(missing)?.status, 409);
+    assert.equal(deliveries.get(unavailable)?.status, null);
+    assert.equal(requests.includes('/v1/operation'), false);
+  } finally {
+    await links.close(); store.database.close();
+  }
+});
+
 test('a committed command with a lost response retries once; permissions and workspace identity are scoped',async()=>{
  const f=fixture();const authority=f.runtime.workspace.server();const url=await listen(authority);
  const peer=f.runtime.workspace.grant('hub');const store=new Store(join(f.dir,'gateway.db'));let links=new WorkspaceLinks(store);

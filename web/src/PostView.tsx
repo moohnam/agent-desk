@@ -1,6 +1,6 @@
 import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
-import { Bookmark, ChevronRight, PenLine } from 'lucide-react';
+import { Bookmark, ChevronRight, Paperclip, PenLine, Trash2 } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, modelLabel, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
@@ -13,7 +13,10 @@ import { useNow } from './clock.ts';
 import { LongText, Markdown } from './Markdown.tsx';
 import { ChannelSources } from './ChannelSources.tsx';
 import { modelShort } from './projects.ts';
+import { NoteEditor } from './Note.tsx';
+import { NotePreview } from './NotePreview.tsx';
 import type { Approval, HubEvent, Post, Question, TaskView } from './types.ts';
+import type { NoteContext } from '../../shared/api.ts';
 
 interface Props {
   post: Post;
@@ -46,6 +49,7 @@ interface Props {
   /** Reading references, available only beside the split thread. */
   referenced?: boolean;
   onReference?: () => void;
+  onAttachNote?: () => void;
 }
 
 const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
@@ -84,11 +88,12 @@ function samePost(a: Props, b: Props): boolean {
     || x.activity.some((e, i) => e !== y.activity[i]))) return false;
   // Only what the post reads from its task; keep in step with the uses below.
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
+  if (a.task?.kind !== b.task?.kind) return false;
   if ((a.task?.status === 'running') !== (b.task?.status === 'running')) return false;
   for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked', 'referenced'] as const) {
     if (a[k] !== b[k]) return false;
   }
-  return !a.onOpenThread === !b.onOpenThread;
+  return !a.onOpenThread === !b.onOpenThread && !a.onAttachNote === !b.onAttachNote;
 }
 
 export const PostView = memo(PostViewInner, samePost);
@@ -101,18 +106,30 @@ function RelTime({ iso }: { iso: string }) {
 function PostViewInner(props: Props) {
   const { post, task, model, approval, question, selected, expanded, working, flash, inThread, up, down } = props;
   const p = post.event.payload;
+  const isNote = task?.kind === 'note' && post.kind === 'user';
+  const canEditNote = !!inThread && isNote && !p.clipped;
+  const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const deleteNote = async () => {
+    if (deleting || !window.confirm('이 메모 글을 삭제할까요?')) return;
+    setDeleting(true);
+    try { await api.deleteNote(post.taskId, post.id); }
+    catch (error) { props.onError?.(error instanceof Error ? error.message : String(error)); }
+    finally { setDeleting(false); }
+  };
   const onLocalLink = useMemo(() => openLink(post.taskId, props.onError), [post.taskId, props.onError]);
   // Keep the body element stable across selection, clock and unrelated task updates.
   // Markdown parsing and clamped-height measurement then only run for changed content.
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user'} taskId={post.taskId} onLocalLink={onLocalLink} />
-    : richText(String(p.text ?? '')), [post.kind, p, onLocalLink]);
+  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} />
+    : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink]);
   const engine = task?.engine ?? 'claude';
   const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
     : [engine, ENGINE_SHORT[engineOf(engine)]];
-  const tag = post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>
+  const tag = isNote && !inThread ? <span className="tag via">메모</span>
+    : post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>
     : post.kind === 'question' ? <span className="tag">질문</span>
     : post.kind === 'alert' ? (p.state === 'interrupted' ? <span className="tag stop">중단됨</span>
       : p.state === 'queue_dropped' ? <span className="tag stop">대기 취소</span>
@@ -127,7 +144,7 @@ function PostViewInner(props: Props) {
     : post.kind === 'user' && p.delivery === 'new' ? <span className="tag via" title="같은 프로젝트의 새 작업">#new</span>
     : null;
   // Like Twitter, say whom a post answers unless that post is drawn right above it.
-  const replyTo = !up && post.parent ? author(post.parent, task) : null;
+  const replyTo = !up && !isNote && post.parent ? author(post.parent, task) : null;
   const cls = ['post', post.kind, post.kind === 'user' && p.handoff === 'reset' && 'reset-start', props.picked !== undefined && 'pickable', props.picked && 'picked', up && 'chain-up', down && 'chain-down', selected && 'selected', flash && 'flash'];
 
   return (
@@ -157,6 +174,14 @@ function PostViewInner(props: Props) {
           <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
             <RelTime iso={post.event.ts} />
           </time>
+          {canEditNote && !editing && <>
+            {props.onAttachNote && <button type="button" className="icon-btn reference-button" title="에이전트 지시에 첨부" aria-label="에이전트 지시에 첨부"
+              disabled={deleting} onClick={props.onAttachNote}><Paperclip /></button>}
+            <button type="button" className="icon-btn reference-button" title="메모 글 수정" aria-label="메모 글 수정"
+              disabled={deleting} onClick={() => setEditing(true)}><PenLine /></button>
+            <button type="button" className="icon-btn reference-button" title="메모 글 삭제" aria-label="메모 글 삭제"
+              disabled={deleting} onClick={() => void deleteNote()}><Trash2 /></button>
+          </>}
           {props.referenced !== undefined && <button className="icon-btn reference-button" aria-pressed={props.referenced}
             title={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'} aria-label={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'}
             onClick={(e) => { e.stopPropagation(); props.onReference?.(); }}><Bookmark /></button>}
@@ -166,7 +191,7 @@ function PostViewInner(props: Props) {
         {post.kind === 'user' && p.handoff === 'reset' && <div className="replying">↻ 새 세션: 이전 대화 없이 이 정리본으로 이어 갑니다</div>}
         {post.kind === 'user' && p.forked_from && <div className="replying">⑂ {p.forked_from.seq ? `#${p.forked_from.seq} ` : ''}“{p.forked_from.title}”에서 포크</div>}
 
-        {post.kind === 'approval' && isAsk(p.toolName) ? (
+        {canEditNote && editing ? <NoteEditor post={post} onClose={() => setEditing(false)} onError={props.onError} /> : post.kind === 'approval' && isAsk(p.toolName) ? (
           <AskCard post={post} approval={approval} onError={props.onError} />
         ) : post.kind === 'approval' ? (
           <ApprovalCard post={post} approval={approval} expanded={expanded} onAllow={props.onAllow} onDeny={props.onDeny} />
@@ -181,6 +206,8 @@ function PostViewInner(props: Props) {
         )}
 
         {post.kind === 'user' && p.channel_context && <ChannelSources context={p.channel_context} clipped={!!p.clipped} />}
+        {post.kind === 'user' && (p.note_context as NoteContext | undefined)?.map((note, index) =>
+          <NotePreview key={index} note={note} clipped={!!p.clipped} />)}
         {post.kind === 'assistant' && p.questions?.length > 0 && (
           <AsyncChoices post={post} running={task?.status === 'running'} onError={props.onError} />
         )}

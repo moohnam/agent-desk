@@ -1,9 +1,10 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
-import type { AccessView, ChannelMessageInput, MessageReceipt } from '../../shared/api.ts';
+import type { AccessView, ChannelMessageInput, MessageReceipt, NoteContext } from '../../shared/api.ts';
 import type { UpdateView } from '../../shared/update.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, HubMessage, Project, Settings, Skill, TaskView } from './types.ts';
 import { workspaceId, SharedPending } from './workspace.ts';
 import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
+import { noteRevision, onNoteChange, reportNoteChange } from './noteEvents.ts';
 
 async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, target?:string): Promise<T> {
   let source=target??'';
@@ -49,6 +50,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   const index=sourceIndex(source);
   if(route==='/compose'||route==='/tasks'&&method==='POST'||method==='PATCH'&&/^\/tasks\/[^/]+$/.test(route))return mapTask(source,index,data) as T;
   if(route==='/projects'&&method==='POST')return {...data,id:scopeId(source,data.id)} as T;
+  if(method==='PATCH'&&/^\/tasks\/[^/]+\/notes\/\d+$/.test(route))return mapEvent(source,index,data) as T;
   if(route.endsWith('/events')) {
     if(Array.isArray(data))return data.map(e=>mapEvent(source,index,e)) as T;
     return {...data,events:data.events.map((e:HubEvent)=>mapEvent(source,index,e))} as T;
@@ -228,9 +230,20 @@ export const api = {
     if (at.since) q.set('since', String(at.since));
     if (at.before) q.set('before', String(at.before));
     const qs = q.toString();
+    const edits = new Map<number, HubEvent>();
+    const offNotes = onNoteChange(change => {
+      if (change.type === 'event_updated' && change.event.task_id === taskId) edits.set(change.event.id, change.event);
+    });
     // A hub not yet restarted answers with the bare array (newest 500, no paging).
     return call<{ events: HubEvent[]; more: boolean } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
-      .then((r) => (Array.isArray(r) ? { events: r, more: false } : r));
+      .then((r) => {
+        const page = Array.isArray(r) ? { events: r, more: false } : r;
+        if (!edits.size) return page;
+        return { ...page, events: page.events.map(event => {
+          const edited = edits.get(event.id);
+          return edited && (noteRevision(edited) ?? 0) > (noteRevision(event) ?? 0) ? edited : event;
+        }) };
+      }).finally(offNotes);
   },
   /** Saves a file on the hub's machine (for a device without it); returns the saved path. */
   upload: async (file: File) => {
@@ -245,11 +258,19 @@ export const api = {
   /** Has the hub download a web file (an image dragged in from a page); returns the saved path. */
   uploadUrl: (url: string) => call<{ path: string }>('POST', '/uploads', { url }),
   createProject: (name: string, root_path: string) => call<Project>('POST', '/projects', { name, root_path }),
-  compose: (text: string, source?:string) => call<TaskView>('POST', '/compose', { text },undefined,composeSource(text,projects,source)),
+  compose: (text: string, source?: string, noteContext?: NoteContext, noteOnly?: boolean) =>
+    call<TaskView>('POST', '/compose', { text, note_context: noteContext, note_only: noteOnly }, undefined, composeSource(text, projects, source)),
   createTask: (project_id: string, title: string, prompt: string) =>
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
   send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
+  writeNote: (taskId: string, text: string) => call('POST', `/tasks/${taskId}/messages`, { text, note_only: true }),
+  editNote: (taskId: string, eventId: number, text: string) =>
+    call<HubEvent>('PATCH', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`, { text })
+      .then(event => reportNoteChange({ type: 'event_updated', event })),
+  deleteNote: (taskId: string, eventId: number) =>
+    call<{ ok: true }>('DELETE', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`)
+      .then(() => reportNoteChange({ type: 'event_removed', task_id: taskId, event_id: eventId })),
   renameTask: (taskId: string, title: string) => call<TaskView>('PATCH', `/tasks/${taskId}`, { title }),
   cancelQueued: (taskId: string, queuedId: string) => call('DELETE', `/tasks/${taskId}/queue/${queuedId}`),
   /** Sends a waiting message at once: into the running turn, like #now. */

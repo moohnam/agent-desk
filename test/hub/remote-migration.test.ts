@@ -108,6 +108,32 @@ test('remote cutover preserves IDs, history, delivery sequence and cross-source 
   }
 });
 
+test('remote transfer preserves notes and queued note snapshots without changing ordinary legacy fingerprints', () => {
+  const f = fixture(), target = new Store(join(f.dir, 'target.db'));
+  try {
+    const ordinary = exportRemoteTransfer(f.source.database, f.runnerId);
+    f.source.database.exec('ALTER TABLE task DROP COLUMN kind; ALTER TABLE queued DROP COLUMN note_context_json');
+    const legacy = exportRemoteTransfer(f.source.database, f.runnerId);
+    assert.equal(legacy.fingerprint, ordinary.fingerprint);
+
+    // Write through the current store after updating the source schema in place.
+    f.source.database.exec('ALTER TABLE task ADD COLUMN kind TEXT; ALTER TABLE queued ADD COLUMN note_context_json TEXT');
+    const note = f.hub.compose('@remote #note 수집');
+    f.hub.sendMessage(note.id, '#slack 원문');
+    const context = [{ title: note.title, text: '#slack 원문' }];
+    f.source.database.prepare('UPDATE queued SET note_context_json = ? WHERE id = ?').run(JSON.stringify(context), 'queued-remote');
+    const bundle = exportRemoteTransfer(f.source.database, f.runnerId);
+    importRemoteTransfer(bundle, target, f.journal);
+    verifyRemoteImport(bundle, target.database, f.journal);
+    assert.equal(target.getTask(note.id)?.kind, 'note');
+    assert.deepEqual(target.listSessions(note.id), []);
+    assert.deepEqual(target.listEvents(note.id)[0].payload, { text: '#slack 원문', revision: 0 });
+    assert.deepEqual(target.queued({ taskId: 'task-remote' })[0].note_context, context);
+  } finally {
+    target.database.close(); f.hub.dispose(); f.source.database.close(); f.journal.close(); rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('tampered or changed transfer, wrong journal and live lease refuse import',()=>{
   const f=fixture();const target=new Store(join(f.dir,'target.db'));
   try{

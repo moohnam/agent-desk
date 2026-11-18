@@ -2,6 +2,7 @@ import { mergeEvents, mergeTaskEvents } from '../../web/src/posts.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { api } from '../../web/src/api.ts';
+import { reportNoteChange, visibleNoteEvents } from '../../web/src/noteEvents.ts';
 import { compareEvents, composeSource, discoverSources, eventId, legacyTaskId, mapEvent, mapMessage, mapState, scopeId, sourceFilter, splitId } from '../../web/src/federation.ts';
 import type { DeskState, HubEvent } from '../../web/src/types.ts';
 
@@ -44,6 +45,47 @@ test('renaming a shared task routes to its source and scopes the returned task',
    assert.deepEqual(requests.map(r=>[r.path,r.method,r.body.title]),[[`/api/workspaces/${source}/tasks/task`,'PATCH','새 제목']]);
    assert.ok(requests[0].operation,'shared writes use a stable operation ID');
  }finally{globalThis.fetch=original;}
+});
+
+test('shared note edits preserve the newest snapshot during a stale history read and deletion', async () => {
+ const source = 'note-source';
+ const index = 31;
+ const taskId = scopeId(source, 'task');
+ const original = { ...event(19), kind: 'user' as const, payload: { text: 'before #now', revision: 0 } };
+ const edited = { ...original, payload: { text: 'after #slack', revision: 1 } };
+ const [entered, started] = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+ const restoreFetch = globalThis.fetch;
+ const writes: string[] = [];
+ globalThis.fetch = async (input, init) => {
+   const path = String(input);
+   if (path === '/api/workspaces') return Response.json([{ id: source, view_index: index, name: 'workspace' }]);
+   if (path.endsWith('/events')) {
+     entered.resolve();
+     await started.promise;
+     return Response.json({ events: [original], more: false });
+   }
+   writes.push(path);
+   return Response.json(init?.method === 'PATCH' ? edited : { ok: true });
+ };
+ try {
+   await discoverSources(true);
+   const pending = api.events(taskId);
+   await entered.promise;
+   await api.editNote(taskId, eventId(index, original.id), edited.payload.text);
+   started.resolve();
+   const page = await pending;
+   assert.deepEqual(page.events, [mapEvent(source, index, edited)]);
+   await api.deleteNote(taskId, eventId(index, original.id));
+   const delayed = mapMessage(source, index, { type: 'event_updated', event: edited });
+   assert.equal(delayed?.type, 'event_updated');
+   if (delayed?.type === 'event_updated') reportNoteChange(delayed);
+   assert.deepEqual(visibleNoteEvents(page.events), []);
+   assert.deepEqual(visibleNoteEvents([original]), [original], 'the local event ID is independent');
+   assert.deepEqual(writes, Array(2).fill(`/api/workspaces/${source}/tasks/task/notes/${original.id}`));
+ } finally {
+   started.resolve();
+   globalThis.fetch = restoreFetch;
+ }
 });
 
 test('migrated remote records appear once, old task links resolve, and offline snapshots respect removal',async()=>{

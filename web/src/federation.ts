@@ -49,6 +49,8 @@ export function mapMessage(source:string,index:number,m:HubMessage):HubMessage|n
   if (!source) return m;
   switch(m.type) {
     case 'event': return {...m,event:mapEvent(source,index,m.event)};
+    case 'event_updated': return {...m,event:mapEvent(source,index,m.event)};
+    case 'event_removed': return {...m,task_id:scopeId(source,m.task_id),event_id:eventId(index,m.event_id)};
     case 'task': return {...m,task:mapTask(source,index,m.task)};
     case 'approval': return {...m,approval:mapRequest(source,m.approval)};
     case 'question': return {...m,question:mapRequest(source,m.question)};
