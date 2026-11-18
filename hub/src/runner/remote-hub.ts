@@ -51,6 +51,7 @@ export class RemoteRunners implements RunnerPort {
   private local: RunnerPort;
   private onMessage: (m: RunnerToHub, at?: string) => void;
   private onSnapshot: (sessions: LiveSession[], runnerId: string) => void;
+  private onReadyExchange: (runnerId: string) => void;
   private changed: () => void;
   private skills: SkillStore;
   private reported = '';
@@ -65,9 +66,10 @@ export class RemoteRunners implements RunnerPort {
   constructor(store: Store, local: RunnerPort,
     onMessage: (m: RunnerToHub, at?: string) => void,
     onSnapshot: (sessions: LiveSession[], runnerId: string) => void,
-    changed: () => void, skills: SkillStore) {
+    changed: () => void, skills: SkillStore, onReadyExchange: (runnerId: string) => void) {
     this.store=store; this.local=local; this.onMessage=onMessage; this.onSnapshot=onSnapshot; this.changed=changed;
     this.skills=skills;
+    this.onReadyExchange=onReadyExchange;
     this.db = store.database;
     ensureRemoteTables(this.db);
     // A process restart does not prove that a remote process has stopped.
@@ -228,6 +230,7 @@ export class RemoteRunners implements RunnerPort {
         const combined = new Map(input.sessions.map(s => [s.sessionId, s]));
         for (const pending of this.pendingWork(id)) combined.set(pending.sessionId, { ...pending, ...combined.get(pending.sessionId), busy: true });
         if (reconcile) this.onSnapshot([...combined.values()], id);
+        this.onReadyExchange(id);
       }
       let bytes = 0;
       const commands: { seq: number; value: HubToRunner }[] = [];

@@ -41,13 +41,18 @@ export function parseSearch(text: string, projects: Project[], tasks: Iterable<T
   const projectNamed = (name: string) => projects.find((p) => p.name.toLowerCase() === name.toLowerCase());
   for (const tok of tokens(text)) {
     const m = /^#([^\s:]+):(.*)$/.exec(tok);
-    const key = m && keyOf(m[1]);
+    const exactProject = m?.[1].toLowerCase() === 'project-id';
+    const key = exactProject ? 'project' : m && keyOf(m[1]);
     if (!m || !key) { words.push(unquote(tok)); continue; }
     const value = unquote(m[2]);
     if (!value) continue;
     let ok = true;
     if (key === 'project') {
-      const p = projectNamed(value);
+      let p = exactProject ? projects.find(project => project.id === value) : projectNamed(value);
+      if (!p && !exactProject) {
+        const atPath = projects.filter(project => project.root_path === value);
+        if (atPath.length === 1) p = atPath[0];
+      }
       if (p) f.projectIds.push(p.id); else ok = false;
     } else if (key === 'task') {
       const t = /^(.+)#(\d+)$/.exec(value);
@@ -70,7 +75,7 @@ export function parseSearch(text: string, projects: Project[], tasks: Iterable<T
   };
 }
 
-export interface SearchOption { key: string; insert: string; label: string; desc?: string; color?: string; more?: boolean }
+export interface SearchOption { key: string; insert: string; label: string; desc?: string; workdir?: string; color?: string; more?: boolean }
 export interface Suggestions { start: number; end: number; items: SearchOption[] }
 
 const quote = (v: string) => (/[\s"\\]/.test(v) ? `"${v.replace(/["\\]/g, '\\$&')}"` : v);
@@ -100,10 +105,20 @@ export function suggestSearch(text: string, caret: number, projects: Project[], 
   const head = `#${key}:`;
   let items: SearchOption[] = [];
   if (key === 'project') {
-    items = rankProjects(projects, tasks, q).slice(0, MAX).map(({ project, last }) => ({
-      key: project.id, insert: head + quote(project.name), label: project.name, color: projectColor(project.id),
-      desc: last ? `› ${last.title}` : project.root_path,
-    }));
+    const names = new Map<string, number>(), paths = new Map<string, number>();
+    for (const project of projects) {
+      const name = project.name.toLowerCase(), path = project.root_path;
+      names.set(name, (names.get(name) ?? 0) + 1);
+      paths.set(path, (paths.get(path) ?? 0) + 1);
+    }
+    items = rankProjects(projects, tasks, q).slice(0, MAX).map(({ project, last }) => {
+      const { id, name, root_path: path } = project;
+      const insert = names.get(name.toLowerCase()) === 1 ? head + quote(name)
+        : paths.get(path) === 1 && !names.has(path.toLowerCase()) ? head + quote(path)
+          : '#project-id:' + quote(id);
+      return { key: id, insert, label: name, color: projectColor(id),
+        desc: last ? `› ${last.title}` : undefined, workdir: path };
+    });
   } else if (key === 'task') {
     items = tasks.filter((t) => `${t.project_name}#${t.seq}`.toLowerCase().includes(q) || t.title.toLowerCase().includes(q))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, MAX)

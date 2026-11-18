@@ -7,11 +7,12 @@ import {
   DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, TAG_HELP, effortNote, modelEngine,
   modelHelpOf, modelProblem, modelTagsOf, parseCompose, parseComposeTarget, parseNoteCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
 } from '../../shared/compose.ts';
-import { api } from './api.ts';
+import { api, workspaceOperationId } from './api.ts';
 import { composeSource, splitId } from './federation.ts';
 import { useSources } from './Workspaces.tsx';
 import { SharedPending } from './workspace.ts';
 import type { MessageReceipt, NoteContext } from '../../shared/api.ts';
+import { hasScheduledReply, parseScheduledReply, scheduledReplyDraft, scheduledReplyHint, scheduledReplyPlainText } from '../../shared/scheduled-reply.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import { useDeskApp, useFileDrop, webDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
@@ -23,8 +24,11 @@ import { QueuedShortcut, type QueuedTarget } from './queuedShortcut.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
 // ── 자동 완성 ──
+const scheduledTime = new Intl.DateTimeFormat('ko-KR', {
+  month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short',
+});
 
-interface Option { key: string; insert: string; label: string; desc?: string; color?: string; space?: boolean }
+interface Option { key: string; insert: string; label: string; desc?: string; workdir?: string; color?: string; space?: boolean }
 /** Rows rendered in the @ list; typing narrows it further. */
 const MAX_OPTIONS = 50;
 
@@ -52,7 +56,7 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
     const ranked = rankProjects(projects, tasks, q);
     const items: Option[] = ranked.slice(0, MAX_OPTIONS).map(({ project, last }) => ({
       key: project.id, insert: project.name, label: `@${project.name}`, space: true, color: projectColor(project.id),
-      desc: last ? `› ${last.title}` : project.root_path,
+      desc: last ? `› ${last.title}` : undefined, workdir: project.root_path,
     }));
     if (mentions === 'route' && q && !projects.some((p) => p.name.toLowerCase() === q.toLowerCase())) {
       items.push({ key: 'new', insert: `${q}:/`, label: `@${q}:/경로`, desc: '새 프로젝트 만들기' });
@@ -248,6 +252,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
                 {o.color && <span className="pdot" style={{ background: o.color }} />}
                 <span className="k">{o.label}</span>
                 {o.desc && <span className="d">{o.desc}</span>}
+                {o.workdir && <code className="option-workdir" dir="ltr">{o.workdir}</code>}
               </div>
             ))}
           </div>
@@ -317,6 +322,7 @@ function interpretNew(text: string, projects: Project[], tasks: TaskView[], skil
     rows.push(note?.title ? { label: '제목', value: note.title } : { label: '제목', value: '메모 제목을 입력하세요', tone: 'bad' });
     return { ok: !!valid && !!note?.title && !noteAttachment, rows, createsNote: true };
   }
+  if (hasScheduledReply(route.text)) return { ok: false, rows: [{ label: '예약', value: scheduledReplyHint, tone: 'bad' }] };
   const modelTags = catalogModelTags(catalogsForTarget(runners,{rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
   const c = parseCompose(text, skillNames(skills),true,modelTags);
   const rows: Row[] = [];
@@ -492,7 +498,7 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
           {ENGINES.map((e) => <Fragment key={e}><code>{modelTagsOf(e)}</code><span>{modelHelpOf(e)} (작업에 유지)</span></Fragment>)}
           <code>#low … #max</code><span>effort 고르기 (작업에 유지, {effortNote()})</span>
           <code>#스킬이름</code><span>데스크 스킬을 이 메시지에만 사용</span>
-          <code>#later</code><span>실행 중이면 지금 턴이 끝난 뒤 보내기 (기본)</span>
+          <code>#later</code><span>실행 중이면 지금 턴 뒤에 보내기 · 스레드 답글에서 #later {'{+2m}'}로 전송 예약</span>
           <code>#now</code><span>실행 중인 턴에 바로 끼워넣기</span>
           <code>#fork</code><span>작업의 대화를 이어받은 새 작업으로 동시에 진행</span>
         </div>
@@ -533,7 +539,8 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const shortcut = useRef(new QueuedShortcut());
   const revision = useRef(0);
   const mounted = useRef(true);
-  const edited = () => { revision.current++; shortcut.current.reset(); };
+  const scheduledAttempt = useRef<{ at: string; operation: string; session?: string }>(undefined);
+  const edited = () => { revision.current++; shortcut.current.reset(); scheduledAttempt.current = undefined; };
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; shortcut.current.reset(); };
@@ -543,9 +550,13 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const skills = useSkills(splitId(task.id)[0]);
   const inventory = useModelCatalogs(splitId(task.id)[0]);
   const modelTags = catalogModelTags(catalogsForTarget(inventory.runners,{runnerId:task.runner_id}),skillNames(skills));
-  const c = parseCompose(text, skillNames(skills), false,modelTags);
+  const schedule = parseScheduledReply(text);
+  const scheduled = schedule && 'at' in schedule ? schedule : undefined;
+  const c = parseCompose(scheduled?.text ?? text, skillNames(skills), false,modelTags);
+  const scheduleError = schedule && (answerTarget ? '질문에 답하는 동안에는 메시지를 예약할 수 없습니다'
+    : 'error' in schedule ? schedule.error : c.body !== schedule.text ? scheduledReplyPlainText : null);
   const name = engineName(task.engine);
-  const delivery = c.delivery ?? pick ?? undefined;
+  const delivery = schedule ? 'later' : c.delivery ?? pick ?? undefined;
   // #new picks its own engine by tag (else this task's); #fork and plain replies stay on this task's.
   const fresh = delivery === 'new';
   const branch = fresh || delivery === 'fork';
@@ -556,11 +567,11 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const content = !!(c.body || c.skills.length);
   const auto = task.permission_mode === 'auto';
   const running = isRunning(task);
-  const ok = !otherEngine && !problem && !!(c.body || c.mode || modelTag || c.skills.length) && !(branch && !content);
+  const ok = !scheduleError && !otherEngine && !problem && !!(c.body || c.mode || modelTag || c.skills.length) && !(branch && !content);
 
-  const send = async (body: string):Promise<({task_id:string;shared_pending?:boolean}&MessageReceipt)|null> => {
+  const send = async (body: string, attempt?: NonNullable<typeof scheduledAttempt.current>):Promise<({task_id:string;shared_pending?:boolean}&MessageReceipt)|null> => {
     setBusy(true);
-    try { return await api.send(task.id, body); }
+    try { return attempt ? await api.scheduleReply(task.id, body, attempt.at, attempt.operation, attempt.session) : await api.send(task.id, body); }
     catch (e) {
       if (e instanceof SharedPending) return {task_id:task.id,shared_pending:true};
       onError(e instanceof Error ? e.message : String(e)); return null;
@@ -579,7 +590,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   const answerBusy = useRef(false);
   const submit = async (fromShortcut = false) => {
     if (answerTarget) {
-      if (busy || answerBusy.current || !text.trim()) return;
+      if (busy || answerBusy.current || !text.trim() || schedule) return;
       answerBusy.current = true; setBusy(true); shortcut.current.reset();
       const unchanged = revision.current, submitted = getDraft(draftKey);
       try {
@@ -596,18 +607,23 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     if (fromShortcut && shortcut.current.active) { await promote(shortcut.current.repeat()); return; }
     if (!ok || busy) return;
     shortcut.current.reset();
-    const request = fromShortcut && content && !branch && delivery !== 'now' ? shortcut.current.begin(task.id) : null;
+    const reservation = schedule && parseScheduledReply(text);
+    if (reservation && 'error' in reservation) { onError(reservation.error); return; }
+    const request = !reservation && fromShortcut && content && !branch && delivery !== 'now' ? shortcut.current.begin(task.id) : null;
     const unchanged = revision.current;
     const submittedDraft = getDraft(draftKey);
-    onSend?.();
-    const r = await send(!c.delivery && pick ? `#${pick} ${text}` : text);
+    if (!reservation) onSend?.();
+    const attempt = reservation ? scheduledAttempt.current ??= { at: reservation.at, operation: workspaceOperationId(), session: task.reply_session_id } : undefined;
+    const r = reservation ? await send(reservation.text, attempt) : await send(!c.delivery && pick ? `#${pick} ${text}` : text);
     if (!r) { if (request !== null) shortcut.current.finish(request); return; }
     // A closed box can clear its own draft, but must not erase one written after re-entering it.
     if (revision.current === unchanged && (mounted.current || getDraft(draftKey) === submittedDraft)) {
       setDraft(draftKey, null, { empty: true });
+      scheduledAttempt.current = undefined;
       setText(''); setPick(null);
     }
-    setSent(r.shared_pending ? new SharedPending().message : r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
+    setSent(r.shared_pending ? (reservation ? '허브에 예약 요청을 보관했습니다. 공유 러너가 받으면 예약이 확정됩니다.' : new SharedPending().message) : r.task_id !== task.id ? `${delivery === 'fork' ? '포크한 ' : ''}새 작업을 시작했습니다. 피드에서 이어 볼 수 있습니다.`
+      : attempt ? `${scheduledTime.format(new Date(attempt.at))}에 전송을 예약했습니다.`
       : r.answered ? '에이전트의 질문에 이 답글로 답했습니다.'
       : r.queued_id && task.runner_id?.startsWith('remote-') && task.runner_connected === false ? '메시지를 보관했습니다. 러너 재연결 후 순서대로 전달합니다.'
       : r.queued_id ? `대기열에 넣었습니다. 지금 턴이 끝나면 보냅니다.${fromShortcut ? ' 입력을 바꾸지 않고 ⌘Enter를 한 번 더 누르면 지금 보냅니다.' : ''}`
@@ -616,13 +632,14 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   };
 
   /** Takes a queued message out of the queue into the box, above anything already typed there. */
-  const editQueued = async (q: { id: string; text: string }) => {
+  const editQueued = async (q: { id: string; text: string; scheduled_at?: string }) => {
     edited();
     // Preserve the original before any durable DELETE, including thread switches and timeouts.
-    const next = text.trim() ? `${q.text}\n${text}` : q.text;
+    const message = q.scheduled_at ? scheduledReplyDraft(q.scheduled_at, q.text) : q.text;
+    const next = text.trim() ? `${message}\n${text}` : message;
     setDraft(draftKey, { text: next, pick }, { taskId: task.id, empty: false });
     setText(next); setSent(null);
-    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(q.text.length, q.text.length); });
+    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(message.length, message.length); });
     try { await api.cancelQueued(task.id, q.id); }
     catch (e) {
       onError(e instanceof SharedPending
@@ -636,7 +653,11 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
   // A #new or #fork reply carries its tags into the new task instead of switching this task.
   const switches = branch ? '' : [c.mode && MODE_LABEL[c.mode], c.model && modelLabel(c.model), c.effort && `effort ${c.effort}`]
     .filter(Boolean).join(' · ');
-  const note = otherEngine ? { warn: true, text: `이 작업은 ${name}로 진행 중입니다. 엔진은 새 작업에서만 고를 수 있습니다.` }
+  const note = scheduleError ? { warn: true, text: scheduleError }
+    : scheduled ? { warn: false, text: scheduled.relativeMinutes
+      ? `보낸 시각에서 ${scheduled.relativeMinutes}분 뒤에 전송을 예약합니다.`
+      : `${scheduledTime.format(new Date(scheduled.at))}에 전송을 예약합니다.` }
+    : otherEngine ? { warn: true, text: `이 작업은 ${name}로 진행 중입니다. 엔진은 새 작업에서만 고를 수 있습니다.` }
     : problem ? { warn: true, text: `${problem}.` }
     : branch && !content ? { warn: true, text: `#${delivery}로 맡길 지시를 함께 쓰세요.` }
     : switches ? { warn: false, text: `보내면 ${switches}로 전환${content ? '하고 이어서 지시합니다' : '만 합니다'}${modelTag && running ? ' (모델·effort는 다음 턴부터)' : ''}${how ? ` · ${how}` : ''}.` }
@@ -645,21 +666,22 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
     : sent ? { warn: false, text: sent }
     : null;
   const choices: Delivery[] = running ? ['later', 'now', 'new', 'fork'] : ['new', 'fork'];
+  const waitingCount = task.queued?.filter(q => !q.scheduled_at).length ?? 0;
 
   return (
     <div className="reply-box" data-answer-task={task.id}>
       {(task.queued ?? []).length > 0 && (
         <ol className="queued" aria-label="대기 중인 메시지">
-          {(task.queued ?? []).map((q, i, all) => (
+          {(task.queued ?? []).map((q, i) => (
             <li key={q.id}>
-              <span className="n">대기 {i + 1}</span>
+              <span className="n">{q.scheduled_at ? `예약 ${scheduledTime.format(new Date(q.scheduled_at))}` : `대기 ${i + 1}`}</span>
               {q.kind ? <span className="t" title={q.text}>{q.kind === 'reset' ? '컨텍스트 재구성: 새 세션으로 넘기기' : '컨텍스트 재구성: 정리본 요청'}</span>
                 : <span className="t" title={q.text}>{q.text}</span>}
               <span className="q-acts">
-                <button className="icon-btn" disabled={i === 0} title="먼저 보내기"
+                {!q.scheduled_at && <><button className="icon-btn" disabled={i === 0} title="먼저 보내기"
                   aria-label="먼저 보내기" onClick={() => api.moveQueued(task.id, q.id, i - 1).catch((e) => onError(e.message))}><ArrowUp /></button>
-                <button className="icon-btn" disabled={i === all.length - 1} title="나중에 보내기"
-                  aria-label="나중에 보내기" onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}><ArrowDown /></button>
+                <button className="icon-btn" disabled={i === waitingCount - 1} title="나중에 보내기"
+                  aria-label="나중에 보내기" onClick={() => api.moveQueued(task.id, q.id, i + 1).catch((e) => onError(e.message))}><ArrowDown /></button></>}
                 {!q.kind && <>
                   <button className="link" title={running ? '실행 중인 턴에 바로 끼워넣기 (#now)' : '바로 보내기'}
                     onClick={() => { shortcut.current.reset(); api.sendQueuedNow(task.id, q.id).catch((e) => onError(e.message)); }}>지금 보내기</button>
@@ -686,7 +708,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
           title={auto ? '누르면 #ask: 매번 확인' : '누르면 #auto: 자동 승인'}
           onClick={() => { shortcut.current.reset(); void send(auto ? '#ask' : '#auto'); }}>#auto</button>
         {choices.map((d) => (
-          <button key={d} className="toggle" aria-pressed={delivery === d} disabled={!!c.delivery}
+          <button key={d} className="toggle" aria-pressed={delivery === d} disabled={!!c.delivery || !!schedule}
             title={c.delivery ? '본문의 태그를 따릅니다' : `이 답글을 #${d}: ${DELIVERY_LABEL[d]}`}
             onClick={() => { edited(); setPick(pick === d ? null : d); }}>#{d}</button>
         ))}
@@ -694,7 +716,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
         </>}
         <span className="spacer" />
         <span><kbd>⌘</kbd><kbd>↵</kbd></span>
-        <button className="btn primary" disabled={busy || (answerTarget ? !text.trim() : task.source === 'external' || !ok)} onClick={() => void submit()}>{answerTarget ? '답변 반영' : branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
+        <button className="btn primary" disabled={busy || (answerTarget ? !text.trim() || !!schedule : task.source === 'external' || !ok)} onClick={() => void submit()}>{answerTarget ? '답변 반영' : schedule ? '예약' : branch ? DELIVERY_LABEL[delivery] : running && delivery !== 'now' && content ? '대기' : '답글'}</button>
       </div>
     </div>
   );

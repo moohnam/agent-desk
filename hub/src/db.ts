@@ -98,12 +98,13 @@ function feedWhere(f: FeedFilter): { where: string; args: string[] } {
  */
 export interface Queued {
   id: string; task_id: string; session_id: string; text: string; body: string; skills: string[];
-  mode: PermissionMode | null; created_at: string; kind?: QueuedKind | null;
+  mode: PermissionMode | null; created_at: string; kind?: QueuedKind | 'scheduled' | null;
   skill_snapshot?: import('../../shared/protocol.ts').SkillSnapshot;
   channel_context?: ChannelContext;
   note_context?: NoteContext;
   connector_context?: import('./connector-broker.ts').ConnectorExecutionContext | null;
 }
+export type ScheduledReply = Pick<Queued, 'id' | 'task_id' | 'session_id' | 'text' | 'created_at'> & { scheduled_at: string };
 /**
  * A question one agent asks another task's agent through the desk. `approval_id`: the card the user
  * allows it with (none when the user named the target with @); `queued_id`: the waiting message it
@@ -143,6 +144,12 @@ CREATE TABLE IF NOT EXISTS question (
 CREATE TABLE IF NOT EXISTS queued (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, session_id TEXT NOT NULL, text TEXT NOT NULL, body TEXT NOT NULL,
   skills_json TEXT NOT NULL, mode TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled_reply (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+  text TEXT NOT NULL, created_at TEXT NOT NULL, scheduled_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS scheduled_reply_due ON scheduled_reply(scheduled_at);
+CREATE INDEX IF NOT EXISTS scheduled_reply_task ON scheduled_reply(task_id, scheduled_at);
 CREATE TABLE IF NOT EXISTS request (
   id TEXT PRIMARY KEY, from_task_id TEXT NOT NULL, from_session_id TEXT NOT NULL, to_task_id TEXT NOT NULL,
   to_session_id TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, answer TEXT, approval_id TEXT, queued_id TEXT,
@@ -653,6 +660,36 @@ export class Store {
   /** Removes a waiting message; false when it was already sent or cancelled. */
   dequeue(id: string): boolean {
     return Number(this.db.prepare('DELETE FROM queued WHERE id = ?').run(id).changes) > 0;
+  }
+
+  scheduleReply(q: ScheduledReply) {
+    this.db.prepare('INSERT INTO scheduled_reply (id, task_id, session_id, text, created_at, scheduled_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(q.id, q.task_id, q.session_id, q.text, q.created_at, q.scheduled_at);
+  }
+  scheduledReplies(taskId: string): ScheduledReply[] {
+    return this.db.prepare('SELECT * FROM scheduled_reply WHERE task_id = ? ORDER BY scheduled_at, rowid').all(taskId) as unknown as ScheduledReply[];
+  }
+  nextScheduledReply(): ScheduledReply | undefined {
+    return this.db.prepare(`SELECT r.* FROM scheduled_reply r JOIN session s ON s.id=r.session_id
+      WHERE NOT EXISTS (SELECT 1 FROM remote_runner p WHERE p.id=s.runner_id)
+      ORDER BY r.scheduled_at, r.rowid LIMIT 1`).get() as unknown as ScheduledReply | undefined;
+  }
+  dueScheduledReplies(at: string, runnerId?: string): ScheduledReply[] {
+    const owner = runnerId ? 's.runner_id=?' : 'NOT EXISTS (SELECT 1 FROM remote_runner p WHERE p.id=s.runner_id)';
+    return this.db.prepare(`SELECT r.* FROM scheduled_reply r JOIN session s ON s.id=r.session_id
+      WHERE r.scheduled_at <= ? AND ${owner} ORDER BY r.scheduled_at, r.rowid`).all(at, ...(runnerId ? [runnerId] : [])) as unknown as ScheduledReply[];
+  }
+  queuedScheduledSessions(runnerId: string): string[] {
+    return (this.db.prepare(`SELECT DISTINCT q.session_id FROM queued q JOIN session s ON s.id=q.session_id
+      WHERE q.kind='scheduled' AND s.runner_id=?`).all(runnerId) as { session_id: string }[]).map(q => q.session_id);
+  }
+  dropScheduledReply(taskId: string, id: string): ScheduledReply | undefined {
+    return this.db.prepare('DELETE FROM scheduled_reply WHERE task_id = ? AND id = ? RETURNING *').get(taskId, id) as unknown as ScheduledReply | undefined;
+  }
+  dropScheduledReplies(sessionId: string) {
+    const future = this.db.prepare('DELETE FROM scheduled_reply WHERE session_id = ?').run(sessionId);
+    const due = this.db.prepare("DELETE FROM queued WHERE session_id = ? AND kind='scheduled'").run(sessionId);
+    return Number(future.changes) + Number(due.changes);
   }
 
   upsertRunner(id: string, host: string, capabilities: unknown) {

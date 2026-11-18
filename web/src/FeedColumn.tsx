@@ -181,27 +181,33 @@ export function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRe
   renaming: boolean; onRenaming: (on: boolean) => void; onRename: (title: string) => void; onMenu: (r: DOMRect) => void;
 }) {
   const label = filterLabel(def, projects, tasks);
+  const f = def.filter;
+  const project = f.projectIds?.length === 1 && !def.note && !f.taskIds?.length && !f.kinds?.length && !f.statuses?.length && !f.query
+    ? projects.get(f.projectIds[0]) : undefined;
   return (
-    <header className="col-head">
-      {renaming ? (
-        <input className="input col-rename" defaultValue={def.title} aria-label="컬럼 이름" autoFocus
-          onFocus={(e) => e.currentTarget.select()}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
-            if (e.key === 'Enter') e.currentTarget.blur();
-            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.currentTarget.value = def.title; e.currentTarget.blur(); }
-          }}
-          onBlur={(e) => { const t = e.currentTarget.value.trim(); if (t && t !== def.title) onRename(t); onRenaming(false); }} />
-      ) : (
-        <h2 title={`${def.title} (더블클릭: 이름 바꾸기)`} onDoubleClick={() => onRenaming(true)}>{def.title}</h2>
-      )}
-      {total == null ? <span className="count" title="불러온 글">{loaded}</span> : (
-        <span className="count" title={`불러온 글 ${loaded}개 / 전체 ${Math.max(total, loaded)}개`}>
-          {loaded}<span className="of"> / {Math.max(total, loaded).toLocaleString()}</span>
-        </span>
-      )}
-      <span className="filter" title={label}>{label}</span>
-      <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
+    <header className={`col-head${project ? ' has-workdir' : ''}`}>
+      <div className="col-head-row">
+        {renaming ? (
+          <input className="input col-rename" defaultValue={def.title} aria-label="컬럼 이름" autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter') e.currentTarget.blur();
+              else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.currentTarget.value = def.title; e.currentTarget.blur(); }
+            }}
+            onBlur={(e) => { const t = e.currentTarget.value.trim(); if (t && t !== def.title) onRename(t); onRenaming(false); }} />
+        ) : (
+          <h2 title={`${def.title} (더블클릭: 이름 바꾸기)`} onDoubleClick={() => onRenaming(true)}>{def.title}</h2>
+        )}
+        {total == null ? <span className="count" title="불러온 글">{loaded}</span> : (
+          <span className="count" title={`불러온 글 ${loaded}개 / 전체 ${Math.max(total, loaded)}개`}>
+            {loaded}<span className="of"> / {Math.max(total, loaded).toLocaleString()}</span>
+          </span>
+        )}
+        <span className="filter" title={label}>{label}</span>
+        <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
+      </div>
+      {project && <code className="col-workdir" dir="ltr">{project.root_path}</code>}
     </header>
   );
 }

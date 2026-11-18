@@ -79,6 +79,7 @@ export class DeskCore {
       permission_mode: session?.permission_mode ?? null,
       model: session?.model ?? null,
       effort: session?.effort ?? null,
+      ...(session?.source === 'app' && { reply_session_id: session.id }),
       runner_id: session?.runner_id,
       runner_label: session?.source === 'app' ? session.runner_label ?? undefined : undefined,
       runner_connected: session ? (this.runner.ready?.(session.id) ?? this.runner.connected) : false,
@@ -89,11 +90,11 @@ export class DeskCore {
       pending_approvals: this.store.pendingApprovals().filter((a) => a.task_id === task.id).length,
       pending_questions: this.store.pendingQuestions().filter((q) => q.task_id === task.id).length,
       pending_ask: this.store.openAsyncQuestion(task.id),
-      queued: this.store.queued({ taskId: task.id }).map((q) => ({
-        id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && { kind: q.kind }),
+      queued: [...this.store.queued({ taskId: task.id }).map((q) => ({
+        id: q.id, text: q.text, created_at: q.created_at, ...(q.kind && q.kind !== 'scheduled' && { kind: q.kind }),
         ...(q.channel_context && { channel_entry_count: q.channel_context.entries.length }),
         ...(q.note_context && { note_context_count: q.note_context.length }),
-      })),
+      })), ...this.store.scheduledReplies(task.id).map(({ id, text, created_at, scheduled_at }) => ({ id, text, created_at, scheduled_at }))],
       background: (session && this.background.get(session.id)) ?? [],
     };
   }

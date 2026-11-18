@@ -10,6 +10,8 @@ import { Hub } from '../../hub/src/hub.ts';
 import { workspaceApi } from '../../hub/src/workspace-api.ts';
 import type { RunnerPort } from '../../hub/src/runner/client.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
+import { parseScheduledReply, scheduledReplyDraft } from '../../shared/scheduled-reply.ts';
+import { HttpError } from '../../hub/src/errors.ts';
 
 /** A runner that records the hub's commands; the test plays the runner's side with `say`. */
 class FakeRunner implements RunnerPort {
@@ -17,6 +19,7 @@ class FakeRunner implements RunnerPort {
   id: string | null = null;
   engines = new Set(['claude', 'codex', 'agy']);
   sent: HubToRunner[] = [];
+  sendError?: Error;
   private live = new Set<string>();
   private onMessage: (m: RunnerToHub) => void;
   private onConnection: (c: boolean) => void;
@@ -27,6 +30,7 @@ class FakeRunner implements RunnerPort {
   has(sessionId: string) { return this.connected && this.live.has(sessionId); }
   handle(cmd: HubToRunner) {
     if (!this.connected) throw new Error('runner not connected');
+    if (cmd.type === 'send' && this.sendError) throw this.sendError;
     if (cmd.type === 'start') this.live.add(cmd.sessionId);
     this.sent.push(cmd);
   }
@@ -66,6 +70,95 @@ function started(t = setup(), text = '고쳐 줘') {
   t.runner.say({ type: 'busy', sessionId: start.sessionId, busy: true });
   return { ...t, taskId: view.id, sessionId: start.sessionId };
 }
+
+test('scheduled reply syntax resolves on the authoring device and validates the calendar', () => {
+  const clock = new Date(2026, 10, 18, 16, 40).getTime();
+  const at = new Date(2026, 10, 18, 16, 43).toISOString();
+  assert.deepEqual(parseScheduledReply('#later {2026-11-18 16:43} continue', clock), { text: 'continue', at });
+  assert.equal(scheduledReplyDraft(at, 'continue'), '#later {2026-11-18 16:43} continue');
+  assert.deepEqual(parseScheduledReply('#later {+2m}\ncontinue', clock), {
+    text: 'continue', at: new Date(clock + 120_000).toISOString(), relativeMinutes: 2,
+  });
+  assert.equal(parseScheduledReply('#later continue', clock), undefined);
+  assert.equal(parseScheduledReply('예시: #later {+2m}', clock), undefined);
+  for (const text of ['#later {2026-02-30 16:43} continue', '#later {2026-11-18 16:40} continue', '#later {+0m} continue',
+    '#later {+2m}', '#later {+2m continue', '#now #later {+2m} continue',
+    '#now\n#later {+2m} continue', '#later\n{+2m} continue']) {
+    assert.ok('error' in (parseScheduledReply(text, clock) ?? {}), text);
+  }
+});
+
+test('scheduled replies join the end of the normal queue once due and dispatch once', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-11-18T07:40:00Z') });
+  const { hub, runner, dir, taskId, sessionId } = started();
+  t.after(() => { hub.dispose(); hub.store.database.close(); rmSync(dir, { recursive: true }); });
+  const scheduledAt = new Date(Date.now() + 2000).toISOString();
+  const res = workspaceApi(hub, 'POST', new URL(`/tasks/${taskId}/scheduled-replies`, 'http://workspace'), {
+    text: 'continue', scheduled_at: scheduledAt,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(hub.taskView(hub.store.getTask(taskId)!).queued.map(q => [q.text, q.scheduled_at]), [['continue', scheduledAt]]);
+  hub.sendMessage(taskId, '#later first');
+  t.mock.timers.tick(1999);
+  assert.deepEqual(hub.store.queued().map(q => q.body), ['first']);
+  assert.equal(runner.last('send'), undefined);
+  t.mock.timers.tick(1);
+  assert.deepEqual(hub.store.queued().map(q => q.body), ['first', 'continue']);
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(runner.last('send')?.text, 'first');
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.equal(runner.last('send')?.text, 'continue');
+  runner.say({ type: 'busy', sessionId, busy: false });
+  t.mock.timers.tick(5000);
+  assert.equal(runner.sent.filter(c => c.type === 'send' && c.text === 'continue').length, 1);
+});
+
+test('scheduled replies support cancel and send now without changing plain later', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-11-18T07:40:00Z') });
+  const { hub, runner, dir, taskId, sessionId } = started();
+  t.after(() => { hub.dispose(); hub.store.database.close(); rmSync(dir, { recursive: true }); });
+  const at = new Date(Date.now() + 1000).toISOString();
+  const cancelled = hub.scheduleReply(taskId, 'cancelled', at);
+  const immediate = hub.scheduleReply(taskId, 'immediate', at);
+  assert.throws(() => hub.scheduleReply(taskId, '#now invalid', at), /예약할 메시지/);
+  assert.throws(() => hub.scheduleReply(taskId, 'invalid', new Date(Date.now()).toISOString()), /지났습니다/);
+  assert.throws(() => hub.scheduleReply(taskId, 'invalid', '+010000-01-01T00:00:00.000Z'), /형식/);
+  assert.throws(() => hub.scheduleReply(taskId, 'invalid', at, undefined, 'replaced'), /세션이 바뀌었습니다/);
+  assert.throws(() => hub.sendMessage(taskId, '#later {+2m} continue'), /예약으로/);
+  hub.cancelQueued(taskId, cancelled.queued_id);
+  hub.sendQueuedNow(taskId, immediate.queued_id);
+  assert.equal(runner.last('send')?.text, 'immediate');
+  assert.equal(runner.last('send')?.steer, true);
+  hub.scheduleReply(taskId, 'stop this too', at);
+  hub.interrupt(taskId);
+  t.mock.timers.tick(1000);
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.deepEqual(hub.taskView(hub.store.getTask(taskId)!).queued, []);
+  hub.sendMessage(taskId, '#later plain');
+  assert.equal(runner.last('send')?.text, 'plain');
+});
+
+test('a scheduled reply retries a definite pre-dispatch rejection and survives a preceding turn closing', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-11-18T07:40:00Z') });
+  const { hub, runner, dir, taskId, sessionId } = started();
+  t.after(() => { hub.dispose(); hub.store.database.close(); rmSync(dir, { recursive: true }); });
+  runner.say({ type: 'engine_session', sessionId, engineSessionId: 'existing-engine-session' });
+  const at = new Date(Date.now() + 1000).toISOString();
+  hub.scheduleReply(taskId, 'retry me', at);
+  hub.scheduleReply(taskId, 'resume me', at);
+  t.mock.timers.tick(1000);
+  runner.sendError = new HttpError(409, 'pre-dispatch rejection');
+  runner.say({ type: 'busy', sessionId, busy: false });
+  assert.deepEqual(hub.store.queued().map(q => q.body), ['retry me', 'resume me']);
+  runner.sendError = undefined;
+  t.mock.timers.tick(5000);
+  assert.equal(runner.last('send')?.text, 'retry me');
+  runner.say({ type: 'closed', sessionId, error: 'another turn closed' });
+  assert.deepEqual(hub.store.queued().map(q => q.body), ['resume me']);
+  t.mock.timers.tick(5000);
+  assert.equal(runner.last('start')?.prompt, 'resume me');
+  assert.equal(runner.last('start')?.resume, 'existing-engine-session');
+});
 
 test('compose starts a task in a new project and sends the runner a start', () => {
   const { hub, runner, dir } = setup();

@@ -458,6 +458,13 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         const body = req.method === 'GET' ? {} : await readJson(req);
         const result = (() => {
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
+          if (route === 'POST /tasks/:id/scheduled-replies') {
+            const requestId = req.headers['x-desk-operation-id'];
+            return directWorkspace.execute(directPeer, {
+              id: typeof requestId === 'string' ? requestId : randomUUID(), method: req.method, path: workspaceUrl.pathname,
+              body: { text: body.text, scheduled_at: body.scheduled_at, session_id: body.session_id },
+            });
+          }
           return hub.withInputPeer(directPeer, () => hub.atomic(() => {
             if (!connectorUserInput(req.method!, workspaceUrl.pathname) || isNoteInput(req.method!, workspaceUrl.pathname, body, hub))
               return workspaceApi(hub, req.method!, workspaceUrl, body);

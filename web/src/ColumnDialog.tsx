@@ -107,7 +107,7 @@ export function ColumnDialog({ column, projects, tasks, channels = [], onManageC
   );
 }
 
-interface PickItem { id: string; label: string; desc: string; color: string; title?: string }
+interface PickItem { id: string; label: string; desc: string; color: string; title?: string; workdir?: string }
 
 /** Projects matching the typed text, most recently active first. */
 function ProjectPicker({ projects, tasks, value, onChange }: {
@@ -117,7 +117,7 @@ function ProjectPicker({ projects, tasks, value, onChange }: {
   return (
     <Picker value={value} onChange={onChange} total={projects.length} noun="프로젝트" empty={['맞는 프로젝트가 없습니다.', '아직 프로젝트가 없습니다.']}
       find={(q) => rankProjects(projects, tasks, q).map(({ project, last }) => (
-        { id: project.id, label: project.name, desc: last ? `› ${last.title}` : project.root_path, color: projectColor(project.id) }))}
+        { id: project.id, label: project.name, desc: last ? `› ${last.title}` : '', workdir: project.root_path, color: projectColor(project.id) }))}
       chip={(id) => { const p = byId.get(id); return { id, label: p?.name ?? '삭제된 프로젝트', desc: '', title: p?.root_path, color: projectColor(id) }; }} />
   );
 }
@@ -201,7 +201,8 @@ function Picker({ value, onChange, find, chip, total, noun, empty }: {
                 <span className="check">{value.includes(r.id) ? '✓' : ''}</span>
                 <span className="pdot" style={{ background: r.color }} />
                 <span className="k">{r.label}</span>
-                <span className="d">{r.desc}</span>
+                {r.desc && <span className="d">{r.desc}</span>}
+                {r.workdir && <code className="option-workdir" dir="ltr">{r.workdir}</code>}
               </div>
             ))}
             {!rows.length && <div className="empty">{total ? empty[0] : empty[1]}</div>}

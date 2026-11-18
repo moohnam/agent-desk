@@ -57,6 +57,7 @@ const routes = [
   'GET /tasks/:id/events',
   'PATCH /tasks/:id',
   'POST /tasks/:id/messages',
+  'POST /tasks/:id/scheduled-replies',
   'PATCH /tasks/:id/notes/:id',
   'DELETE /tasks/:id/notes/:id',
   'DELETE /tasks/:id/queue/:id',
@@ -128,11 +129,11 @@ export function needsDefaultInstructions(method: string, path: string, body: Rec
   // A project-only mention or channel can create its first conversation; the remote store decides.
   return route === 'POST /compose' && !composed.mention?.no;
 }
-export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<string, any> = {}): WorkspaceResult {
+export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<string, any> = {}, scheduleAcceptedAt?: number): WorkspaceResult {
   const parts = ['api', ...url.pathname.split('/').filter(Boolean)];
   const id = parts[2];
   const route = workspaceRoute(method, url.pathname);
-  const required = route === 'POST /compose' || route === 'POST /tasks/:id/messages' || route === 'POST /tasks/:id/reset' || route === 'PATCH /tasks/:id/notes/:id' ? ['text']
+  const required = route === 'POST /compose' || route === 'POST /tasks/:id/messages' || route === 'POST /tasks/:id/scheduled-replies' || route === 'POST /tasks/:id/reset' || route === 'PATCH /tasks/:id/notes/:id' ? ['text']
     : route === 'POST /projects' ? ['name','root_path'] : route === 'POST /tasks' ? ['project_id','prompt']
     : route === 'POST /questions/:id' ? ['answer'] : [];
   if (required.some(key=>typeof body[key] !== 'string')) throw new HttpError(400,'필수 입력은 문자열이어야 합니다');
@@ -192,6 +193,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
           const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), b.note_only === true);
           return reply(202, { ok: true, task_id, ...receipt });
         }
+        case 'POST /tasks/:id/scheduled-replies':
+          return reply(202, hub.scheduleReply(id, body.text, body.scheduled_at, scheduleAcceptedAt, body.session_id));
         case 'PATCH /tasks/:id/notes/:id':
           return reply(200, hub.updateNote(id, noteEventId(parts[4]), body.text));
         case 'DELETE /tasks/:id/notes/:id':

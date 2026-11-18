@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseSearch, taskSearchQuery } from '../../web/src/search.ts';
+import { parseSearch, suggestSearch, taskSearchQuery } from '../../web/src/search.ts';
 import type { Project, TaskView } from '../../web/src/types.ts';
 
 const projects: Project[] = [{ id: 'p1', name: 'web', root_path: '/w', created_at: '' }, { id: 'p2', name: 'Hub', root_path: '/h', created_at: '' }];
@@ -15,6 +15,26 @@ test('filters by #key:value (names case-blind, Korean labels too), the rest is t
 
 test('a filter naming nothing known is reported, not applied', () => {
   assert.deepEqual(parseSearch('#project:nope #status:x', projects, tasks), { filter: {}, unknown: ['#project:nope', '#status:x'] });
+});
+
+test('choosing a project recommendation resolves that exact project when names collide', () => {
+  const sameNamed = [
+    { id: 'local', name: 'demo', root_path: '/local/demo', created_at: '' },
+    { id: 'remote', name: 'Demo', root_path: 'worker:~/my  repo', created_at: '' },
+  ];
+  const query = '#project:demo';
+  const suggestions = suggestSearch(query, query.length, sameNamed, [])!.items;
+  const remote = suggestions.find(item => item.key === 'remote')!;
+  assert.equal(remote.workdir, sameNamed[1].root_path);
+  assert.deepEqual(parseSearch(remote.insert, sameNamed, []), { filter: { projectIds: ['remote'] }, unknown: [] });
+
+  sameNamed[0].root_path = sameNamed[1].root_path;
+  const other = suggestSearch(query, query.length, sameNamed, [])!.items.find(item => item.key === 'remote')!;
+  assert.deepEqual(parseSearch(other.insert, sameNamed, []).filter, { projectIds: ['remote'] });
+  const overlapsId = { id: 'third', name: 'remote', root_path: '/third', created_at: '' };
+  const all = [...sameNamed, overlapsId];
+  assert.deepEqual(parseSearch('#project:remote', all, []).filter, { projectIds: ['third'] });
+  assert.deepEqual(parseSearch(other.insert, all, []).filter, { projectIds: ['remote'] });
 });
 
 test('a thread search scopes a phrase to exactly its task, including quoted project names', () => {

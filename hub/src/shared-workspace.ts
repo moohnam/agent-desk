@@ -149,10 +149,15 @@ export class SharedWorkspace {
         return JSON.parse(held.result);
       }
       let result: WorkspaceResult;
+      const url = new URL(op.path, 'http://workspace');
+      // The registered gateway can durably accept a request before its due time while this authority is offline.
+      const stamped = op.body.__desk_schedule_accepted_at;
+      const acceptedAt = op.method === 'POST' && /^\/tasks\/[^/]+\/scheduled-replies$/.test(url.pathname)
+        && typeof stamped === 'number' && Number.isSafeInteger(stamped) && stamped >= 0 ? stamped : undefined;
       try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(literalNote ? undefined : op.body.__desk_instructions, ()=>snapshot
         ? this.hub.withSkillSnapshot(snapshot,
-          () => workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body))
-        : workspaceApi(this.hub,op.method,new URL(op.path,'http://workspace'),op.body)))))); }
+          () => workspaceApi(this.hub,op.method,url,op.body,acceptedAt))
+        : workspaceApi(this.hub,op.method,url,op.body,acceptedAt)))))); }
       catch (e) {
         if (!(e instanceof HttpError) || e.status >= 500) throw e;
         result = {status:e.status,body:{error:e.message}};

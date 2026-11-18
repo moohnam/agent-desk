@@ -437,6 +437,69 @@ test('shared task creation defaults to auto and respects an explicit ask mode',(
  }finally{f.close();}
 });
 
+test('a shared workspace restores a scheduled reply and executes it once without a connected gateway', (t) => {
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:new Date('2026-11-18T07:40:00Z')});
+ const f=fixture();
+ let restarted:SharedRuntime|undefined;
+ const resumed:StartOptions[]=[];
+ try {
+  const peer=f.runtime.workspace.grant('scheduling');
+  const task=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@scheduled:shared@worker:${f.project} #codex initial`}}).body;
+  f.runtime.exchange();f.finish('ready');
+  const operation={id:randomUUID(),method:'POST',path:`/tasks/${task.id}/scheduled-replies`,
+   body:{text:'continue',scheduled_at:new Date(Date.now()+2000).toISOString()}};
+  const receipt=f.runtime.workspace.execute(peer.id,operation);
+  assert.equal(receipt.status,202);
+  assert.deepEqual(f.runtime.workspace.execute(peer.id,operation),receipt);
+  f.runtime.close();
+  t.mock.timers.tick(3000);
+  restarted=new SharedRuntime(join(f.dir,'runner'),'shared@worker',{start:o=>{
+   resumed.push(o);
+   return {send:()=>{},close:()=>{},resolveApproval:()=>{},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{}};
+  }});
+  t.mock.timers.tick(1);restarted.exchange();
+  assert.equal(resumed.length,1);
+  assert.equal(resumed[0].resume,'fixture');assert.equal(resumed[0].prompt,'continue');
+  assert.deepEqual(restarted.workspace.execute(peer.id,operation),receipt);
+  t.mock.timers.tick(5000);restarted.exchange();
+  assert.equal(resumed.length,1);
+  assert.deepEqual(restarted.hub.store.scheduledReplies(task.id),[]);
+ }finally{restarted?.close();f.close();}
+});
+
+test('a gateway forwards its scheduled reply after the due time without falling back to regular send', async (t) => {
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-18T07:40:00Z')});
+ const f=fixture();
+ const runner=f.runtime.workspace.server();
+ const runnerUrl=await listen(runner);
+ const store=new Store(':memory:');
+ const links=new WorkspaceLinks(store);
+ try {
+  const peer=f.runtime.workspace.grant('delayed schedule');
+  const link=await links.attach({name:'worker',url:runnerUrl,token:peer.token});
+  const task=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@scheduled:shared@worker:${f.project} #codex initial`}}).body;
+  f.runtime.exchange();f.finish('ready');
+  const scheduled_at=new Date(Date.now()+2000).toISOString();
+  const session_id=f.runtime.hub.store.latestSession(task.id)!.id;
+  const op={id:randomUUID(),method:'POST',path:`/tasks/${task.id}/scheduled-replies`,body:{text:'continue',scheduled_at,session_id}};
+  assert.throws(()=>links.enqueue(link.id,{ ...op,path:`/tasks/${task.id}/messages`,body:{text:'#now\n#later {+2m} continue'} }),/예약으로/);
+  links.enqueue(link.id,op);
+  assert.equal(f.runtime.hub.store.scheduledReplies(task.id).length,0);
+  t.mock.timers.tick(3000);
+  await links.flush(link.id);
+  assert.equal(f.runtime.hub.store.scheduledReplies(task.id).length,1);
+  // A new exchange uses the runner's current engine snapshot.
+  t.mock.timers.tick(5000);f.runtime.exchange();
+  assert.deepEqual(f.sends,['continue']);
+  links.enqueue(link.id,op);await links.flush(link.id);
+  f.runtime.exchange();
+  assert.deepEqual(f.sends,['continue']);
+  assert.throws(()=>links.enqueue(link.id,{...op,id:randomUUID()}),/시각이 지났습니다/);
+ } finally {
+  await links.close();store.database.close();await stop(runner);f.close();
+ }
+});
+
 test('shutdown leaves an undispatched start for exactly one execution after runtime restart',()=>{
  const f=fixture();let restarted:SharedRuntime|undefined;let starts=0,closes=0;
  try{

@@ -81,6 +81,8 @@ export interface TaskView<E = WireEvent> extends Task {
   model: ModelName | null;
   effort: Effort | null;
   live: boolean;
+  /** The session a scheduled reply is intended to continue. */
+  reply_session_id?: string;
   /** Increases on every manual title save, including a save of the same text. */
   title_revision?: number;
   runner_id?: string; runner_label?: string; runner_connected?: boolean; delivery_pending?: number;
@@ -93,7 +95,7 @@ export interface TaskView<E = WireEvent> extends Task {
   /** A Codex async question waiting for my next message, which answers it; null when none. */
   pending_ask: { event_id: number; text: string; ts: string } | null;
   /** Messages waiting for the running turn to end (#later), oldest first. */
-  queued: { id: string; text: string; created_at: string; kind?: QueuedKind; channel_entry_count?: number; note_context_count?: number }[];
+  queued: { id: string; text: string; created_at: string; scheduled_at?: string; kind?: QueuedKind; channel_entry_count?: number; note_context_count?: number }[];
   /** What the agent left running between turns (subagents, background commands); the session stays open meanwhile. */
   background: BackgroundTask[];
 }

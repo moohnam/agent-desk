@@ -20,7 +20,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { closeRequestBroker } from './request-broker.ts';
 import type { SkillStore } from './skills.ts';
 import { collectSkillBundle, collectSkillVersion, EMPTY_SKILL_BUNDLE, type SkillBundle } from './shared-skill-sync.ts';
-import { RESERVED_TAGS } from '../../shared/compose.ts';
+import { parseComposeTarget, RESERVED_TAGS } from '../../shared/compose.ts';
+import { hasScheduledReply, scheduledReplyHint, scheduledReplyInstant } from '../../shared/scheduled-reply.ts';
 
 type Link = { id:string; name:string; url:string; workspace_id:string; token:string };
 type Delivery = { id:string; link_id:string; digest:string; payload:string; prepared_payload:string|null; result:string|null; status:number|null };
@@ -406,17 +407,28 @@ export class WorkspaceLinks {
   }
   enqueue(id:string,input:unknown) {
     const link = this.link(id);const op=operation(input),hash=digest(canonical(op));const old=this.result(op.id);
-    if('__desk_instructions' in op.body||'__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body||'__desk_connector_grant' in op.body||'__desk_connector_selection' in op.body||'__desk_connector_identity' in op.body)
+    if('__desk_instructions' in op.body||'__desk_skill_ref' in op.body||'__desk_skill_bundle' in op.body||'__desk_connector_grant' in op.body||'__desk_connector_selection' in op.body||'__desk_connector_identity' in op.body||'__desk_schedule_accepted_at' in op.body)
       throw new HttpError(400,'내부 지침·스킬 필드는 작업공간 연결에서만 설정합니다');
     if(old&&(old.digest!==hash||old.link_id!==id))throw new HttpError(409,'같은 명령 ID의 내용 또는 대상이 바뀌었습니다');
     if(!old){
       const literalNote = isNoteInput(op.method, op.path, op.body);
       const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
+      const path = op.path.split('?')[0];
+      if (!literalNote && text && op.method === 'POST' && (path === '/compose' || path === '/tasks' || /^\/(?:tasks|channels)\/[^/]+\/messages$/.test(path))
+        && hasScheduledReply(path === '/compose' ? parseComposeTarget(text).text : text))
+        throw new HttpError(400, scheduledReplyHint);
       const bundle=!literalNote&&text&&this.skills&&this.needsSkillSnapshot(text)
         ? collectSkillBundle(this.skills,text)??EMPTY_SKILL_BUNDLE:null;
       const prepared=bundle?JSON.stringify(bundle):'';
       const preparedOp: WorkspaceOperation = needsDefaultInstructions(op.method, op.path, op.body)
         ? {...op, body: {...op.body, __desk_instructions: this.instructions?.()}} : {...op, body: {...op.body}};
+      if (op.method === 'POST' && /^\/tasks\/[^/]+\/scheduled-replies$/.test(path)) {
+        const acceptedAt = Date.now();
+        const instant = scheduledReplyInstant(op.body.scheduled_at);
+        if (!Number.isFinite(instant)) throw new HttpError(400,'예약 시각 형식이 잘못되었습니다');
+        if (instant <= acceptedAt) throw new HttpError(400,'예약 시각이 지났습니다. 새로운 시각으로 예약해 주세요');
+        preparedOp.body.__desk_schedule_accepted_at = acceptedAt;
+      }
       this.db.exec('SAVEPOINT connector_enqueue');
       try {
       if (!literalNote && connectorUserInput(op.method, op.path)) {

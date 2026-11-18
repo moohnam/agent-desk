@@ -6,7 +6,10 @@ import { workspaceId, SharedPending } from './workspace.ts';
 import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
 import { noteRevision, onNoteChange, reportNoteChange } from './noteEvents.ts';
 
-async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, target?:string): Promise<T> {
+// getRandomValues works on phones using an HTTP LAN address.
+export const workspaceOperationId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, target?:string, operationId?: string): Promise<T> {
   let source=target??'';
   const url=new URL(path,'http://desk');
   const route=url.pathname;
@@ -33,17 +36,23 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   }
   if(source&&route.startsWith('/channels/'))throw new Error('채널 대화는 같은 허브의 프로젝트를 선택하세요');
   path=url.pathname+url.search;
-  // getRandomValues also works on phones using an HTTP LAN address (randomUUID requires HTTPS).
-  const requestId = source && method !== 'GET' && route !== '/open' ? Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('') : undefined;
+  const scheduling = method === 'POST' && route.endsWith('/scheduled-replies');
+  const requestId = operationId ?? (source && method !== 'GET' && route !== '/open' ? workspaceOperationId() : undefined);
   const init:RequestInit = {
     method,
     headers: { ...(input ? { 'content-type': 'application/json' } : {}), ...(requestId ? {'x-desk-operation-id':requestId} : {}) },
     body: input ? JSON.stringify(input) : undefined,
     signal,
   };
-  const send = ()=>fetch(`${sourceBase(source)}${path}`,init);
-  const res = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
-  const data = await res.json().catch(() => ({}));
+  const send = async () => {
+    const res = await fetch(`${sourceBase(source)}${path}`, init);
+    const data = await res.json().catch(() => ({}));
+    if (scheduling && res.ok && data?.shared_pending !== true &&
+        (typeof data?.task_id !== 'string' || typeof data?.queued_id !== 'string'))
+      throw new Error('예약 접수 결과를 확인하지 못했습니다. 입력을 그대로 두고 다시 시도해 주세요');
+    return { res, data };
+  };
+  const { res, data } = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
   if (data.shared_pending) throw new SharedPending();
   if(!source)return data as T;
@@ -264,6 +273,8 @@ export const api = {
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
   send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
+  scheduleReply: (taskId: string, text: string, at: string, operationId: string, sessionId?: string) =>
+    call<{ task_id: string; queued_id: string }>('POST', `/tasks/${taskId}/scheduled-replies`, { text, scheduled_at: at, session_id: sessionId }, undefined, undefined, operationId),
   writeNote: (taskId: string, text: string) => call('POST', `/tasks/${taskId}/messages`, { text, note_only: true }),
   editNote: (taskId: string, eventId: number, text: string) =>
     call<HubEvent>('PATCH', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`, { text })

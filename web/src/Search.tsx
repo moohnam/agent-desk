@@ -69,6 +69,7 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
                     {o.color && <span className="pdot" style={{ background: o.color }} />}
                     <span className="k">{o.label}</span>
                     {o.desc && <span className="d">{o.desc}</span>}
+                    {o.workdir && <code className="option-workdir" dir="ltr">{o.workdir}</code>}
                   </div>
                 ))}
               </div>

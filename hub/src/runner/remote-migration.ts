@@ -145,6 +145,9 @@ function collect(db:DatabaseSync,runnerId:string,skills?:SkillStore):RemoteTrans
     const approvals=select(db,'approval',inIds('task_id',taskIds),taskIds);
     const questions=select(db,'question',inIds('task_id',taskIds),taskIds);
     const queued=select(db,'queued',inIds('task_id',taskIds),taskIds);
+    if(taskIds.length&&db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_reply'").get()
+      &&db.prepare(`SELECT 1 FROM scheduled_reply WHERE ${inIds('task_id',taskIds)} LIMIT 1`).get(...taskIds))
+      throw new Error('원격 작업의 예약 메시지를 보내거나 취소한 뒤 이관하세요');
     const requests=select(db,'request',inIds('from_task_id',taskIds),taskIds);
     const touching=select(db,'request',`${inIds('from_task_id',taskIds)} OR ${inIds('to_task_id',taskIds)}`,[...taskIds,...taskIds]);
     if(touching.some(r=>['approval','queued','running'].includes(String(r.status))))throw new Error('열린 다른 작업 질문을 먼저 완료해야 합니다');

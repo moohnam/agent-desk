@@ -144,7 +144,7 @@ export const TAG_HELP: { tag: string; help: string }[] = [
   ...ENGINES.map((e) => ({ tag: e, help: `새 작업을 ${ENGINE_INFO[e].tagLabel}로${e === DEFAULT_ENGINE ? ' (기본)' : ''}` })),
   ...MODEL_TAGS.map((m) => ({ tag: m, help: `${MODEL_INFO[m].help} (작업에 유지)` })),
   ...EFFORT_TAGS.map((t) => ({ tag: t, help: `${EFFORT_HELP[t]} (작업에 유지)` })),
-  { tag: 'later', help: '실행 중이면 지금 턴이 끝난 뒤 보내기 (기본)' },
+  { tag: 'later', help: '현재 턴 뒤에 보내기 (기본) · 스레드 답글에서 {+2m}으로 예약' },
   { tag: 'now', help: '실행 중인 턴에 바로 끼워넣기' },
   { tag: 'new', help: '같은 프로젝트에서 새 작업 시작 (이전 대화 없이)' },
   { tag: 'fork', help: '이 작업의 대화를 이어받은 새 작업으로 동시에 진행' },
