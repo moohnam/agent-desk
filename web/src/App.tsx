@@ -1528,7 +1528,7 @@ export function App() {
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
         channels={[...hub.channels.values()]} onOpenChannel={openChannel} tasks={hub.tasks} onOpenSession={openThread}
-        onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} />}
+        onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} updateAvailable={newVersion} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}

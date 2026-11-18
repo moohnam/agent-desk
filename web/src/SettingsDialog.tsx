@@ -39,10 +39,10 @@ function SettingSection({title, description, visible, register, children, preloa
 }
 
 /** Editors stay mounted after first expansion so folding or changing sections preserves drafts. */
-export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks, onOpenSession, onChanged, manageChannels=true, updates }: {
+export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks, onOpenSession, onChanged, manageChannels=true, updates, updateAvailable }: {
   local:boolean; onClose:()=>void; channels:Channel[]; onOpenChannel:(channel:Channel)=>void;
   tasks:ReadonlyMap<string,TaskView>; onOpenSession:(taskId:string)=>void;
-  onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState;
+  onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState; updateAvailable:boolean;
 }) {
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
   const [notice,setNotice]=useState('');
@@ -58,7 +58,13 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
   return <Modal title="설정" wide onClose={close}>
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="설정 항목">
-        {SECTIONS.map(({id,label,Icon})=><button key={id} className="btn" aria-pressed={section===id} onClick={()=>{setSection(id);setNotice('');}}><Icon aria-hidden="true"/>{label}</button>)}
+        {SECTIONS.map(({id,label,Icon})=>{
+          const showUpdate = id === 'version' && updateAvailable;
+          return <button key={id} className="btn" aria-pressed={section===id} aria-label={showUpdate ? `${label}: 새 버전 있음` : undefined}
+            data-update={showUpdate ? '' : undefined} onClick={()=>{setSection(id);setNotice('');}}>
+            <Icon aria-hidden="true"/>{label}
+          </button>;
+        })}
       </nav>
       <div className="settings-pages">
         {notice&&<p className="muted small" role="status">{notice}</p>}
