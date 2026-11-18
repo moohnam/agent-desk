@@ -413,10 +413,12 @@ export class Hub extends DeskCore {
       // Checked before the directory and project are made, so a request that fails leaves nothing behind.
       this.checkNewTask(c, undefined, path);
       // Naming a new directory there is how a new project starts: it is made, and the thread says so.
+      const newProject = !project;
+      const remote = !!remoteLocation(path);
       let made = false;
-      if (!project && !remoteLocation(path)) { try { statSync(path); } catch { made = true; } }
+      if (newProject && !remote) { try { statSync(path); } catch { made = true; } }
       project ??= this.createProject(c.mention.name, path, true);
-      const view = this.createTask(project.id, '', text, c.mode, undefined, true, context);
+      const view = this.createTaskInner(project.id, '', text, c.mode ?? DEFAULT_MODE, undefined, true, context, newProject && remote);
       const session = made ? this.store.latestSession(view.id) : undefined;
       if (session) this.addEvent(session.id, view.id, 'status', { kind: 'status', state: 'mkdir', detail: { path } });
       return view;
@@ -469,7 +471,7 @@ export class Hub extends DeskCore {
       return this.taskView(this.store.getTask(taskId)!);
     });
   }
-  private createTaskInner(projectId: string, title: string, text: string, mode: PermissionMode, engine0: EngineName | undefined, routed: boolean, context: MessageContext) {
+  private createTaskInner(projectId: string, title: string, text: string, mode: PermissionMode, engine0: EngineName | undefined, routed: boolean, context: MessageContext, createDirectory = false) {
     requireAdmission();
     if (hasScheduledReply(routed ? parseComposeTarget(text).text : text)) throw new HttpError(400, scheduledReplyHint);
     const project = this.store.getProject(projectId);
@@ -501,6 +503,7 @@ export class Hub extends DeskCore {
     });
     this.runner.handle({
       type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: project.root_path, prompt:notePrompt(prompt, context.note_context)+(this.connectorBroker?.inputNote(sessionId)??''), permissionMode,
+      ...(createDirectory && { createDirectory: true }),
       model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
     });
     this.busy.add(sessionId);

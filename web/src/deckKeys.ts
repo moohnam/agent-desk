@@ -44,6 +44,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['r', '답글 쓰기·질문에 답하기', '작업 컬럼은 선택한 글 또는 최신 글 기준입니다. RSS·봇 컬럼은 선택 자료로 채널 대화를 엽니다. 터미널 작업은 질문에 답합니다.'],
     ['y / n', '선택한 글의 작업 승인 / 거절', '질문형 승인 요청에서 y는 답변 화면을 엽니다.'],
     ['s', '선택한 글·스레드의 작업 중단'],
+    ['c / dd', '선택한 메모 글 편집 / 삭제', '메모 스레드에서 사용합니다. dd를 누르면 삭제 확인이 열립니다.'],
     ['a', '좌측 하단 응답 패널 열기 / 접기', 'j/k로 이동, y/n으로 승인·거절, Enter로 스레드·답변 열기, Esc로 접기.'],
     ['X', '컨텍스트 재구성 패널 열기 / 닫기', '고른 글을 정리해 새 세션으로 넘깁니다. 데스크가 실행한 작업에서 사용합니다.'],
     ['x', '정리본에 담을 글 선택 / 해제', '재구성 패널을 연 뒤 스레드의 글을 선택합니다.'],
@@ -53,7 +54,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['⌘ -', '글자·화면 작게'],
     ['⌘ 0', '기본 크기로 복원'],
     ['F1 – F4', '내 컬럼 / 프로젝트 / 작업 / 상태', 'F2–F4는 자동 구성됩니다. 컬럼 추가·편집·삭제는 F1에서 합니다. Mac은 fn 키가 필요할 수 있습니다.'],
-    ['c', '컬럼 추가'],
+    ['c', '컬럼 추가', '메모 스레드에서 글을 선택하면 그 글을 편집합니다.'],
     ['e', '컬럼 조건 편집', '이름은 더블클릭으로도 바꿉니다. 검색 패널에서는 검색 입력란으로 이동합니다.'],
     ['p', '선택한 글·스레드의 작업을 컬럼으로 고정'],
     ['v', '작업별 최신 글 / 모든 글 보기'],
@@ -98,6 +99,8 @@ export interface DeckKeyContext {
   /** When `g` and `D` were last pressed, for `gg`, `gr` and `DD`. */
   pendingG: RefObject<number>;
   pendingDelete: RefObject<number>;
+  pendingNoteDelete: RefObject<{ postId: number; at: number } | null>;
+  noteAction: (postId: number, action: 'edit' | 'delete') => (() => void) | undefined;
   // What the keys do
   switchView: (v: View) => void;
   setHelp: (open: boolean) => void;
@@ -138,17 +141,23 @@ export interface DeckKeyContext {
 export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     const {
       help, menu, phone, drawer, editable, queue, queueFocus, activeCol,
-      activeIdx, selectedPost, threadTask, tasks, handoff, pendingG, pendingDelete, switchView,
+      activeIdx, selectedPost, threadTask, tasks, handoff, pendingG, pendingDelete, pendingNoteDelete, noteAction, switchView,
       setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select,
       goRecent, stepColumn, edgeColumn, moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat,
       openSearch, closeSearch, setDrawer, openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog,
       pinTask, toggleByTask, setFinder, deleteColumn, setWidth, widthOf,
     } = c;
+    const dialogOpen = modalOpen();
+    const key = latinKey(ev);
     // Ctrl+Shift+J / K: only the user's own instructions; every other Ctrl/Alt/Cmd chord is left alone.
     const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
+    const noteKey = !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.isComposing && !ev.defaultPrevented && key === 'd';
+    const canDeleteNote = noteKey && !help && !menu && queueFocus == null && !dialogOpen
+      && !(ev.target instanceof Element && ev.target.closest('input, textarea, select'));
+    if (!canDeleteNote) pendingNoteDelete.current = null;
     const references = ev.ctrlKey && !ev.shiftKey && !ev.metaKey && !ev.altKey && ev.code === 'Semicolon';
     // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
-    if ((modalOpen() && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine && !references) || ev.altKey) return;
+    if ((dialogOpen && !help) || menu || ev.metaKey || (ev.ctrlKey && !mine && !references) || ev.altKey) return;
     if (ev.key === 'Escape') {
       if (ev.defaultPrevented || ev.isComposing || ev.repeat) return;
       const target = ev.target instanceof Element ? ev.target : null;
@@ -172,7 +181,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }
     const t = ev.target as HTMLElement;
     if (t.closest('input, textarea, select')) return;
-    const e = { key: latinKey(ev), preventDefault: () => ev.preventDefault() };
+    const e = { key, preventDefault: () => ev.preventDefault() };
     if (help && !mine) { if (e.key === '?' || e.key === 'q') setHelp(false); return; }
 
     if (queueFocus != null) {
@@ -224,6 +233,8 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       return;
     }
     const now = Date.now();
+    const note = queueFocus == null && activeCol?.id === THREAD && selectedPost?.kind === 'user' && selectedPost.taskId === threadTask
+      && tasks.get(threadTask)?.kind === 'note' ? selectedPost : undefined;
     let handled = true;
     // `gr`: back to the column showing everything, at its newest post.
     if (e.key === 'r' && now - pendingG.current < 600) {
@@ -274,7 +285,25 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
         if (taskId && tasks.get(taskId)?.kind !== 'note') api.interrupt(taskId).then(() => setToast('중단을 요청했습니다.'), fail);
         break;
       }
-      case 'c': if (editable) setColumnDialog({}); else setToast(FIXED_NOTE); break;
+      case 'c':
+        if (note) { if (!ev.repeat && !ev.isComposing && !ev.defaultPrevented) noteAction(note.id, 'edit')?.(); }
+        else if (editable) setColumnDialog({});
+        else setToast(FIXED_NOTE);
+        break;
+      case 'd': {
+        const remove = note && canDeleteNote ? noteAction(note.id, 'delete') : undefined;
+        if (!note || !remove) { pendingNoteDelete.current = null; handled = false; break; }
+        if (ev.repeat) break;
+        const previous = pendingNoteDelete.current;
+        if (previous?.postId === note.id && now - previous.at < 1500) {
+          pendingNoteDelete.current = null;
+          remove();
+        } else {
+          pendingNoteDelete.current = { postId: note.id, at: now };
+          setToast('d를 한 번 더 누르면 이 메모 글의 삭제를 확인합니다.');
+        }
+        break;
+      }
       case 'f': if (threadTask && !phone) toggleFloat(); break;
       case 't': toggleThreadFocus(); break;
       case 'X':

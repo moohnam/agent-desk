@@ -141,6 +141,7 @@ export function App() {
   const replyRef = useRef<HTMLTextAreaElement>(null);
   const [noteAttachment, setNoteAttachment] = useState<NoteContext[number]>();
   const pendingDelete = useRef(0);
+  const pendingNoteDelete = useRef<{ postId: number; at: number } | null>(null);
   const pendingG = useRef(0);
   const jumpIndex = useRef<Record<string, number>>({});
   const [tick, setTick] = useState(0);
@@ -247,7 +248,7 @@ export function App() {
    * The thread's selected post and its offset from the feed's top across a float switch: the
    * thread is drawn anew elsewhere, and it should come back showing the same post at the same place.
    */
-  const floatAnchor = useRef<{ id: number; top: number } | null>(null);
+  const floatAnchor = useRef<'bottom' | { id: number; top: number } | null>(null);
   const [split, setSplit] = useState(() => {
     const v = Number((() => { try { return localStorage.getItem(SPLIT_KEY); } catch { return null; } })());
     return v >= PANE_MIN && v <= PANE_MAX ? v : PANE_DEFAULT;
@@ -260,11 +261,19 @@ export function App() {
     }, SAVE_DELAY);
     return () => clearTimeout(t);
   }, [split]);
+  const readingRequestedPost = () =>
+    threadFocus != null && selection[THREAD] === threadFocus && !threadInteracted.current;
   const toggleFloat = () => {
     const id = selection[THREAD];
     const feed = threadFeed();
     const el = id != null ? feed?.querySelector(`[data-post="${id}"]`) : null;
-    floatAnchor.current = id != null ? { id, top: el && feed ? el.getBoundingClientRect().top - feed.getBoundingClientRect().top : 0 } : null;
+    floatAnchor.current = feed && !readingRequestedPost() && atThreadBottom(feed, 2) ? 'bottom'
+      : id != null ? { id, top: el && feed ? el.getBoundingClientRect().top - feed.getBoundingClientRect().top : 0 } : null;
+    const last = threadPosts.at(-1)?.id;
+    if (floatAnchor.current === 'bottom' && last != null && id !== last) {
+      readerSelection.current = last;
+      select(THREAD, last);
+    }
     try { localStorage.setItem(FLOAT_KEY, floatPref ? '0' : '1'); } catch { /* ignore */ }
     setToast(floatPref ? '스레드를 컬럼으로 보기' : '스레드를 오른쪽 절반에 보기');
     setFloatPref(!floatPref);
@@ -639,7 +648,10 @@ export function App() {
       if (top != null && top !== id) { select(activeCol.id, top); return; }
     }
     if (activeCol.id === THREAD && readerSelection.current === id) readerSelection.current = null;
-    else revealPost(activeCol.id, id);
+    else {
+      const feed = entered && activeCol.id === THREAD ? threadFeed() : null;
+      if (!feed || !atThreadBottom(feed, 2)) revealPost(activeCol.id, id);
+    }
   }, [activeCol?.id, selection]);
   // The thread column eases in where it opens (or moves to) rather than popping up.
   const threadAt = threadTask ? deckDefs.slice(0, threadSlot(threadAfter)).filter((c) => c.id !== SEARCH).length : null;
@@ -784,8 +796,8 @@ export function App() {
     const feed = threadFeed();
     if (feed && threadAtBottom.current) feed.scrollTop = feed.scrollHeight;
   };
-  const atThreadBottom = (feed: HTMLElement) =>
-    feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40
+  const atThreadBottom = (feed: HTMLElement, tolerance = 40) =>
+    feed.scrollHeight - feed.scrollTop - feed.clientHeight < tolerance
     && Number(feed.querySelector('.thread-content > article:last-of-type')?.getAttribute('data-post')) === threadPosts.at(-1)?.id;
   const selectReadingPost = () => {
     const id = topPostInView(THREAD);
@@ -812,14 +824,14 @@ export function App() {
     const target = threadFocus != null ? threadPosts.find((p) => p.id === threadFocus) : undefined;
     // A live event can arrive before the history that holds the post to open at; wait for it.
     if (threadFocus != null && !target && !threadLoaded) return;
+    if (!target) readerSelection.current = last.id;
     select(THREAD, (target ?? last).id);
     openedThreadFrame.current = requestAnimationFrame(() => {
       openedThreadFrame.current = null;
       const feed = threadFeed();
       if (!feed) return;
-      const el = feed.querySelector(`[data-post="${(target ?? last).id}"]`);
-      const top = el ? feed.scrollTop + el.getBoundingClientRect().top - feed.getBoundingClientRect().top : Infinity;
-      feed.scrollTop = target ? top : Math.min(top, feed.scrollHeight);
+      const el = target && feed.querySelector(`[data-post="${target.id}"]`);
+      feed.scrollTop = el ? feed.scrollTop + el.getBoundingClientRect().top - feed.getBoundingClientRect().top : feed.scrollHeight;
       // Decided here, not by the scroll event that follows: the bottom-sticking below (a new event, the
       // resize observer's first call) would otherwise pull the thread off the post it just opened at.
       threadAtBottom.current = atThreadBottom(feed);
@@ -884,8 +896,14 @@ export function App() {
     const anchor = floatAnchor.current;
     floatAnchor.current = null;
     const feed = threadFeed();
-    const el = anchor && feed?.querySelector(`[data-post="${anchor.id}"]`);
-    if (!anchor || !feed || !el) return;
+    if (!anchor || !feed) return;
+    if (anchor === 'bottom') {
+      threadAtBottom.current = true;
+      stickThread();
+      return;
+    }
+    const el = feed.querySelector(`[data-post="${anchor.id}"]`);
+    if (!el) return;
     // A narrower or wider thread rewraps the posts; keep at least the post's top in view.
     const top = Math.max(0, Math.min(anchor.top, feed.clientHeight - 40));
     feed.scrollTop += el.getBoundingClientRect().top - feed.getBoundingClientRect().top - top;
@@ -895,6 +913,15 @@ export function App() {
     sentFrom.current = threadPosts[threadPosts.length - 1]?.id ?? 0;
     threadAtBottom.current = true;
     stickThread();
+  };
+  const beforeReplyResize = () => {
+    const feed = threadFeed();
+    if (!feed || readingRequestedPost() || !atThreadBottom(feed, 2)) return;
+    return () => {
+      if (threadFeed() !== feed) return;
+      threadAtBottom.current = true;
+      stickThread();
+    };
   };
 
   /** Focuses the pending answer box, if the thread has rendered it yet. */
@@ -1182,9 +1209,21 @@ export function App() {
   };
   // The deck's keys (deckKeys.ts). Registered again each render, so the handler sees the current state.
   useEffect(() => {
+    const clear = () => { pendingNoteDelete.current = null; };
+    clear();
+    window.addEventListener('pointerdown', clear);
+    window.addEventListener('focusin', clear);
+    return () => { window.removeEventListener('pointerdown', clear); window.removeEventListener('focusin', clear); };
+  }, [activeCol?.id, selectedPost?.id, threadTask]);
+  useEffect(() => {
     const keys: DeckKeyContext = {
       help, menu, phone, drawer, searchOpen: search != null, editable, queue, queueFocus, activeCol, activeIdx, selectedPost, threadTask, tasks: hub.tasks,
-      handoff, pendingG, pendingDelete,
+      handoff, pendingG, pendingDelete, pendingNoteDelete,
+      noteAction: (postId, action) => {
+        const button = threadFeed()?.querySelector<HTMLButtonElement>(`[data-post="${postId}"] button[data-note-action="${action}"]:not(:disabled)`);
+        if (!button?.getClientRects().length || button.closest('[inert]') || getComputedStyle(button).visibility !== 'visible') return;
+        return () => button.click();
+      },
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
@@ -1353,12 +1392,12 @@ export function App() {
           </div>
         </div>
         {threadTaskView && (threadTaskView.kind === 'note' ? (
-          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onBeforeResize={beforeReplyResize} />
         ) : handoff?.open && threadTaskView.source !== 'external' ? (
           <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
             onError={setToast} onDone={setToast} />
         ) : (
-          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} />
+          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onBeforeResize={beforeReplyResize} />
         ))}
         <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
       </section>

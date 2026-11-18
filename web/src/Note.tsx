@@ -5,9 +5,10 @@ import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import type { Post, TaskView } from './types.ts';
 import { SharedPending } from './workspace.ts';
 
-export function NoteReply({ task, inputRef, onError, onSend }: {
+export function NoteReply({ task, inputRef, onError, onSend, onBeforeResize }: {
   task: TaskView; inputRef: RefObject<HTMLTextAreaElement | null>;
   onError: (message: string) => void; onSend?: () => void;
+  onBeforeResize?: () => (() => void) | undefined;
 }) {
   const key = `reply:${task.id}`;
   const [text, setText] = useState(() => getDraft<{ text: string }>(key)?.text ?? '');
@@ -45,7 +46,7 @@ export function NoteReply({ task, inputRef, onError, onSend }: {
   };
 
   return <form className="reply-box" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-    <ResizableEditor inputRef={inputRef} rows={2}>{({ id, rows }) => <div className="cmp-field">
+    <ResizableEditor inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}>{({ id, rows }) => <div className="cmp-field">
       <textarea id={id} className="input" rows={rows} ref={inputRef} value={text} aria-label="메모 글" placeholder="메모를 작성하세요"
         onChange={(event) => edit(event.target.value)} onKeyDown={(event) => {
           if (event.nativeEvent.isComposing || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;

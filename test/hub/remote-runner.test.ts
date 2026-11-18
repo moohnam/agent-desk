@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -49,6 +49,43 @@ function setup() {
   function cleanup() { for(const s of agent.runner.snapshot())agent.runner.handle({type:'close',sessionId:s.sessionId});hub.remotes.close();journal.close();store.database.close();rmSync(dir,{recursive:true,force:true}); }
   return {hub,store,dir,skills,makeHub,registered,journal,starts,sent,agent,localSent,localSay:(m:RunnerToHub)=>localSay(m),request,exchange,finish,cleanup};
 }
+
+test('only an explicitly named new remote project creates a missing directory on its runner', () => {
+  const t = setup();
+  try {
+    t.exchange();
+    const path = join(t.dir, 'nested', 'project');
+    const task = t.hub.compose(`@fresh:moohnam@ws20:${path} #codex start`);
+    assert.equal(existsSync(path), false);
+    assert.ok(t.exchange().commands.some(({ value }) => value.type === 'start' && value.createDirectory));
+    assert.equal(t.starts[0].cwd, realpathSync(path));
+    t.exchange();
+    assert.ok(t.store.listEvents(task.id).some(event => event.kind === 'status' && (event.payload as { state: string }).state === 'mkdir'));
+
+    t.agent.runner.handle({ type: 'close', sessionId: t.starts[0].sessionId });
+    t.exchange();
+    rmSync(path, { recursive: true });
+    const existing = t.hub.compose(`@fresh:moohnam@ws20:${path} #codex again`);
+    assert.ok(t.exchange().commands.some(({ value }) => value.type === 'start' && !value.createDirectory));
+    t.exchange();
+    assert.equal(existsSync(path), false);
+    assert.equal(t.store.getTask(existing.id)?.status, 'error');
+
+    t.hub.createProject('registered', `moohnam@ws20:${t.dir}/absent/../nested`);
+    const registered = t.hub.compose('@registered #codex start');
+    t.exchange(); t.exchange();
+    assert.equal(existsSync(join(t.dir, 'absent')), false);
+    assert.equal(t.store.getTask(registered.id)?.status, 'error');
+
+    const file = join(t.dir, 'file');
+    writeFileSync(file, 'content');
+    const collision = t.hub.compose(`@collision:moohnam@ws20:${file} #codex start`);
+    t.exchange(); t.exchange();
+    assert.equal(readFileSync(file, 'utf8'), 'content');
+    assert.equal(t.store.getTask(collision.id)?.status, 'error');
+    assert.equal(t.starts.length, 1);
+  } finally { t.cleanup(); }
+});
 
 test('remote paths identify a machine and directory without shell evaluation',()=>{
   assert.deepEqual(remoteLocation('moohnam@ws20:~/project'),{address:'moohnam@ws20',path:'~/project'});

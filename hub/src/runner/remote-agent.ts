@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from 'node:fs';
+import { mkdirSync, realpathSync, statSync } from 'node:fs';
 import { maintenanceActive } from '../runtime-control.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -49,15 +49,23 @@ export class RemoteAgent {
             skills.writeFile(file.name, file.path, file.content, file.executable);
           }
         }
-        if (cmd.type === 'start') {
-          const cwd = cmd.cwd.startsWith('~/') ? join(homedir(), cmd.cwd.slice(2)) : cmd.cwd;
-          if (!cwd.startsWith('/') || !statSync(cwd).isDirectory()) throw new Error('원격 프로젝트 디렉터리가 없습니다');
-          new SkillStore(home);
-          cmd = { ...cmd, cwd: resolve(cwd), skillsHome: realpathSync(home) };
-        }
-        const checked = checkHubToRunner(cmd);
+        if (cmd.type === 'start' && cmd.cwd.startsWith('~/')) cmd = { ...cmd, cwd: join(homedir(), cmd.cwd.slice(2)) };
+        let checked = checkHubToRunner(cmd);
         if (typeof checked === 'string' || checked.type === 'auth') throw new Error(typeof checked === 'string' ? checked : 'invalid auth');
-        const live = this.runner.snapshot().find(s=>s.sessionId===checked.sessionId);
+        const { sessionId } = checked;
+        const live = this.runner.snapshot().find(s=>s.sessionId===sessionId);
+        if (checked.type === 'start') {
+          const cwd = checked.cwd;
+          const prior = statSync(cwd, { throwIfNoEntry: false });
+          if (prior && !prior.isDirectory()) throw new Error('원격 프로젝트 경로가 디렉터리가 아닙니다');
+          if (!prior && (!checked.createDirectory || live)) throw new Error('원격 프로젝트 디렉터리가 없습니다');
+          new SkillStore(home);
+          const skillsHome = realpathSync(home);
+          const made = !prior && mkdirSync(cwd, { recursive: true });
+          const actual = prior ? resolve(cwd) : realpathSync(cwd);
+          if (made) this.journal.emit({ type: 'event', sessionId, event: { kind: 'status', state: 'mkdir', detail: { path: actual } } });
+          checked = { ...checked, cwd: actual, skillsHome };
+        }
         // A restored hub may not yet know that this session survived. Never replace its process.
         if (checked.type === 'start' && live) {
           this.runner.handle({type:'send',sessionId:checked.sessionId,text:checked.prompt,skills:checked.skills,skillSnapshot:checked.skillSnapshot});

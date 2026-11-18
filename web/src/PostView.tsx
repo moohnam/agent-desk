@@ -2,6 +2,7 @@ import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, Paperclip, PenLine, Trash2 } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, modelLabel, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { asyncAnswerText } from './asyncAnswers.ts';
@@ -15,6 +16,8 @@ import { CopyButton } from './CopyButton.tsx';
 import { ChannelSources } from './ChannelSources.tsx';
 import { modelShort } from './projects.ts';
 import { NoteEditor } from './Note.tsx';
+import { Modal } from './Modal.tsx';
+import { SharedPending } from './workspace.ts';
 import { NotePreview } from './NotePreview.tsx';
 import type { Approval, HubEvent, Post, Question, TaskView } from './types.ts';
 import type { NoteContext } from '../../shared/api.ts';
@@ -111,12 +114,22 @@ function PostViewInner(props: Props) {
   const canEditNote = !!inThread && isNote && !p.clipped;
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
   const deleteNote = async () => {
-    if (deleting || !window.confirm('이 메모 글을 삭제할까요?')) return;
+    if (deletingRef.current) return;
+    deletingRef.current = true;
     setDeleting(true);
-    try { await api.deleteNote(post.taskId, post.id); }
-    catch (error) { props.onError?.(error instanceof Error ? error.message : String(error)); }
-    finally { setDeleting(false); }
+    setDeleteError(undefined);
+    try {
+      await api.deleteNote(post.taskId, post.id);
+      setConfirmDelete(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SharedPending) { setConfirmDelete(false); props.onError?.(message); }
+      else setDeleteError(message);
+    } finally { deletingRef.current = false; setDeleting(false); }
   };
   const onLocalLink = useMemo(() => openLink(post.taskId, props.onError), [post.taskId, props.onError]);
   // Keep the body element stable across selection, clock and unrelated task updates.
@@ -180,10 +193,10 @@ function PostViewInner(props: Props) {
           {canEditNote && !editing && <>
             {props.onAttachNote && <button type="button" className="icon-btn reference-button" title="에이전트 지시에 첨부" aria-label="에이전트 지시에 첨부"
               disabled={deleting} onClick={props.onAttachNote}><Paperclip /></button>}
-            <button type="button" className="icon-btn reference-button" title="메모 글 수정" aria-label="메모 글 수정"
+            <button type="button" className="icon-btn reference-button" data-note-action="edit" title="메모 글 수정 (c)" aria-label="메모 글 수정"
               disabled={deleting} onClick={() => setEditing(true)}><PenLine /></button>
-            <button type="button" className="icon-btn reference-button" title="메모 글 삭제" aria-label="메모 글 삭제"
-              disabled={deleting} onClick={() => void deleteNote()}><Trash2 /></button>
+            <button type="button" className="icon-btn reference-button" data-note-action="delete" title="메모 글 삭제 (dd)" aria-label="메모 글 삭제"
+              disabled={deleting} onClick={() => { setDeleteError(undefined); setConfirmDelete(true); }}><Trash2 /></button>
           </>}
           {props.referenced !== undefined && <button className="icon-btn reference-button" aria-pressed={props.referenced}
             title={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'} aria-label={props.referenced ? '왼쪽 고정 해제' : '이 글을 왼쪽에 고정'}
@@ -218,6 +231,18 @@ function PostViewInner(props: Props) {
         <Activity events={post.activity} expanded={expanded} onToggle={props.onToggle} />
         {working && <div className="working"><span className="dots"><span /><span /><span /></span>작업 중…</div>}
       </div>
+      {confirmDelete && createPortal(
+        <Modal title="메모 글 삭제" onClose={() => setConfirmDelete(false)}>
+          <div className="form">
+            <div>이 메모 글을 삭제할까요?</div>
+            {deleteError && <div className="error" role="alert">{deleteError}</div>}
+            <div className="form-actions">
+              <span className="spacer" />
+              <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>취소</button>
+              <button type="button" className="btn danger" disabled={deleting} onClick={() => void deleteNote()}>{deleting ? '삭제 중…' : '삭제'}</button>
+            </div>
+          </div>
+        </Modal>, document.body)}
     </article>
   );
 }

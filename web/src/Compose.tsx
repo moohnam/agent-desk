@@ -2,7 +2,7 @@ import {useModelCatalogs} from './modelCatalogs.ts';
 import {catalogModelTags,catalogsForTarget,type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { ArrowDown, ArrowUp, Paperclip, Square, X } from 'lucide-react';
-import { Fragment, useEffect, useId, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import {
   DEFAULT_ENGINE, DEFAULT_MODE, DELIVERY_LABEL, ENGINE_INFO, ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, TAG_HELP, effortNote, modelEngine,
   modelHelpOf, modelProblem, modelTagsOf, parseCompose, parseComposeTarget, parseNoteCompose, wantedEngine, type Delivery, type Effort, type EngineName, type ModelName,
@@ -80,14 +80,26 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
 
 type Mentions = 'route' | 'refer';
 
-export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top', children }: {
+export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top', onBeforeResize, children }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
   rows: number;
   resizeFrom?: 'top' | 'bottom';
+  /** Captures any scroll position that needs restoring after the new rows commit. */
+  onBeforeResize?: () => (() => void) | undefined;
   children: (control: { id: string; rows: number }) => ReactNode;
 }) {
   const id = useId();
   const [rows, setRows] = useState<number>();
+  const afterResize = useRef<(() => void) | undefined>(undefined);
+  const changeRows = (next: number | undefined) => {
+    afterResize.current = (next ?? defaultRows) !== (rows ?? defaultRows) ? onBeforeResize?.() : undefined;
+    setRows(next);
+  };
+  useLayoutEffect(() => {
+    const restore = afterResize.current;
+    afterResize.current = undefined;
+    restore?.();
+  }, [rows]);
   const measure = () => {
     const input = inputRef.current;
     if (!input) return;
@@ -100,7 +112,7 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
   };
   const drag = useRef<{ pointer: number; x: number; y: number; size: NonNullable<ReturnType<typeof measure>>; moved: boolean } | null>(null);
   const lastTap = useRef<{ time: number; pointerType: string } | null>(null);
-  const resize = (next: number, max: number) => setRows(Math.max(2, Math.min(next, max)));
+  const resize = (next: number, max: number) => changeRows(Math.max(2, Math.min(next, max)));
   const resizeBy = ({ visible, maxRows, line }: NonNullable<ReturnType<typeof measure>>, dy: number) =>
     resize(visible + Math.round(dy / line * (resizeFrom === 'top' ? -1 : 1)), maxRows);
   const grip = <button type="button" className="compose-height-grip" aria-controls={id}
@@ -128,7 +140,7 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
       if (!tap) resizeBy(start.size, dy);
       const last = lastTap.current;
       if (tap && last?.pointerType === e.pointerType && e.timeStamp - last.time <= 500) {
-        setRows(undefined);
+        changeRows(undefined);
         lastTap.current = null;
       } else lastTap.current = tap ? { time: e.timeStamp, pointerType: e.pointerType } : null;
     }}
@@ -138,7 +150,7 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
       if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); return; }
       if (!['ArrowUp', 'ArrowDown', 'Home'].includes(e.key)) return;
       e.preventDefault(); e.stopPropagation();
-      if (e.key === 'Home') setRows(undefined);
+      if (e.key === 'Home') changeRows(undefined);
       else { const size = measure(); if (size) resize(size.visible + (e.key === 'ArrowUp' ? 1 : -1), size.maxRows); }
     }} />;
   return <div className="compose-editor">
@@ -152,7 +164,7 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top' }: {
+export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top', onBeforeResize }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; by default it is handled by the containing view. */
   onEscape?: () => void;
@@ -160,6 +172,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
   inputRef: RefObject<HTMLTextAreaElement | null>;
   projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string; runnerId?:string;
   resizeFrom?: 'top' | 'bottom';
+  onBeforeResize?: () => (() => void) | undefined;
 }) {
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
@@ -213,7 +226,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
   };
 
   return (
-    <ResizableEditor inputRef={inputRef} rows={rows} resizeFrom={resizeFrom}>{({ id, rows }) => (
+    <ResizableEditor inputRef={inputRef} rows={rows} resizeFrom={resizeFrom} onBeforeResize={onBeforeResize}>{({ id, rows }) => (
     <div className={`cmp-field${files.over ? ' drop-over' : ''}`} {...browserDrop}>
       <textarea id={id} ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder}
         onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); setDismissed(false); }}
@@ -515,12 +528,13 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
  * send it to a new task instead (a tag typed in the text wins). Waiting replies are listed above the
  * box and can be cancelled.
  */
-export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
+export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onBeforeResize }: {
   task: TaskView; inputRef: RefObject<HTMLTextAreaElement | null>; onError: (msg: string) => void;
   /** For @mentions: naming another project or task lets this task's agent ask it (desk_request) without a card. */
   projects: Project[]; tasks: TaskView[];
   /** Right before a message goes out (its event can arrive before the reply); the thread then follows it. */
   onSend?: () => void;
+  onBeforeResize?: () => (() => void) | undefined;
 }) {
   // Mounted per task (keyed by its id): the box restores the task's unsent reply and keeps it as a
   // draft until it is sent, across other threads and reloads.
@@ -698,7 +712,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend }: {
       )}
       <AnswerDestination taskId={task.id} />
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
-      <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2}
+      <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}
         projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]} runnerId={task.runner_id}
         placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}

@@ -41,9 +41,10 @@ export type HubToRunner =
    * `skills`: desk skills (#tags) to apply to this message only. `skillsHome`: the desk plugin
    * directory (skills.ts) the session loads skills from; both engines read the same files.
    * `fork`: start a new conversation from a copy of `resume` instead of continuing it (#fork).
+   * `createDirectory`: an explicitly named new remote project's first start may create its directory.
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
-  | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean;
+  | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
       permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
   | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
@@ -131,6 +132,7 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
   switch (m.type) {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
+        && (m.createDirectory === undefined || m.createDirectory === true && m.resume === undefined && (m.fork === undefined || m.fork === false))
         && connectorMcp(m.connectorMcp) && optStr(m.instructions) && (m.instructions === undefined || (m.instructions as string).length <= 32768) && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
         ? m as HubToRunner : 'start: bad fields';
     case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';
