@@ -46,6 +46,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
   const [notice,setNotice]=useState('');
   const guards=useRef(new Map<string,PanelGuard>());
   const register=useCallback((id:string,state:PanelGuard)=>{guards.current.set(id,state);return()=>{guards.current.delete(id);};},[]);
+  const versionContext=useMemo(()=>({active:section==='version',register}),[section,register]);
   const canClose=()=>{
     if([...guards.current.values()].some(state=>state.busy)){setNotice('처리가 끝난 뒤 닫아 주세요.');return false;}
     return ![...guards.current.values()].some(state=>state.dirty)||window.confirm('저장하지 않은 설정이 있습니다. 버리고 닫을까요?');
@@ -72,7 +73,9 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
           {panel('runners','공유 러너 전달 내역','연결 대기 또는 처리에 실패한 요청',<WorkspaceDeliveries/>)}
         </section>
         <section className="settings-content" hidden={section!=='version'} aria-label="버전 정보">
-          {panel('version','Agent Desk 버전','현재 버전, 변경 요약과 업데이트 적용',<Updates state={updates} local={local}/>)}
+          <SettingsPanelContext.Provider value={versionContext}>
+            <Updates state={updates} local={local}/>
+          </SettingsPanelContext.Provider>
         </section>
       </div>
     </div>

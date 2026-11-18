@@ -252,3 +252,62 @@ test('an incomplete backfill retries without declaring the gapped history loaded
   assert.equal(h.render('a').events.length, 603);
   h.unmount();
 });
+
+test('revisiting a source-scoped task displays only its verified recent events before refreshing', async () => {
+  const h = harness();
+  const task = 'w:remote:a';
+  const eventId = 1_000_000_000_000;
+  h.render(task);
+  h.requests[0].resolve({ events: [event(eventId + 1, task), event(eventId + 2, task)], more: true });
+  await settled();
+  h.live(event(eventId + 900, task));
+  h.render(task);
+  assert.equal(h.render('a').events.length, 0, 'the old task does not flash during a switch');
+  assert.equal(h.requests[1].task, 'a');
+  assert.equal(h.requests[1].at.since, undefined, 'a native ID does not share the remote task cache');
+  const revisited = h.render(task);
+  assert.equal(h.requests[2].at.since, eventId + 2, 'unverified live events cannot advance the cached cursor');
+  assert.deepEqual(Array.from(revisited.events, e => e.id), [eventId + 1, eventId + 2]);
+  assert.equal(revisited.loaded, false);
+  assert.equal(h.requests.length, 3);
+  h.requests[2].resolve({ events: [event(eventId + 2, task), event(eventId + 3, task)], more: true });
+  await settled();
+  assert.deepEqual(Array.from(h.render(task).events, e => e.id), [eventId + 1, eventId + 2, eventId + 3]);
+  h.unmount();
+});
+
+test('an inactive thread retains at most the newest page and can still page through older history', async () => {
+  const h = harness();
+  h.render('a', 0, 1);
+  h.requests[0].resolve({ events: Array.from({ length: 620 }, (_, i) => event(i + 1)), more: false });
+  await settled();
+  h.render(null);
+  const revisited = h.render('a');
+  assert.equal(revisited.events.length, 500);
+  assert.equal(revisited.events[0].id, 121);
+  assert.equal(revisited.more, true);
+  h.requests[1].resolve({ events: revisited.events, more: true });
+  await settled();
+  h.render('a').loadEarlier();
+  assert.equal(h.requests[2].at.before, 121);
+  h.requests[2].resolve({ events: Array.from({ length: 120 }, (_, i) => event(i + 1)), more: false });
+  await settled();
+  assert.equal(h.render('a').events.length, 620);
+  assert.equal(h.render('a').more, false);
+  h.unmount();
+});
+
+test('an oversized older event is left on the hub without leaving a hole in cached history', async () => {
+  const h = harness();
+  const large = event(2);
+  large.payload.text = '가'.repeat(1_000_000);
+  h.render('a');
+  h.requests[0].resolve({ events: [event(1), large, event(3), event(4)], more: false });
+  await settled();
+  h.render(null);
+  const revisited = h.render('a');
+  assert.deepEqual(Array.from(revisited.events, e => e.id), [3, 4]);
+  assert.equal(revisited.more, true);
+  assert.equal(h.requests[1].at.since, 4);
+  h.unmount();
+});

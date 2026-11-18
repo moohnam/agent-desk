@@ -19,14 +19,14 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
   const approvedPath=approval?.scope===scope?approval.path:undefined;
   const requestedPath=permission?.scope===scope?permission.path:undefined;
   const [preview,setPreview]=useState<(Preview&{request:PreviewRequest})|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(false);
-  const [request,setRequest]=useState({revision:0,refresh:true}),[ready,setReady]=useState(false),[near,setNear]=useState(false);
+  const [request,setRequest]=useState<PreviewRequest>({revision:0,refresh:false});
+  const [ready,setReady]=useState(false),[frameReady,setFrameReady]=useState(false);
   const latestRequest=useRef(request);
   useLayoutEffect(()=>{latestRequest.current=request;},[request]);
   const ref=useRef<HTMLElement>(null);
   const revealed=useRef('');
   useLayoutEffect(()=>{setApproval(null);setPermission(null);setPreview(null);},[scope]);
-  // An explicit open reads the source again, including an already mounted or failed card.
-  // Visibility changes and lease renewal can still reuse the existing preview.
+  // Explicit opens read the source again. Passive mounts and expired leases reuse the hub copy.
   useLayoutEffect(()=>{
     const choice=JSON.stringify([scope,focusRevision]);
     if(!visible||!focusRevision||revealed.current===choice)return;
@@ -35,12 +35,16 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
     setReady(true);
   },[scope,focusRevision,visible]);
   useEffect(()=>{
-    if(!visible)return;
-    if(!ref.current)return;
-    if(typeof IntersectionObserver==='undefined'){setReady(true);setNear(true);return;}
-    const observer=new IntersectionObserver(entries=>{const inside=entries.some(e=>e.isIntersecting);setNear(inside);if(inside)setReady(true);}, {root:ref.current.closest('.reference-feed'),rootMargin:'100px'});
-    observer.observe(ref.current);return()=>observer.disconnect();
-  },[visible]);
+    if(!visible||frameReady||!ref.current)return;
+    if(typeof IntersectionObserver==='undefined'){setReady(true);setFrameReady(true);return;}
+    let alive=true;
+    const observer=new IntersectionObserver(entries=>{
+      if(!alive||!entries.some(entry=>entry.isIntersecting))return;
+      setReady(true);setFrameReady(true);observer.disconnect();
+    },{root:ref.current.closest('.reference-feed'),rootMargin:'100px'});
+    observer.observe(ref.current);
+    return()=>{alive=false;observer.disconnect();};
+  },[visible,frameReady]);
   useEffect(()=>{
     if(!ready)return;
     const controller=new AbortController();let alive=true;
@@ -90,8 +94,8 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
         <button type="button" className="btn" onClick={remove}>취소</button>
       </div>
     </div>}
-    {preview?.kind==='html'&&near&&<iframe title={preview.name} src={preview.url} sandbox="" referrerPolicy="no-referrer" className="document-frame"/>}
-    {preview?.kind==='html'&&!near&&<div className="document-frame"/>}
+    {preview?.kind==='html'&&frameReady&&<iframe title={preview.name} src={preview.url} sandbox="" referrerPolicy="no-referrer" className="document-frame"/>}
+    {preview?.kind==='html'&&!frameReady&&<div className="document-frame"/>}
     {preview?.kind==='markdown'&&<div className="body md"><Markdown text={preview.text??''} resourceBase={preview.url} taskId={taskId} linkBase={href}
       onLocalLink={openLink}/></div>}
   </section>;

@@ -10,6 +10,8 @@ import { TemporaryFiles } from './shared-files.ts';
 
 const TTL = 24 * 60 * 60 * 1000;
 const LEASE = 90_000;
+const PARALLEL_SOURCES = 4;
+const MAX_TRANSFERS = 32;
 const MIME: Record<string,string> = {
   '.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.md':'text/plain; charset=utf-8','.markdown':'text/plain; charset=utf-8',
   '.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8',
@@ -80,8 +82,9 @@ export class DocumentPreviews {
   private maintenance:Promise<unknown> = Promise.resolve();
   private entries = new Map<string,Entry>();
   private grants = new Map<string,Grant>();
-  private queue:Promise<unknown> = Promise.resolve();
-  private waiting = 0;
+  private queue: { source: string; start: () => void }[] = [];
+  private activeSources = new Set<string>();
+  private transfers = new Set<Promise<string>>();
   private stopped = false;
   private timer = setInterval(()=>{void this.collect().catch(()=>{});},60_000);
   private read:PreviewReader;
@@ -115,6 +118,27 @@ export class DocumentPreviews {
     if(!grant)throw new HttpError(404,'문서 미리보기가 만료됐습니다. 다시 열어 주세요');
     grant.until=Date.now()+LEASE;grant.entry.at=Date.now();
   }
+  private drain() {
+    while (this.activeSources.size < PARALLEL_SOURCES) {
+      const next = this.queue.findIndex(job => !this.activeSources.has(job.source));
+      if (next < 0) return;
+      const [job] = this.queue.splice(next, 1);
+      this.activeSources.add(job.source);
+      job.start();
+    }
+  }
+  private schedule(source: string, read: () => Promise<string>) {
+    const work = new Promise<string>((resolve, reject) => {
+      this.queue.push({ source, start: () => {
+        void Promise.resolve().then(read).then(resolve, reject).finally(() => {
+          this.activeSources.delete(source);
+          this.drain();
+        });
+      } });
+    });
+    this.drain();
+    return work;
+  }
   private file(entry:Entry,path:string):Promise<string> {
     if(entry.approvedPath!==undefined&&path!==entry.name)throw new HttpError(403,'허용한 문서 한 파일만 볼 수 있습니다. 부속 파일은 포함하지 않습니다');
     const prior=entry.files.get(path);
@@ -129,24 +153,25 @@ export class DocumentPreviews {
       }
     });
     if(this.stopped)throw new HttpError(503,'허브가 종료 중입니다');
-    if(this.waiting>=32)throw new HttpError(429,'문서를 불러오는 중입니다. 잠시 뒤 다시 시도해 주세요');
-    this.waiting++;entry.busy++;
-    // Serialize the existing bounded receiver; concurrent requests for one resource share a promise.
-    const work=this.queue.then(async()=>{
+    if(this.transfers.size>=MAX_TRANSFERS)throw new HttpError(429,'문서를 불러오는 중입니다. 잠시 뒤 다시 시도해 주세요');
+    entry.busy++;
+    // A runner gets one transfer at a time. Another runner can fill an unused global slot.
+    const work=this.schedule(entry.source,async()=>{
       if(this.stopped)throw new HttpError(503,'허브가 종료 중입니다');
       const href=path===entry.name?entry.href:posix.join(posix.dirname(entry.href),path);
       return this.read(entry.source,entry.task,href,path===entry.name?undefined:entry.href,async response=>{
         if(path===entry.name&&Number(response.headers.get('content-length'))>5*1024*1024)
           throw new HttpError(413,'문서 본문은 5 MB까지 미리 볼 수 있습니다');
-        const size=Number(response.headers.get('content-length'));
-        if(response.headers.has('content-length')&&Number.isSafeInteger(size)&&size>=0&&size<=50*1024*1024)await this.collect(size);
-        const result=await this.files.receive(response);
+        const result=await this.files.receive(response,size=>this.collect(size));
         if(result.kind!=='file')throw new HttpError(502,'파일 응답이 필요합니다');
         return result.path;
       },entry.approvedPath);
-    }).finally(()=>{this.waiting--;entry.busy--;});
+    }).catch(error=>{
+      if(entry.files.get(path)===work)entry.files.delete(path);
+      throw error;
+    }).finally(()=>{this.transfers.delete(work);entry.busy--;});
     entry.files.set(path,work);
-    this.queue=work.catch(()=>{entry.files.delete(path);});
+    this.transfers.add(work);
     return work;
   }
   async prepare(source:string,task:string,href:string,refresh:boolean,allowed:()=>boolean,approvedPath?:string) {
@@ -216,5 +241,5 @@ export class DocumentPreviews {
     if(body)res.end(body);else await pipeline(createReadStream(file),res);
     } finally {entry.busy--;void this.collect().catch(()=>{});}
   }
-  async close(){this.stopped=true;clearInterval(this.timer);await this.queue;await this.maintenance;this.grants.clear();this.entries.clear();this.versions.clear();await this.files.close();}
+  async close(){this.stopped=true;clearInterval(this.timer);await Promise.allSettled(this.transfers);await this.maintenance;this.grants.clear();this.entries.clear();this.versions.clear();await this.files.close();}
 }

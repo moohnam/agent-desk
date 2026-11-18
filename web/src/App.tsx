@@ -4,7 +4,7 @@ import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
@@ -101,6 +101,9 @@ export function App() {
   const [threadAfter, setThreadAfter] = useState<string | null>(null);
   /** The post a thread opens at (top of the view); null opens at the newest post. */
   const [threadFocus, setThreadFocus] = useState<number | null>(null);
+  const openedThreadFrame = useRef<number | null>(null);
+  const threadInteracted = useRef(false);
+  const readerSelection = useRef<number | null>(null);
   // A new object per call, so choosing the same index again still re-renders and counts as a choice.
   const [activeState, setActiveState] = useState({ i: 0 });
   const active = activeState.i;
@@ -141,7 +144,7 @@ export function App() {
   const jumpIndex = useRef<Record<string, number>>({});
   const [tick, setTick] = useState(0);
   // A question whose answer box should get focus once its thread has rendered it.
-  const questionFocus = useRef<string | null>(null);
+  const questionFocus = useRef<{ taskId: string; questionId: string } | null>(null);
   /** The search column's query; null: no search column. `searchApplied` follows it after a pause. */
   const [search, setSearch] = useState<string | null>(null);
   const [searchApplied, setSearchApplied] = useState('');
@@ -492,8 +495,8 @@ export function App() {
   const referencesVisible = canRead && references.open && !!threadTask && hub.tasks.has(threadTask);
   useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible]);
   useEffect(() => {
-    setReferenceTask(previous => referencesVisible ? threadTask : canReference && previous === threadTask ? previous : null);
-  }, [threadTask, referencesVisible, canReference]);
+    setReferenceTask(previous => referencesVisible ? threadTask : canRead && previous === threadTask ? previous : null);
+  }, [threadTask, referencesVisible, canRead]);
   useEffect(() => {
     // A deck reorder briefly changes the column at the active index before the layout effect
     // restores focus by column ID. Only a settled move away from the thread closes this pane.
@@ -623,7 +626,8 @@ export function App() {
       const top = postInView(activeCol.id, id) ? id : topPostInView(activeCol.id);
       if (top != null && top !== id) { select(activeCol.id, top); return; }
     }
-    revealPost(activeCol.id, id);
+    if (activeCol.id === THREAD && readerSelection.current === id) readerSelection.current = null;
+    else revealPost(activeCol.id, id);
   }, [activeCol?.id, selection]);
   // The thread column eases in where it opens (or moves to) rather than popping up.
   const threadAt = threadTask ? threadSlot(threadAfter) : null;
@@ -696,6 +700,11 @@ export function App() {
    * thread lands on its newest post. Reopening the open thread lands again.
    */
   const openThread = (taskId: string, at: { from?: string; post?: number } = {}) => {
+    if (hub.gone.has(taskId)) return;
+    if (openedThreadFrame.current != null) cancelAnimationFrame(openedThreadFrame.current);
+    threadInteracted.current = false;
+    readerSelection.current = null;
+    questionFocus.current = null;
     const after = at.from && at.from !== THREAD ? at.from : threadAfter;
     if (threadTask !== taskId) { references.enter(taskId); setThreadTask(taskId); }
     setThreadAfter(after);
@@ -753,38 +762,56 @@ export function App() {
     addEventListener('popstate', onPop);
     return () => removeEventListener('popstate', onPop);
   }, []);
-  // When a thread opens, select the post it opens at (else its newest) and scroll there: that post's
-  // top at the top, or the bottom when the newest post fits. Right after switching tasks the posts
-  // still belong to the previous thread until the new events load; wait.
+  const threadAtBottom = useRef(true);
+  const sentFrom = useRef<number | null>(null);
+  const threadFeedRef = useRef<HTMLDivElement>(null);
+  const threadFeed = () => threadFeedRef.current;
+  const stickThread = () => {
+    const feed = threadFeed();
+    if (feed && threadAtBottom.current) feed.scrollTop = feed.scrollHeight;
+  };
+  const atThreadBottom = (feed: HTMLElement) =>
+    feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40
+    && Number(feed.querySelector('.thread-content > article:last-of-type')?.getAttribute('data-post')) === threadPosts.at(-1)?.id;
+  const selectReadingPost = () => {
+    const id = topPostInView(THREAD);
+    if (id == null) return;
+    readerSelection.current = id;
+    select(THREAD, id);
+  };
+  useLayoutEffect(() => {
+    threadAtBottom.current = true;
+    sentFrom.current = null;
+    threadAnchor.current = null;
+    return () => { if (openedThreadFrame.current != null) cancelAnimationFrame(openedThreadFrame.current); };
+  }, [threadTask]);
+
+  // When a thread opens, reveal the requested post at the top, or land at the newest post.
   useEffect(() => {
     if (!threadTask || selection[THREAD] != null) return;
+    // Cached posts are available to read immediately. A normal open lands at the real tail once
+    // the history arrives, unless the user has started reading the provisional view.
+    if (threadFocus == null && threadInteracted.current) { selectReadingPost(); return; }
+    if (threadFocus == null && !threadLoaded) return;
     const last = threadPosts[threadPosts.length - 1];
     if (!last || last.taskId !== threadTask) return;
     const target = threadFocus != null ? threadPosts.find((p) => p.id === threadFocus) : undefined;
     // A live event can arrive before the history that holds the post to open at; wait for it.
     if (threadFocus != null && !target && !threadLoaded) return;
     select(THREAD, (target ?? last).id);
-    requestAnimationFrame(() => {
-      const feed = document.querySelector(`section[data-col="${THREAD}"] .feed`);
+    openedThreadFrame.current = requestAnimationFrame(() => {
+      openedThreadFrame.current = null;
+      const feed = threadFeed();
       if (!feed) return;
       const el = feed.querySelector(`[data-post="${(target ?? last).id}"]`);
       const top = el ? feed.scrollTop + el.getBoundingClientRect().top - feed.getBoundingClientRect().top : Infinity;
       feed.scrollTop = target ? top : Math.min(top, feed.scrollHeight);
       // Decided here, not by the scroll event that follows: the bottom-sticking below (a new event, the
       // resize observer's first call) would otherwise pull the thread off the post it just opened at.
-      threadAtBottom.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+      threadAtBottom.current = atThreadBottom(feed);
     });
   }, [threadTask, threadPosts, selection, threadFocus, threadLoaded]);
 
-  // The thread sticks to its bottom while scrolled there (new posts, a growing reply box), and
-  // jumps there after the user sends from it; the own message gets selected when it arrives.
-  const threadAtBottom = useRef(true);
-  const sentFrom = useRef<number | null>(null);
-  const threadFeed = () => document.querySelector<HTMLElement>(`section[data-col="${THREAD}"] .feed`);
-  const stickThread = () => {
-    const feed = threadFeed();
-    if (feed && threadAtBottom.current) feed.scrollTop = feed.scrollHeight;
-  };
   /**
    * While earlier history loads, the post read at the top of the thread and its offset from the
    * feed's top: the older posts go in above it without moving it. `first`: the oldest post then.
@@ -799,7 +826,6 @@ export function App() {
     if (el) threadAnchor.current = { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop, first: threadPosts[0].id };
     loadEarlier();
   };
-  useEffect(() => { threadAtBottom.current = true; sentFrom.current = null; threadAnchor.current = null; }, [threadTask]);
   // The newest page can be all tool calls (a long agent turn): go back until there is a post to show.
   // Once per page, so a failing request leaves the button instead of retrying forever.
   const autoEarlier = useRef<number | null>(null);
@@ -820,7 +846,7 @@ export function App() {
     feed.scrollTop += el.getBoundingClientRect().top - feed.getBoundingClientRect().top - anchor.top;
     // Live posts arriving meanwhile land below; only the earlier page ends the hold.
     if (threadPosts[0] && threadPosts[0].id < anchor.first) threadAnchor.current = null;
-    threadAtBottom.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+    threadAtBottom.current = atThreadBottom(feed);
     return !threadAtBottom.current;
   };
   useLayoutEffect(() => {
@@ -849,7 +875,7 @@ export function App() {
     // A narrower or wider thread rewraps the posts; keep at least the post's top in view.
     const top = Math.max(0, Math.min(anchor.top, feed.clientHeight - 40));
     feed.scrollTop += el.getBoundingClientRect().top - feed.getBoundingClientRect().top - top;
-    threadAtBottom.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+    threadAtBottom.current = atThreadBottom(feed);
   }, [floatThread]);
   const onThreadSend = () => {
     sentFrom.current = threadPosts[threadPosts.length - 1]?.id ?? 0;
@@ -858,14 +884,18 @@ export function App() {
   };
 
   /** Focuses the pending answer box, if the thread has rendered it yet. */
-  const tryFocusQuestion = () => {
-    const id = questionFocus.current;
-    const el = id && document.querySelector<HTMLElement>(`section[data-col="${THREAD}"] [data-question="${id}"]`);
+  const tryFocusQuestion = useCallback(() => {
+    const pending = questionFocus.current;
+    const feed = threadFeedRef.current;
+    if (!pending || feed?.closest('section')?.dataset.task !== pending.taskId) return;
+    const el = feed.querySelector<HTMLElement>(`[data-question="${pending.questionId}"]`);
     if (!el) return;
     questionFocus.current = null;
+    threadInteracted.current = true;
+    if (openedThreadFrame.current != null) cancelAnimationFrame(openedThreadFrame.current);
     el.scrollIntoView({ block: 'nearest' });
     el.focus();
-  };
+  }, []);
   useEffect(() => {
     if (!questionFocus.current) return;
     const frame = requestAnimationFrame(tryFocusQuestion);
@@ -875,7 +905,7 @@ export function App() {
   const answerQuestion = (taskId: string, questionId: string) => {
     setQueueFocus(null);
     openThread(taskId);
-    questionFocus.current = questionId;
+    questionFocus.current = { taskId, questionId };
     requestAnimationFrame(() => requestAnimationFrame(tryFocusQuestion));
   };
   /** The task's oldest unanswered question. */
@@ -1238,7 +1268,7 @@ export function App() {
       );
     }
     return (
-      <section key={col.id} data-col={col.id} className={`column thread${i === activeIdx ? ' focused' : ''}`}
+      <section key={col.id} data-col={col.id} data-task={threadTask} className={`column thread${i === activeIdx ? ' focused' : ''}`}
         style={{ '--w': `${widthOf(col.id)}px`,
           ...(threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
         onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
@@ -1249,11 +1279,16 @@ export function App() {
           references={canRead ? { open: references.open, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
-        <div className="feed thread-feed"
+        <div className="feed thread-feed" ref={threadFeedRef}
+          onPointerDown={() => { threadInteracted.current = true; }}
+          onTouchStart={() => { threadInteracted.current = true; }}
+          onWheel={() => { threadInteracted.current = true; }}
           onScroll={(e) => {
             const f = e.currentTarget;
-            threadAtBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
-            if (f.scrollTop < 80 && !threadAtBottom.current && threadLoaded && threadMore && !threadLoadingEarlier) loadEarlierThread();
+            threadAtBottom.current = atThreadBottom(f);
+            if (threadInteracted.current && threadFocus == null && selection[THREAD] == null) selectReadingPost();
+            if (f.scrollTop < 80 && !threadAtBottom.current && threadLoaded && threadMore && !threadLoadingEarlier
+              && f.querySelector('.thread-content > article')?.getAttribute('data-post') === String(threadPosts[0]?.id)) loadEarlierThread();
           }}>
           <div className="thread-content">
             {threadMore && (
@@ -1263,7 +1298,9 @@ export function App() {
                 </button>
               </div>
             )}
-            <ThreadPosts col={col} ctx={columnCtx.get(col.id)!}
+            <ThreadPosts key={threadTask} col={col} ctx={columnCtx.get(col.id)!} feed={threadFeedRef} atBottom={threadAtBottom}
+              target={selection[THREAD] ?? threadFocus ?? (!threadInteracted.current ? threadPosts.at(-1)?.id : undefined)}
+              onPostsMounted={tryFocusQuestion}
               selected={i === activeIdx ? selection[col.id] : undefined} flash={flash} expanded={expanded}
               picked={handoff?.open ? handoff.picked : undefined} referenced={canReference ? referencedIds : undefined}
               taskId={threadTask} actions={threadActions} onError={setToast} />

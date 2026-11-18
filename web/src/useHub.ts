@@ -524,76 +524,102 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   return { feeds, loadEarlier, setReading };
 }
 
-/** Full event history of one task (the feed only keeps recent events), kept live. */
+/** Inactive threads keep only a recent, successfully fetched and contiguous page. */
+const THREAD_CACHE_SIZE = 4;
+const THREAD_CACHE_EVENTS = 500;
+const THREAD_CACHE_BYTES = 2_000_000;
+const EMPTY_TASK_EVENTS: HubEvent[] = [];
+
+interface TaskHistory {
+  taskId: string;
+  events: HubEvent[];
+  more: boolean;
+  /** Last event covered by a history read, excluding later live-only events. */
+  cursor: number | null;
+  firstLive: number | null;
+  since: number | undefined;
+  reload: number;
+  loaded: boolean;
+  loadingEarlier: boolean;
+}
+
+function historyFloor(history: TaskHistory | undefined, since?: number): number | undefined {
+  const ids = [since, history?.cursor, history?.firstLive].filter((id): id is number => id != null);
+  return ids.length ? Math.min(...ids) : undefined;
+}
+
+function recentHistory(history: TaskHistory, cursor: number): TaskHistory | undefined {
+  const { events } = history;
+  let end = events.length;
+  while (end > 0 && events[end - 1].id > cursor) end--;
+  let start = end, bytes = 0;
+  while (start > Math.max(0, end - THREAD_CACHE_EVENTS)) {
+    // Count serialized string storage and allow room for the event fields.
+    bytes += 256 + 2 * JSON.stringify(events[start - 1].payload).length;
+    if (bytes > THREAD_CACHE_BYTES) break;
+    start--;
+  }
+  if (start === end) return;
+  return { ...history, events: events.slice(start, end), more: history.more || start > 0,
+    firstLive: null, loaded: false, loadingEarlier: false };
+}
+
 /**
- * A task's history: its newest events, and every event from `since` on (a thread opened at an older
- * post). `loaded`: the history has arrived; live events alone may show up before it. `more`: older
- * events exist before the shown ones; `loadEarlier` adds the next page of them.
+ * The newest events of one task and everything from an explicitly opened post onward.
+ * Earlier pages stay available while the task is open. A revisit displays its recent cached page
+ * immediately, and every open/reload still reads the authoritative source.
  */
 export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0) {
-  const [{ events, more }, setHistory] = useState<{ events: HubEvent[]; more: boolean }>({ events: [], more: false });
-  const [loaded, setLoaded] = useState<string | null>(null);
-  const [loadingEarlier, setLoadingEarlier] = useState(false);
-  const earlierRequest = useRef(false);
-  const earlierAbort = useRef<AbortController | null>(null);
-  const shown = useRef<string | null>(null);
-  /** Last event covered by a successful history read, excluding later live-only events. */
-  const fetchedThrough = useRef<number | null>(null);
-  /** Earliest live event seen before the first successful history read. */
-  const firstLive = useRef<number | null>(null);
-  /** Bumped on every (re)load, so an earlier page asked for meanwhile is dropped. */
-  const gen = useRef(0);
+  const active = useRef<TaskHistory | undefined>(undefined);
+  const [history, setHistory] = useState<TaskHistory | undefined>(undefined);
+  const cache = useRef(new Map<string, TaskHistory>());
+  const earlier = useRef<(() => void) | null>(null);
+  const publish = (value: TaskHistory | undefined) => { active.current = value; setHistory(value); };
+
   useEffect(() => {
-    // Another task starts empty; the same task reopened at another post keeps what it shows meanwhile.
-    const sameTask = shown.current === taskId;
-    if (!sameTask) { setHistory({ events: [], more: false }); fetchedThrough.current = null; firstLive.current = null; }
-    shown.current = taskId;
-    setLoaded(null);
-    setLoadingEarlier(false);
-    earlierRequest.current = false;
-    gen.current++;
-    if (!taskId) return;
-    let alive = true;
+    const previous = active.current;
+    if (previous && previous.taskId !== taskId && previous.cursor != null) {
+      const recent = recentHistory(previous, previous.cursor);
+      if (recent) cache.current.set(previous.taskId, recent);
+      while (cache.current.size > THREAD_CACHE_SIZE) cache.current.delete(cache.current.keys().next().value!);
+    }
+    if (!taskId) { publish(undefined); return; }
+    const held = previous?.taskId === taskId ? previous : cache.current.get(taskId);
+    cache.current.delete(taskId);
+    publish({ taskId, events: held?.events ?? EMPTY_TASK_EVENTS, more: held?.more ?? false, cursor: held?.cursor ?? null,
+      firstLive: held?.firstLive ?? null, since, reload, loaded: false, loadingEarlier: false });
+    const floor = () => historyFloor(active.current, since);
     const controller = new AbortController();
-    const key = `${taskId}:${since ?? ''}`;
-    // Reconnects can miss more than the newest page. Live events may jump ahead of the gap,
-    // so only a completed history read can advance this cursor.
-    const sinceFloor = () => {
-      const ids = [since, fetchedThrough.current, firstLive.current].filter((id): id is number => id != null);
-      return ids.length ? Math.min(...ids) : undefined;
-    };
+    let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let retryDelay = 1000;
     const fetchHistory = async () => {
       try {
-        let page = await api.events(taskId, { since: sinceFloor() }, controller.signal);
+        let page = await api.events(taskId, { since: floor() }, controller.signal);
         if (!alive) return;
-        // A live event may arrive while the first request is in flight. If the newest page
-        // starts after it, fetch the entire interval before treating the history as loaded.
-        const gapBeforeLive = () => fetchedThrough.current == null && firstLive.current != null
-          && (!page.events.length || page.events[0].id > firstLive.current);
+        // A live event can arrive while the newest page is in flight. Cover the gap before
+        // advancing the cursor, so a reload never skips events between two reads.
+        const gapBeforeLive = () => {
+          const { cursor, firstLive } = active.current!;
+          return cursor == null && firstLive != null && (!page.events.length || page.events[0].id > firstLive);
+        };
         if (gapBeforeLive()) {
-          page = await api.events(taskId, { since: sinceFloor() }, controller.signal);
+          page = await api.events(taskId, { since: floor() }, controller.signal);
           if (!alive) return;
         }
         if (gapBeforeLive()) throw new Error('Incomplete task history');
-        // Older events kept from before (pages loaded earlier) keep their own `more`.
-        setHistory((prev) => ({
-          events: mergeTaskEvents(prev.events, page.events),
-          more: prev.events.length && page.events.length && prev.events[0].id < page.events[0].id ? prev.more : page.more,
-        }));
-        if (page.events.length) fetchedThrough.current = Math.max(fetchedThrough.current ?? 0, page.events[page.events.length - 1].id);
-        firstLive.current = null;
-        setLoaded(key);
+        const current = active.current!;
+        const latest = page.events.at(-1)?.id;
+        publish({ ...current, events: mergeTaskEvents(current.events, page.events),
+          more: !page.events.length || (current.events.length > 0 && current.events[0].id < page.events[0].id) ? current.more : page.more,
+          cursor: latest == null ? current.cursor : Math.max(current.cursor ?? 0, latest), firstLive: null, loaded: true });
       } catch {
         if (!alive) return;
-        // A transient failure must not strand an open thread until the app restarts.
         retry = setTimeout(fetchHistory, retryDelay);
         retryDelay = Math.min(retryDelay * 2, 10000);
       }
     };
-    fetchHistory();
-    // Live events come cut like the feed's; the thread fetches the cut ones whole, a few at a time.
+    // Live events arrive clipped like the feed's. Gather a few before fetching them whole.
     const cut = new Set<number>();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const fetchWhole = () => {
@@ -601,38 +627,45 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       const ids = [...cut];
       cut.clear();
       api.events(taskId, { ids }, controller.signal).then((page) => {
-        if (alive) setHistory((prev) => ({ ...prev, events: mergeTaskEvents(prev.events, page.events) }));
+        if (!alive) return;
+        const current = active.current!;
+        publish({ ...current, events: mergeTaskEvents(current.events, page.events) });
       }).catch(() => {});
     };
     const off = onEvent((e) => {
       if (e.task_id !== taskId) return;
-      if (fetchedThrough.current == null) firstLive.current = Math.min(firstLive.current ?? e.id, e.id);
-      setHistory((prev) => ({ ...prev, events: mergeTaskEvents(prev.events, [e]) }));
+      const current = active.current!;
+      publish({ ...current, events: mergeTaskEvents(current.events, [e]),
+        firstLive: current.cursor == null ? Math.min(current.firstLive ?? e.id, e.id) : null });
       if (e.payload?.clipped) {
         cut.add(e.id);
         timer ??= setTimeout(fetchWhole, WHOLE_DELAY_MS);
       }
     });
+    void fetchHistory();
+
+    earlier.current = () => {
+      const current = active.current!;
+      const oldest = current.events[0];
+      if (!current.more || !oldest || current.loadingEarlier) return;
+      publish({ ...current, loadingEarlier: true });
+      api.events(taskId, { before: oldest.id }, controller.signal).then(page => {
+        if (!alive) return;
+        const latest = active.current!;
+        publish({ ...latest, events: mergeTaskEvents(latest.events, page.events), more: page.more });
+      }).catch(() => {}).finally(() => {
+        if (alive) publish({ ...active.current!, loadingEarlier: false });
+      });
+    };
     return () => {
-      alive = false; off(); clearTimeout(timer); clearTimeout(retry); gen.current++;
-      controller.abort(); earlierAbort.current?.abort(); earlierAbort.current = null;
+      alive = false; earlier.current = null; off();
+      clearTimeout(timer); clearTimeout(retry);
+      controller.abort();
     };
   }, [taskId, since, onEvent, reload]);
-  const loadEarlier = useCallback(() => {
-    const oldest = events[0];
-    if (!taskId || !more || !oldest || earlierRequest.current) return;
-    const g = gen.current;
-    earlierRequest.current = true;
-    setLoadingEarlier(true);
-    const controller = new AbortController();
-    earlierAbort.current = controller;
-    api.events(taskId, { before: oldest.id }, controller.signal).then((page) => {
-      if (gen.current !== g) return;
-      setHistory((prev) => ({ events: mergeTaskEvents(prev.events, page.events), more: page.more }));
-    }).catch(() => {}).finally(() => {
-      if (earlierAbort.current === controller) earlierAbort.current = null;
-      if (gen.current === g) { earlierRequest.current = false; setLoadingEarlier(false); }
-    });
-  }, [taskId, events, more, loadingEarlier]);
-  return { events, more, loadingEarlier, loadEarlier, loaded: taskId != null && loaded === `${taskId}:${since ?? ''}` };
+
+  const loadEarlier = useCallback(() => earlier.current?.(), []);
+  const shown = taskId == null ? undefined : history?.taskId === taskId ? history : cache.current.get(taskId);
+  return { events: shown?.events ?? EMPTY_TASK_EVENTS, more: shown?.more ?? false, loadingEarlier: shown?.loadingEarlier ?? false,
+    loaded: !!shown?.loaded && shown.since === since && shown.reload === reload, loadEarlier };
 }

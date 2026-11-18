@@ -260,15 +260,16 @@ test('diagram syntax errors and aborts do not retry or leave a live renderer', a
   assert.equal(removed, 2, 'abort releases the iframe');
 });
 
-test('fallback queue bounds cancelled work until it settles, then accepts new work',async()=>{
- for(let round=0;round<2;round++){
-  const pending:Promise<unknown>[]=[];
-  for(let i=0;i<16;i++){
-   const controller=new AbortController();
-   pending.push(assert.rejects(renderMermaid('graph LR\nA-->B',controller.signal),{name:'AbortError'}));
-   controller.abort();
-  }
-  await assert.rejects(renderMermaid('overflow'),/요청이 많/);
-  await Promise.all(pending);
- }
+test('fallback queue keeps its bound and immediately removes cancelled waiters',async()=>{
+ const active=new AbortController();
+ const first=assert.rejects(renderMermaid('active',active.signal),{name:'AbortError'});
+ const waiting=Array.from({length:15},()=>new AbortController());
+ const queued=waiting.map(controller=>assert.rejects(renderMermaid('queued',controller.signal),{name:'AbortError'}));
+ const overflow=assert.rejects(renderMermaid('overflow'),/요청이 많/);
+ for(const controller of waiting)controller.abort();
+ const replacement=new AbortController();
+ const next=assert.rejects(renderMermaid('replacement',replacement.signal),{name:'AbortError'});
+ replacement.abort();
+ active.abort();
+ await Promise.all([first,...queued,overflow,next]);
 });

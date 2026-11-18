@@ -1,5 +1,5 @@
 import { workspaceKey } from './workspace.ts';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HubEvent } from './types.ts';
 
 export const REFERENCES_KEY = workspaceKey('agent-desk.threadReferences');
@@ -67,6 +67,7 @@ export function referenceEvents(task: string, ids: number[], events: HubEvent[])
 
 export function useThreadReferences(taskId: string | null, gone: Set<string>) {
   const [fileFocus, setFileFocus] = useState<{taskId:string;href:string;revision:number}>();
+  const fileRevision = useRef(0);
   const [state, setState] = useState<ThreadReferences>(() => {
     try { return readReferences(localStorage.getItem(REFERENCES_KEY)); } catch { return {}; }
   });
@@ -84,10 +85,12 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
     ...selected,
     fileFocus: fileFocus?.taskId === taskId ? fileFocus : undefined,
     // Called before opening a different thread. A subsequent addFile in the same event wins.
-    enter: (task: string) => setState(s => Object.hasOwn(s, task) && s[task].open
-      ? { ...s, [task]: { ...s[task], open: false } } : s),
+    enter: (task: string) => {
+      setFileFocus(undefined);
+      setState(s => Object.hasOwn(s, task) && s[task].open ? { ...s, [task]: { ...s[task], open: false } } : s);
+    },
     addFile: (task:string,href:string) => {
-      setFileFocus(previous=>({taskId:task,href,revision:(previous?.revision??0)+1}));
+      setFileFocus({taskId:task,href,revision:++fileRevision.current});
       setState(s => openReferenceFile(s, task, href));
     },
     removeFile,

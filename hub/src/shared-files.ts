@@ -104,20 +104,21 @@ export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, 
 /** Private, bounded temporary copies. No shell interpolation and no persistent project artifacts. */
 export class TemporaryFiles {
   private entries: { dir: string; path: string; size: number; at: number }[] = [];
-  private active = false;
+  private reserved = { bytes: 0, files: 0 };
   private stopped = false;
-  private current?: Promise<LinkTarget>;
+  private current = new Set<Promise<LinkTarget>>();
   private expiring: Promise<void> = Promise.resolve();
+  private allocating: Promise<void> = Promise.resolve();
   private readonly baseDir: string;
   private readonly options: { managed?: boolean; maxBytes?: number; maxFiles?: number };
-  private timer = setInterval(() => { if (!this.active) void this.expire().catch(() => {}); }, 60_000);
+  private timer = setInterval(() => { if (!this.current.size) void this.expire().catch(() => {}); }, 60_000);
   constructor(baseDir = tmpdir(), options: { managed?: boolean; maxBytes?: number; maxFiles?: number } = {}) {
     this.baseDir = baseDir; this.options = options; this.timer.unref();
   }
   private get prefix() { return this.options.managed ? 'agent-desk-preview-' : 'agent-desk-file-'; }
   canReceive(size: number) {
-    return this.entries.length < (this.options.maxFiles ?? 100)
-      && this.entries.reduce((sum, e) => sum + e.size, size) <= (this.options.maxBytes ?? CACHE_LIMIT);
+    return this.entries.length + this.reserved.files < (this.options.maxFiles ?? 100)
+      && this.entries.reduce((sum, e) => sum + e.size, size + this.reserved.bytes) <= (this.options.maxBytes ?? CACHE_LIMIT);
   }
   private expire(all = false) {
     const run = this.expiring.then(async () => {
@@ -156,18 +157,17 @@ export class TemporaryFiles {
     this.expiring = run.catch(() => {});
     return run;
   }
-  async receive(response: Response): Promise<LinkTarget> {
-    if (this.active) throw new HttpError(429, '다른 파일을 가져오는 중입니다. 잠시 뒤 다시 눌러 주세요');
-    const pending = this.receiveNow(response);
-    this.current = pending;
+  async receive(response: Response, makeRoom?: (size: number) => Promise<void>): Promise<LinkTarget> {
+    if (this.current.size && !this.options.managed) throw new HttpError(429, '다른 파일을 가져오는 중입니다. 잠시 뒤 다시 눌러 주세요');
+    const pending = this.receiveNow(response, makeRoom);
+    this.current.add(pending);
     try { return await pending; }
-    finally { if (this.current === pending) this.current = undefined; }
+    finally { this.current.delete(pending); }
   }
-  private async receiveNow(response: Response): Promise<LinkTarget> {
+  private async receiveNow(response: Response, makeRoom?: (size: number) => Promise<void>): Promise<LinkTarget> {
     if (this.stopped) throw new HttpError(503, '허브가 종료 중입니다');
-    if (this.active) throw new HttpError(429, '다른 파일을 가져오는 중입니다. 잠시 뒤 다시 눌러 주세요');
-    this.active = true;
     let dir: string | undefined;
+    let reservedSize: number | undefined;
     try {
       await this.expire();
       let name: string;
@@ -176,8 +176,15 @@ export class TemporaryFiles {
       if (!name || name === '.' || name === '..' || /[/\\\x00-\x1f\x7f]/.test(name) || name.length > 240) throw new HttpError(502, '러너가 잘못된 파일 이름을 보냈습니다');
       const raw = response.headers.get('content-length'), size = Number(raw);
       if (raw === null || !Number.isSafeInteger(size) || size < 0 || size > SHARED_FILE_LIMIT) throw new HttpError(413, '파일은 50 MB까지 가져올 수 있습니다');
-      if (!this.canReceive(size)) throw new HttpError(413, '임시 파일 보관 한도에 도달했습니다');
       if (!response.body) throw new HttpError(502, '파일 본문이 없습니다');
+      // Serialize eviction and reservation together. The slow transfer happens outside this queue.
+      const allocate = this.allocating.then(async () => {
+        await makeRoom?.(size);
+        if (!this.canReceive(size)) throw new HttpError(413, '임시 파일 보관 한도에 도달했습니다');
+        this.reserved.files++; this.reserved.bytes += size; reservedSize = size;
+      });
+      this.allocating = allocate.catch(() => {});
+      await allocate;
       dir = await mkdtemp(join(this.baseDir, this.prefix));
       const path = join(dir, name), file = await open(path, 'wx', 0o600);
       let received = 0;
@@ -195,7 +202,9 @@ export class TemporaryFiles {
       return target;
     } finally {
       try { if (dir) await rm(dir, { recursive: true, force: true }); }
-      finally { this.active = false; }
+      finally {
+        if (reservedSize !== undefined) { this.reserved.files--; this.reserved.bytes -= reservedSize; }
+      }
     }
   }
   async discard(path: string) {
@@ -208,5 +217,5 @@ export class TemporaryFiles {
     this.expiring = run.catch(() => {});
     await run;
   }
-  async close() { this.stopped = true; clearInterval(this.timer); await this.current?.catch(() => {}); await this.expire(true); }
+  async close() { this.stopped = true; clearInterval(this.timer); await Promise.allSettled(this.current); await this.expire(true); }
 }

@@ -117,6 +117,71 @@ test('waiting prepares cannot be evicted while a previous transfer is delayed',a
  }finally{release();await cache.close();}
 });
 
+test('a slow preview blocks only its own runner while another runner completes', async () => {
+ const held = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+ const reads: string[] = [];
+ const cache = new DocumentPreviews(async (source, _task, href, _base, receive) => {
+  reads.push(`${source}/${href}`);
+  if (href === 'slow.md') { entered.resolve(); await held.promise; }
+  return receive(new Response('ok', { headers: {'content-length':'2','x-desk-filename':'doc.md'} }));
+ });
+ let slow: ReturnType<typeof cache.prepare> | undefined;
+ let sameRunner: ReturnType<typeof cache.prepare> | undefined;
+ let otherRunner: ReturnType<typeof cache.prepare> | undefined;
+ let timer: ReturnType<typeof setTimeout> | undefined;
+ try {
+  slow = cache.prepare('runner-a','task','slow.md',false,()=>true);
+  await entered.promise;
+  sameRunner = cache.prepare('runner-a','task','next.md',false,()=>true);
+  otherRunner = cache.prepare('runner-b','task','fast.md',false,()=>true);
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('다른 러너의 문서가 느린 요청 뒤에서 대기했습니다')), 1000); });
+  assert.equal((await Promise.race([otherRunner, deadline])).text, 'ok');
+  assert.deepEqual(reads, ['runner-a/slow.md','runner-b/fast.md']);
+ } finally {
+  clearTimeout(timer); held.resolve();
+  await Promise.allSettled([slow,sameRunner,otherRunner]);
+  await cache.close();
+ }
+ assert.deepEqual(reads, ['runner-a/slow.md','runner-b/fast.md','runner-a/next.md']);
+});
+
+test('in-flight transfers reserve shared preview disk quota and release it after failure', async () => {
+ const reading = Promise.withResolvers<void>();
+ const held = Promise.withResolvers<void>();
+ const cache = new DocumentPreviews(async (_source, _task, href, _base, receive) => {
+  const headers = {'content-length':'2','x-desk-filename':'doc.md'};
+  if (href !== 'slow.md') return receive(new Response('ok', { headers }));
+  const body = new ReadableStream({ async pull(controller) {
+   reading.resolve(); await held.promise;
+   controller.error(new Error('transfer interrupted'));
+  } }, { highWaterMark: 0 });
+  return receive(new Response(body, { headers }));
+ }, {maxFiles:2,maxBytes:2});
+ const slow = cache.prepare('runner-a','task','slow.md',false,()=>true);
+ const failed = assert.rejects(slow,/transfer interrupted/);
+ try {
+  await reading.promise;
+  await assert.rejects(cache.prepare('runner-b','task','fast.md',false,()=>true),/보관 한도/);
+  held.resolve(); await failed;
+  const preview = await cache.prepare('runner-b','task','fast.md',false,()=>true);
+  assert.equal(preview.text, 'ok');
+ } finally {
+  held.resolve(); await failed; await cache.close();
+ }
+});
+
+test('concurrent previews reclaim evictable space before reserving shared quota', async () => {
+ const cache = new DocumentPreviews(async (_source, _task, _href, _base, receive) =>
+  receive(new Response('ok', {headers:{'content-length':'2','x-desk-filename':'doc.md'}})), {maxFiles:2,maxBytes:4});
+ const open = (source: string, href: string) => cache.prepare(source,'task',href,false,()=>true);
+ try {
+  const old = await open('runner-a','old.md');
+  await cache.release(old.url.split('/')[2]);
+  const fresh = await Promise.all([open('runner-a','next.md'),open('runner-b','other.md')]);
+  assert.deepEqual(fresh.map(doc=>doc.text), ['ok','ok']);
+ } finally { await cache.close(); }
+});
+
 
 test('a failed cache deletion is retried instead of permanently losing its quota',async t=>{
  const original=TemporaryFiles.prototype.discard;let fail=true;

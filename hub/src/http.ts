@@ -313,14 +313,19 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       }
       if (parts[0] !== 'api') return await serveStatic(url.pathname, res);
       if(req.method==='POST'&&url.pathname==='/api/diagram') {
-        const body=await readJson(req);
-        if(typeof body.source!=='string')throw new HttpError(400,'도표 원문이 필요합니다');
         const controller=new AbortController();const abort=()=>controller.abort();res.once('close',abort);
         try {
+          const body=await readJson(req);
+          if(typeof body.source!=='string')throw new HttpError(400,'도표 원문이 필요합니다');
+          if(res.destroyed)return;
           const result=await diagrams.render(body.source,await diagramBrowser.version(),controller.signal);
           if(!res.destroyed){res.setHeader('cache-control','no-store');return send(res,200,result);}
           return;
+        }catch(error){
+          // An offscreen or closed card cancels its request. There is no client left to answer.
+          if(!res.destroyed&&!controller.signal.aborted)throw error;
         }finally{res.off('close',abort);}
+        return;
       }
       if((req.method==='DELETE'||req.method==='PUT')&&url.pathname==='/api/preview') {
         const b=await readJson(req);

@@ -53,6 +53,32 @@ const RENDERER_IDLE_MS = 5000;
 const RENDERER_TIMEOUT_MS = 30_000;
 export class DiagramBusyError extends Error {}
 class RendererInfrastructureError extends Error {}
+
+/** A queued request releases its place immediately when its diagram leaves the viewport. */
+export function createDiagramQueue(concurrency: number, capacity: number) {
+  const waiting = new Set<() => void>();
+  let active = 0;
+  return async function<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    if (active + waiting.size >= capacity) throw new DiagramBusyError('도표 요청이 많습니다. 잠시 뒤 다시 시도해 주세요.');
+    await new Promise<void>((resolve, reject) => {
+      if (active < concurrency) { active++; resolve(); return; }
+      const start = () => { waiting.delete(start); signal?.removeEventListener('abort', abort); resolve(); };
+      const abort = () => { waiting.delete(start); reject(signal?.reason); };
+      waiting.add(start);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    try {
+      signal?.throwIfAborted();
+      return await run();
+    } finally {
+      const next = waiting.values().next().value;
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
 interface Renderer {
   frame: HTMLIFrameElement;
   port: MessagePort;
@@ -62,8 +88,7 @@ interface Renderer {
   idle?: ReturnType<typeof setTimeout>;
 }
 let renderer: Renderer | undefined;
-let rendering: Promise<void> = Promise.resolve();
-let queuedRenders = 0;
+const renderInQueue = createDiagramQueue(1, 16);
 let requestId = 0;
 
 function getRenderer(): Renderer {
@@ -115,10 +140,7 @@ function getRenderer(): Renderer {
 /** Serialized config/render work; cancelled frames and idle library state are fully released. */
 export async function renderMermaid(source: string, signal?: AbortSignal): Promise<DiagramResult> {
   if (source.length > MAX_DIAGRAM_TEXT) throw new Error('도표가 너무 커서 원문으로 표시합니다.');
-  signal?.throwIfAborted();
-  if (queuedRenders >= 16) throw new DiagramBusyError('도표 요청이 많습니다. 잠시 뒤 다시 시도해 주세요.');
-  queuedRenders++;
-  const render = async () => {
+  return renderInQueue(async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted();
       const state = getRenderer();
@@ -145,9 +167,5 @@ export async function renderMermaid(source: string, signal?: AbortSignal): Promi
       }
     }
     throw new Error('도표를 그리지 못했습니다.');
-  };
-  const result = rendering.then(render).finally(() => { queuedRenders--; });
-  // Queue completion must not retain the last image as a fulfilled Promise's value.
-  rendering = result.then(() => {}, () => {});
-  return result;
+  }, signal);
 }
