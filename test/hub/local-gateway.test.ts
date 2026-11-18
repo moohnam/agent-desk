@@ -133,7 +133,7 @@ test('local gateway forwards compose and retains one offline message across its 
     authority.hub.store.createProject({id:'legacy-remote-project', name:'legacy-remote', root_path:`ws20:${project}`, created_at:localTask.created_at});
     const legacyTask = authority.hub.store.createTask({...localTask, id:'legacy-remote-task', project_id:'legacy-remote-project'});
     const localSession = authority.hub.store.latestSession(taskId)!;
-    authority.hub.store.createSession({...localSession, id:'legacy-remote-session', task_id:legacyTask.id, cwd:`ws20:${project}`, status:'parked'});
+    authority.hub.store.createSession({...localSession, id:'legacy-remote-session', task_id:legacyTask.id, cwd:`ws20:${project}`, status:'idle'});
     const remoteFile = new URLSearchParams({task_id:legacyTask.id,href:'report.html'});
     assert.equal((await api('/file-path?' + remoteFile)).status,409);
     assert.notEqual((await api('/file-reveal','POST',Object.fromEntries(remoteFile))).status,200);
