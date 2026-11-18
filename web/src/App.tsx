@@ -3,7 +3,7 @@ import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
-import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Cpu, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
+import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -22,7 +22,6 @@ import { ChannelColumn } from './ChannelColumn.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
 import { SkillsDialog } from './Skills.tsx';
-import { SessionsDialog, openSessions } from './Sessions.tsx';
 import { stalledMinutes, taskRunning } from './format.ts';
 import { HandoffPanel, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
 import { pruneDrafts, useDraftTasks } from './drafts.ts';
@@ -129,7 +128,6 @@ export function App() {
   const [finder, setFinder] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [runnersOpen, setRunnersOpen] = useState(false);
@@ -160,7 +158,6 @@ export function App() {
     return () => clearInterval(t);
   }, []);
   const drafts = useDraftTasks();
-  const liveCount = useMemo(() => openSessions(hub.tasks.values()).length, [hub.tasks]);
   // Recomputed on every tick, since a task stalls without any new message.
   const stalled = useMemo(() => {
     const now = Date.now();
@@ -1358,8 +1355,6 @@ export function App() {
           <button className="btn primary" title="새 작업 (i)" aria-label="새 작업" onClick={() => (drawer ? setDrawer(false) : openDrawer())}>
             <SquarePen />
           </button>
-          <button className="btn sessions-btn" title="열린 세션: 데스크가 띄운 엔진 프로세스 목록과 닫기" aria-label={`열린 세션 ${liveCount}개`}
-            onClick={() => setSessionsOpen(true)}><Cpu /><span>{liveCount}</span></button>
           <button className="btn" aria-pressed={notifyState === 'on'} aria-label="알림"
             title={notifyState === 'on' ? '알림 켜짐: 데스크를 보고 있지 않을 때 승인 요청·질문·작업 끝남·오류를 OS 알림으로 (누르면 끄기)'
               : notifyState === 'blocked' ? '알림이 차단되어 있습니다. 브라우저나 시스템 설정에서 이 사이트의 알림을 허용하세요'
@@ -1482,10 +1477,10 @@ export function App() {
           }} />
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
-        channels={[...hub.channels.values()]} onOpenChannel={openChannel} onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} />}
+        channels={[...hub.channels.values()]} onOpenChannel={openChannel} tasks={hub.tasks} onOpenSession={openThread}
+        onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
-      {sessionsOpen && <SessionsDialog tasks={hub.tasks} onOpen={(id) => openThread(id)} onClose={() => setSessionsOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
       {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
       {workspaceOpen && <WorkspaceDialog value={locationFilter} onChange={changeLocation} onClose={() => setWorkspaceOpen(false)} />}

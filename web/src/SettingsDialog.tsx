@@ -5,10 +5,11 @@ import { ModelDialog } from './ModelDialog.tsx';
 import { InstructionsDialog } from './InstructionsDialog.tsx';
 import { ChannelsDialog } from './Channels.tsx';
 import { RunnersDialog } from './Runners.tsx';
+import { SessionsPanel } from './Sessions.tsx';
 import { ConnectorsPanel } from './Connectors.tsx';
 import { WorkspaceDeliveries } from './Workspaces.tsx';
 import { SettingsPanelContext, type PanelGuard } from './settingsPanel.tsx';
-import type { Channel } from './types.ts';
+import type { Channel, TaskView } from './types.ts';
 import { Updates } from './Updates.tsx';
 import type { UpdatesState } from './useUpdates.ts';
 import './settings-dialog.css';
@@ -38,8 +39,9 @@ function SettingSection({title, description, visible, register, children, preloa
 }
 
 /** Editors stay mounted after first expansion so folding or changing sections preserves drafts. */
-export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChanged, manageChannels=true, updates }: {
+export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks, onOpenSession, onChanged, manageChannels=true, updates }: {
   local:boolean; onClose:()=>void; channels:Channel[]; onOpenChannel:(channel:Channel)=>void;
+  tasks:ReadonlyMap<string,TaskView>; onOpenSession:(taskId:string)=>void;
   onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState;
 }) {
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
@@ -69,6 +71,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, onChan
           {manageChannels&&panel('connections','RSS·Atom / 봇 알림','구독·수신 채널 관리',<ChannelsDialog channels={channels} onClose={close} onChanged={onChanged} onOpen={channel=>{if(canClose())onOpenChannel(channel);}}/>)}
         </section>
         <section className="settings-content" hidden={section!=='runners'} aria-label="러너">
+          {panel('runners','열린 세션','현재 실행 중인 엔진과 터미널 세션',<SessionsPanel tasks={tasks} onOpen={id=>{if(canClose()){onOpenSession(id);onClose();}}}/>)}
           {local?panel('runners','러너 연결 관리','원격 머신 등록과 공유 러너 연결',<RunnersDialog onClose={close}/>):<p className="muted small">러너 등록과 연결 관리는 허브가 실행 중인 기기에서 할 수 있습니다.</p>}
           {panel('runners','공유 러너 전달 내역','연결 대기 또는 처리에 실패한 요청',<WorkspaceDeliveries/>)}
         </section>

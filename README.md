@@ -183,7 +183,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 | `AGENT_DESK_UPLOADS` | `data/uploads` | 첨부 파일 저장 위치 |
 | `AGENT_DESK_SKILLS_HOME` | `data/desk-plugin` | 데스크 스킬(로컬 Claude Code 플러그인 `desk`) |
 | `RUNNER_PORT` | `4318` | 러너 포트 |
-| `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 resume. 상단바의 열린 세션 목록에서 바로 닫을 수도 있음 |
+| `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 대화를 재개합니다. 설정 → 러너 → 열린 세션에서도 닫을 수 있습니다. |
 | `RUNNER_LOG` / `RUNNER_PID_FILE` | `data/runner.log` / `data/runner.pid` | 러너 로그와 PID 파일 |
 | `RUNNER_TOKEN_FILE` | `data/runner-token` | 허브가 러너에 붙을 때 보이는 토큰 |
 | `CODEX_BIN` / `AGY_BIN` | `codex` / `agy` | Codex, Antigravity 실행 파일 |
@@ -459,7 +459,7 @@ node hub/src/update-cli.ts start /srv/desk/update.json
 | `gg` / `G` / `gr` | 맨 위 / 맨 아래 / 전체 컬럼의 가장 최근 글 |
 | `gh` / `gl` | 맨 왼쪽 / 맨 오른쪽 컬럼으로 |
 | `Enter` / `q` | 스레드 열기 / 닫기 |
-| `Esc` | 열린 창(설정·열린 세션 등) 닫기, 작성 서랍에서는 서랍 닫기 (쓰던 내용은 유지) |
+| `Esc` | 열린 창 닫기, 작성 서랍에서는 서랍 닫기 (쓰던 내용은 유지) |
 | `f` | 스레드를 화면 오른쪽 절반 / 덱의 컬럼으로 보기 (절반일 때는 덱이 왼쪽에서 따로 스크롤되고, 경계선을 끌어 30–70%로 조절, 더블클릭은 절반. 화면이 작으면 스레드를 560px 이상으로 넓히고, 덱이 420px보다 좁아지면 스레드가 작업 공간 전체를 덮습니다. 덮을 때는 포커스가 덱으로 가면 스레드가 비켜나고 `t`로 다시 나옵니다) |
 | `t` | 스레드로 가기 / 이전 컬럼으로 돌아가기 (절반일 때 `h`/`l`은 스레드를 건너뛰고, 스레드에서 누르면 이전 컬럼으로) |
 | `r` / `i` | 답글 쓰기 (글 미선택 시 컬럼의 작업 또는 최신 글 기준) / 새 작업 |
