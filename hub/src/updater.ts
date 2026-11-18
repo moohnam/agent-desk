@@ -302,7 +302,10 @@ export class UpdateWorker {
       await this.command('git', ['--git-dir', mirror, 'fetch', '--prune', 'origin'], root);
     }
     assertTrustedTree(mirror);
-    const resolved = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', this.config.ref + '^{commit}'], { maxBuffer: 4096 });
+    // A mirror's symbolic HEAD can outlive changes to the source's default branch.
+    const ref = this.config.ref;
+    if (ref === 'HEAD') await this.command('git', ['--git-dir', mirror, 'fetch', 'origin', 'HEAD'], root);
+    const resolved = await exec('git', ['--git-dir', mirror, 'rev-parse', '--verify', (ref === 'HEAD' ? 'FETCH_HEAD' : ref) + '^{commit}'], { maxBuffer: 4096 });
     const commit = resolved.stdout.trim();
     if (!sha(commit)) throw new Error('Git 커밋을 고정하지 못했습니다');
     this.deploymentPaths(commit);

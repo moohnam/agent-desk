@@ -104,7 +104,7 @@ test('a poll started before approval cannot overwrite its result; accepted trans
 test('an unconfirmed approval times out, releases the settings guard and only reloads status', async () => {
   const x = harness(); x.render(); x.requests[0].resolve(status()); await settle(); x.hang();
   const pending = x.render().approve(b, 'immediate'); assert.equal(x.render().busy, true);
-  x.run(15_000); await pending;
+  x.run(30_000); await pending;
   assert.equal(x.render().busy, false); assert.match(x.render().error, /반영되었을 수/);
   x.run(0); x.requests[1].resolve(status({approval: {commit: b, mode: 'immediate'}})); await settle();
   assert.equal(x.render().view.approval.commit, b);
@@ -147,7 +147,8 @@ test('only explicit controls approve/cancel a specific prepared SHA; discovered 
   state.view = status({latest: c}); tree = ui.Updates({state, local: true});
   assert.match(text(tree), /발견한 버전과 준비된 버전이 다릅니다/);
   assert.ok(button(tree, '새 버전 준비'));
-  button(tree, '지금 적용').props.onClick(); assert.deepEqual(calls.at(-1), [b, 'immediate']);
+  assert.equal(button(tree, '지금 적용').props.disabled, true);
+  assert.equal(button(tree, '작업 종료 후 적용').props.disabled, true);
   state.view = status(); tree = ui.Updates({state, local: false}); assert.equal(button(tree, '지금 적용').props.disabled, true);
 });
 

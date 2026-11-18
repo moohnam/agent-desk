@@ -69,7 +69,8 @@ export function useUpdates() {
     }
     const controller = new AbortController(); action.current = controller;
     let timedOut = false;
-    const timeout = setTimeout(() => {timedOut = true; controller.abort();}, 15_000);
+    // Approval includes a fresh Git lookup in addition to checking managed runtime status.
+    const timeout = setTimeout(() => {timedOut = true; controller.abort();}, kind === 'approve' ? 30_000 : 15_000);
     ++revision.current; request.current?.abort();
     setBusy(true); setError('');
     try {

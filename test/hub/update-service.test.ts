@@ -37,7 +37,7 @@ function fixture() {
   const options = { configPath, current: old, worker: () => worker, runCheck: async () => { checks++; },
     launchApproval: async () => { launches++; }, discover: async () => { discoveries++; return next; } };
   const service = new UpdateService(options);
-  return { dir, config, configPath, state, worker, service, options, setManaged: (value: boolean) => { managed = value; },
+  return { dir, config, configPath, state, worker, runtime, service, options, setManaged: (value: boolean) => { managed = value; },
     counts: () => ({ checks, launches, observations, discoveries }), close: () => { service.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -112,6 +112,44 @@ test('unmanaged and stale approvals are refused, exact approvals persist before 
   } finally { f.close(); }
 });
 
+test('approval checks Git again and refuses an older candidate without substituting a different commit', async () => {
+  const f = fixture(), newer = 'c'.repeat(40);
+  let remote = next, lookups = 0;
+  const service = new UpdateService({ ...f.options, discover: async () => { lookups++; return remote; },
+    runCheck: async () => { f.state.candidate = remote; } });
+  try {
+    await service.view(); await tick();
+    assert.equal((await service.view()).latest, next);
+    remote = newer;
+    await assert.rejects(service.approve(next, 'immediate'), /최신 후보를 준비/);
+    assert.equal(lookups, 2);
+    assert.equal(f.state.approval, undefined); assert.equal(f.counts().launches, 0);
+    const stale = await service.view();
+    assert.equal(stale.latest, newer); assert.equal(stale.available, next); assert.equal(stale.canApply, false);
+    await assert.rejects(service.approve(next, 'when-idle'), /새 버전 준비/);
+
+    remote = 'd'.repeat(40);
+    await service.check(); await tick(); await service.view(); await tick();
+    const ready = await service.view();
+    assert.equal(ready.latest, remote); assert.equal(ready.available, remote); assert.equal(ready.canApply, true);
+    assert.deepEqual((await service.approve(remote, 'when-idle')).approval, { commit: remote, mode: 'when-idle' });
+    assert.equal(f.counts().launches, 1);
+  } finally { service.close(); f.close(); }
+});
+
+test('a failed fresh lookup does not authorize a cached commit', async () => {
+  const f = fixture();
+  let unreachable = false;
+  const service = new UpdateService({ ...f.options, discover: async () => unreachable ? null : next });
+  try {
+    await service.view(); await tick();
+    assert.equal((await service.view()).latest, next);
+    unreachable = true;
+    await assert.rejects(service.approve(next, 'immediate'), /최신 버전을 확인하지 못했습니다/);
+    assert.equal(f.state.approval, undefined); assert.equal(f.counts().launches, 0);
+  } finally { service.close(); f.close(); }
+});
+
 test('launch failure revokes only the approval token created by that request', async () => {
   const f = fixture();
   const service = new UpdateService({ ...f.options, launchApproval: async () => { throw Error('/secret executable'); } });
@@ -135,11 +173,16 @@ test('local Git discovery and summary distinguish new remote SHA from prepared c
     writeFileSync(join(source, 'shared/api.ts'), 'new'); git('-C', source, 'add', '.'); git('-C', source, 'commit', '-m', 'shared change'); const second = git('-C', source, 'rev-parse', 'HEAD');
     mkdirSync(f.config.deploymentDir); git('clone', '--mirror', source, join(f.config.deploymentDir, 'repository.git'));
     writePrivateJson(f.configPath, { ...f.config, source }); f.state.candidate = second;
+    f.runtime.commit = first;
     const service = new UpdateService({ ...f.options, current: first, discover: undefined });
     let view = await service.view();
     for (let attempt = 0; !view.latest && attempt < 100; attempt++) { await new Promise(resolve => setTimeout(resolve, 10)); view = await service.view(); }
     assert.equal(view.latest, second); assert.equal(view.available, second);
     assert.deepEqual(view.summary, { commits: [{ sha: second, subject: 'shared change' }], files: 1, hub: true, runner: true });
+    git('-C', source, 'commit', '--allow-empty', '-m', 'advanced while the page was open');
+    await assert.rejects(service.approve(second, 'immediate'), /최신 후보를 준비/);
+    assert.equal((await service.view()).latest, git('-C', source, 'rev-parse', 'HEAD'));
+    assert.equal(f.state.approval, undefined);
     service.close();
   } finally { f.close(); }
 });

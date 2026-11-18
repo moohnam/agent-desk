@@ -77,23 +77,30 @@ export class UpdateService {
     }));
   }
 
-  private discover(config: UpdateConfig) {
+  private discover(config: UpdateConfig, fresh = false) {
     const key = JSON.stringify([config.source, config.ref]);
-    if (this.discovery?.key === key && (this.discovery.pending || this.discovery.until > Date.now())) return this.discovery;
-    if (this.closed) return this.discovery;
+    if (this.closed) return undefined;
+    if (!fresh && this.discovery?.key === key && (this.discovery.pending || this.discovery.until > Date.now())) return this.discovery;
+    this.discoveryChild?.kill();
+    this.discoveryChild = undefined;
     const entry = { key, until: Date.now() + 300_000, latest: null, error: null } as NonNullable<UpdateService['discovery']>;
     this.discovery = entry;
     const ref = config.ref;
-    // A pinned SHA cannot announce a moving version; custom rev expressions use explicit prepare.
+    // A fixed SHA is the complete update target. Moving refs must be resolved against the source.
     if (/^[a-f0-9]{40}$/.test(ref)) { entry.latest = ref; return entry; }
-    const names = ref.startsWith('refs/heads/') || ref.startsWith('refs/tags/') ? [ref]
+    const names = ref === 'HEAD' || ref.startsWith('refs/heads/') || ref.startsWith('refs/tags/') ? [ref]
       : !ref.startsWith('refs/') && !ref.startsWith('origin/') ? [`refs/heads/${ref}`, `refs/tags/${ref}`] : [];
-    if (!names.length || names.some(name => !/^refs\/(heads|tags)\/[A-Za-z0-9_./-]+$/.test(name))) {
-      entry.error = '이 Git ref는 자동 발견을 지원하지 않습니다. 새 버전 확인으로 후보를 준비하세요.';
+    if (!names.length || names.some(name => name !== 'HEAD' && !/^refs\/(heads|tags)\/[A-Za-z0-9_./-]+$/.test(name))) {
+      entry.error = '이 Git ref의 최신 버전을 조회할 수 없습니다. 업데이트 설정의 브랜치·태그·커밋을 확인하세요.';
       return entry;
     }
     entry.pending = (async () => {
-      if (this.discoverOverride) { entry.latest = await this.discoverOverride(config); return; }
+      if (this.discoverOverride) {
+        const latest = await this.discoverOverride(config);
+        if (!sha(latest)) throw new Error('remote ref unavailable');
+        entry.latest = latest;
+        return;
+      }
       const operation = exec('git', ['ls-remote', '--', config.source, ...names, ...names.filter(name => name.startsWith('refs/tags/')).map(name => `${name}^{}`)],
         { timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
       this.discoveryChild = operation.child;
@@ -105,7 +112,7 @@ export class UpdateService {
       if (commits.size !== 1) throw new Error('remote ref missing or ambiguous');
       entry.latest = [...commits][0];
     })().catch(() => { entry.error = '새 버전을 자동으로 찾지 못했습니다. 새 버전 확인으로 다시 시도하세요.'; })
-      .finally(() => { entry.pending = undefined; this.discoveryChild = undefined; });
+      .finally(() => { entry.pending = undefined; if (this.discovery === entry) this.discoveryChild = undefined; });
     return entry;
   }
 
@@ -190,6 +197,7 @@ export class UpdateService {
         : this.approving || result.approval ? '승인한 버전을 처리 중입니다.'
         : state.phase === 'switching' ? '승인한 버전으로 교체 중입니다.'
         : !result.available ? '새 버전 확인을 눌러 후보를 준비하세요.'
+        : result.latest && result.available !== result.latest ? '준비된 후보가 새 버전과 다릅니다. 새 버전 준비를 눌러 주세요.'
         : config.roles.includes('hub') && result.available === this.current ? '현재 버전과 같습니다.' : null;
       result.canApply = result.reason === null;
       if (result.available) result.summary = await this.summary(config, result.available);
@@ -206,7 +214,10 @@ export class UpdateService {
       if (view.approval || this.approving || view.phase === 'switching') throw new HttpError(409, '승인한 버전의 처리가 끝난 뒤 다시 확인하세요.');
       this.failure = null;
       this.checking = Promise.resolve().then(() => this.runCheck(this.configPath)).catch(() => { this.failure = '새 버전을 준비하지 못했습니다. 이 머신의 워커 상태를 확인하세요.'; })
-        .finally(() => { this.checking = undefined; this.summaryCache = undefined; });
+        .finally(() => {
+          this.checking = undefined; this.summaryCache = undefined;
+          if (this.discovery) this.discovery.until = 0;
+        });
     } finally { this.checkStarting = false; }
     return this.view();
   }
@@ -216,15 +227,24 @@ export class UpdateService {
     const view = await this.view();
     if (!view.canApply || view.available !== commit) throw new HttpError(409, view.available !== commit ? '확인한 새 버전이 바뀌었습니다. 다시 확인하세요.' : view.reason!);
     if (this.approving) throw new HttpError(409, '승인한 버전을 처리 중입니다.');
+    if (this.checking || this.checkStarting) throw new HttpError(409, '새 버전을 확인하고 검증하는 중입니다.');
     this.approving = true; this.failure = null;
     let approval: UpdateApproval | undefined;
     let worker: WorkerView | undefined;
     try {
-      worker = this.configuration()?.worker;
-      if (!worker) throw new Error('configuration changed');
+      const configured = this.configuration();
+      if (!configured) throw new Error('configuration changed');
+      const latest = this.discover(configured.config, true);
+      await latest?.pending;
+      if (this.closed || !latest?.latest) throw new HttpError(409, 'Git에서 최신 버전을 확인하지 못했습니다. 연결과 업데이트 설정을 확인한 뒤 다시 시도하세요.');
+      if (latest.latest !== commit) throw new HttpError(409, 'Git에 새 버전이 있습니다. 최신 후보를 준비한 뒤 다시 승인하세요.');
+      const current = this.configuration();
+      if (!current || JSON.stringify(current.config) !== JSON.stringify(configured.config)) throw new Error('configuration changed');
+      worker = current.worker;
       approval = worker.approve(commit, mode);
       await this.launchApproval(this.configPath, approval.token);
-    } catch {
+    } catch (error) {
+      if (!approval && error instanceof HttpError) throw error;
       // Revoke only this request's token if the detached worker could not launch.
       try { if (approval) worker?.cancelApproval(commit, approval.token); } catch { /* Switching has already consumed this approval. */ }
       this.failure = approval ? '승인 워커를 시작하지 못했습니다.' : '후보가 바뀌었거나 검증되지 않아 승인하지 못했습니다. 다시 확인하세요.';

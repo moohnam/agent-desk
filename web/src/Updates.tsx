@@ -21,9 +21,9 @@ export function Updates({state, local}: {state: UpdatesState; local: boolean}) {
   useSettingsPanel(false, busy);
   const applying = view?.phase === 'switching';
   const disabled = busy || applying;
-  const canApprove = !!view?.available && view.canApply && !view.approval && local && !disabled && !view.checking && !state.unavailable;
   const version = view?.latest ?? view?.available;
   const versionsDiffer = !!view?.latest && !!view.available && view.latest !== view.available;
+  const canApprove = !!view?.available && view.canApply && !versionsDiffer && !view.approval && local && !disabled && !view.checking && !state.unavailable;
   const phase = view?.phase === 'waiting' && view.approval?.mode !== 'when-idle'
     ? '실행 중인 작업 때문에 적용하지 못했습니다. 작업 종료 후 다시 선택해 주세요.'
     : view ? PHASES[view.phase] : '버전 정보를 불러오는 중입니다.';
@@ -63,7 +63,7 @@ export function Updates({state, local}: {state: UpdatesState; local: boolean}) {
     {!!view?.available && !view.approval && <p className="muted small">
       {versionsDiffer && '발견한 버전과 준비된 버전이 다릅니다. '}
       {versionsDiffer && local && !view.checking && '최신 커밋을 다시 확인하고 준비하려면 ‘새 버전 준비’를 누르세요. '}
-      적용 버튼은 화면의 준비된 버전을 승인합니다. 지금 적용할 수 없어 실패해도 자동으로 예약하지 않습니다.
+      준비된 버전이 Git의 최신 커밋과 일치하면 승인할 수 있습니다. 지금 적용할 수 없어 실패해도 자동으로 예약하지 않습니다.
     </p>}
   </div>;
 }

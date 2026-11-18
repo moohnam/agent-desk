@@ -578,6 +578,21 @@ function prepareGuardFixture(role: 'shared' | 'remote' = 'shared') {
   return {dir,data,deploy,bin,marker,config,commit,fakeNpm};
 }
 
+test('preparing HEAD follows the source default branch after the mirror was created', async () => {
+  const f = prepareGuardFixture(), previousPath = process.env.PATH;
+  f.fakeNpm('process.exit(0)'); process.env.PATH = `${f.bin}:${previousPath}`;
+  const worker = new UpdateWorker({ ...f.config, ref: 'HEAD' }); worker.claim();
+  const git = (...args: string[]) => execFileSync('git', ['-C', f.config.source, ...args],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  try {
+    assert.equal(await worker.prepare(), f.commit);
+    execFileSync('git', ['--git-dir', join(f.deploy, 'repository.git'), 'config', 'remote.origin.followRemoteHEAD', 'never']);
+    git('switch', '-c', 'new-default'); git('commit', '--allow-empty', '-m', 'remote default changed');
+    assert.equal(await worker.prepare(), git('rev-parse', 'HEAD'));
+    assert.equal(worker.state().approval, undefined);
+  } finally { worker.close(); process.env.PATH = previousPath; rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('processes reclaim a stale legacy worker lock exclusively', {timeout: 15_000}, async () => {
   const f = prepareGuardFixture(), configPath = join(f.dir, 'update.json'), lock = join(f.deploy, 'worker.lock');
   writePrivateJson(configPath, f.config);
