@@ -1,4 +1,5 @@
 import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { lstat, mkdtemp, open, opendir, realpath, rm, utimes } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
@@ -83,17 +84,19 @@ export async function workspaceFile(hub: Hub, taskId: string, href: string, base
     }
     if (!stat.isFile()) throw new HttpError(400, '일반 파일만 가져올 수 있습니다');
     if (stat.size > SHARED_FILE_LIMIT) throw new HttpError(413, '파일은 50 MB까지 가져올 수 있습니다');
-    return { file, stat, target };
+    const identity = isPreviewDocument(target.path) ? createHash('sha256').update(taskId).update('\0').update(path).digest('hex') : undefined;
+    return { file, stat, target, identity };
   } catch (error) { await file.close(); throw error; }
 }
 
 export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string, approvedPath?: string) {
-  const { file, stat, target } = await workspaceFile(hub, taskId, href, base, approvedPath);
+  const { file, stat, target, identity } = await workspaceFile(hub, taskId, href, base, approvedPath);
   try {
     res.writeHead(200, {
       'content-type': 'application/octet-stream', 'cache-control': 'no-store',
       'content-length': stat.size,
       'x-desk-filename': encodeURIComponent(basename(target.path)),
+      ...(identity && { 'x-desk-document-identity': identity }),
       'x-desk-reveal': target.reveal || (stat.mode & 0o111) !== 0 ? '1' : '0',
     });
     if (stat.size === 0) res.end();

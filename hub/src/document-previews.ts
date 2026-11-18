@@ -71,7 +71,7 @@ export function documentPath(href:string) {
   if(!path || /[\x00-\x1f\\?#]/.test(path) || /^[a-z][a-z\d+.-]*:/i.test(path))throw new HttpError(400,'파일 경로가 필요합니다');
   return posix.normalize(path);
 }
-type Entry = { approvedPath?:string; source:string; task:string; href:string; name:string; at:number; busy:number; files:Map<string,Promise<string>> };
+type Entry = { approvedPath?:string; identity?:string; source:string; task:string; href:string; name:string; at:number; busy:number; files:Map<string,Promise<string>> };
 type Grant = { entry:Entry; until:number; allowed:()=>boolean };
 export type PreviewReader = (source:string,task:string,href:string,base:string|undefined,receive:(r:Response)=>Promise<string>,approvedPath?:string)=>Promise<string>;
 
@@ -164,6 +164,10 @@ export class DocumentPreviews {
           throw new HttpError(413,'문서 본문은 5 MB까지 미리 볼 수 있습니다');
         const result=await this.files.receive(response,size=>this.collect(size));
         if(result.kind!=='file')throw new HttpError(502,'파일 응답이 필요합니다');
+        if(path===entry.name) {
+          const identity=response.headers.get('x-desk-document-identity');
+          entry.identity=identity&&/^[a-f0-9]{64}$/.test(identity)?identity:undefined;
+        }
         return result.path;
       },entry.approvedPath);
     }).catch(error=>{
@@ -200,7 +204,7 @@ export class DocumentPreviews {
       const id=randomBytes(24).toString('base64url');
       this.grants.set(id,{entry,allowed,until:Date.now()+LEASE});
       const url=`/_preview/${id}/${encodeURIComponent(entry.name)}`;
-      return {url,name:entry.name,kind,...(text!==undefined?{text}:{})};
+      return {url,name:entry.name,kind,...(entry.identity&&{identity:entry.identity}),...(text!==undefined?{text}:{})};
     } catch(error) {
       if(this.entries.get(key)===entry)this.entries.delete(key);
       throw error;

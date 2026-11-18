@@ -5,12 +5,17 @@ import { Markdown } from './Markdown.tsx';
 import { previewLink } from './documentLinks.ts';
 import { DocumentLink } from './DocumentLink.tsx';
 import { splitId } from './federation.ts';
+import { ReferenceMoveButtons } from './ReferenceMoveButtons.tsx';
 
 const releasePreview=(url:string)=>fetch('/api/preview',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id:url.split('/')[2]}),keepalive:true}).catch(()=>{});
 class PermissionRequired extends Error { constructor(readonly path:string) { super('문서 접근 확인이 필요합니다'); } }
-type Preview = {name:string;url:string;kind:'html'|'markdown';text?:string};
+type Preview = {name:string;url:string;kind:'html'|'markdown';text?:string;identity?:string};
 type PreviewRequest = {revision:number;refresh:boolean};
-export const DocumentPreview = memo(function DocumentPreview({taskId,href,visible,focusRevision=0,onRemove,onError}:{taskId:string;href:string;visible:boolean;focusRevision?:number;onRemove:(href:string)=>void;onError:(message:string)=>void}) {
+export const DocumentPreview = memo(function DocumentPreview({taskId,href,visible,focusRevision=0,first,last,onMove,onResolve,onRemove,onError}: {
+  taskId:string; href:string; visible:boolean; focusRevision?:number; first:boolean; last:boolean;
+  onMove:(href:string,direction:-1|1)=>void; onResolve:(href:string,identity:string|undefined)=>void;
+  onRemove:(href:string)=>void; onError:(message:string)=>void;
+}) {
   const openLink=useCallback((path:string)=>{if(!previewLink(taskId,path))void api.open(path,taskId).catch((e:Error)=>onError(e.message));},[taskId,onError]);
   const remove=useCallback(()=>onRemove(href),[href,onRemove]);
   const scope=JSON.stringify([taskId,href]);
@@ -48,17 +53,24 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
   useEffect(()=>{
     if(!ready)return;
     const controller=new AbortController();let alive=true;
+    onResolve(href,undefined);
     const [source,task]=splitId(taskId);setLoading(true);setError('');setPermission(null);
     void fetch('/api/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source,task_id:task,href,refresh:request.refresh,...(approvedPath!==undefined?{approved_path:approvedPath}:{})}),signal:controller.signal})
       .then(async r=>{const data=await r.json();if(!r.ok){
         if(r.status===403&&data.code==='document_permission_required'&&typeof data.path==='string'&&data.path.startsWith('/')&&data.path.length<=4096&&!/[\x00-\x1f]/.test(data.path))throw new PermissionRequired(data.path);
         throw Error(data.error??`HTTP ${r.status}`);
       }return data as Preview;})
-      .then(data=>{if(alive)setPreview({...data,request});else void releasePreview(data.url);},e=>{if(alive){if(e instanceof PermissionRequired){setPermission({scope,path:e.path});setPreview(null);}else setError(e instanceof Error?e.message:String(e));}})
+      .then(data=>{
+        if(!alive){void releasePreview(data.url);return;}
+        setPreview({...data,request});
+      },e=>{if(alive){if(e instanceof PermissionRequired){setPermission({scope,path:e.path});setPreview(null);}else setError(e instanceof Error?e.message:String(e));}})
       .finally(()=>{if(alive)setLoading(false);});
     return()=>{alive=false;controller.abort();};
-  },[taskId,href,ready,request,approvedPath,scope]);
+  },[taskId,href,ready,request,approvedPath,scope,onResolve]);
   useEffect(()=>()=>{if(preview)void releasePreview(preview.url);},[preview]);
+  useEffect(()=>{
+    if(preview?.request===request&&typeof preview.identity==='string')onResolve(href,preview.identity);
+  },[preview,request,href,onResolve]);
   useEffect(()=>{
     if(!preview||!visible)return;
     const controller=new AbortController();let pending=false,expired=false;
@@ -80,6 +92,7 @@ export const DocumentPreview = memo(function DocumentPreview({taskId,href,visibl
   },[preview,visible]);
   return <section ref={ref} className="reference-card document-card">
     <div className="reference-tools"><FileText/><DocumentLink path={href} taskId={taskId} previewId={preview?.url.split('/')[2]} onPreview={()=>openLink(href)}><strong>{preview?.name??href.split('/').at(-1)}</strong></DocumentLink><span className="spacer"/>
+      <ReferenceMoveButtons first={first} last={last} onMove={direction=>onMove(href,direction)}/>
       <button className="icon-btn" title="원본 파일 다시 가져오기" aria-label="문서 새로고침" disabled={loading} onClick={()=>{setReady(true);setRequest(value=>({revision:value.revision+1,refresh:true}));}}><RotateCw/></button>
       <button className="icon-btn" title="문서 닫기" aria-label="문서 닫기" onClick={remove}><X/></button>
     </div>

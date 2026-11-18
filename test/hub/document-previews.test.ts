@@ -61,6 +61,21 @@ test('document paths accept editor suffixes but reject schemes and ambiguous dec
  }
 });
 
+test('preview reports valid source identity only after the document has been read and authorized', async () => {
+ const identity = 'a'.repeat(64);
+ let header = identity;
+ const cache = new DocumentPreviews(async(_s,_t,_h,_b,receive)=>
+  receive(new Response('ok',{headers:{'content-length':'2','x-desk-filename':'doc.md','x-desk-document-identity':header}})));
+ try {
+  await assert.rejects(cache.prepare('','t','doc.md',false,()=>false), {status:403});
+  const first = await cache.prepare('','t','doc.md',false,()=>true);
+  assert.equal(first.identity, identity);
+  header = '%invalid';
+  const next = await cache.prepare('','t','doc.md',true,()=>true);
+  assert.equal(next.identity, undefined);
+ } finally { await cache.close(); }
+});
+
 test('capacity evicts the least recently used closed version and refetches its files',async t=>{
  t.mock.timers.enable({apis:['Date'],now:1_000});
  const reads:string[]=[];

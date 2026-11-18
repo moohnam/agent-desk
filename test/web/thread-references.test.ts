@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { openReferenceFile, readReferences, referenceEvents, referenceOrder, toggleReference } from '../../web/src/threadReferences.ts';
+import { moveReference, openReferenceFile, readReferences, referenceEvents, referenceOrder, resolveReferenceFile, toggleReference } from '../../web/src/threadReferences.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 
 test('each thread keeps its own chosen order across storage reload and removal', () => {
@@ -58,6 +58,46 @@ test('old preferences preserve their displayed order and invalid order entries c
   assert.equal(state.a.files?.length,20);
   assert.equal(referenceOrder(state.a).filter(entry=>entry.kind==='file').length,20);
   assert.deepEqual(state.a.files?.slice(0,2), ['/21.md','/20.md']);
+});
+
+test('a pinned post moves between documents and the mixed order survives reload', () => {
+  let state = openReferenceFile({}, 'a', '/report.md');
+  state = toggleReference(state, 'a', 42);
+  state = openReferenceFile(state, 'a', '/brief.html');
+  state = moveReference(state, 'a', {kind:'event',id:42}, 1);
+  const expected = [{kind:'file',href:'/brief.html'},{kind:'file',href:'/report.md'},{kind:'event',id:42}];
+  assert.deepEqual(referenceOrder(readReferences(JSON.stringify(state)).a), expected);
+  assert.equal(moveReference(state, 'a', {kind:'event',id:42}, 1), state);
+  assert.deepEqual(referenceOrder(moveReference(state, 'a', {kind:'file',href:'/report.md'}, -1).a), [expected[1], expected[0], expected[2]]);
+});
+
+test('document spellings and authority-confirmed aliases share one card per thread', () => {
+  const absolute = '/docs/a%20b.md', relative = './a%20b.md';
+  let state = openReferenceFile({}, 'a', absolute);
+  state = openReferenceFile(state, 'a', 'file:///docs/a%20b.md#L10');
+  assert.deepEqual(state.a.files, [absolute]);
+  state = resolveReferenceFile(state, 'a', absolute, '/docs/a b.md');
+  state = toggleReference(state, 'a', 42);
+  state = openReferenceFile(state, 'a', relative);
+  state = openReferenceFile(state, 'b', absolute);
+  state = resolveReferenceFile(state, 'a', relative, '/docs/a b.md');
+  assert.deepEqual(referenceOrder(state.a), [{kind:'file',href:relative},{kind:'event',id:42}]);
+  assert.deepEqual(state.b.files, [absolute]);
+  assert.equal(resolveReferenceFile(state, 'a', absolute, '/docs/a b.md'), state, 'ignore a closed alias');
+  const restored = readReferences(JSON.stringify({a:{ids:[],files:[absolute,'file:///docs/a%20b.md:10']}}));
+  assert.deepEqual(restored.a.files, [absolute]);
+});
+
+test('an alias being reopened cannot remove a valid card using its stale identity', () => {
+  const identity = 'b'.repeat(64);
+  let state = openReferenceFile({}, 'a', '/docs/link.md');
+  state = resolveReferenceFile(state, 'a', '/docs/link.md', identity);
+  state = openReferenceFile(state, 'a', 'source.md');
+  state = openReferenceFile(state, 'a', '/docs/link.md');
+  state = resolveReferenceFile(state, 'a', 'source.md', identity);
+  assert.deepEqual(referenceOrder(state.a), [{kind:'file',href:'/docs/link.md'},{kind:'file',href:'source.md'}]);
+  state = resolveReferenceFile(state, 'a', '/docs/link.md', undefined);
+  assert.deepEqual(state.a.files, ['/docs/link.md','source.md']);
 });
 
 test('reference originals must belong to this thread and arrive whole, including old unloaded IDs', () => {

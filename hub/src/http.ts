@@ -147,8 +147,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
   const diagrams=new DiagramCache((source,signal)=>diagramBrowser.render(source,signal));
   const previews = new DocumentPreviews(async(source,task,href,base,receive,approvedPath)=>{
     if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive,approvedPath);
-    const {file,stat,target}=await workspaceFile(hub,task,href,base,approvedPath);
-    try {return await receive(new Response(await file.readFile(),{headers:{'content-length':String(stat.size),'x-desk-filename':encodeURIComponent(target.path.split('/').at(-1)!)}}));}
+    const {file,stat,target,identity}=await workspaceFile(hub,task,href,base,approvedPath);
+    try {return await receive(new Response(await file.readFile(),{headers:{'content-length':String(stat.size),'x-desk-filename':encodeURIComponent(target.path.split('/').at(-1)!),...(identity&&{'x-desk-document-identity':identity})}}));}
     finally {await file.close();}
   });
   access.onChange = () => hub.bus.emit('message', { type: 'access', ...access.view() } satisfies HubMessage);

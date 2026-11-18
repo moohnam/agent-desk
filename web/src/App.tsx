@@ -1449,7 +1449,8 @@ export function App() {
         <div className="deck-space">
         {canRead && threadTaskView && (referencesVisible || (referenceTask === threadTask && (references.ids.length > 0 || !!references.files?.length))) && <ThreadReferences key={threadTaskView.id} task={threadTaskView}
           visible={referencesVisible}
-          ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
+          ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onMove={references.move} onResolveFile={references.resolveFile}
+          onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}

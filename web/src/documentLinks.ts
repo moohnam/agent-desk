@@ -13,6 +13,18 @@ export function isDocumentLink(href:string) {
   try {return /\.(md|markdown|html?)(?::\d+(?::\d+)?|#L\d+(?:-L?\d+)?)?$/i.test(decodeURIComponent(href));}
   catch{return false;}
 }
+
+/** Match alternate spellings that do not need the runner's filesystem to resolve. */
+export function documentLinkKey(href: string) {
+  try {
+    const url = /^file:/i.test(href) ? new URL(href) : undefined;
+    if (url?.hostname && url.hostname !== 'localhost') return `link:${href}`;
+    const path = decodeURIComponent(url ? url.pathname : href)
+      .replace(/#L\d+(-L?\d+)?$/, '').replace(/:\d+(:\d+)?(-\d+)?$/, '');
+    if (!path || /[\x00-\x1f\\?#]/.test(path) || /^[a-z][a-z\d+.-]*:/i.test(path)) return `link:${href}`;
+    return `path:${path.startsWith('/') ? '/' : ''}${path.split('/').filter(part => part && part !== '.').join('/')}`;
+  } catch { return `link:${href}`; }
+}
 export function previewLink(taskId:string,href:string):boolean {
   if(!isDocumentLink(href))return false;
   window.dispatchEvent(new CustomEvent(DOCUMENT_OPEN,{detail:{taskId,href}}));return true;

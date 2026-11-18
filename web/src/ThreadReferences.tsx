@@ -1,7 +1,8 @@
 import { DocumentPreview } from './DocumentPreview.tsx';
-import { previewLink } from './documentLinks.ts';
+import { documentLinkKey, previewLink } from './documentLinks.ts';
+import { ReferenceMoveButtons } from './ReferenceMoveButtons.tsx';
 import { ArrowUpRight, Bookmark, PanelLeftClose, X } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { Markdown } from './Markdown.tsx';
@@ -46,8 +47,10 @@ const ReferenceBody = memo(function ReferenceBody({ visible, ...props }: { visib
 
 export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids && a.files === b.files && a.order === b.order && a.fileFocus === b.fileFocus);
 
-function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, events, reload, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
+function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, events, reload, onMove, onResolveFile, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
   visible: boolean; files?: string[]; onRemoveFile: (href:string)=>void;
+  onMove: (entry: ReferenceEntry, direction: -1 | 1) => void;
+  onResolveFile: (href: string, identity: string | undefined) => void;
   order?: ReferenceEntry[];
   fileFocus?: {href:string;revision:number};
   task: TaskView; ids: number[]; events: HubEvent[]; reload: number;
@@ -97,21 +100,27 @@ function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, ev
   }, [task.id, needed, reload, retry]);
   // A failed lookup or a missing original can be retried after reconnection or explicitly.
   useEffect(() => { setAbsent(previous => previous.size ? new Set() : previous); }, [reload, retry]);
+  const entries = useMemo(() => referenceOrder({ ids, files, order }), [ids, files, order]);
+  const moveFile = useCallback((href: string, direction: -1 | 1) => onMove({ kind: 'file', href }, direction), [onMove]);
+  const focusedLink = fileFocus ? documentLinkKey(fileFocus.href) : undefined;
   return <aside className={`thread-references${visible ? '' : ' reading-hidden'}`} aria-label="고정한 글" aria-hidden={!visible} inert={!visible}>
     <header className="reference-head">
-      <div><h2><Bookmark /> 고정한 글·문서 <span>{ids.length+(files?.length??0)}</span></h2><p>{task.project_name}#{task.seq} · 최근 선택한 순서</p></div>
+      <div><h2><Bookmark /> 고정한 글·문서 <span>{entries.length}</span></h2><p>{task.project_name}#{task.seq}</p></div>
       {(ids.length > 0 || !!files?.length) && <button className="link" onClick={onClear}>모두 해제</button>}
       <button className="icon-btn" title="고정한 글 창 닫기 · 선택은 유지" aria-label="고정한 글 창 닫기" onClick={onClose}><PanelLeftClose /></button>
     </header>
     <div ref={feed} className="reference-feed">
       {error && <p className="error" role="alert">글을 불러오지 못했습니다. <button className="link" onClick={() => setRetry(n => n + 1)}>다시 시도</button></p>}
       {ids.length === 0 && !files?.length && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
-      {referenceOrder({ ids, files, order }).map((entry, index) => {
+      {entries.map((entry, index) => {
+        const first = index === 0, last = index === entries.length - 1;
         if (entry.kind === 'file') return <DocumentPreview key={`file:${entry.href}`} taskId={task.id} href={entry.href} visible={visible}
-          focusRevision={fileFocus?.href===entry.href?fileFocus.revision:0} onRemove={onRemoveFile} onError={onError}/>;
+          focusRevision={fileFocus && focusedLink === documentLinkKey(entry.href) ? fileFocus.revision : 0}
+          first={first} last={last} onMove={moveFile} onResolve={onResolveFile} onRemove={onRemoveFile} onError={onError}/>;
         const id = entry.id;
         return <section className="reference-card" key={`event:${id}`} data-reference={id}>
         <div className="reference-tools"><span>{index + 1}</span><span className="spacer" />
+          <ReferenceMoveButtons first={first} last={last} onMove={direction => onMove(entry, direction)} />
           <button className="icon-btn" title="오른쪽 스레드에서 원문 보기" aria-label={`고정한 글 ${index + 1} 원문 보기`} onClick={() => onReveal(id)}><ArrowUpRight /></button>
           <button className="icon-btn" title="고정 해제" aria-label={`고정한 글 ${index + 1} 해제`} onClick={() => onRemove(id)}><X /></button>
         </div>
