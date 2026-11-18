@@ -110,6 +110,8 @@ npm start        # http://127.0.0.1:4317 에서 허브 + 화면
 
 ### 5. 업데이트
 
+관리형 업데이트를 설정한 머신에서는 아래 수동 절차 대신 **설정 → 버전 정보**에서 새 버전을 확인하고 승인합니다(뒤의 "허브·러너 업데이트 확인과 승인"). 그런 머신에서 `scripts/start-*`나 `npm start`로 띄우면 작업 체크아웃의 비관리 프로세스가 되어, 화면의 적용이 다시 막힙니다.
+
 먼저 받고 다시 빌드합니다.
 
 ```sh
@@ -348,7 +350,13 @@ node hub/src/update-cli.ts approve /srv/desk/update.json <40자리-SHA> when-idl
 node hub/src/update-cli.ts cancel /srv/desk/update.json <40자리-SHA>
 # 상시 확인이 필요한 경우에만 별도로 실행합니다. 승인 없이 적용하지 않습니다.
 node hub/src/update-cli.ts run /srv/desk/update.json
+# 재부팅 뒤: 활성화한 릴리스의 역할 중 꺼진 것만 그대로 띄웁니다. 버전은 바꾸지 않습니다.
+node hub/src/update-cli.ts start /srv/desk/update.json
 ```
+
+`start`는 `state.json`의 현재 릴리스를 그대로 띄웁니다. 끝나지 않은 교체가 남아 있거나 다른 커밋의 런타임이 떠 있거나 포트를 다른 프로세스가 쓰면 아무것도 바꾸지 않습니다. 교체에 성공하면 배포 디렉터리의 `current` 링크가 현재 릴리스를 가리키므로, 로그인할 때 한 번 실행하는 LaunchAgent는 `<배포 디렉터리>/current/hub/src/update-cli.ts start <설정>`을 부르면 됩니다. 이때 러너가 `claude`·`codex`·`agy`를 찾도록 LaunchAgent의 `PATH`를 로그인 셸과 같게 둡니다. 데스크톱 앱은 허브가 떠 있지 않으면 작업 체크아웃의 허브를 띄우므로, 관리형 머신에서는 로그인 자동 시작이 허브를 올린 뒤에 앱을 엽니다.
+
+처음 관리 방식으로 바꿀 때는 `check`로 후보를 준비한 뒤 기존 비관리 허브·러너를 멈추고(실행 중인 세션이 끊김) `approve <SHA> immediate`로 승인하면, 워커가 포트가 비었음을 확인하고 관리 런타임을 띄웁니다. 그 뒤부터는 화면의 **지금 적용**이 동작합니다.
 
 로컬 작업공간 모드는 `daemon,local,hub`, 기존 직접 허브 모드는 `hub,daemon`, 공유 러너는 `shared`, 일반 원격 러너는 `remote`를 사용합니다. 설정 화면의 대상도 이 머신의 설정에 있는 역할뿐이며, 다른 머신의 서비스는 조작하지 않습니다. 공유·원격 머신은 각각 자기 설정으로 실행합니다. 기존 환경 설정은 `--environment-file`에 소유자 전용 JSON 파일의 절대 경로를 주어 보존합니다. 예시의 설정 위치를 쓰려면 설정 화면이 읽는 기본 위치로 바꾸세요.
 

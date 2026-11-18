@@ -4,8 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { readUpdateConfig, UpdateWorker, validateUpdateConfig, writePrivateJson } from './updater.ts';
 
 const [command, configPath, ...args] = process.argv.slice(2);
-if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply', 'cancel'].includes(command)) {
-  console.error('사용법: node hub/src/update-cli.ts init|status|check|once|run|apply 설정파일 | approve 설정파일 SHA immediate|when-idle | cancel 설정파일 SHA');
+if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply', 'cancel', 'start'].includes(command)) {
+  console.error('사용법: node hub/src/update-cli.ts init|status|check|once|run|apply|start 설정파일 | approve 설정파일 SHA immediate|when-idle | cancel 설정파일 SHA');
   process.exitCode = 1;
 } else if (command === 'init') {
   const options = new Map<string, string>();
@@ -45,6 +45,7 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
       process.on('SIGTERM', stop); process.on('SIGINT', stop);
       try {
         if (command === 'check') console.log(JSON.stringify({ prepared: await worker.prepare() }));
+        else if (command === 'start') console.log(JSON.stringify({ started: await worker.startCurrent(), state: worker.state() }));
         else do {
           if (approval && worker.state().approval?.token !== approval.token) break;
           try { console.log(JSON.stringify({ activated: await worker.cycle(), state: worker.state() })); }

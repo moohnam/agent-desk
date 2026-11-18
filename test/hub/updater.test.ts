@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -703,4 +703,67 @@ test('prepare guard preserves a changed owner marker instead of clearing an unco
     assert.equal(JSON.parse(readFileSync(f.marker,'utf8')).token,'different-owner');
     await assert.rejects(worker.prepare(),/이전 업데이트 준비/);
   } finally {worker.close();process.env.PATH=previousPath;rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('start brings back the activated release after its runtime is gone, never another version or a failed switch', { timeout: 90_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'desk-start-')), source = join(dir, 'source'), data = join(dir, 'data'), deploy = join(dir, 'deploy');
+  mkdirSync(join(source, 'hub/src/runner'), { recursive: true }); mkdirSync(data);
+  for (const name of ['runtime-control.ts', 'trusted-path.ts', 'errors.ts']) copyFileSync(new URL(`../../hub/src/${name}`, import.meta.url), join(source, 'hub/src', name));
+  const git = (...args: string[]) => execFileSync('git', ['-C', source, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  const pkg = { name: 'start-fixture', version: '1.0.0', type: 'module', scripts: { typecheck: 'node -e "process.exit(0)"', build: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' } };
+  writeFileSync(join(source, 'package.json'), JSON.stringify(pkg));
+  writeFileSync(join(source, 'package-lock.json'), JSON.stringify({ name: pkg.name, version: pkg.version, lockfileVersion: 3, packages: { '': { name: pkg.name, version: pkg.version } } }));
+  const runtime = `import {registerRuntimeControl} from '../runtime-control.ts';
+import {appendFileSync} from 'node:fs'; import {dirname,join} from 'node:path';
+appendFileSync(join(dirname(process.env.AGENT_DESK_DB),'starts.txt'),'one\\n');
+await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:()=>process.exit(0)});`;
+  const commit = (message: string, body: string) => { writeFileSync(join(source, 'hub/src/runner/shared.ts'), body); git('add', '.'); git('commit', '-m', message); return git('rev-parse', 'HEAD'); };
+  const v1 = commit('one', runtime);
+  const portProbe = createServer();
+  await new Promise<void>(resolve => portProbe.listen(0, '127.0.0.1', resolve));
+  const port = (portProbe.address() as { port: number }).port;
+  await new Promise<void>(resolve => portProbe.close(() => resolve()));
+  const config: UpdateConfig = { version: 1, enabled: true, source, ref: 'main', deploymentDir: deploy, dataDir: data, roles: ['shared'], environment: { AGENT_DESK_SHARED_PORT: String(port) }, intervalMs: 1000 };
+  writeFileSync(join(data, 'agent-desk.db'), '원본 DB 유지');
+  const worker = new UpdateWorker(config); worker.claim();
+  // A runtime on its way out answers with a cut reply first; wait until its socket is really gone.
+  const gone = async () => {
+    for (const deadline = Date.now() + 5000; Date.now() < deadline; await delay(50)) {
+      try { if (!(await worker.status())[0].runtime) return; } catch { /* exiting */ }
+    }
+    throw new Error('runtime did not exit');
+  };
+  try {
+    await assert.rejects(worker.startCurrent(), /활성화한 릴리스가 없습니다/);
+    worker.approve(await worker.prepare(), 'immediate'); assert.equal(await worker.cycle(), true);
+    assert.equal(readlinkSync(join(deploy, 'current')), join('releases', v1));
+    assert.deepEqual(await worker.startCurrent(), [], 'a ready runtime of the current release is left alone');
+    const running = (await worker.status())[0].runtime!;
+    // The runtime is gone (a reboot): it is stopped through its own control socket here.
+    const hold = await controlRequest(worker.socket('shared'), { action: 'prepare', instance: running.instance });
+    await controlRequest(worker.socket('shared'), { action: 'stop', instance: running.instance, lease: hold.lease });
+    await gone();
+    assert.deepEqual(await worker.startCurrent(), ['shared']);
+    const restarted = (await worker.status())[0].runtime!;
+    assert.equal(restarted.commit, v1); assert.equal(restarted.ready, true); assert.notEqual(restarted.pid, running.pid);
+    assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\none\n');
+    assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지');
+    // A switch whose candidate failed to start is not undone by start: a fixed successor commit recovers it.
+    commit('broken', 'process.exit(17);');
+    worker.approve(await worker.prepare(), 'immediate');
+    await assert.rejects(worker.cycle(), /준비 전에 종료/);
+    await gone();
+    await assert.rejects(worker.startCurrent(), /끝나지 않은 교체/);
+    assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\none\n');
+  } finally {
+    try {
+      const status = (await worker.status())[0].runtime;
+      if (status) {
+        const hold = await controlRequest(worker.socket('shared'), { action: 'prepare', instance: status.instance });
+        if (hold.ok) await controlRequest(worker.socket('shared'), { action: 'stop', instance: status.instance, lease: hold.lease });
+      }
+      await delay(150);
+    } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
 });

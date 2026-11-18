@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { createServer } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
@@ -462,6 +462,8 @@ export class UpdateWorker {
       for (const role of this.config.roles) await this.start(role, commit);
       const completed = this.state();
       this.save({ ...completed, current: commit, attempted: undefined, started: undefined, phase: completed.candidate && completed.candidate !== commit ? 'waiting' : 'active', error: undefined });
+      try { this.pointCurrent(commit); }
+      catch (error) { this.save({ ...this.state(), error: `현재 릴리스 링크를 갱신하지 못했습니다: ${error instanceof Error ? error.message : String(error)}` }); }
       try { await this.pruneReleases(); }
       catch (error) { this.save({ ...this.state(), error: `오래된 릴리스 정리를 건너뛰었습니다: ${error instanceof Error ? error.message : String(error)}` }); }
       return true;
@@ -470,6 +472,38 @@ export class UpdateWorker {
     } finally {
       await Promise.allSettled(prepared.map(item => controlRequest(this.socket(item.role), { action: 'cancel', instance: item.runtime.instance, lease: item.lease })));
     }
+  }
+  /** `current` → the activated release: a stable path for whatever starts the runtimes at login. */
+  private pointCurrent(commit: string) {
+    const link = join(this.config.deploymentDir, 'current'), temp = `${link}.${randomUUID()}`;
+    symlinkSync(join('releases', commit), temp);
+    try { renameSync(temp, link); } finally { if (existsSync(temp) || lstatSync(temp, { throwIfNoEntry: false })) unlinkSync(temp); }
+  }
+  /**
+   * Starts the roles of the activated release that are not running (after a reboot, or a crash).
+   * It never changes versions: a failed switch stays for a fixed successor commit, and a runtime of
+   * another commit is left alone. Returns the roles it started.
+   */
+  async startCurrent(): Promise<RuntimeRole[]> {
+    if (!this.lock) throw new Error('워커 잠금이 필요합니다');
+    if (this.activating) throw new Error('이미 업데이트를 적용 중입니다');
+    this.preparationIdle();
+    const state = this.state(), commit = state.current;
+    if (!commit) throw new Error('활성화한 릴리스가 없습니다. 후보를 준비하고 승인하세요');
+    if (state.phase === 'switching' || state.attempted) throw new Error('끝나지 않은 교체가 있습니다. status로 확인하고 수정된 후속 커밋으로 복구하세요');
+    this.deploymentPaths(commit); this.protectedPaths();
+    if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 릴리스는 실행할 수 없습니다');
+    const head = await exec('git', ['-C', join(this.config.deploymentDir, 'releases', commit), 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
+    if (head.stdout.trim() !== commit) throw new Error('현재 릴리스 체크아웃의 커밋이 바뀌었습니다');
+    const started: RuntimeRole[] = [];
+    for (const role of this.config.roles) {
+      const runtime = await this.observe(role);
+      if (runtime?.ready && runtime.commit === commit) continue;
+      if (runtime?.ready) throw new Error(`${role} 런타임이 다른 커밋으로 실행 중입니다. 승인 절차로 교체하세요`);
+      await this.start(role, commit); started.push(role);
+    }
+    this.pointCurrent(commit);
+    return started;
   }
   /** Retain recovery/runtime anchors and three other recent releases; never traverse external roots. */
   async pruneReleases(): Promise<string[]> {
