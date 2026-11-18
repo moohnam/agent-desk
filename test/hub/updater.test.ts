@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -563,20 +563,124 @@ test('prepare and activate reject writable Git metadata, release trees, markers 
 });
 
 /** A disposable Git source and fake npm: no real package install, model or production service. */
-function prepareGuardFixture() {
+function prepareGuardFixture(role: 'shared' | 'remote' = 'shared') {
   const dir=mkdtempSync(join(process.platform==='darwin'?'/private/tmp':tmpdir(),'desk-prepare-'));
   const source=join(dir,'source'),data=join(dir,'data'),deploy=join(dir,'deploy'),bin=join(dir,'bin');
   mkdirSync(join(source,'hub/src/runner'),{recursive:true});mkdirSync(data);mkdirSync(bin);
   const git=(...args:string[])=>execFileSync('git',['-C',source,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
   git('init','-b','main');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');
   writeFileSync(join(source,'package.json'),JSON.stringify({name:'prepare-fixture',version:'1.0.0',type:'module'}));
-  writeFileSync(join(source,'package-lock.json'),'{}');writeFileSync(join(source,'hub/src/runner/shared.ts'),'process.exit(0)');
+  writeFileSync(join(source,'package-lock.json'),'{}');writeFileSync(join(source,`hub/src/runner/${role}.ts`),'process.exit(0)');
   git('add','.');git('commit','-m','fixture');const commit=git('rev-parse','HEAD');
   const npm=join(bin,'npm'),marker=join(deploy,'prepare.pending.json');
   const fakeNpm=(body:string)=>writeFileSync(npm,`#!${process.execPath}\n${body}\n`,{mode:0o755});
-  const config:UpdateConfig={version:1,enabled:true,source,ref:'main',deploymentDir:deploy,dataDir:data,roles:['shared'],environment:{AGENT_DESK_SHARED_PORT:'65431'},intervalMs:1000};
+  const config:UpdateConfig={version:1,enabled:true,source,ref:'main',deploymentDir:deploy,dataDir:data,roles:[role],environment:role==='shared'?{AGENT_DESK_SHARED_PORT:'65431'}:{},intervalMs:1000};
   return {dir,data,deploy,bin,marker,config,commit,fakeNpm};
 }
+
+test('processes reclaim a stale legacy worker lock exclusively', {timeout: 15_000}, async () => {
+  const f = prepareGuardFixture(), configPath = join(f.dir, 'update.json'), lock = join(f.deploy, 'worker.lock');
+  writePrivateJson(configPath, f.config);
+  const crashed = spawn(process.execPath, ['-e', 'process.exit(0)'], {stdio: 'ignore'});
+  await new Promise<number | null>((resolve, reject) => { crashed.once('error', reject); crashed.once('exit', resolve); });
+  writePrivateJson(lock, {host: hostname(), pid: crashed.pid});
+  const updater = new URL('../../hub/src/updater.ts', import.meta.url).href;
+  const contender = `
+import {readUpdateConfig, UpdateWorker, UpdateWorkerBusyError} from ${JSON.stringify(updater)};
+const worker = new UpdateWorker(readUpdateConfig(process.argv[1]));
+let acquired = false;
+try { worker.claim(); acquired = true; }
+catch (error) {
+  if (!(error instanceof UpdateWorkerBusyError)) throw error;
+}
+if (acquired) {
+  process.on('message', () => { worker.close(); process.disconnect(); });
+  process.send(true);
+} else process.send(false, () => process.disconnect());`;
+  const children: ChildProcess[] = [];
+  const race = () => new Promise<{child: ChildProcess; acquired: boolean}>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', contender, configPath], {stdio: ['ignore', 'ignore', 'inherit', 'ipc']});
+    children.push(child);
+    child.once('error', reject);
+    child.once('exit', code => reject(new Error(`contender exited before reporting: ${code}`)));
+    child.once('message', acquired => resolve({child, acquired: acquired === true}));
+  });
+  try {
+    const results = await Promise.all([race(), race()]);
+    const owners = results.filter(result => result.acquired);
+    assert.equal(owners.length, 1);
+    const owner = owners[0].child;
+    assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, owner.pid);
+    // Even an absent marker cannot allow a second process into a live worker's critical section.
+    unlinkSync(lock);
+    assert.throws(() => new UpdateWorker(f.config).claim(), /워커가 이미 있습니다/);
+    // Closing a worker must leave a replacement marker untouched.
+    writePrivateJson(lock, {host: hostname(), pid: process.pid, token: 'replacement-marker'});
+    const exited = new Promise(resolve => owner.once('exit', resolve));
+    owner.send('release');
+    assert.equal(await exited, 0);
+    assert.equal(JSON.parse(readFileSync(lock, 'utf8')).token, 'replacement-marker');
+    const next = new UpdateWorker(f.config);
+    next.claim(); next.close();
+    assert.equal(existsSync(lock), false);
+  } finally {
+    await Promise.all(children.map(child => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill('SIGKILL');
+      return exited;
+    }));
+    rmSync(f.dir, {recursive: true, force: true});
+  }
+});
+
+test('apply waits for a one-shot worker and never takes over a replacement approval', {timeout: 15_000}, async () => {
+  const f = prepareGuardFixture('remote'), configPath = join(f.dir, 'update.json'), previousPath = process.env.PATH;
+  writePrivateJson(configPath, f.config);
+  f.fakeNpm('process.exit(0)'); process.env.PATH = f.bin + ':' + previousPath;
+  const worker = new UpdateWorker(f.config), children: ChildProcess[] = [];
+  const cli = fileURLToPath(new URL('../../hub/src/update-cli.ts', import.meta.url));
+  const apply = (token: string) => new Promise<{code: number | null; stderr: string}>((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, 'apply', configPath, token], {cwd: f.dir, stdio: ['ignore', 'ignore', 'pipe']});
+    children.push(child);
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', code => resolve({code, stderr}));
+  });
+  try {
+    worker.claim();
+    await worker.prepare();
+    const first = worker.approve(f.commit, 'immediate');
+    const waiting = apply(first.token);
+    assert.equal(await Promise.race([waiting, delay(500, 'waiting')]), 'waiting');
+    assert.equal(worker.cancelApproval(f.commit, first.token), true);
+    const second = worker.approve(f.commit, 'immediate');
+    assert.deepEqual(await waiting, {code: 0, stderr: ''});
+    assert.deepEqual(await apply(first.token), {code: 0, stderr: ''});
+    assert.equal(worker.state().approval?.token, second.token);
+
+    const applying = apply(second.token);
+    assert.equal(await Promise.race([applying, delay(500, 'waiting')]), 'waiting');
+    worker.close();
+    const result = await applying;
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /준비 전에 종료/); // The fixture runtime intentionally exits before readiness.
+    assert.equal(worker.state().attempted, f.commit);
+    assert.equal(worker.state().spentApproval, second.token);
+    assert.equal(worker.state().approval, undefined);
+  } finally {
+    worker.close();
+    await Promise.all(children.map(child => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill('SIGKILL');
+      return exited;
+    }));
+    process.env.PATH = previousPath;
+    rmSync(f.dir, {recursive: true, force: true});
+  }
+});
 
 test('approval is exact, cross-process cancellable and never reused after failure or an unapproved interrupted switch', async () => {
   const f = prepareGuardFixture(), previousPath = process.env.PATH;
@@ -603,7 +707,9 @@ test('approval is exact, cross-process cancellable and never reused after failur
     assert.equal(worker.state().approval, undefined);
     worker.approve(f.commit, 'immediate'); writePrivateJson(f.marker, {pid: process.pid});
     await assert.rejects(worker.cycle(), /이전 업데이트 준비/);
-    assert.equal(worker.state().phase, 'failed'); assert.match(worker.state().error!, /이전 업데이트 준비/);
+    // Refused before any runtime stopped: the approval is spent, but no unfinished switch is recorded.
+    assert.notEqual(worker.state().phase, 'failed'); assert.equal(worker.state().attempted, undefined);
+    assert.match(worker.state().error!, /이전 업데이트 준비/);
     assert.equal(worker.state().approval, undefined); unlinkSync(f.marker);
     const competing = worker.approve(f.commit, 'immediate'), approvalLock = join(f.deploy, 'approval.lock');
     internal.activateApproved = async () => {writePrivateJson(approvalLock, {pid: process.pid}, true); throw new Error('fixture competing writer');};
@@ -749,6 +855,16 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
     assert.equal(restarted.commit, v1); assert.equal(restarted.ready, true); assert.notEqual(restarted.pid, running.pid);
     assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\none\n');
     assert.equal(readFileSync(join(data, 'agent-desk.db'), 'utf8'), '원본 DB 유지');
+    // A switch refused before any stop (here: a dirty candidate tree) is no unfinished switch: the current
+    // release keeps running and start still serves it.
+    const dirty = commit('dirty', runtime + '\n// dirty\n'); worker.approve(await worker.prepare(), 'immediate');
+    writeFileSync(join(deploy, 'releases', dirty, 'package.json'), '{}');
+    await assert.rejects(worker.cycle());
+    // prepare() of the candidate left phase 'waiting'; the refusal neither fails it nor records an attempt.
+    assert.equal(worker.state().phase, 'waiting'); assert.equal(worker.state().attempted, undefined);
+    assert.match(worker.state().error ?? '', /./);
+    assert.equal((await worker.status())[0].runtime!.commit, v1);
+    assert.deepEqual(await worker.startCurrent(), []);
     // A switch whose candidate failed to start is not undone by start: a fixed successor commit recovers it.
     commit('broken', 'process.exit(17);');
     worker.approve(await worker.prepare(), 'immediate');

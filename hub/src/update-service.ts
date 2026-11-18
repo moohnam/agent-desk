@@ -1,11 +1,12 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateMode, UpdateSummary, UpdateView } from '../../shared/update.ts';
 import { HttpError } from './errors.ts';
+import { assertTrustedPath } from './trusted-path.ts';
 import { readUpdateConfig, UpdateWorker, type UpdateApproval, type UpdateConfig } from './updater.ts';
 
 const exec = promisify(execFile);
@@ -30,7 +31,7 @@ interface Options {
   current?: string | null;
   worker?: (config: UpdateConfig) => WorkerView;
   runCheck?: (configPath: string) => Promise<void>;
-  launchApproval?: (configPath: string) => Promise<void>;
+  launchApproval?: (configPath: string, token: string) => Promise<void>;
   discover?: (config: UpdateConfig) => Promise<string | null>;
 }
 
@@ -40,7 +41,7 @@ export class UpdateService {
   private readonly current: string | null;
   private readonly workerFactory: (config: UpdateConfig) => WorkerView;
   private readonly runCheck: (path: string) => Promise<void>;
-  private readonly launchApproval: (path: string) => Promise<void>;
+  private readonly launchApproval: (path: string, token: string) => Promise<void>;
   private checking?: Promise<void>;
   private checkStarting = false;
   private approving = false;
@@ -59,11 +60,20 @@ export class UpdateService {
     this.discoverOverride = options.discover;
     this.workerFactory = options.worker ?? (config => new UpdateWorker(config));
     this.runCheck = options.runCheck ?? (async path => { await exec(process.execPath, [CLI, 'check', path], { timeout: 20 * 60_000, maxBuffer: 64 * 1024 }); });
-    this.launchApproval = options.launchApproval ?? (path => new Promise((resolve, reject) => {
-      // The worker must outlive this hub while replacing it. No shell, inherited output or service edits.
-      const child = spawn(process.execPath, [CLI, 'apply', path], { detached: true, stdio: 'ignore' });
-      child.once('error', reject);
-      child.once('spawn', () => { child.unref(); resolve(); });
+    this.launchApproval = options.launchApproval ?? ((path, token) => new Promise((resolve, reject) => {
+      // The worker must outlive this hub while replacing it. No shell or service edits; its output
+      // goes to the data directory's update logs, where a failed switch can be read up afterwards.
+      const dir = join(readUpdateConfig(path).dataDir, 'update-logs');
+      const file = join(dir, 'worker.log');
+      assertTrustedPath(dir, { kind: 'directory', allowMissing: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      assertTrustedPath(file, { kind: 'file', private: true, allowMissing: true });
+      const log = openSync(file, 'a', 0o600);
+      try {
+        const child = spawn(process.execPath, [CLI, 'apply', path, token], { detached: true, stdio: ['ignore', log, log] });
+        child.once('error', reject);
+        child.once('spawn', () => { child.unref(); resolve(); });
+      } finally { closeSync(log); }
     }));
   }
 
@@ -165,7 +175,11 @@ export class UpdateService {
       result.available = sha(state.candidate) ? state.candidate : null;
       if (!busyChecking) result.phase = state.phase === 'preparing' ? (result.available ? 'ready' : 'idle') : state.phase;
       if (!busyChecking && state.phase === 'waiting' && !state.approval && !state.error && result.available) result.phase = 'ready';
-      if (state.phase === 'failed') result.error = '업데이트 적용에 실패했습니다. 이 머신의 워커 상태를 확인하세요.';
+      const waitingForWork = state.phase === 'waiting' && state.error === '작업이 유휴 상태가 아닙니다';
+      if (state.phase === 'failed' || (state.error && !waitingForWork)) {
+        result.error = '업데이트 처리 중 문제가 발생했습니다. 이 머신의 워커 상태를 확인하세요.';
+        if (!busyChecking && state.phase === 'waiting') result.phase = 'failed';
+      }
       const approval = state.approval;
       if (approval && sha(approval.commit) && ['immediate', 'when-idle'].includes(approval.mode)) result.approval = { commit: approval.commit, mode: approval.mode };
       const runtimes = await this.runtimes(config, worker);
@@ -209,7 +223,7 @@ export class UpdateService {
       worker = this.configuration()?.worker;
       if (!worker) throw new Error('configuration changed');
       approval = worker.approve(commit, mode);
-      await this.launchApproval(this.configPath);
+      await this.launchApproval(this.configPath, approval.token);
     } catch {
       // Revoke only this request's token if the detached worker could not launch.
       try { if (approval) worker?.cancelApproval(commit, approval.token); } catch { /* Switching has already consumed this approval. */ }

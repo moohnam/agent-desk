@@ -6,7 +6,7 @@ interface SourceStream {
   close: () => void;
 }
 interface Packet { source: string; view_index?: number; connected?: boolean; message?: unknown }
-type Connection = Pick<EventSource, 'onerror' | 'onmessage' | 'close'> & { readyState?: number };
+type Connection = Pick<EventSource, 'onerror' | 'onmessage' | 'close'> & Partial<Pick<EventSource, 'readyState' | 'onopen'>>;
 /** EventSource.CLOSED: the browser gave up on this transport and will not retry it. */
 const CLOSED = 2;
 const RETRY_MIN_MS = 1000, RETRY_MAX_MS = 30_000;
@@ -21,6 +21,7 @@ export function createSourceStreams(connect: () => Connection,
     cancelRetry?.(); cancelRetry = undefined;
     connection = connect();
     const active = connection;
+    connection.onopen = () => { if (connection === active) retryMs = RETRY_MIN_MS; };
     connection.onmessage = event => {
       if(connection!==active)return;
       retryMs = RETRY_MIN_MS;

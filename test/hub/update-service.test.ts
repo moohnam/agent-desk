@@ -51,6 +51,12 @@ test('update view reports missing/unsafe config without exposing paths, environm
     assert.equal(result.current, old); assert.equal(result.canApply, true); assert.equal(result.phase, 'ready'); assert.deepEqual(result.targets, ['hub']);
     const encoded = JSON.stringify(result);
     for (const privateValue of [f.dir, 'SECRET_TOKEN_FILE', 'secret-owner', 'secret-instance', 'secret-token', f.config.source]) assert.equal(encoded.includes(privateValue), false);
+    f.state.error = 'prepare failed under /private/path';
+    const refused = await f.service.view();
+    assert.equal(refused.phase, 'failed');
+    assert.doesNotMatch(JSON.stringify(refused), /\/private\/path/);
+    f.state.error = '작업이 유휴 상태가 아닙니다';
+    assert.equal((await f.service.view()).phase, 'waiting');
     writeFileSync(f.configPath, '{"environment":"secret-value"}', { mode: 0o600 });
     const unsafe = await f.service.view();
     assert.equal(unsafe.phase, 'failed'); assert.equal(JSON.stringify(unsafe).includes('secret-value'), false);
@@ -90,7 +96,10 @@ test('unmanaged and stale approvals are refused, exact approvals persist before 
     assert.match((await f.service.view()).reason!, /수동 서비스/);
     await assert.rejects(f.service.approve(next, 'immediate'), /수동 서비스/);
     assert.equal(f.counts().launches, 0);
-    const managed = new UpdateService({ ...f.options, launchApproval: async () => { assert.equal(f.state.approval?.commit, next); } });
+    const managed = new UpdateService({ ...f.options, launchApproval: async (_path, token) => {
+      assert.equal(f.state.approval?.commit, next);
+      assert.equal(token, f.state.approval?.token);
+    } });
     f.setManaged(true);
     await assert.rejects(managed.approve(old, 'when-idle'), /바뀌었습니다/);
     await assert.rejects(managed.approve(next.slice(0, 8), 'when-idle'), /40자리/);

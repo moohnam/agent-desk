@@ -32,7 +32,7 @@ test('whole connection failure marks every subscriber disconnected and clears ca
 test('a transport the browser closed for good (an HTTP error) is reopened with backoff; a dropped one is left to the browser',async()=>{
   const timers:{fn:()=>void;ms:number;cancelled:boolean}[]=[];
   const sockets:any[]=[];
-  const open=createSourceStreams(()=>{const socket={onmessage:null,onerror:null,closed:false,readyState:1,close(){this.closed=true;}};sockets.push(socket);return socket;},
+  const open=createSourceStreams(()=>{const socket={onopen:null,onmessage:null,onerror:null,closed:false,readyState:1,close(){this.closed=true;}};sockets.push(socket);return socket;},
     (fn,ms)=>{const timer={fn,ms,cancelled:false};timers.push(timer);return()=>{timer.cancelled=true;};});
   const fire=()=>{const timer=timers.shift()!;assert.equal(timer.cancelled,false);timer.fn();return timer.ms;};
   const a=open('a');let errors=0,opens=0;a.onerror=()=>errors++;a.onopen=()=>opens++;
@@ -40,8 +40,9 @@ test('a transport the browser closed for good (an HTTP error) is reopened with b
   sockets[0].readyState=2;sockets[0].onerror();assert.equal(errors,2);assert.equal(sockets[0].closed,true);
   assert.equal(fire(),1000);assert.equal(sockets.length,2);
   sockets[1].readyState=2;sockets[1].onerror();assert.equal(fire(),2000);assert.equal(sockets.length,3);
-  sockets[2].onmessage({data:JSON.stringify({source:'a',connected:true})});assert.equal(opens,1);
+  sockets[2].onopen();
   sockets[2].readyState=2;sockets[2].onerror();assert.equal(fire(),1000);assert.equal(sockets.length,4);
+  sockets[3].onmessage({data:JSON.stringify({source:'a',connected:true})});assert.equal(opens,1);
   // A late subscriber while a retry waits connects at once; closing the last one cancels the retry.
   sockets[3].readyState=2;sockets[3].onerror();const b=open('b');assert.equal(sockets.length,5);assert.equal(timers[0].cancelled,true);timers.shift();
   sockets[4].readyState=2;sockets[4].onerror();a.close();b.close();assert.equal(timers[0].cancelled,true);

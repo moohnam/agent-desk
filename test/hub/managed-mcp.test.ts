@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../../hub/src/db.ts';
 import { Hub } from '../../hub/src/hub.ts';
+import { SkillStore } from '../../hub/src/skills.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { claudeMcpOptions, codexMcpProcess, sharedRunnerMcp } from '../../hub/src/runner/managed-mcp.ts';
 
@@ -86,7 +87,8 @@ test('engine MCP options keep the bearer out of argv and config text', () => {
 test('managed credential reaches only its authenticated workspace MCP route', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-managed-route-'));
   const store = new Store(join(dir, 'workspace.db'));
-  const hub = new Hub(store, { runner: () => ({ connected: true, id: 'fixture', engines: new Set(),
+  // A skill store of its own: the default would write the plugin skeleton into this checkout's data.
+  const hub = new Hub(store, { skills: new SkillStore(join(dir, 'skills-home')), runner: () => ({ connected: true, id: 'fixture', engines: new Set(),
     has: () => false, handle: () => {} }) });
   const workspace = new SharedWorkspace(hub);
   const server = workspace.server();

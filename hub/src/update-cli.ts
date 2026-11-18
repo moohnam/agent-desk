@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { readUpdateConfig, UpdateWorker, validateUpdateConfig, writePrivateJson } from './updater.ts';
+import { readUpdateConfig, UpdateWorker, UpdateWorkerBusyError, validateUpdateConfig, writePrivateJson } from './updater.ts';
 
 const [command, configPath, ...args] = process.argv.slice(2);
 if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply', 'cancel', 'start'].includes(command)) {
@@ -21,7 +21,7 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
   writePrivateJson(resolve(configPath), config, true);
   console.log('이 머신의 업데이트 설정만 만들었습니다. 기존 서비스·프로세스는 변경하지 않았습니다.');
 } else {
-  if (command === 'approve' ? args.length !== 2 : command === 'cancel' ? args.length !== 1 : args.length)
+    if (command === 'approve' ? args.length !== 2 : command === 'cancel' ? args.length !== 1 : command === 'apply' ? args.length > 1 || args[0] === '' : args.length)
     throw new Error('명령의 인수를 확인하세요');
   const worker = new UpdateWorker(readUpdateConfig(resolve(configPath)));
   if (command === 'status') console.log(JSON.stringify({ deployment: worker.state(), runtimes: await worker.status() }, null, 2));
@@ -30,25 +30,32 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
     console.log(JSON.stringify({cancelled: worker.cancelApproval(args[0]), state: worker.state()}));
   }
   else {
-    if (command === 'approve') worker.approve(args[0], args[1] as 'immediate' | 'when-idle');
-    const approval = ['approve', 'apply'].includes(command) ? worker.state().approval : undefined;
-    if (command === 'apply' && !approval) throw new Error('명시적 업데이트 승인이 필요합니다');
+    const approval = command === 'approve' ? worker.approve(args[0], args[1] as 'immediate' | 'when-idle')
+      : command === 'apply' ? worker.state().approval : undefined;
+    const token = command === 'apply' ? args[0] ?? approval?.token : approval?.token;
+    if (command === 'apply' && !token) throw new Error('명시적 업데이트 승인이 필요합니다');
+    let stopped = false;
+    const stop = () => { stopped = true; };
+    process.on('SIGTERM', stop); process.on('SIGINT', stop);
     let claimed = false;
-    try { worker.claim(); claimed = true; }
-    catch (error) {
-      if (!['approve', 'apply'].includes(command) || !(error instanceof Error) || !error.message.includes('워커가 이미 있습니다')) throw error;
-      console.log(JSON.stringify({approved: true, state: worker.state()}));
+    while (!stopped && (!token || approval?.token === token && worker.state().approval?.token === token)) {
+      try { worker.claim(); claimed = true; break; }
+      catch (error) {
+        if (!token || !(error instanceof UpdateWorkerBusyError)) throw error;
+        // A one-shot check/start does not consume approvals. Wait for its lock or for this approval to disappear.
+        await delay(250);
+      }
     }
     if (claimed) {
-      let stopped = false;
-      const stop = () => { stopped = true; };
-      process.on('SIGTERM', stop); process.on('SIGINT', stop);
       try {
         if (command === 'check') console.log(JSON.stringify({ prepared: await worker.prepare() }));
         else if (command === 'start') console.log(JSON.stringify({ started: await worker.startCurrent(), state: worker.state() }));
         else do {
           if (approval && worker.state().approval?.token !== approval.token) break;
-          try { console.log(JSON.stringify({ activated: await worker.cycle(), state: worker.state() })); }
+          try {
+            const activated = approval ? await worker.activate(approval.commit, approval.token) : await worker.cycle();
+            console.log(JSON.stringify({ activated, state: worker.state() }));
+          }
           catch (error) { console.error(error instanceof Error ? error.message : String(error)); if (command !== 'run') { process.exitCode = 1; break; } }
           if (stopped || (command !== 'run' && !(approval?.mode === 'when-idle' && worker.state().approval?.token === approval.token))) break;
           const waitingToken = worker.state().approval?.token;

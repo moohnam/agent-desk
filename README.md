@@ -348,13 +348,16 @@ node hub/src/update-cli.ts approve /srv/desk/update.json <40자리-SHA> immediat
 node hub/src/update-cli.ts approve /srv/desk/update.json <40자리-SHA> when-idle
 # 아직 교체를 시작하지 않은 해당 SHA의 승인만 취소합니다.
 node hub/src/update-cli.ts cancel /srv/desk/update.json <40자리-SHA>
-# 상시 확인이 필요한 경우에만 별도로 실행합니다. 승인 없이 적용하지 않습니다.
+# 로그인 start를 등록한 머신은 화면에서 확인·승인합니다. 상시 run을 따로 등록하지 않습니다.
+# run은 승인 없이 적용하지 않습니다.
 node hub/src/update-cli.ts run /srv/desk/update.json
 # 재부팅 뒤: 활성화한 릴리스의 역할 중 꺼진 것만 그대로 띄웁니다. 버전은 바꾸지 않습니다.
 node hub/src/update-cli.ts start /srv/desk/update.json
 ```
 
-`start`는 `state.json`의 현재 릴리스를 그대로 띄웁니다. 끝나지 않은 교체가 남아 있거나 다른 커밋의 런타임이 떠 있거나 포트를 다른 프로세스가 쓰면 아무것도 바꾸지 않습니다. 교체에 성공하면 배포 디렉터리의 `current` 링크가 현재 릴리스를 가리키므로, 로그인할 때 한 번 실행하는 LaunchAgent는 `<배포 디렉터리>/current/hub/src/update-cli.ts start <설정>`을 부르면 됩니다. 이때 러너가 `claude`·`codex`·`agy`를 찾도록 LaunchAgent의 `PATH`를 로그인 셸과 같게 둡니다. 데스크톱 앱은 허브가 떠 있지 않으면 작업 체크아웃의 허브를 띄우므로, 관리형 머신에서는 로그인 자동 시작이 허브를 올린 뒤에 앱을 엽니다.
+기존 방식으로 운영하면서 새 버전만 확인할 수 있습니다. 화면에서 직접 적용하려면 해당 머신의 허브·러너를 관리형으로 실행합니다. 관리형으로 전환한 머신에서는 `scripts/start-*`·`stop-*`·`restart-*` 대신 설정 화면과 `update-cli start`를 사용합니다. 수동 운영으로 전환할 때는 기존 관리 런타임을 정상 종료한 뒤 `AGENT_DESK_UNMANAGED=1`을 지정합니다. 화면에서 승인한 교체 워커의 출력은 업데이트 설정의 데이터 디렉터리 아래 `update-logs/worker.log`에 남습니다.
+
+`start`는 `state.json`의 현재 릴리스를 그대로 띄웁니다. 끝나지 않은 교체가 남아 있거나 다른 커밋의 런타임이 떠 있거나 포트를 다른 프로세스가 쓰면 아무것도 바꾸지 않습니다. 교체에 성공하면 배포 디렉터리의 `current` 링크가 현재 릴리스를 가리키므로, 로그인할 때 한 번 실행하는 LaunchAgent는 `<배포 디렉터리>/current/hub/src/update-cli.ts start <설정>`을 부르면 됩니다. 이때 러너가 `claude`·`codex`·`agy`를 찾도록 LaunchAgent의 `PATH`를 로그인 셸과 같게 둡니다. `com.agent-desk.managed` LaunchAgent를 등록한 Mac에서는 데스크톱 앱도 같은 서비스에 기동을 요청합니다.
 
 처음 관리 방식으로 바꿀 때는 `check`로 후보를 준비한 뒤 기존 비관리 허브·러너를 멈추고(실행 중인 세션이 끊김) `approve <SHA> immediate`로 승인하면, 워커가 포트가 비었음을 확인하고 관리 런타임을 띄웁니다. 그 뒤부터는 화면의 **지금 적용**이 동작합니다.
 

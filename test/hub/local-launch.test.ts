@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../../hub/src/db.ts';
+import { SkillStore } from '../../hub/src/skills.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { LocalRuntime } from '../../hub/src/runner/local-runtime.ts';
 import { ensureGatewayLocalAuthority, ensureLocalAuthority, readLocalLaunchSettings } from '../../hub/src/runner/local-launch.ts';
@@ -71,7 +72,7 @@ test('automatic recovery starts only an activated, absent local authority', asyn
   let server:ReturnType<LocalRuntime['server']>|undefined;
   try {
     await assert.rejects(ensureLocalAuthority({...input,spawnAuthority:(() => {throw new Error('spawned');}) as never}),/첫 로컬 작업공간 전환/);
-    runtime = new LocalRuntime(dbPath,{runner:fakeRunner});
+    runtime = new LocalRuntime(dbPath,{runner:fakeRunner,skills:new SkillStore(join(dir,'skills-home'))});
     server = runtime.server();
     await listen(server,port);
     await ensureLocalAuthority({...input,spawnAuthority:(() => {throw new Error('spawned');}) as never});
@@ -79,7 +80,7 @@ test('automatic recovery starts only an activated, absent local authority', asyn
     let launches = 0;
     await ensureLocalAuthority({...input,spawnAuthority:(() => {
       launches++;
-      runtime = new LocalRuntime(dbPath,{runner:fakeRunner});
+      runtime = new LocalRuntime(dbPath,{runner:fakeRunner,skills:new SkillStore(join(dir,'skills-home'))});
       server = runtime.server();
       void listen(server,port);
       return {exitCode:null,signalCode:null,on:()=>{},once:()=>{},unref:()=>{}};
@@ -100,7 +101,7 @@ test('wrong service response blocks automatic authority startup', async () => {
   const token = workspace.grant('gateway').token;
   writeFileSync(tokenFile,token,{mode:0o600});
   store.database.close();
-  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner});
+  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner,skills:new SkillStore(join(dir,'skills-home'))});
   const authority = runtime.server();
   const port = await listen(authority);
   const gatewayDbPath = join(dir,'gateway.db');
@@ -119,7 +120,7 @@ test('wrong service response blocks automatic authority startup', async () => {
 test('offline gateway startup requires an existing link with the canonical identity, URL, and token', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-local-launch-offline-'));
   const dbPath = join(dir, 'authority.db'), gatewayDbPath = join(dir, 'gateway.db'), tokenFile = join(dir, 'local.token');
-  const authority = new LocalRuntime(dbPath, {runner: fakeRunner});
+  const authority = new LocalRuntime(dbPath, {runner: fakeRunner, skills: new SkillStore(join(dir, 'skills-home'))});
   const server = authority.server();
   const port = await listen(server);
   const token = authority.workspace.grant('gateway').token;
@@ -163,7 +164,7 @@ test('recovery launches an isolated child and waits for authenticated identity',
   const workspace = new SharedWorkspace(undefined,store);
   writeFileSync(tokenFile,workspace.grant('gateway').token,{mode:0o600});
   store.database.close();
-  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner});
+  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner,skills:new SkillStore(join(dir,'skills-home'))});
   const authority = runtime.server();
   const port = await listen(authority);
   await stop(authority);runtime.close();
@@ -208,7 +209,7 @@ test('signalled and timed-out children are detected and only the new child is cl
   const workspace = new SharedWorkspace(undefined,store);
   writeFileSync(tokenFile,workspace.grant('gateway').token,{mode:0o600});
   store.database.close();
-  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner});
+  const runtime = new LocalRuntime(dbPath,{runner:fakeRunner,skills:new SkillStore(join(dir,'skills-home'))});
   const authority = runtime.server();
   const port = await listen(authority);
   await stop(authority);runtime.close();

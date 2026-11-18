@@ -4,6 +4,30 @@
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DATA=$ROOT/data
+# A machine on managed updates runs its hub and runners from release directories. These scripts would
+# replace them with unmanaged copies of this checkout, so they refuse there unless forced.
+MANAGED_CONFIG=${AGENT_DESK_UPDATE_CONFIG:-$HOME/.local/share/agent-desk/update.json}
+if [ -f "$MANAGED_CONFIG" ] && [ -z "${AGENT_DESK_UNMANAGED:-}" ]; then
+  # A config file can exist before the first transition. Block only if activation has begun.
+  if node --input-type=module -e '
+    import {readFileSync, existsSync} from "node:fs";
+    import {join} from "node:path";
+    const config = JSON.parse(readFileSync(process.argv[1], "utf8"));
+    const path = join(config.deploymentDir, "state.json");
+    const state = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+    const [script, hubPort, runnerPort] = process.argv.slice(2);
+    const managesHub = !script.endsWith("-runner") && config.roles.includes("hub") && (config.environment.PORT ?? "4317") === hubPort;
+    const managesRunner = !script.endsWith("-hub") && config.roles.includes("daemon") && (config.environment.RUNNER_PORT ?? "4318") === runnerPort;
+    const activated = state.current || state.attempted || state.phase === "switching";
+    process.exitCode = activated && (managesHub || managesRunner) ? 0 : 3;
+  ' "$MANAGED_CONFIG" "$(basename "$0")" "${PORT:-4317}" "${RUNNER_PORT:-4318}" 2>/dev/null; then
+    echo "관리형 허브·러너는 설정 → 버전 정보에서 교체하고 update-cli start로 기동하세요. 수동 운영이 필요하면 AGENT_DESK_UNMANAGED=1을 지정하세요." >&2
+    exit 2
+  elif [ "$?" -ne 3 ]; then
+    echo "업데이트 관리 상태를 확인하지 못했습니다. 업데이트 설정을 확인해 주세요." >&2
+    exit 2
+  fi
+fi
 HUB_PORT=${PORT:-4317}
 RUNNER_PORT=${RUNNER_PORT:-4318}
 HUB_LOG=${HUB_LOG:-$DATA/hub.log}

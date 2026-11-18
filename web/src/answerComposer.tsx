@@ -33,6 +33,11 @@ function clear(target: Target) {
   setDraft(draftKey(target.taskId), null, { empty: true }); emit();
 }
 
+export function cancelAnswerTarget(taskId: string, questionId: string, index: number) {
+  const target = current(taskId);
+  if (target?.key === `${taskId}:${questionId}` && target.index === index) clear(target);
+}
+
 /** A persisted destination has no callback; mounted cards register their current handlers separately. */
 export function useAnswerWriter(taskId: string, questionId: string, active: boolean, accept: Handler['accept']) {
   const owner = useRef(Symbol());

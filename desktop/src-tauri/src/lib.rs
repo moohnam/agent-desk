@@ -102,8 +102,59 @@ fn is_loopback(url: &Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }
 
-/// Starts the hub, which in turn starts the runner when that is not up either.
+#[cfg(target_os = "macos")]
+fn start_managed_hub(hub: &Url) -> Result<bool, String> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(false);
+    };
+    let config_path = home.join(".local/share/agent-desk/update.json");
+    let read_json = |path: &std::path::Path| -> Option<serde_json::Value> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    };
+    let Some(config) = read_json(&config_path) else {
+        return Ok(false);
+    };
+    let manages_hub = config["roles"].as_array().is_some_and(|roles| {
+        roles.iter().any(|role| role.as_str() == Some("hub"))
+    });
+    let port = config["environment"]["PORT"].as_str().unwrap_or("4317");
+    if !manages_hub || port.parse::<u16>().ok() != hub.port_or_known_default() {
+        return Ok(false);
+    }
+    let Some(deploy) = config["deploymentDir"].as_str().map(PathBuf::from) else {
+        return Ok(false);
+    };
+    let state_path = deploy.join("state.json");
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let Some(state) = read_json(&state_path) else {
+        return Err("관리형 허브의 실행 상태를 확인하지 못했습니다.".into());
+    };
+    if state["current"].is_null() && state["attempted"].is_null() && state["phase"] != "switching" {
+        return Ok(false);
+    }
+    let uid = Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .map_err(|err| format!("관리형 허브 시작 계정을 확인하지 못했습니다: {err}"))?;
+    let uid = String::from_utf8_lossy(&uid.stdout);
+    let result = Command::new("/bin/launchctl")
+        .args(["kickstart", &format!("gui/{}/com.agent-desk.managed", uid.trim())])
+        .output()
+        .map_err(|err| format!("관리형 허브 시작을 요청하지 못했습니다: {err}"))?;
+    if !result.status.success() {
+        return Err("관리형 허브를 시작하지 못했습니다. 로그인 시작 설정을 확인해 주세요.".into());
+    }
+    Ok(true)
+}
+
+/// Uses the registered login service for managed installations.
 fn start_local(hub: &Url) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if start_managed_hub(hub)? {
+        return Ok(());
+    }
     let repo = repo_dir();
     if !repo.join("hub/src/index.ts").exists() {
         return Err(format!("허브 코드를 찾을 수 없습니다: {}", repo.display()));

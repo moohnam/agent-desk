@@ -16,6 +16,7 @@ const MAX_BUFFER_CHARS = 64 * 1024 * 1024;
 const PID_FILE = config.runner.pidFile;
 
 let hub: Socket | null = null;
+let stopping = false;
 /**
  * Messages for the next hub, serialized. Over the limits the oldest events go first; state changes
  * (engine session ids, busy, approvals, closed) are kept, as the hub can't learn them otherwise.
@@ -51,6 +52,7 @@ const server = createServer((socket) => {
   let authed = false;
   const timer = setTimeout(() => socket.destroy(), AUTH_MS);
   readLines(socket, (m) => {
+    if (stopping) { socket.destroy(); return; }
     if (!authed) {
       // Until it shows the token the connection is nobody's: the hub already connected keeps its place.
       const auth = m as { type?: string; token?: unknown; protocolVersion?: unknown };
@@ -91,7 +93,16 @@ server.listen(RUNNER_PORT, RUNNER_HOST, () => {
   writeFileSync(PID_FILE, String(process.pid));
   console.log(`agent-desk runner ${runner.id} listening on ${RUNNER_HOST}:${RUNNER_PORT} (pid ${process.pid})`);
 });
+function stop() {
+  if (stopping) return;
+  stopping = true;
+  runner.shutdown();
+  const current = hub;
+  // Let the hub receive the shutdown events before closing its connection.
+  current?.end(() => current.destroy());
+  server.close(() => process.exit(0));
+}
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
 await registerRuntimeControl({ role: 'daemon', ready: () => server.listening,
-  blockers: () => sessionBlockers(runner.snapshot()), stop: () => {
-    runner.shutdown(); hub?.destroy(); server.close(() => process.exit(0));
-  } });
+  blockers: () => sessionBlockers(runner.snapshot()), stop });

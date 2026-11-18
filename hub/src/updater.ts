@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { hostname, uptime } from 'node:os';
 import { createServer } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -21,10 +21,21 @@ export interface UpdateConfig {
 type CandidateIdentity = Pick<RuntimeStatus, 'owner' | 'commit' | 'instance' | 'pid'>;
 export interface UpdateApproval { commit: string; mode: 'immediate' | 'when-idle'; token: string }
 export interface UpdateState { current?: string; candidate?: string; attempted?: string; spentApproval?: string; approval?: UpdateApproval; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
+type WorkerLock = { host: string; pid: number; at?: number; token?: string };
+export class UpdateWorkerBusyError extends Error {
+  constructor() { super('이 배포 경로를 관리하는 워커가 이미 있습니다'); }
+}
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const within = (base: string, path: string) => { const rel = relative(base, path); return !rel || (!rel.startsWith('..') && !isAbsolute(rel)); };
 const persistentEnvironmentPath = (key: string) => /(?:_DB|_DIR|_FILE|_HOME|RUNNER_LOG|AGENT_DESK_UPLOADS)$/.test(key);
+/** Not for the runtimes or build commands: the launching agent session's identity and the terminal's state. */
+const SESSION_ENV = /^(CLAUDECODE$|CLAUDE_CODE_|CLAUDE_PID$|CODEX_THREAD_ID$|AI_AGENT$|GHOSTTY_|STARSHIP_|TERM_PROGRAM|XPC_|SECURITYSESSIONID$|SHLVL$|OLDPWD$|PWD$|_$)/;
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; } };
+function previousBoot(at: number | undefined): boolean {
+  if (at === undefined) return false;
+  try { return at < Date.now() - uptime() * 1000 - 5000; }
+  catch { return false; } // Some restricted environments cannot read the boot time.
+}
 
 /** Configuration is created explicitly on each machine, never supplied by another hub. */
 export function validateUpdateConfig(value: unknown): UpdateConfig {
@@ -59,9 +70,12 @@ export function writePrivateJson(path: string, value: unknown, exclusive = false
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   assertTrustedPath(dirname(path), {kind: 'directory'});
   assertTrustedPath(path, {kind: 'file', private: true, allowMissing: true});
-  if (exclusive) { writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' }); return; }
   const temp = path + '.' + randomUUID();
-  try { writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' }); renameSync(temp, path); }
+  try {
+    writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    if (exclusive) linkSync(temp, path);
+    else renameSync(temp, path);
+  }
   finally { if (existsSync(temp)) unlinkSync(temp); }
 }
 export function readUpdateConfig(path: string): UpdateConfig {
@@ -73,12 +87,14 @@ export function readUpdateConfig(path: string): UpdateConfig {
 export class UpdateWorker {
   readonly config: UpdateConfig;
   readonly statePath: string;
-  private lock?: string;
+  private lock?: { path: string; database: DatabaseSync; token: string };
   private readonly node: string;
   private readonly commandTimeoutMs: number;
   private prepareToken?: string;
   private prepareUncertain = false;
   private activating = false;
+  /** Whether the activation in progress has stopped a runtime: only then is a failure an unfinished switch. */
+  private switched = false;
   constructor(config: UpdateConfig, options: { node?: string; commandTimeoutMs?: number } = {}) {
     this.config = validateUpdateConfig(config); this.node = options.node ?? process.execPath;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 15 * 60_000;
@@ -143,6 +159,7 @@ export class UpdateWorker {
   private marker(commit: string) { return join(this.config.deploymentDir, 'verified', commit + '.json'); }
   private owner() { return createHash('sha256').update(this.config.deploymentDir).digest('hex'); }
   claim() {
+    if (this.lock) throw new UpdateWorkerBusyError();
     for (const path of [this.config.deploymentDir, this.config.dataDir]) assertTrustedPath(path, {kind: 'directory', allowMissing: true});
     mkdirSync(this.config.deploymentDir, { recursive: true, mode: 0o700 });
     mkdirSync(this.config.dataDir, { recursive: true, mode: 0o700 });
@@ -157,18 +174,55 @@ export class UpdateWorker {
     for (const path of this.protectedPaths()) {
       if (within(deployment, path)) throw new Error('실행 데이터의 실제 저장 경로는 배포 경로 밖이어야 합니다');
     }
-    const lock = join(this.config.deploymentDir, 'worker.lock');
-    assertTrustedPath(lock, {kind: 'file', private: true, allowMissing: true});
-    if (existsSync(lock)) {
-      const old = JSON.parse(readFileSync(lock, 'utf8')) as { host: string; pid: number };
-      if (old.host !== hostname() || !Number.isSafeInteger(old.pid) || old.pid < 1 || alive(old.pid)) throw new Error('이 배포 경로를 관리하는 워커가 이미 있습니다');
-      unlinkSync(lock);
+    const lockPath = join(deployment, 'worker.lock'), database = this.acquireWorkerDatabase(deployment);
+    try {
+      assertTrustedPath(lockPath, {kind: 'file', private: true, allowMissing: true});
+      if (existsSync(lockPath)) {
+        const old = JSON.parse(readFileSync(lockPath, 'utf8')) as WorkerLock;
+        // Legacy workers have only a JSON marker. A PID from before this boot may have been reused.
+        if (old.host !== hostname() || !Number.isSafeInteger(old.pid) || old.pid < 1) throw new Error('이전 워커 잠금의 호스트 또는 PID를 확인할 수 없습니다');
+        // For a token-bearing marker the SQLite lock is authoritative, including after PID reuse.
+        if (!old.token && alive(old.pid) && !previousBoot(typeof old.at === 'number' ? old.at : undefined)) throw new UpdateWorkerBusyError();
+        unlinkSync(lockPath);
+      }
+      const token = randomUUID();
+      writePrivateJson(lockPath, { host: hostname(), pid: process.pid, at: Date.now(), token }, true);
+      this.lock = { path: lockPath, database, token };
+    } catch (error) {
+      database.close();
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new UpdateWorkerBusyError();
+      throw error;
     }
-    writePrivateJson(lock, { host: hostname(), pid: process.pid }, true); this.lock = lock;
   }
-  close() { if (this.lock) { unlinkSync(this.lock); this.lock = undefined; } }
+  private acquireWorkerDatabase(deployment: string): DatabaseSync {
+    const path = join(deployment, 'worker-lock.db');
+    for (const suffix of ['', '-journal', '-wal', '-shm'])
+      assertTrustedPath(path + suffix, {kind: 'file', private: true, allowMissing: true});
+    try { closeSync(openSync(path, 'wx', 0o600)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    assertTrustedPath(path, {kind: 'file', private: true});
+    const database = new DatabaseSync(path);
+    try {
+      // The kernel releases SQLite's write lock on exit, even when worker.lock is left behind.
+      database.exec('BEGIN IMMEDIATE');
+      return database;
+    } catch (error) {
+      database.close();
+      if ((error as {errcode?: number}).errcode === 5) throw new UpdateWorkerBusyError(); // SQLITE_BUSY
+      throw error;
+    }
+  }
+  close() {
+    if (!this.lock) return;
+    const {path, database, token} = this.lock;
+    this.lock = undefined;
+    try {
+      assertTrustedPath(path, {kind: 'file', private: true, allowMissing: true});
+      if (existsSync(path) && (JSON.parse(readFileSync(path, 'utf8')) as WorkerLock).token === token) unlinkSync(path);
+    } finally { database.close(); }
+  }
   private async command(command: string, args: string[], cwd: string) {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_)/.test(key)));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_)/.test(key) && !SESSION_ENV.test(key)));
     const operation = exec(command, args, { cwd, env, timeout: this.commandTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
     try {
       await operation;
@@ -225,10 +279,10 @@ export class UpdateWorker {
         try {
           assertTrustedPath(marker,{kind:'file',private:true});
           const saved = JSON.parse(readFileSync(marker,'utf8')) as typeof identity;
-          assertTrustedPath(this.lock,{kind:'file',private:true});
-          const lock = JSON.parse(readFileSync(this.lock,'utf8')) as {host:string;pid:number};
+          assertTrustedPath(this.lock.path,{kind:'file',private:true});
+          const lock = JSON.parse(readFileSync(this.lock.path,'utf8')) as WorkerLock;
           if (saved.token !== token || saved.host !== hostname() || saved.pid !== process.pid
-            || lock.host !== hostname() || lock.pid !== process.pid) throw new Error('준비 표시 또는 워커 잠금의 소유자가 바뀌었습니다');
+            || lock.host !== hostname() || lock.pid !== process.pid || lock.token !== this.lock.token) throw new Error('준비 표시 또는 워커 잠금의 소유자가 바뀌었습니다');
           unlinkSync(marker);
         } catch (error) {
           // Never clear an unknown owner's marker. Recreate a removed marker fail-closed where possible.
@@ -268,7 +322,7 @@ export class UpdateWorker {
   }
   private environment(role: RuntimeRole, commit: string): NodeJS.ProcessEnv {
     const d = this.config.dataDir;
-    const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_|PORT$|HOST$)/.test(key)));
+    const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_|PORT$|HOST$)/.test(key) && !SESSION_ENV.test(key)));
     return { ...inherited, AGENT_DESK_DB: join(d, 'agent-desk.db'),
       AGENT_DESK_UPLOADS: join(d, 'uploads'), AGENT_DESK_TOKEN_FILE: join(d, 'access-token'),
       AGENT_DESK_INSTRUCTIONS_FILE: join(d, 'instructions.md'), AGENT_DESK_SKILLS_HOME: join(d, 'desk-plugin'),
@@ -387,20 +441,22 @@ export class UpdateWorker {
     }
     throw new Error(`${role} 후보의 준비 확인 시간이 초과되었습니다. 강제 종료하거나 DB를 되돌리지 않았습니다`);
   }
-  async activate(commit: string): Promise<boolean> {
+  async activate(commit: string, expectedToken?: string): Promise<boolean> {
     if (!this.lock || !sha(commit)) throw new Error('워커 잠금과 고정 커밋이 필요합니다');
     const approval = this.readApproval();
+    if (expectedToken !== undefined && approval?.token !== expectedToken) return false;
     if (!approval || approval.commit !== commit) {
       this.preparationIdle();
       throw new Error('정확한 커밋에 대한 명시적 업데이트 승인이 필요합니다');
     }
     if (this.state().spentApproval === approval.token) throw new Error('이미 사용한 업데이트 승인입니다. 취소 후 다시 승인하세요');
     if (this.activating) throw new Error('이미 업데이트를 적용 중입니다');
-    this.activating = true;
+    this.activating = true; this.switched = false;
     let waiting = false;
     try { this.preparationIdle(); const activated = await this.activateApproved(commit, approval); waiting = !activated; return activated; }
     catch (error) {
-      this.save({...this.state(), phase: 'failed', error: error instanceof Error ? error.message : String(error)});
+      const state = this.state();
+      this.save({...state, phase: this.switched ? 'failed' : state.phase, error: error instanceof Error ? error.message : String(error)});
       throw error;
     }
     finally {
@@ -433,7 +489,7 @@ export class UpdateWorker {
         this.requireApproval(approval);
         // Commit the cancellation boundary immediately before the first stop, including failed-candidate cleanup.
         this.save({ ...this.state(), attempted: commit, phase: 'switching', error: undefined });
-        unlinkSync(this.approvalPath); switching = true;
+        unlinkSync(this.approvalPath); switching = true; this.switched = true;
       });
     };
     try {
@@ -468,7 +524,9 @@ export class UpdateWorker {
       catch (error) { this.save({ ...this.state(), error: `오래된 릴리스 정리를 건너뛰었습니다: ${error instanceof Error ? error.message : String(error)}` }); }
       return true;
     } catch (error) {
-      this.save({ ...this.state(), started: this.state().started, attempted: commit, phase: 'failed', error: error instanceof Error ? error.message : String(error) }); throw error;
+      // Before the first stop nothing ran yet: the current runtimes stay and no anchor moves.
+      const state = this.state();
+      this.save({ ...state, attempted: switching ? commit : state.attempted, phase: switching ? 'failed' : state.phase, error: error instanceof Error ? error.message : String(error) }); throw error;
     } finally {
       await Promise.allSettled(prepared.map(item => controlRequest(this.socket(item.role), { action: 'cancel', instance: item.runtime.instance, lease: item.lease })));
     }
@@ -493,17 +551,23 @@ export class UpdateWorker {
     if (state.phase === 'switching' || state.attempted) throw new Error('끝나지 않은 교체가 있습니다. status로 확인하고 수정된 후속 커밋으로 복구하세요');
     this.deploymentPaths(commit); this.protectedPaths();
     if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 릴리스는 실행할 수 없습니다');
-    const head = await exec('git', ['-C', join(this.config.deploymentDir, 'releases', commit), 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
+    const release = join(this.config.deploymentDir, 'releases', commit);
+    const head = await exec('git', ['-C', release, 'rev-parse', 'HEAD'], { maxBuffer: 4096 });
     if (head.stdout.trim() !== commit) throw new Error('현재 릴리스 체크아웃의 커밋이 바뀌었습니다');
-    const started: RuntimeRole[] = [];
+    await this.command('git', ['diff', '--exit-code', 'HEAD', '--'], release);
+    // Every missing role must have its port free before any starts, so a taken port leaves nothing half managed.
+    const missing: RuntimeRole[] = [];
     for (const role of this.config.roles) {
       const runtime = await this.observe(role);
-      if (runtime?.ready && runtime.commit === commit) continue;
-      if (runtime?.ready) throw new Error(`${role} 런타임이 다른 커밋으로 실행 중입니다. 승인 절차로 교체하세요`);
-      await this.start(role, commit); started.push(role);
+      if (runtime && runtime.commit !== commit) throw new Error(`${role} 런타임이 다른 커밋으로 실행 중입니다. 승인 절차로 교체하세요`);
+      if (runtime?.ready) continue;
+      if (!runtime) await this.preflight(role, this.environment(role, commit));
+      missing.push(role);
     }
+    for (const role of missing) await this.start(role, commit);
+    if (missing.length) this.save({ ...this.state(), started: undefined });
     this.pointCurrent(commit);
-    return started;
+    return missing;
   }
   /** Retain recovery/runtime anchors and three other recent releases; never traverse external roots. */
   async pruneReleases(): Promise<string[]> {

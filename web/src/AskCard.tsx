@@ -1,4 +1,4 @@
-import { useAnswerWriter, answerOperation, useAnswerPending } from './answerComposer.tsx';
+import { useAnswerWriter, answerOperation, useAnswerPending, cancelAnswerTarget } from './answerComposer.tsx';
 import { useEffect, useState } from 'react';
 import { ASK_USER, type Answers } from '../../shared/protocol.ts';
 import { api } from './api.ts';
@@ -20,6 +20,13 @@ function answerOf(q: AskQuestion, p: Pick): string {
   return [...p.labels, ...(other ? [other] : [])].join(', ');
 }
 
+function answersReady(questions: AskQuestion[], picks: Pick[]): boolean {
+  return questions.length > 0 && questions.every((question, index) => {
+    const pick = picks[index];
+    return (!pick.otherOn || !!pick.other.trim()) && answerOf(question, pick) !== '';
+  });
+}
+
 /** Short one-line summary for the approval queue. */
 export function askSummary(input: Record<string, any>): string {
   const qs: AskQuestion[] = Array.isArray(input?.questions) ? input.questions : [];
@@ -35,7 +42,8 @@ export function AskCard({ post, approval, onError }: {
   post: Post; approval: Approval | undefined; onError?: (msg: string) => void;
 }) {
   const p = post.event.payload;
-  const operationKey = `${post.taskId}:approval:${p.approvalId}`;
+  const questionId = `approval:${p.approvalId}`;
+  const operationKey = `${post.taskId}:${questionId}`;
   const sending = useAnswerPending(operationKey);
   const qs: AskQuestion[] = Array.isArray(p.input?.questions) ? p.input.questions : [];
   const r = post.resolution?.payload;
@@ -54,7 +62,7 @@ export function AskCard({ post, approval, onError }: {
 
   useEffect(() => {
     const kept = picks.map((x, i) => (qs[i]?.secret ? { ...x, other: '' } : x));
-    const empty = !!outcome || kept.every((x) => !x.labels.length && !x.other.trim());
+    const empty = !!outcome || kept.every((x, i) => !x.labels.length && !x.other.trim() && (!x.otherOn || qs[i]?.secret));
     setDraft(draftKey, kept, { taskId: post.taskId, empty });
   }, [draftKey, picks, outcome, post.taskId]);
   useDraftSync<Pick[]>(draftKey, (v) => setPicks(previous => v?.length === qs.length ? v.map((p, i) => qs[i].secret ? previous[i] ?? EMPTY : p) : qs.map(() => EMPTY)));
@@ -67,10 +75,13 @@ export function AskCard({ post, approval, onError }: {
     const next = picks.map((x, k) => k === i ? f(x) : x);
     if (qs[i].secret) setPicks(next); else savePicks(next);
   };
-  const choose = (i: number, label: string) => set(i, (x) => qs[i].multiSelect
-    ? { ...x, labels: x.labels.includes(label) ? x.labels.filter((l) => l !== label) : [...x.labels, label] }
-    : { ...x, labels: [label], otherOn: false });
-  const ready = qs.length > 0 && qs.every((q, i) => answerOf(q, picks[i]) !== '');
+  const choose = (i: number, label: string) => {
+    if (!qs[i].multiSelect) cancelAnswerTarget(post.taskId, questionId, i);
+    set(i, (x) => qs[i].multiSelect
+      ? { ...x, labels: x.labels.includes(label) ? x.labels.filter((l) => l !== label) : [...x.labels, label] }
+      : { ...x, labels: [label], otherOn: false });
+  };
+  const ready = answersReady(qs, picks);
 
   const submit = async () => {
     if (!ready || busy || sending || !approval) return;
@@ -80,9 +91,9 @@ export function AskCard({ post, approval, onError }: {
     catch (e) { onError?.(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
-  const write = useAnswerWriter(post.taskId, `approval:${p.approvalId}`, !outcome && !!approval && !busy && !sending, async (index, text) => {
+  const write = useAnswerWriter(post.taskId, questionId, !outcome && !!approval && !busy && !sending, async (index, text) => {
     const next = picks.map((p, i) => i === index ? { ...p, other: text, otherOn: true, labels: qs[i].multiSelect ? p.labels : [] } : p);
-    if (!qs.some(q => q.secret) && qs.every((q, i) => answerOf(q, next[i]))) {
+    if (!qs.some(q => q.secret) && answersReady(qs, next)) {
       const out = Object.fromEntries(qs.map((q, i) => [q.question, answerOf(q, next[i])]));
       await answerOperation(operationKey, () => api.resolve(approval!.id, true, undefined, out)); setSent(out);
     }
@@ -145,7 +156,10 @@ export function AskCard({ post, approval, onError }: {
                   role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={pick.otherOn}
                   onClick={() => {
                     if (q.secret) set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] }));
-                    else if (pick.otherOn) set(i, x => ({ ...x, otherOn: false, other: '' }));
+                    else if (pick.otherOn) {
+                      cancelAnswerTarget(post.taskId, questionId, i);
+                      set(i, x => ({ ...x, otherOn: false, other: '' }));
+                    }
                     // Shown as chosen (a single pick dropped) right away, while the reply box waits for the text.
                     else { set(i, (x) => ({ ...x, otherOn: true, labels: q.multiSelect ? x.labels : [] })); write(q.question, i); }
                   }}>
