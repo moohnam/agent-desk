@@ -143,7 +143,12 @@ export function AskCard({ post, approval, onError }: {
                 })}
                 <button type="button" className={`ask-opt${pick.otherOn ? ' on' : ''}`} disabled={busy || sending}
                   role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={pick.otherOn}
-                  onClick={() => { if (!q.secret && pick.otherOn) set(i, x => ({ ...x, otherOn: false, other: '' })); else if (!q.secret) write(q.question, i); else set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] })); }}>
+                  onClick={() => {
+                    if (q.secret) set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] }));
+                    else if (pick.otherOn) set(i, x => ({ ...x, otherOn: false, other: '' }));
+                    // Shown as chosen (a single pick dropped) right away, while the reply box waits for the text.
+                    else { set(i, (x) => ({ ...x, otherOn: true, labels: q.multiSelect ? x.labels : [] })); write(q.question, i); }
+                  }}>
                   <span className="mark">{q.multiSelect ? (pick.otherOn ? '☑' : '☐') : (pick.otherOn ? '◉' : '○')}</span>
                   <span><b>기타</b><span className="desc">직접 입력</span></span>
                 </button>
