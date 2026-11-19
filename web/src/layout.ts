@@ -44,6 +44,21 @@ export function groupsOf(placed: PlacedPost[]): PlacedPost[][] {
   return out;
 }
 
+/** Key runs by their full loaded extent, before clipping to the render window.
+ * A new post can evict the visible tail without replacing the existing group DOM.
+ */
+export function visibleFeedGroups(placed: PlacedPost[], count: number): { key: number; posts: PlacedPost[] }[] {
+  const result: { key: number; posts: PlacedPost[] }[] = [];
+  for (let start = 0; start < placed.length && count > 0;) {
+    let end = start + 1;
+    while (end < placed.length && placed[end].up) end++;
+    result.push({ key: placed[end - 1].post.id, posts: placed.slice(start, Math.min(start + count, end)) });
+    count -= end - start;
+    start = end;
+  }
+  return result;
+}
+
 export function filterLabel(def: ColumnDef, projects: Map<string, Project>, tasks: Map<string, TaskView>): string {
   const f = def.filter;
   const text = def.note ?? ([

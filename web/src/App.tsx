@@ -302,7 +302,7 @@ export function App() {
   // Every view's columns: their loaded events stay while any of them uses the query.
   const keptDefs = () => [...custom, ...(['project', 'task', 'status'] as const)
     .flatMap((v) => viewColumns(v, hub.tasks, hub.projects, stalled, drafts, viewByTask))];
-  const { feeds, loadEarlier: loadEarlierColumn, setReading: keepColumnHistory } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
+  const { feeds, loadEarlier: loadEarlierColumn, setReading: keepColumnHistory } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone, hub.onEventBatch);
   // "글 많은 순": a column takes its place by its first count, and keeps it until the view opens again.
   useEffect(() => {
     if (viewOrder[view] !== 'count') return;

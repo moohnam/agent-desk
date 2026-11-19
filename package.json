@@ -17,7 +17,8 @@
     "runner:remote-migrate": "node hub/src/runner/remote-migration.ts",
     "runner:shared": "node hub/src/runner/shared.ts",
     "runner:local": "node hub/src/runner/local.ts",
-    "runner:stop": "kill $(cat data/runner.pid)"
+    "runner:stop": "kill $(cat data/runner.pid)",
+    "perf:bench": "node perf-bench/run.mjs"
   },
   "engines": {
     "node": ">=26"

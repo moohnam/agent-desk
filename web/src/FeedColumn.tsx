@@ -4,7 +4,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode, 
 import { PostView } from './PostView.tsx';
 import { projectColor } from './projects.ts';
 import type { Approval, ColumnDef, PlacedPost, Post, Project, Question, TaskView } from './types.ts';
-import { taskHue, groupsOf, filterLabel } from './layout.ts';
+import { taskHue, visibleFeedGroups, filterLabel } from './layout.ts';
 import { StatusBadge, TerminalBadge } from './badges.tsx';
 import { ResizeHandle } from './handles.tsx';
 
@@ -13,11 +13,14 @@ export interface DeckColumn { id: string; def?: ColumnDef; placed: PlacedPost[];
 export const EXTERNAL_NOTE = '터미널 세션입니다. 에이전트가 질문하면 여기서 답할 수 있습니다.';
 
 /** Posts a feed column draws at first, and adds at a time near its bottom. */
-export const DRAWN = 40, DRAW_STEP = 60;
-/** Drawn in a column off screen until it first comes into view: a view switch mounts far fewer posts. */
-const DRAWN_HIDDEN = 8;
+// Crossing the viewport edge must not mount a whole page of off-screen bodies.
+// Start with the same small window in every column; extend() fills a short viewport
+// and scrolling/keyboard selection still reveals older posts on demand.
+export const DRAWN = 8, DRAW_STEP = 8;
 /** How near the bottom (px) a feed draws or loads more. */
 export const EXTEND_PX = 600;
+/** Keep network prefetch independent from the smaller render batches. */
+const PREFETCH_POSTS = 120;
 /** How long a feed stays at its top before it draws only its newest posts again. */
 export const SHRINK_MS = 20_000;
 /** What a feed column shows besides its posts: only the tasks, models and the rest its posts refer to. */
@@ -74,13 +77,12 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
     io.observe(sectionRef.current);
     return () => io.disconnect();
   }, [seen]);
-  const base = floor == null ? Math.min(seen ? DRAWN : DRAWN_HIDDEN, placed.length) : (() => {
+  const base = floor == null ? Math.min(DRAWN, placed.length) : (() => {
     const k = placed.findIndex((x) => x.post.id === floor);
     return k < 0 ? placed.length : k + 1;
   })();
   const selectedAt = selected == null ? -1 : placed.findIndex((x) => x.post.id === selected);
   const count = Math.max(base, selectedAt + 1);
-  const drawn = count < placed.length ? placed.slice(0, count) : placed;
   // The selection moved past the drawn posts (j, G): they stay drawn when it comes back up.
   useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -89,7 +91,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
     if (!seen) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
     if (count < placed.length) setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
-    if (more && !loading && placed.length - count <= 2 * DRAW_STEP) act.current.older(id);
+    if (more && !loading && placed.length - count <= PREFETCH_POSTS) act.current.older(id);
   };
   // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
   useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen]);
@@ -98,9 +100,12 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   useEffect(() => () => clearTimeout(shrink.current), []);
   const onScroll = (feed: HTMLElement) => {
     act.current.scroll(id, feed);
-    extend(feed);
     clearTimeout(shrink.current);
-    if (feed.scrollTop >= 40) { if (floor == null && count) setFloor(placed[count - 1].post.id); return; }
+    // Preserve the current window before extending it; the opposite order would
+    // overwrite the larger window requested by extend() on the first scroll.
+    if (feed.scrollTop >= 40 && floor == null && count) setFloor(placed[count - 1].post.id);
+    extend(feed);
+    if (feed.scrollTop >= 40) return;
     if (floor != null) shrink.current = window.setTimeout(() => setFloor(null), SHRINK_MS);
   };
   return (
@@ -117,13 +122,13 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
             <button onClick={() => act.current.showNewest(id)}>↑ 새 글 {unseen}개</button>
           </div>
         ) : null}
-        {groupsOf(drawn).map((group) => {
+        {visibleFeedGroups(placed, count).map(({ key, posts: group }) => {
           const task = ctx.tasks.get(group[0].post.taskId);
           const pending = group.some(({ post }) => !post.resolution
             && (post.kind === 'approval' ? ctx.approvals.has(post.event.payload.approvalId)
               : post.kind === 'question' && ctx.questions.has(post.event.payload.questionId)));
           return (
-            <div key={group[group.length - 1].post.id} className={`group${pending ? ' has-approval' : ''}`}
+            <div key={key} className={`group${pending ? ' has-approval' : ''}`}
               style={task ? { '--pc': projectColor(task.project_id), '--th': taskHue(task.seq) } as CSSProperties : undefined}>
               {task && <GroupContext task={task} now={now} onOpen={() => act.current.openThread(task.id, id)} />}
               {group.map(({ post: p, up, down }) => (

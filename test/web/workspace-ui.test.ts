@@ -473,10 +473,11 @@ test('an empty shared project deleted during a delayed workspace read does not r
 
 test('a project column receives the first event of a task created in the same SSE batch', async () => {
   const h = hooks(), streams: any[] = [];
+  const batches: number[] = [];
   const project = { id: 'project', name: 'project' };
   const task = { id: 'new-task', project_id: project.id, title: 'new', status: 'running', title_revision: 0 };
-  const event = { id: 1, task_id: task.id, session_id: 'session', kind: 'user', ts: '2026-11-12T00:00:00Z', payload: { text: 'first' } };
-  const defs = [{ id: 'project-column', filter: { projectIds: [project.id] } }];
+  const event = { id: 13001, task_id: task.id, session_id: 'session', kind: 'user', ts: '2026-11-12T00:00:00Z', payload: { text: 'first' } };
+  const defs = ['project-column', 'same-query'].map(id => ({ id, filter: { projectIds: [project.id] } }));
   const module = load('useHub.ts', {
     react: h.react, './api.ts': { api: {
       state: async () => ({ projects: [project], tasks: [], approvals: [], questions: [], channels: [] }),
@@ -484,25 +485,49 @@ test('a project column receives the first event of a task created in the same SS
       feedCount: async () => ({ posts: 0, tasks: 0 }), remember() {},
     }, FEED_PAGE: 1000 },
     './federation.ts': { ...federation, discoverSources: async () => {}, getSources: () => [], subscribeSources: () => () => {} },
-    './posts.ts': posts, './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} },
-    './feedCache.ts': feedCache,
+    './posts.ts': { ...posts, mergeEvents: (a: HubEvent[], b: HubEvent[], cap?: number) => {
+      batches.push(b.length); return posts.mergeEvents(a, b, cap);
+    } }, './projects.ts': { assignProjectColors() {}, forgetProjectColors() {} },
+    './feedCache.ts': feedCache, './noteEvents.ts': noteEvents,
   }, { EventSource: class { onmessage: any; constructor() { streams.push(this); } close() {} },
     AbortController, window: { setTimeout }, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {} });
   const render = () => h.render(() => {
     const hub = module.useHub();
-    const columns = module.useColumnFeeds(defs, () => defs, hub.tasks, hub.onEvent, hub.synced, hub.gone);
+    const columns = module.useColumnFeeds(defs, () => defs, hub.tasks, hub.onEvent, hub.synced, hub.gone, hub.onEventBatch);
     return { hub, columns };
   });
   try {
     await render().hub.refresh();
     render();
     await Promise.resolve();
+    batches.length = 0;
     streams[0].onmessage({ data: JSON.stringify({ type: 'event', event }) });
+    const whole = { ...event, id: 13002, payload: { text: 'whole' } };
+    streams[0].onmessage({ data: JSON.stringify({ type: 'event', event: { ...whole, payload: { text: 'cut', clipped: true } } }) });
+    streams[0].onmessage({ data: JSON.stringify({ type: 'event', event: whole }) });
     streams[0].onmessage({ data: JSON.stringify({ type: 'task', task }) });
     await new Promise(resolve => setTimeout(resolve, 65));
     const result = render();
     assert.equal(result.hub.tasks.has(task.id), true);
-    assert.equal(result.columns.feeds.get('project-column')?.events.map((e: any) => e.id).join(','), String(event.id));
+    assert.equal(result.columns.feeds.get('project-column')?.events.map((e: any) => e.id).join(','), '13001,13002');
+    assert.equal(result.columns.feeds.get('project-column')?.events[1].payload.text, 'whole');
+    assert.deepEqual(batches, [3, 3], 'one global merge and one query merge, not one merge per event');
+    assert.equal(result.columns.feeds.get('same-query'), result.columns.feeds.get('project-column'));
+    const send = (message: unknown) => streams[0].onmessage({ data: JSON.stringify(message) });
+    const note = { ...event, id: 13003, payload: { text: 'before', revision: 1 } };
+    send({ type: 'event', event: note });
+    send({ type: 'event_updated', event: { ...note, payload: { text: 'edited', revision: 2 } } });
+    send({ type: 'event', event: { ...note, id: 13004 } });
+    send({ type: 'event_removed', event_id: 13004, task_id: task.id });
+    await new Promise(resolve => setTimeout(resolve, 65));
+    const updated = render().columns.feeds.get('project-column').events;
+    assert.equal(updated.find((e: any) => e.id === 13003)?.payload.text, 'edited');
+    assert.equal(updated.some((e: any) => e.id === 13004), false);
+    send({ type: 'event', event: { ...note, id: 13005 } });
+    send({ type: 'removed', taskIds: [task.id], projectIds: [] });
+    await new Promise(resolve => setTimeout(resolve, 65));
+    assert.equal(render().columns.feeds.get('project-column').events.length, 0);
+
   } finally { h.unmount(); }
 });
 
@@ -680,10 +705,10 @@ test('pagination resumes at the oldest retained post after live compaction', asy
   }, { AbortController, window: { setTimeout: setTimer }, setTimeout: setTimer, clearTimeout: clearTimer });
   const defs = [{ id: 'column', filter: {} }];
   const onEvent = (fn: (e: any) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
-  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), onEvent, 0));
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), () => () => {}, 0, new Set(), onEvent));
   try {
     render(); await Promise.resolve(); await Promise.resolve();
-    for (const id of [3, 4]) for (const listener of listeners) listener(event(id));
+    for (const listener of listeners) listener([3, 4].map(id => ({ event: event(id) })));
     assert.equal(render().feeds.get('column')?.events.map((e: any) => e.id).join(','), '2,3,4');
     render().loadEarlier('column');
     await Promise.resolve(); await Promise.resolve();

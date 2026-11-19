@@ -23,6 +23,8 @@ test('cached syntax survives downstream mutation and returns independent positio
   second.position!.end.offset = 0;
   assert.deepEqual(read(), expected);
   assert.equal(calls, 1);
+  assert.equal(cache.stats().hits, 2);
+  assert.equal(cache.stats().misses, 1);
 });
 
 test('recently used syntax survives entry eviction while evicted syntax reparses normally', () => {
@@ -32,6 +34,7 @@ test('recently used syntax survives entry eviction while evicted syntax reparses
   read('first'); read('second'); read('first'); read('third'); read('first'); read('second');
   assert.deepEqual(calls, ['first', 'second', 'third', 'second']);
   assert.equal(cache.size, 2);
+  assert.equal(cache.stats().evictions, 2);
 });
 
 test('UTF-16 storage budget and single-entry limits bound source churn without truncating output', () => {

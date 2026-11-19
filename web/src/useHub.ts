@@ -16,6 +16,9 @@ const WHOLE_DELAY_MS = 400;
 /** How long live hub messages gather before one render handles them together. */
 const SSE_BATCH_MS = 50;
 
+type FeedEventBatch = { event: HubEvent; task?: TaskView }[];
+type SubscribeEventBatch = (fn: (batch: FeedEventBatch) => void) => () => void;
+
 /** Hub state and the recent cross-task event feed, kept live over SSE. */
 export function useHub() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -45,6 +48,7 @@ export function useHub() {
   // Devices asking to connect and devices let in: on this Mac's pages only.
   const [access, setAccess] = useState<AccessView | null>(null);
   const listeners = useRef(new Set<(e: HubEvent, task?: TaskView) => void>());
+  const batchListeners = useRef(new Set<(batch: FeedEventBatch) => void>());
   // Counts state reloads (each SSE (re)connect): feed columns reload their newest page with it.
   const [synced, setSynced] = useState(0);
   // Tasks deleted while this page is open: their events, wherever cached, are no longer shown.
@@ -222,6 +226,8 @@ export function useHub() {
       const liveEvents = visibleNoteEvents(events.filter(e => !deleted.current.has(e.task_id)));
       if (liveEvents.length) {
         setEvents((prev) => mergeEvents(prev, liveEvents, FEED_CAP));
+        const entries = liveEvents.map(event => ({ event, task: currentTasks.current.get(event.task_id) }));
+        batchListeners.current.forEach(fn => fn(entries));
         for (const e of liveEvents) listeners.current.forEach((fn) => fn(e, currentTasks.current.get(e.task_id)));
       }
       // Publish new posts before their edits so a thread can update them even in one batch.
@@ -263,11 +269,16 @@ export function useHub() {
     return () => { listeners.current.delete(fn); };
   }, []);
 
+  const onEventBatch: SubscribeEventBatch = useCallback(fn => {
+    batchListeners.current.add(fn);
+    return () => { batchListeners.current.delete(fn); };
+  }, []);
+
   const onChannelEntry = useCallback((fn: (entry: ChannelEntry) => void) => {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, runnerProblem, local, access, synced, gone, availableSources, refresh, onEvent };
+  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, runnerProblem, local, access, synced, gone, availableSources, refresh, onEvent, onEventBatch };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */
@@ -329,7 +340,7 @@ interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean
  * pages until it returns to the top; trimmed records can always be paged from the hub again.
  */
 export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks: Map<string, TaskView>,
-  onEvent: (fn: (e: HubEvent, task?: TaskView) => void) => () => void, synced: number, gone: Set<string> = new Set()) {
+  onEvent: (fn: (e: HubEvent, task?: TaskView) => void) => () => void, synced: number, gone: Set<string> = new Set(), onEventBatch?: SubscribeEventBatch) {
   const cache = useRef(new Map<string, FeedEntry>());
   const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.filter((d) => !d.channelId).map((d) => [d.id, feedQuery(d.filter, tasks)]));
@@ -501,17 +512,24 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     bump();
   }, [sig, synced]);
 
-  useEffect(() => onEvent((e, task) => {
-    task ??= current.current.tasks.get(e.task_id);
-    let any = false;
-    for (const [k, f] of cache.current) {
-      if (!f.live || current.current.gone.has(e.task_id) || !accepts(f.q, e, task)) continue;
-      cache.current.set(k, compactFeed({ ...f, events: mergeEvents(f.events, [e]) }, protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT, current.current.gone));
-      count(k, COUNT_EVERY);
-      any = true;
-    }
-    if (any) bump();
-  }), [onEvent]);
+  useEffect(() => {
+    const receive = (batch: FeedEventBatch) => {
+      let any = false;
+      for (const [k, f] of cache.current) {
+        if (!f.live) continue;
+        const incoming = batch.filter(({ event, task }) => !current.current.gone.has(event.task_id)
+          && accepts(f.q, event, task ?? current.current.tasks.get(event.task_id))).map(({ event }) => event);
+        if (!incoming.length) continue;
+        // Keep the existing 50ms delivery boundary: merge each query once, before note edits/removals.
+        cache.current.set(k, compactFeed({ ...f, events: mergeEvents(f.events, incoming) },
+          protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT, current.current.gone));
+        count(k, COUNT_EVERY);
+        any = true;
+      }
+      if (any) bump();
+    };
+    return onEventBatch ? onEventBatch(receive) : onEvent((event, task) => receive([{ event, task }]));
+  }, [onEvent, onEventBatch]);
 
   useEffect(() => onNoteChange(change => {
     let changed = false;
