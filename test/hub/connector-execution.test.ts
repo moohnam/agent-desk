@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { EventEmitter, once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hub } from '../../hub/src/hub.ts';
@@ -9,6 +11,8 @@ import { SkillStore } from '../../hub/src/skills.ts';
 import { ConnectorBroker, type ConnectorExecutionContext } from '../../hub/src/connector-broker.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { codexMcpProcess, claudeMcpOptions } from '../../hub/src/runner/managed-mcp.ts';
+import { RunnerClient } from '../../hub/src/runner/client.ts';
+import { readLines, writeLine } from '../../hub/src/runner/wire.ts';
 import { MODE_LABEL } from '../../shared/compose.ts';
 import { checkHubToRunner, type HubToRunner, type RunnerToHub } from '../../shared/protocol.ts';
 
@@ -276,8 +280,47 @@ test('engine MCP secrets use child environment only and invalid endpoints are re
   assert.equal(codexMcpProcess().env.AGENT_DESK_CONNECTOR_MCP_AUTH,undefined);
   const start={type:'start',sessionId:'s',engine:'codex',cwd:'/tmp',prompt:'test',permissionMode:'auto',connectorMcp:connector};
   assert.equal(typeof checkHubToRunner(start),'object');
-  for(const url of ['https://remote/v1/connector-mcp','http://127.0.0.1:4321/other','http://user@127.0.0.1/v1/connector-mcp'])
+  const ipv6DeskMcpUrl='http://[::1]:17641/mcp';
+  assert.equal(typeof checkHubToRunner({...start,ipv6DeskMcpUrl,connectorMcp:{...connector,url:'http://[::1]:17641/v1/connector-mcp'}}),'object');
+  for(const url of ['https://remote/v1/connector-mcp','http://127.0.0.1:4321/other','http://user@127.0.0.1/v1/connector-mcp',
+    'http://[::]:17641/v1/connector-mcp','http://[::1]:65536/v1/connector-mcp','http://[::1]:17641/v1/connector-mcp\n'])
     assert.equal(typeof checkHubToRunner({...start,connectorMcp:{...connector,url}}),'string');
+  for(const url of ['http://[::]:17641/mcp','http://[::1]:0/mcp','http://[::1]:17641/mcp?other=1','http://127.0.0.1:17641/mcp'])
+    assert.equal(typeof checkHubToRunner({...start,ipv6DeskMcpUrl:url}),'string');
+});
+
+test('an older local runner accepts ordinary starts on an IPv6 hub without receiving connector credentials', { timeout: 5000 }, async t => {
+  const commands: unknown[] = [];
+  const events = new EventEmitter();
+  const server = createServer(socket => readLines(socket, message => {
+    if ((message as HubToRunner).type === 'auth') writeLine(socket, {
+      type: 'hello', runnerId: 'legacy', host: 'local', sessions: [], protocolVersion: 1,
+      capabilities: { engines: ['codex'], connectorMcp: true },
+    } satisfies RunnerToHub);
+    else { commands.push(message); events.emit('command'); }
+  }));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const connected = once(events, 'connected', { signal: t.signal });
+  const client = new RunnerClient(() => {}, up => { if (up) events.emit('connected'); }, {
+    port: (server.address() as AddressInfo).port, token: () => 'fixture', spawnIfMissing: false,
+    ipv6DeskMcpUrl: () => 'http://[::1]:17641/mcp',
+  });
+  try {
+    await connected;
+    assert.equal(client.connectorMcpSupported, false);
+    const start = { type: 'start', sessionId: 'old', cwd: tmpdir(), engine: 'codex', prompt: 'test', permissionMode: 'auto' } as const;
+    assert.throws(() => client.handle({ ...start, connectorMcp: {
+      url: 'http://[::1]:17641/v1/connector-mcp', token: 'a'.repeat(43),
+    } }), /로컬 러너를 업데이트/);
+    const received = once(events, 'command', { signal: t.signal });
+    client.handle(start);
+    await received;
+    assert.deepEqual(commands, [start]);
+  } finally {
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
 
 test('unsupported AGY keeps ordinary work usable without receiving connector authority',()=>{

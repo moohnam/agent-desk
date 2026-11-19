@@ -689,7 +689,10 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     if(!localAuthorityId)hub.channels.start();
     const address = server.address();
     if (directWorkspace && address && typeof address !== 'string') {
-      hub.connectorMcpUrl = `http://127.0.0.1:${address.port}/v1/connector-mcp`;
+      const ipv6 = address.address === '::1';
+      const origin = `http://${ipv6 ? '[::1]' : '127.0.0.1'}:${address.port}`;
+      hub.ipv6DeskMcpUrl = ipv6 ? `${origin}/mcp` : undefined;
+      hub.connectorMcpUrl = `${origin}/v1/connector-mcp`;
       directTimer = setInterval(pollDirect, 100); directTimer.unref();
     }
   });

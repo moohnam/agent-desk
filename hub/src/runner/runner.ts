@@ -175,7 +175,7 @@ export class Runner {
     try { call(adapter).catch(report); } catch (err) { report(err); }
   }
 
-  handle(cmd: HubToRunner) {
+  handle(cmd: HubToRunner, mcp = this.mcp) {
     if (cmd.type === 'start' || cmd.type === 'send') requireAdmission();
     switch (cmd.type) {
       case 'refresh_models': this.refreshModels(cmd.force); break;
@@ -194,7 +194,7 @@ export class Runner {
           if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
           entry.adapter = start({
             sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: this.mcp,
+            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {

@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { Store } from '../db.ts';
-import { config } from '../config.ts';
+import { config, recordDeskPortDefaults } from '../config.ts';
 import { hubBlockers, registerRuntimeControl } from '../runtime-control.ts';
 import { SharedWorkspace } from '../shared-workspace.ts';
 import { LocalRuntime, connectLocalTakeover } from './local-runtime.ts';
@@ -25,6 +25,7 @@ async function requireLegacyHubStopped() {
 
 const [command, name, file] = process.argv.slice(2);
 if (command === 'grant' || command === 'revoke' || command === 'peers') {
+  recordDeskPortDefaults();
   const store = new Store(config.dbPath);
   const workspace = new SharedWorkspace(undefined, store);
   try {
@@ -45,6 +46,7 @@ if (command === 'grant' || command === 'revoke' || command === 'peers') {
   if (command&&!liveTakeover) throw new Error('지원하지 않는 로컬 러너 명령입니다');
   if (liveTakeover&&localAuthorityActivated(config.dbPath)) throw new Error('첫 전환에만 --takeover-live를 사용하세요');
   if (!localAuthorityActivated(config.dbPath)) await requireLegacyHubStopped();
+  recordDeskPortDefaults();
   const runtime = liveTakeover ? await connectLocalTakeover(config.dbPath) : new LocalRuntime(config.dbPath);
   const server = runtime.server();
   server.on('error', error => { runtime.close(); console.error(error); process.exitCode = 1; });

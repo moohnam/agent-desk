@@ -27,7 +27,7 @@ export interface SkillSnapshot { version: 1; selected: string[]; files: SkillTra
 export const PROTOCOL_VERSION = 1;
 
 /** What a runner can do: the engines it runs, and `close`: it understands the close command. */
-export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean; modelCatalogs?: ModelCatalogs; usage?: true }
+export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean; ipv6Mcp?: true; modelCatalogs?: ModelCatalogs; usage?: true }
 
 /** A Codex question asked in passing (delivery 'async'): the user's next message answers it. */
 export interface AsyncQuestion { title: string; options: string[] }
@@ -46,7 +46,7 @@ export type HubToRunner =
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
   | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
-      permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
+      permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; ipv6DeskMcpUrl?: string; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
   | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
@@ -119,11 +119,17 @@ const strList = (v: unknown) => v === undefined || (Array.isArray(v) && v.every(
 const snapshot = (v: unknown) => v === undefined || (isObj(v) && v.version === 1 && str(v.digest)
   && Array.isArray(v.selected) && v.selected.every(str) && Array.isArray(v.files)
   && isObj(v.hashes));
+const ipv6DeskMcpEndpoint = /^http:\/\/\[::1\]:([0-9]{1,5})\/mcp$/;
+const connectorMcpEndpoint = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([0-9]{1,5})\/v1\/connector-mcp$/;
+const validMcpEndpoint = (url: unknown, pattern: RegExp) => {
+  if (typeof url !== 'string') return false;
+  const match = pattern.exec(url);
+  return !!match && match[0] === url && Number(match[1]) > 0 && Number(match[1]) <= 65535;
+};
 const connectorMcp = (v: unknown) => {
   if (v === undefined) return true;
-  if (!isObj(v) || typeof v.url !== 'string' || typeof v.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(v.token)) return false;
-  const endpoint = /^http:\/\/127\.0\.0\.1:([0-9]{1,5})\/v1\/connector-mcp$/.exec(v.url);
-  return !!endpoint && Number(endpoint[1]) > 0 && Number(endpoint[1]) <= 65535;
+  return isObj(v) && typeof v.token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(v.token)
+    && validMcpEndpoint(v.url, connectorMcpEndpoint);
 };
 const MODES = ['auto', 'default'];
 
@@ -136,7 +142,8 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
         && (m.createDirectory === undefined || m.createDirectory === true && m.resume === undefined && (m.fork === undefined || m.fork === false))
-        && connectorMcp(m.connectorMcp) && optStr(m.instructions) && (m.instructions === undefined || (m.instructions as string).length <= 32768) && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
+        && connectorMcp(m.connectorMcp) && (m.ipv6DeskMcpUrl === undefined || validMcpEndpoint(m.ipv6DeskMcpUrl, ipv6DeskMcpEndpoint))
+        && optStr(m.instructions) && (m.instructions === undefined || (m.instructions as string).length <= 32768) && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
         ? m as HubToRunner : 'start: bad fields';
     case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';
     case 'set_mode': return MODES.includes(m.permissionMode as string) ? m as HubToRunner : 'set_mode: bad mode';

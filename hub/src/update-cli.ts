@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readUpdateConfig, UpdateWorker, UpdateWorkerBusyError, validateUpdateConfig, writePrivateJson } from './updater.ts';
+import { managedPortEnvironment } from './ports.ts';
 
 const [command, configPath, ...args] = process.argv.slice(2);
 if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply', 'cancel', 'start'].includes(command)) {
@@ -18,7 +19,8 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
     deploymentDir: options.get('--deployment-dir'), dataDir: options.get('--data-dir'), roles: options.get('--roles')?.split(','),
     environment: options.has('--environment-file') ? JSON.parse(readFileSync(resolve(options.get('--environment-file')!), 'utf8')) : {},
     intervalMs: Number(options.get('--interval-ms') ?? 300_000) });
-  writePrivateJson(resolve(configPath), config, true);
+  const ports = managedPortEnvironment(config.dataDir, config.environment, config.roles.includes('shared'));
+  writePrivateJson(resolve(configPath), { ...config, environment: { ...ports, ...config.environment } }, true);
   console.log('이 머신의 업데이트 설정만 만들었습니다. 기존 서비스·프로세스는 변경하지 않았습니다.');
 } else {
     if (command === 'approve' ? args.length !== 2 : command === 'cancel' ? args.length !== 1 : command === 'apply' ? args.length > 1 || args[0] === '' : args.length)

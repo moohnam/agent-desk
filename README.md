@@ -8,8 +8,8 @@ TweetDeck처럼 여러 컬럼에서 CLI 에이전트(Claude Code, Codex) 작업�
 
 | 위치 | 역할 |
 | --- | --- |
-| `hub/` | HTTP 서버(기본 `:4317`). 프로젝트·작업·이벤트를 SQLite(`node:sqlite`)에 저장하고, SSE로 화면에 실시간 전달합니다. 빌드한 웹 화면도 함께 제공합니다. |
-| `hub/src/runner/` | 러너 데몬(`127.0.0.1:4318`). 에이전트 세션(Claude Agent SDK, `codex app-server`)을 실제로 실행합니다. 허브와 분리되어 있어 허브를 재시작해도 실행 중인 세션이 끊기지 않습니다. |
+| `hub/` | HTTP 서버(기본 `:17641`). 프로젝트·작업·이벤트를 SQLite(`node:sqlite`)에 저장하고, SSE로 화면에 실시간 전달합니다. 빌드한 웹 화면도 함께 제공합니다. |
+| `hub/src/runner/` | 러너 데몬(`127.0.0.1:17642`). 에이전트 세션(Claude Agent SDK, `codex app-server`)을 실제로 실행합니다. 허브와 분리되어 있어 허브를 재시작해도 실행 중인 세션이 끊기지 않습니다. |
 | `web/` | React + Vite 화면. 컬럼, 스레드, 작성 서랍, 승인 대기열, 검색, 스킬 관리. |
 | `desktop/` | 허브 화면을 창 하나로 띄우는 Tauri v2 셸. Finder에서 끌어다 놓은 파일의 절대 경로를 전달합니다. 자세한 내용은 [`desktop/README.md`](desktop/README.md). |
 
@@ -33,7 +33,7 @@ npm run build
 mkdir -p data
 nohup npm start >> data/hub.log 2>&1 &
 sleep 3
-curl -s http://127.0.0.1:4317/api/state   # {"projects":[],...,"runner":{...}} 이 오면 성공
+curl -s http://127.0.0.1:17641/api/state   # {"projects":[],...,"runner":{...}} 이 오면 성공
 ```
 
 - 이미 다른 허브가 떠 있으면 포트를 바꿉니다: `PORT=4417 RUNNER_PORT=4418 nohup npm start ...`. 러너 포트도 함께 바꿔야 기존 러너와 섞이지 않습니다.
@@ -43,8 +43,8 @@ curl -s http://127.0.0.1:4317/api/state   # {"projects":[],...,"runner":{...}} �
   mkdir -p /tmp/desk-try
   curl -s -X POST -H 'content-type: application/json' \
     -d '{"text":"@try:/tmp/desk-try #haiku 도구를 쓰지 말고 OK 한 단어로만 답해"}' \
-    http://127.0.0.1:4317/api/compose
-  curl -s http://127.0.0.1:4317/api/state   # 몇 초 뒤 tasks[0].status 가 "done"
+    http://127.0.0.1:17641/api/compose
+  curl -s http://127.0.0.1:17641/api/state   # 몇 초 뒤 tasks[0].status 가 "done"
   ```
 
 - 접속 토큰은 `data/access-token`에 보관합니다. 다른 기기는 허브 기기의 **다른 기기 연결** 화면에서 QR 코드나 접속 승인을 사용하세요. 이전 버전의 허브 로그에는 토큰이 든 주소가 기록됐을 수 있습니다.
@@ -80,12 +80,12 @@ npm run build    # web/dist 생성
 ### 3. 실행
 
 ```sh
-npm start        # http://127.0.0.1:4317 에서 허브 + 화면
+npm start        # http://127.0.0.1:17641 에서 허브 + 화면
 ```
 
-브라우저로 http://127.0.0.1:4317 을 엽니다. 처음 실행하면 `data/`에 DB와 접속 토큰이 생깁니다.
+브라우저로 http://127.0.0.1:17641 을 엽니다. 처음 실행하면 `data/`에 DB와 접속 토큰이 생깁니다. 이전에 만든 데이터가 있으면 기존 기본 포트 `4317`(허브), `4318`(로컬 데몬), `4321`(작업공간·공유 러너)을 계속 사용합니다. 포트를 직접 지정한 환경에서는 지정값을 사용합니다.
 
-- 허브는 러너(에이전트 세션을 실행하는 프로세스, `127.0.0.1:4318`)가 없으면 따로 띄웁니다. 러너는 허브와 별개 프로세스라 허브를 꺼도 실행 중인 작업이 계속됩니다.
+- 허브는 러너(에이전트 세션을 실행하는 프로세스, `127.0.0.1:17642`)가 없으면 따로 띄웁니다. 러너는 허브와 별개 프로세스라 허브를 꺼도 실행 중인 작업이 계속됩니다.
 - 허브는 러너에 붙을 때 `data/runner-token`(처음 쓸 때 만들어지고 본인만 읽을 수 있음)을 보여야 합니다. 토큰이 없는 연결은 러너가 끊으므로, 다른 로컬 프로세스가 러너 포트로 작업을 시킬 수 없습니다. 이 확인이 없던 버전에서 올릴 때는 허브와 러너를 함께 재시작합니다(새 허브는 옛 러너에 붙지만, 새 러너는 옛 허브를 받지 않습니다).
 - 터미널을 닫아도 허브를 유지하려면 백그라운드로 띄웁니다: `scripts/start-all` (러너와 허브를 띄우고 로그는 `data/runner.log`, `data/hub.log`)
 
@@ -176,13 +176,13 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `PORT` / `HOST` | `4317` / `0.0.0.0` | 허브 주소. 네트워크에 열지 않으려면 `HOST=127.0.0.1` |
+| `PORT` / `HOST` | `17641` / `0.0.0.0` | 허브 주소. 네트워크에 열지 않으려면 `HOST=127.0.0.1` |
 | `AGENT_DESK_DB` | `data/agent-desk.db` | SQLite DB |
 | `AGENT_DESK_TOKEN_FILE` | `data/access-token` | 다른 기기 접속 토큰 (QR 주소의 공용 토큰) |
 | `AGENT_DESK_HOSTS` | (없음) | 다른 기기가 허브를 부를 수 있는 이름을 쉼표로 추가 (예: Tailscale MagicDNS 이름). 기본은 이 Mac의 IPv4 주소와 `이름.local`만 받습니다 |
 | `AGENT_DESK_UPLOADS` | `data/uploads` | 첨부 파일 저장 위치 |
 | `AGENT_DESK_SKILLS_HOME` | `data/desk-plugin` | 데스크 스킬(로컬 Claude Code 플러그인 `desk`) |
-| `RUNNER_PORT` | `4318` | 러너 포트 |
+| `RUNNER_PORT` | `17642` | 러너 포트 |
 | `RUNNER_IDLE_MS` | 30분 | 이 시간 동안 활동이 없는 세션을 닫음. 다음 메시지에서 대화를 재개합니다. 설정 → 러너 → 열린 세션에서도 닫을 수 있습니다. |
 | `RUNNER_LOG` / `RUNNER_PID_FILE` | `data/runner.log` / `data/runner.pid` | 러너 로그와 PID 파일 |
 | `RUNNER_TOKEN_FILE` | `data/runner-token` | 허브가 러너에 붙을 때 보이는 토큰 |
@@ -235,11 +235,11 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 
 ### 로컬 작업공간의 실행 프로세스 분리(선택 적용)
 
-기본 실행 방식은 그대로 사용할 수 있습니다. 선택 적용 방식에서는 `runner:local` 프로세스가 기존 `AGENT_DESK_DB`의 작업·대화·승인·대기열 원본을 소유하고 기존 4318 러너 데몬에 연결합니다. 허브는 별도 `AGENT_DESK_GATEWAY_DB`에 접속 권한과 공유 작업공간 연결·미전달 입력만 저장하며, 작업 API·MCP·채널·스킬 요청을 로컬 작업공간에 전달합니다. 브라우저의 기존 로컬 작업·세션 ID와 CLI 세션 ID는 바꾸지 않습니다. 기존 공유 러너 연결과 미전달 명령 ID·순서도 게이트웨이 DB로 한 번만 옮깁니다.
+기본 실행 방식은 그대로 사용할 수 있습니다. 선택 적용 방식에서는 `runner:local` 프로세스가 기존 `AGENT_DESK_DB`의 작업·대화·승인·대기열 원본을 소유하고 기존 로컬 러너 데몬에 연결합니다. 허브는 별도 `AGENT_DESK_GATEWAY_DB`에 접속 권한과 공유 작업공간 연결·미전달 입력만 저장하며, 작업 API·MCP·채널·스킬 요청을 로컬 작업공간에 전달합니다. 브라우저의 기존 로컬 작업·세션 ID와 CLI 세션 ID는 바꾸지 않습니다. 기존 공유 러너 연결과 미전달 명령 ID·순서도 게이트웨이 DB로 한 번만 옮깁니다.
 
-1. 전환 전에 기존 허브를 종료하고 4317 포트를 비웁니다. 4318 러너 데몬과 그 CLI 프로세스는 그대로 둡니다. 현재 DB와 데몬 파일을 보존하고, 새 게이트웨이 DB에는 기존 연결 기록이 없어야 합니다. 최초 전환 검사가 실패하면 원본 작업 DB와 연결 기록을 그대로 두고 원인을 해결한 뒤 다시 실행합니다.
-2. 기존 `AGENT_DESK_DB`를 지정한 환경에서 진행 중인 세션·승인이 있으면 `npm run runner:local -- --takeover-live`로, 모두 끝났으면 `npm run runner:local`로 시작합니다. 무중단 인수는 기존 데몬에 새 소켓을 만들지 않고 인증된 첫 hello의 활성 세션·승인을 원본 DB와 대조한 뒤에만 작업공간을 열고 소유권을 넘깁니다. 검사가 실패하면 새 연결의 임시 상태를 정리하고 기존 허브 방식으로 복구할 수 있습니다. 기존 데몬 프로토콜에는 별도 출력 ACK가 없으므로 허브 종료와 새 연결 사이의 마지막 출력에 관한 한계는 일반 허브 재시작과 같습니다. 작업공간 API는 `127.0.0.1:4321`에 열립니다. 다른 터미널에서 `npm run runner:local -- grant local-hub /절대경로/local-hub.token`으로 허브 전용 토큰 파일을 만듭니다.
-3. 기존 허브 포트에서 아래처럼 허브를 시작합니다. `AGENT_DESK_DB`는 전환 전과 같은 파일을 가리켜야 합니다. `AGENT_DESK_GATEWAY_DB`는 다른 SQLite 파일이어야 합니다. `AGENT_DESK_LOCAL_AUTHORITY_URL`은 생략하면 `http://127.0.0.1:4321/`입니다.
+1. 전환 전에 기존 허브를 종료하고 사용하던 허브 포트를 비웁니다. 로컬 러너 데몬과 그 CLI 프로세스는 계속 실행합니다. 현재 DB와 데몬 파일을 보존하고, 새 게이트웨이 DB에는 기존 연결 기록이 없어야 합니다. 최초 전환 검사가 실패하면 원본 작업 DB와 연결 기록을 그대로 두고 원인을 해결한 뒤 다시 실행합니다.
+2. 기존 `AGENT_DESK_DB`를 지정한 환경에서 진행 중인 세션·승인이 있으면 `npm run runner:local -- --takeover-live`로, 모두 끝났으면 `npm run runner:local`로 시작합니다. 무중단 인수는 기존 데몬에 새 소켓을 만들지 않고 인증된 첫 hello의 활성 세션·승인을 원본 DB와 대조한 뒤에만 작업공간을 열고 소유권을 넘깁니다. 검사가 실패하면 새 연결의 임시 상태를 정리하고 기존 허브 방식으로 복구할 수 있습니다. 기존 데몬에는 출력 저장 확인이 없어 허브 교체 시 마지막 출력이 유실될 수 있습니다. 작업공간 API는 `AGENT_DESK_SHARED_PORT`(새 설치 `17643`, 이전 설치 `4321`)로 루프백에 열립니다. 다른 터미널에서 `npm run runner:local -- grant local-hub /절대경로/local-hub.token`으로 허브 전용 토큰 파일을 만듭니다.
+3. 기존 허브 포트에서 아래처럼 허브를 시작합니다. `AGENT_DESK_DB`는 전환 전과 같은 파일을 가리켜야 합니다. `AGENT_DESK_GATEWAY_DB`는 다른 SQLite 파일이어야 합니다. `AGENT_DESK_LOCAL_AUTHORITY_URL`을 생략하면 해당 설치의 작업공간 포트를 사용합니다.
 
    ```sh
    AGENT_DESK_LOCAL_AUTHORITY_TOKEN_FILE=/절대경로/local-hub.token \
@@ -247,11 +247,11 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
    npm start
    ```
 
-4. 데스크톱 앱처럼 환경변수 없이 허브를 다시 시작하는 경로를 위해 원본 DB와 같은 디렉터리의 `local-mode.json`에도 연결 설정을 저장합니다. 기본 원본 DB를 쓰면 위치는 `data/local-mode.json`입니다. 파일 권한을 `0600`으로 두고 아래 세 값을 **절대 경로**로 지정합니다. 토큰 값은 넣지 않고 토큰 파일의 경로만 적습니다.
+4. 데스크톱 앱처럼 환경변수 없이 허브를 다시 시작하는 경로를 위해 원본 DB와 같은 디렉터리의 `local-mode.json`에도 연결 설정을 저장합니다. 기본 원본 DB를 쓰면 위치는 `data/local-mode.json`입니다. 파일 권한을 `0600`으로 두고 아래 세 값을 **절대 경로**로 지정합니다. 토큰 파일의 경로를 적고, 아래 예시의 포트는 실제 작업공간 포트로 바꿉니다.
 
    ```json
    {
-     "authorityUrl": "http://127.0.0.1:4321/",
+     "authorityUrl": "http://127.0.0.1:17643/",
      "tokenFile": "/절대경로/local-hub.token",
      "gatewayDbPath": "/절대경로/gateway.db"
    }
@@ -287,11 +287,11 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
    ```sh
    export AGENT_DESK_SHARED_DIR="$HOME/.local/share/agent-desk/shared"
    export AGENT_DESK_SHARED_ADDRESS=dbteam@srv19
-   export AGENT_DESK_SHARED_PORT=4321
+   export AGENT_DESK_SHARED_PORT=17643
    npm run runner:shared
    ```
 
-   공유 서버는 **127.0.0.1에만** 열립니다. 기본 4321은 예약·무충돌을 보장하는 번호가 아니므로 사용 중이면 바꿉니다. 서비스 관리자로 실행하면 허브 연결이 끊겨도 엔진과 기록이 유지됩니다. 공유 러너 프로세스 자체가 종료되면 살아 있는 엔진까지 유지한다는 의미는 아닙니다. 정상 종료 후 재시작하면 진행 중이던 턴은 중단 사실을 기록하고, 대기 중인 입력은 보존하여 순서대로 전달합니다. 중단된 턴의 원래 지시를 자동 재실행하지는 않습니다. 같은 공유 디렉터리에 실행 프로세스를 두 개 띄우면 거부합니다.
+   공유 서버는 **127.0.0.1에만** 열립니다. 기본 포트를 다른 서비스가 사용 중이면 `AGENT_DESK_SHARED_PORT`를 지정합니다. 서비스 관리자로 실행하면 허브 연결이 끊겨도 엔진과 기록이 유지됩니다. 공유 러너 프로세스 자체가 종료되면 살아 있는 엔진까지 유지한다는 의미는 아닙니다. 정상 종료 후 재시작하면 진행 중이던 턴은 중단 사실을 기록하고, 대기 중인 입력은 보존하여 순서대로 전달합니다. 중단된 턴의 원래 지시를 자동 재실행하지는 않습니다. 같은 공유 디렉터리에 실행 프로세스를 두 개 띄우면 거부합니다.
 
 2. 같은 머신의 다른 터미널에서 **동일한 `AGENT_DESK_SHARED_DIR`**을 지정하고 허브마다 토큰을 따로 발급합니다. 토큰 값은 출력하지 않고 지정한 새 파일(권한600)에 저장합니다. 기존 파일은 덮어쓰지 않습니다.
 
@@ -305,7 +305,7 @@ npm run deploy   # 빌드 후 /Applications/Agent Desk.app 을 교체 (애드혹
 
    토큰을 받은 허브는 해당 공유 작업공간의 전체 작업을 조회·생성·입력·승인·중단·삭제할 수 있습니다. 읽기 전용 권한이나 사용자별 프로젝트 권한은 아직 없습니다. 토큰은 각 허브 DB에 저장하고 화면/API 목록에는 반환하지 않습니다. 승인 응답 등 미전달 입력도 DB에 있으므로 데이터 디렉터리 접근을 실행 계정으로 제한합니다.
 
-3. **각 허브 머신에서** 별도의 SSH 터널을 연결합니다. 예를 들어 `ssh -N -L 127.0.0.1:15321:127.0.0.1:4321 dbteam@srv19`로 연결합니다. 허브의 **설정 → 러너 → 러너 연결 관리 → 같은 작업을 여러 허브에서 공유**에서 이름, `http://127.0.0.1:15321`, 그 허브용 토큰을 등록합니다. 원격 HTTPS 프록시를 준비했다면 경로 없는 HTTPS 주소도 사용할 수 있습니다. 등록할 때 러너의 실제 작업공간 ID를 확인하고 고정하므로 다른 DB에 잘못 연결되어 미전달 입력을 실행하는 것을 막습니다.
+3. **각 허브 머신에서** 별도의 SSH 터널을 연결합니다. 예를 들어 `ssh -N -L 127.0.0.1:15321:127.0.0.1:17643 dbteam@srv19`로 연결합니다. 허브의 **설정 → 러너 → 러너 연결 관리 → 같은 작업을 여러 허브에서 공유**에서 이름, `http://127.0.0.1:15321`, 그 허브용 토큰을 등록합니다. 원격 HTTPS 프록시를 준비했다면 경로 없는 HTTPS 주소도 사용할 수 있습니다. 등록할 때 러너의 실제 작업공간 ID를 확인하고 고정하므로 다른 DB에 잘못 연결되어 미전달 입력을 실행하는 것을 막습니다.
 4. 새 지시의 실행 대상으로 해당 공유 러너를 선택하고 `@shared-test:dbteam@srv19:~/test-proj #codex 테스트 프로젝트`처럼 시작합니다. `#claude`나 `#agy`도 같은 방식으로 지정합니다. 다른 허브에서도 같은 프로젝트·작업·대화가 보이며 같은 승인과 대기열을 조작합니다. 프로젝트 디렉터리는 실행 머신에 미리 만들어야 합니다.
 
 허브를 연결하거나 다시 연결하면 스킬 이름·내용 지문을 비교해 달라진 스킬 파일만 실행 머신의 해당 허브 전용 캐시에 보냅니다. 연결 중에도 약 15초마다 확인하므로 스킬 관리 화면의 수정뿐 아니라 파일을 직접 고친 내용도 반영됩니다. 다른 허브의 동명 스킬은 별도 캐시에 둡니다. 메시지에 명시한 `#스킬`과 조건부 하위 참조의 본문·필요 파일은 **입력을 접수할 때** 고정합니다. 대기 중에 원본 스킬을 바꿔도 그 입력은 이전 버전을 사용합니다. 정상 전달에서는 이름과 내용 지문만 보내고, 실행 직전 캐시가 없거나 지문이 다르면 고정한 파일을 같은 명령 ID의 준비 단계에서 복구한 뒤 실행합니다. 수신 확인이 사라져 재전송해도 같은 명령을 두 번 실행하지 않습니다.
@@ -389,7 +389,7 @@ node hub/src/update-cli.ts start /srv/desk/update.json
 
 이 Mac에서 `localhost`·`127.0.0.1`로 접속할 때는 토큰이 필요 없습니다. 다른 기기(PC, 폰)는 기기마다 따로 받은 토큰으로 접속합니다.
 
-1. 다른 기기의 브라우저로 `http://<Mac 주소>:4317`을 엽니다(주소는 상단 **다른 기기 연결** 창에 나옴). 이름을 확인하고 **접속 요청 보내기**를 누릅니다.
+1. 다른 기기의 브라우저로 `http://<Mac 주소>:17641`을 엽니다(주소는 상단 **다른 기기 연결** 창에 나옴). 이름을 확인하고 **접속 요청 보내기**를 누릅니다.
 2. 이 Mac의 데스크 화면 오른쪽 위에 요청 카드가 뜹니다(알림을 켰으면 OS 알림도). 두 화면의 4자리 코드가 같은지 확인하고 **허용**을 누르면 그 기기가 연결됩니다. 허용·거절은 이 Mac에서만 할 수 있고, 답이 없는 요청은 10분 뒤 사라집니다.
 3. **다른 기기 연결** 창의 **연결한 기기**에서 기기마다 연결 상태(연결 중·마지막 접속·주소)를 보고, 이름을 눌러 바꾸고, **끊기**로 그 기기의 토큰을 지웁니다. 끊으면 열려 있던 화면도 바로 끊기고, 그 기기는 다시 요청해야 합니다. 다만 QR로 연결했던 기기는 QR 주소를 알고 있으므로, 그런 기기를 막으려면 같은 창의 **QR 토큰 바꾸기**도 누릅니다.
 
@@ -399,7 +399,7 @@ node hub/src/update-cli.ts start /srv/desk/update.json
 
 ## 기본 사용법
 
-1. `npm start`로 허브를 띄우고 http://127.0.0.1:4317 (또는 데스크톱 앱)을 엽니다.
+1. `npm start`로 허브를 띄우고 http://127.0.0.1:17641 (또는 데스크톱 앱)을 엽니다.
 2. `i`로 작성 서랍을 열고 `@프로젝트이름:/작업/디렉터리 할 일`처럼 첫 작업을 보냅니다. 프로젝트가 등록되고 새 작업이 시작됩니다. 이후에는 `@프로젝트이름`만 쓰면 됩니다(`Tab`으로 완성).
 3. 작업 글이 컬럼에 실시간으로 올라옵니다. `j`/`k`로 글을 고르고 `Enter`로 스레드를 열어 전체 흐름을 봅니다.
 4. 도구 승인 요청이나 질문이 오면 글에서 바로 누르거나 `y`/`n`으로 답합니다. 여러 작업의 대기 건은 `a`(응답 대기열)에서 한꺼번에 처리합니다.
@@ -534,14 +534,14 @@ node hub/src/update-cli.ts start /srv/desk/update.json
 - **터미널 세션 붙이기(MCP)**: 허브의 `/mcp`(Streamable HTTP)를 `agent-desk` MCP 서버로 등록하면, 터미널에서 돌던 Claude Code·Codex 세션이 `desk_attach`, `desk_post`, `desk_checkpoint`, `desk_ask`, `desk_finish`로 데스크에 진행을 올리고 질문할 수 있습니다.
 
   ```sh
-  claude mcp add --scope user --transport http agent-desk http://127.0.0.1:4317/mcp
+  claude mcp add --scope user --transport http agent-desk http://127.0.0.1:17641/mcp
   ```
 
   Codex는 `~/.codex/config.toml`에 다음을 추가합니다.
 
   ```toml
   [mcp_servers.agent-desk]
-  url = "http://127.0.0.1:4317/mcp"
+  url = "http://127.0.0.1:17641/mcp"
   ```
 
 - **터미널 세션 넘기기(`desk_handoff`)**: 터미널에서 하던 Claude Code·Codex 세션에 데스크로 넘겨 달라고 요청하면, 에이전트가 현재 세션 ID(`$CLAUDE_CODE_SESSION_ID`, `$CODEX_THREAD_ID`)를 지정해 `desk_handoff`를 호출합니다. 허브가 그 세션 파일(`~/.claude/projects`, `~/.codex/sessions`)을 찾아 같은 대화를 이어 가는 데스크 작업을 만들고, 지금까지 주고받은 말을 스레드에 옮깁니다. 도구 호출은 이름만 "도구 N회"로 요약하고, 가져온 기록은 전체 피드에는 띄우지 않고 그 작업의 스레드와 작업 컬럼에서만 보입니다. 이후 답글은 원래 대화의 맥락을 그대로 가진 채 이어집니다. 현재 세션 ID를 확인할 수 없으면 넘기지 말고, 최신 세션을 대신 고르지 않습니다. `desk_attach`로 붙어 있던 작업이면 `task_id`를 넘겨 그 작업을 데스크 작업으로 바꿉니다(이때는 기록을 다시 옮기지 않습니다). 성공 응답을 확인한 뒤에는 기존 터미널 세션을 종료하고 데스크에서 이어가세요. MCP 도구가 보이지 않거나 인계에 실패하면 성공으로 알리거나 세션을 종료하지 말고, MCP 연결을 확인해 같은 세션에서 다시 시도합니다. 같은 대화를 양쪽에서 이어 가면 기록이 갈라집니다. 모델·effort는 데스크 기본값으로 이어지며 `#모델` 태그로 바꿀 수 있습니다.
@@ -583,7 +583,7 @@ node hub/src/update-cli.ts start /srv/desk/update.json
 관리 창에서 각 봇 채널의 **봇에서 이 채널로 알림 보내기**를 펼치면 채널 ID가 채워진 전송 예제를 복사할 수 있습니다. 봇 환경에 `CHANNEL_TOKEN`을 설정하고 실행합니다. 다른 머신의 봇은 `127.0.0.1` 대신 상단 **다른 기기 연결**의 허브 접속 주소를 사용하세요. 복사 예제에는 실제 발행 토큰을 넣지 않습니다.
 
 ```sh
-curl -X POST "http://127.0.0.1:4317/api/channels/$CHANNEL_ID/entries" \
+curl -X POST "http://127.0.0.1:17641/api/channels/$CHANNEL_ID/entries" \
   -H "Authorization: Bearer $CHANNEL_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"external_id":"build-42","title":"빌드 완료","body":"테스트를 통과했습니다.","url":"https://example.com/build/42"}'
@@ -603,17 +603,17 @@ OAuth 토큰·갱신 토큰은 허브 밖으로 보내지 않습니다. 실행�
 
 입력별 허가는 기본 15분 뒤 만료됩니다. 연결 단절이나 긴 대기로 만료되면 임의로 현재 계정 권한을 다시 붙이지 않고 원문과 오류를 보관합니다. 연결을 확인하고 입력을 다시 보내야 합니다. 한 번 대화에 들어온 조회 결과는 공유 대화 기록에 남으므로, 나중의 계정 변경으로 과거 내용을 숨기는 기능은 아닙니다. 기존 실행에 새 도구가 없으면 실행을 닫고 다음 메시지로 재개해야 합니다. 구형 러너에는 업데이트 안내를 표시하며, MCP를 지원하지 않는 AGY는 경고를 표시하고 외부 권한 없이 일반 작업을 계속합니다. 채널 수집이나 에이전트 간 문의가 새 사용자 권한을 자동 발급하지는 않습니다. 에이전트 문의는 대상 대화의 이전 계정 권한도 빌리지 않으며, 권한이 있는 턴이 진행 중이면 끝난 뒤 권한 없는 입력으로 전달합니다. 허브의 임시 조회 결과는 최대 32 MiB로 제한하고, 만료한 권한·조회 캐시는 시작 시와 매분 정리합니다.
 
-- Slack: 기존 **내부 앱**을 재사용할 수 있습니다. 앱의 **Agents → Slack Model Context Protocol (MCP) Server**를 On으로 켭니다. 사용자 읽기 권한 `search:read.public`, `search:read.private`, `channels:history`, `groups:history`, `channels:read`, `groups:read`가 필요합니다. DM·전송 권한은 요청하지 않습니다. 앱 권한을 변경한 뒤에는 다시 승인받아야 합니다. 기존 승인의 권한이 누적되어 요청하지 않은 권한이 반환되면 연결을 거절하므로, 이 경우 기존 승인을 해제하고 읽기 권한으로 다시 연결하거나 별도 읽기용 앱을 사용합니다. Redirect URL은 기본 포트 기준 `http://127.0.0.1:4317/api/connectors/slack/callback`입니다. 연결 시작에 사용한 호스트·포트와 정확히 일치해야 합니다.
+- Slack: 기존 **내부 앱**을 재사용할 수 있습니다. 앱의 **Agents → Slack Model Context Protocol (MCP) Server**를 On으로 켭니다. 사용자 읽기 권한 `search:read.public`, `search:read.private`, `channels:history`, `groups:history`, `channels:read`, `groups:read`가 필요합니다. DM·전송 권한은 요청하지 않습니다. 앱 권한을 변경한 뒤에는 다시 승인받아야 합니다. 기존 승인의 권한이 누적되어 요청하지 않은 권한이 반환되면 연결을 거절하므로, 이 경우 기존 승인을 해제하고 읽기 권한으로 다시 연결하거나 별도 읽기용 앱을 사용합니다. Redirect URL은 기본 포트 기준 `http://127.0.0.1:17641/api/connectors/slack/callback`입니다. 연결 시작에 사용한 호스트·포트와 정확히 일치해야 합니다.
 - Slack의 `client_id`, `client_secret` 두 필드를 담은 JSON 파일을 **저장소 밖에**, 현재 허브 실행 계정 소유·권한 `600`으로 준비하고, `AGENT_DESK_SLACK_CLIENT_FILE`에 그 절대 경로만 지정해 허브를 시작합니다. 비밀값을 명령 인자·환경변수 값·대화·Git에 넣지 않습니다.
 - Jira Cloud·Confluence: Atlassian 공식 MCP의 동적 클라이언트 등록과 OAuth 로그인을 사용합니다. 기본 계정 식별용 `read:me`, `read:account`와 `read:jira:agent-interface`, `search:jira:agent-interface`, `read:confluence:agent-interface`, `search:confluence:agent-interface`, `offline_access`를 요청합니다. Jira 이슈 검색·조회와 Confluence 문서 검색·조회, 공간·댓글 목록을 읽습니다. 문서 작성·수정·삭제는 허용하지 않습니다. 실제 사용에는 사이트의 앱 접근 정책과 사용자 승인이 필요하며, Jira만 승인한 기존 연결은 Confluence 사용을 위해 다시 승인해야 할 수 있습니다. API의 기존 서비스 ID `jira`는 두 제품의 공통 Atlassian 연결로 유지합니다.
 
 ```sh
 # 로그인 URL을 받아 같은 머신의 브라우저에서 열고 서비스 승인을 완료합니다.
 curl -sS -X POST -H 'content-type: application/json' -d '{}' \
-  http://127.0.0.1:4317/api/connectors/jira/connect
+  http://127.0.0.1:17641/api/connectors/jira/connect
 # Slack은 위 URL의 jira를 slack으로 바꿉니다.
-curl -sS http://127.0.0.1:4317/api/connectors
-curl -sS http://127.0.0.1:4317/api/connectors/jira/tools
+curl -sS http://127.0.0.1:17641/api/connectors
+curl -sS http://127.0.0.1:17641/api/connectors/jira/tools
 ```
 
 | API | 동작 |

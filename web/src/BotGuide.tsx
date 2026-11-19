@@ -3,7 +3,7 @@ import { botIngestExample } from './channelEntries.ts';
 
 export function BotGuide({ channelId }: { channelId: string }) {
   const [note, setNote] = useState('');
-  const example = botIngestExample(typeof location === 'undefined' ? 'http://localhost:4317' : location.origin, channelId);
+  const example = botIngestExample(typeof location === 'undefined' ? 'http://localhost:17641' : location.origin, channelId);
   const copy = async () => {
     try { await navigator.clipboard.writeText(example); setNote('예제를 복사했습니다. 발행 토큰은 포함하지 않습니다.'); }
     catch { setNote('복사하지 못했습니다. 예제를 직접 선택해 복사해 주세요.'); }

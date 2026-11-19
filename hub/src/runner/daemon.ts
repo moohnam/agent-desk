@@ -4,7 +4,7 @@
 import { writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { hostname } from 'node:os';
-import { config } from '../config.ts';
+import { config, recordDeskPortDefaults } from '../config.ts';
 import { registerRuntimeControl, sessionBlockers } from '../runtime-control.ts';
 import { PROTOCOL_VERSION, checkHubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
 import { Runner } from './runner.ts';
@@ -38,13 +38,14 @@ const runner = new Runner(`local-${hostname()}`, (m) => {
 }, { mcp: { url: `http://127.0.0.1:${config.port}/mcp` } });
 
 runner.startModelRefresh(() => {
-  if (hub) writeLine(hub, {type:'hello',runnerId:runner.id,host:hostname(),capabilities:runner.capabilities,
+  if (hub) writeLine(hub, {type:'hello',runnerId:runner.id,host:hostname(),capabilities:{ ...runner.capabilities, ipv6Mcp: true },
     sessions:runner.snapshot(),protocolVersion:PROTOCOL_VERSION} satisfies RunnerToHub);
 });
 
 // A failure in one session's adapter must not end the daemon and every other session with it.
 process.on('unhandledRejection', (err) => console.error('runner: unhandled rejection', err));
 
+recordDeskPortDefaults();
 const token = runnerToken();
 /** How long a new connection has to show the token before it is dropped. */
 const AUTH_MS = 5000;
@@ -73,7 +74,7 @@ const server = createServer((socket) => {
     }
     const cmd = checkHubToRunner(m);
     if (typeof cmd === 'string') { console.error('허브 명령의 형식이 잘못되었습니다.'); return; }
-    runner.handle(cmd);
+    runner.handle(cmd, cmd.type === 'start' && cmd.ipv6DeskMcpUrl ? { url: cmd.ipv6DeskMcpUrl } : undefined);
   });
   const drop = () => { clearTimeout(timer); if (hub === socket) hub = null; };
   socket.on('close', drop);
@@ -85,7 +86,7 @@ function adopt(socket: Socket) {
   hub?.destroy();
   hub = socket;
   writeLine(socket, {
-    type: 'hello', runnerId: runner.id, host: hostname(), capabilities: runner.capabilities, sessions: runner.snapshot(),
+    type: 'hello', runnerId: runner.id, host: hostname(), capabilities: { ...runner.capabilities, ipv6Mcp: true }, sessions: runner.snapshot(),
     protocolVersion: PROTOCOL_VERSION,
   } satisfies RunnerToHub);
   for (const { line } of buffer.splice(0)) socket.write(line);

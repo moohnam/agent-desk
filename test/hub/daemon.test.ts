@@ -17,7 +17,7 @@ let daemon: ChildProcess;
 
 before(async () => {
   daemon = spawn(process.execPath, [resolve(import.meta.dirname, '../../hub/src/runner/daemon.ts')], {
-    env: { ...process.env, RUNNER_PORT: String(port), RUNNER_TOKEN_FILE: tokenFile, RUNNER_PID_FILE: join(dir, 'pid') },
+    env: { ...process.env, AGENT_DESK_DB: join(dir, 'desk.db'), RUNNER_PORT: String(port), RUNNER_TOKEN_FILE: tokenFile, RUNNER_PID_FILE: join(dir, 'pid') },
     stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {

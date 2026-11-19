@@ -1,7 +1,7 @@
 import { InstructionStore } from './instruction-store.ts';
 import { hubBlockers, registerRuntimeControl } from './runtime-control.ts';
 import { Access } from './access.ts';
-import { config } from './config.ts';
+import { config, recordDeskPortDefaults } from './config.ts';
 import { Store } from './db.ts';
 import { Hub } from './hub.ts';
 import { createHttpServer } from './http.ts';
@@ -23,6 +23,7 @@ if (authorityTokenFile && (resolve(config.gatewayDbPath) === resolve(DB_PATH)
     const a=statSync(config.gatewayDbPath),b=statSync(DB_PATH);
     return a.dev===b.dev&&a.ino===b.ino;
   })()))) throw new Error('게이트웨이 DB와 로컬 작업공간 DB를 분리하세요');
+recordDeskPortDefaults();
 installDefaultSkills(config.skillsHome);
 if (authorityTokenFile) await ensureGatewayLocalAuthority({
   dbPath: DB_PATH,
@@ -39,8 +40,10 @@ if (workspaces) importRemoteManifests(DB_PATH,store,true);
 const localAuthorityId = authorityTokenFile ? await workspaces!.configureLocal(config.localAuthorityUrl,readFileSync(authorityTokenFile,'utf8').trim()) : undefined;
 const access = new Access(TOKEN_FILE, PORT, undefined, config.allowedHosts);
 const server = createHttpServer(hub, access, UPLOADS_DIR, {workspaces,localAuthorityId,instructions:new InstructionStore(config.instructionsFile)}).listen(PORT, HOST, () => {
-  console.log(`agent-desk hub listening on http://${HOST}:${PORT} (db: ${authorityTokenFile?config.gatewayDbPath:DB_PATH}${authorityTokenFile?`, canonical: ${DB_PATH}`:''})`);
-  if (HOST === '127.0.0.1' || HOST === 'localhost') return;
+  const urlHost = HOST.includes(':') ? `[${HOST}]` : HOST;
+  console.log(`agent-desk hub listening on http://${urlHost}:${PORT} (db: ${authorityTokenFile?config.gatewayDbPath:DB_PATH}${authorityTokenFile?`, canonical: ${DB_PATH}`:''})`);
+  const address = server.address();
+  if (HOST === '127.0.0.1' || HOST === 'localhost' || (address && typeof address !== 'string' && address.address === '::1')) return;
   console.log('다른 기기를 연결하려면 이 기기의 Agent Desk에서 다른 기기 연결을 여세요.');
 });
 await registerRuntimeControl({ role: 'hub', ready: () => server.listening && (!!authorityTokenFile || hub.runner.connected),

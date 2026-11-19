@@ -1,9 +1,21 @@
 # Shared by the start-*/stop-*/restart-* scripts; sourced, not run.
-# The hub (PORT, default 4317) starts the runner daemon (RUNNER_PORT, default 4318) by itself when
+# The hub starts the runner daemon by itself when
 # none is listening, so a runner stopped while the hub runs comes back within about 10 seconds.
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DATA=$ROOT/data
+DESK_PORTS=$(node --input-type=module -e '
+  import {pathToFileURL} from "node:url";
+  import {join} from "node:path";
+  const root = process.argv[1], env = process.env;
+  const {configuredPort, deskPortDefaults} = await import(pathToFileURL(join(root, "hub/src/ports.ts")));
+  const db = env.AGENT_DESK_DB ?? join(root, "data/agent-desk.db");
+  const hub = deskPortDefaults(db, env, join(root, "hub")).hub;
+  const daemon = deskPortDefaults(db, env, root).daemon;
+  console.log(configuredPort(env.PORT, hub) + " " + configuredPort(env.RUNNER_PORT, daemon));
+' "$ROOT") || exit 2
+HUB_PORT=${DESK_PORTS%% *}
+RUNNER_PORT=${DESK_PORTS#* }
 # A machine on managed updates runs its hub and runners from release directories. These scripts would
 # replace them with unmanaged copies of this checkout, so they refuse there unless forced.
 MANAGED_CONFIG=${AGENT_DESK_UPDATE_CONFIG:-$HOME/.local/share/agent-desk/update.json}
@@ -12,15 +24,26 @@ if [ -f "$MANAGED_CONFIG" ] && [ -z "${AGENT_DESK_UNMANAGED:-}" ]; then
   if node --input-type=module -e '
     import {readFileSync, existsSync} from "node:fs";
     import {join} from "node:path";
+    import {pathToFileURL} from "node:url";
     const config = JSON.parse(readFileSync(process.argv[1], "utf8"));
     const path = join(config.deploymentDir, "state.json");
     const state = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-    const [script, hubPort, runnerPort] = process.argv.slice(2);
-    const managesHub = !script.endsWith("-runner") && config.roles.includes("hub") && (config.environment.PORT ?? "4317") === hubPort;
-    const managesRunner = !script.endsWith("-hub") && config.roles.includes("daemon") && (config.environment.RUNNER_PORT ?? "4318") === runnerPort;
+    const [script, hubPort, runnerPort, root] = process.argv.slice(2);
+    const {deskPortDefaults} = await import(pathToFileURL(join(root, "hub/src/ports.ts")));
+    const env = config.environment;
+    const ports = deskPortDefaults(env.AGENT_DESK_DB ?? join(config.dataDir, "agent-desk.db"), env);
+    const selected = (key, fallback) => {
+      if (!(key in env)) return fallback;
+      const port = Number(env[key]);
+      if (typeof env[key] !== "string" || !Number.isInteger(port) || port < 1 || port > 65535)
+        throw new Error("관리형 포트 설정을 확인하세요.");
+      return port;
+    };
+    const managesHub = !script.endsWith("-runner") && config.roles.includes("hub") && selected("PORT", ports.hub) === Number(hubPort);
+    const managesRunner = !script.endsWith("-hub") && config.roles.includes("daemon") && selected("RUNNER_PORT", ports.daemon) === Number(runnerPort);
     const activated = state.current || state.attempted || state.phase === "switching";
     process.exitCode = activated && (managesHub || managesRunner) ? 0 : 3;
-  ' "$MANAGED_CONFIG" "$(basename "$0")" "${PORT:-4317}" "${RUNNER_PORT:-4318}" 2>/dev/null; then
+  ' "$MANAGED_CONFIG" "$(basename "$0")" "$HUB_PORT" "$RUNNER_PORT" "$ROOT" 2>/dev/null; then
     echo "관리형 허브·러너는 설정 → 버전 정보에서 교체하고 update-cli start로 기동하세요. 수동 운영이 필요하면 AGENT_DESK_UNMANAGED=1을 지정하세요." >&2
     exit 2
   elif [ "$?" -ne 3 ]; then
@@ -28,8 +51,6 @@ if [ -f "$MANAGED_CONFIG" ] && [ -z "${AGENT_DESK_UNMANAGED:-}" ]; then
     exit 2
   fi
 fi
-HUB_PORT=${PORT:-4317}
-RUNNER_PORT=${RUNNER_PORT:-4318}
 HUB_LOG=${HUB_LOG:-$DATA/hub.log}
 RUNNER_LOG=${RUNNER_LOG:-$DATA/runner.log}
 export PORT=$HUB_PORT RUNNER_PORT RUNNER_LOG

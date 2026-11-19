@@ -12,6 +12,7 @@ import { assertTrustedPath, assertTrustedTree, destinationPath } from './trusted
 import { resolveLocalLaunchSettings } from './runner/local-launch.ts';
 import { updateCiPassed, usesUpdateCi } from './update-ci.ts';
 import { openRuntimeLog } from './runtime-log.ts';
+import { managedPortEnvironment } from './ports.ts';
 
 const exec = promisify(execFile);
 const ROLES: RuntimeRole[] = ['daemon', 'local', 'hub', 'shared', 'remote'];
@@ -367,7 +368,7 @@ export class UpdateWorker {
   private environment(role: RuntimeRole, commit: string): NodeJS.ProcessEnv {
     const d = this.config.dataDir;
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_|PORT$|HOST$)/.test(key) && !SESSION_ENV.test(key)));
-    return { ...inherited, AGENT_DESK_DB: join(d, 'agent-desk.db'),
+    const env = { ...inherited, AGENT_DESK_DB: join(d, 'agent-desk.db'),
       AGENT_DESK_UPLOADS: join(d, 'uploads'), AGENT_DESK_TOKEN_FILE: join(d, 'access-token'),
       AGENT_DESK_INSTRUCTIONS_FILE: join(d, 'instructions.md'), AGENT_DESK_SKILLS_HOME: join(d, 'desk-plugin'),
       AGENT_DESK_SHARED_DIR: join(d, 'shared-runner'), AGENT_DESK_REMOTE_DB: join(d, 'remote-runner.db'),
@@ -376,6 +377,7 @@ export class UpdateWorker {
       ...this.config.environment, AGENT_DESK_MANAGED_RUNNERS: '1', AGENT_DESK_RELEASE_SHA: commit,
       AGENT_DESK_UPDATE_OWNER: this.owner(),
       AGENT_DESK_UPDATE_SOCKET: this.socket(role) };
+    return { ...managedPortEnvironment(d, env, role === 'shared'), ...env };
   }
   private protectedPaths(): string[] {
     const env = this.environment(this.config.roles[0], '0'.repeat(40));
@@ -404,8 +406,8 @@ export class UpdateWorker {
   async status() { return Promise.all(this.config.roles.map(async role => ({ role, runtime: await this.observe(role) }))); }
   private async preflight(role: RuntimeRole, env: NodeJS.ProcessEnv) {
     // Old, unmanaged services have no control socket. Refuse before the candidate can migrate their DB.
-    const port = role === 'hub' ? Number(env.PORT ?? 4317) : role === 'daemon' ? Number(env.RUNNER_PORT ?? 4318)
-      : role === 'local' || role === 'shared' ? Number(env.AGENT_DESK_SHARED_PORT ?? 4321) : undefined;
+    const port = role === 'hub' ? Number(env.PORT) : role === 'daemon' ? Number(env.RUNNER_PORT)
+      : role === 'local' || role === 'shared' ? Number(env.AGENT_DESK_SHARED_PORT) : undefined;
     if (port !== undefined) {
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('관리 런타임 포트가 잘못되었습니다');
       const probe = createServer();

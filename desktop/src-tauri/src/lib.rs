@@ -1,16 +1,13 @@
 //! Agent Desk desktop shell.
 //!
-//! Loads the hub (default http://127.0.0.1:4317/, overridable via AGENT_DESK_URL) in a
+//! Loads the hub (overridable via AGENT_DESK_URL) in a
 //! single window and forwards Finder drag & drop to the page as DOM CustomEvents carrying
 //! the files' absolute paths. A local hub not yet running is started (and starts the runner) from
 //! this repository; both keep running after the app quits, for phones and running agents.
 
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::Arc;
 
 use tauri::{DragDropEvent, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
@@ -18,8 +15,8 @@ use url::Url;
 
 #[cfg(target_os = "macos")]
 mod notify;
-
-const DEFAULT_URL: &str = "http://127.0.0.1:4317/";
+mod hub_startup;
+use hub_startup::{repo_dir, DesktopHub};
 
 /// Shows an OS notification; a click opens `task`'s thread.
 #[tauri::command]
@@ -39,193 +36,16 @@ async fn desk_notify_permission() -> bool {
     false
 }
 
-fn hub_url() -> Url {
-    let raw = std::env::var("AGENT_DESK_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-    Url::parse(raw.trim()).unwrap_or_else(|e| {
-        eprintln!("[agent-desk] invalid AGENT_DESK_URL: {e}; falling back to {DEFAULT_URL}");
-        Url::parse(DEFAULT_URL).unwrap()
-    })
-}
-
-fn connect_hub(url: &Url) -> Option<TcpStream> {
-    let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-        return None;
-    };
-    (host.trim_matches(['[', ']']), port).to_socket_addrs().ok()?
-        .find_map(|address| TcpStream::connect_timeout(&address, Duration::from_millis(800)).ok())
-}
-
-/// Verify the local HTTP service, so a different process on the port is not opened as the Desk.
-fn hub_reachable(url: &Url) -> bool {
-    if !is_loopback(url) || url.scheme() != "http" { return connect_hub(url).is_some(); }
-    let read = |path| -> Option<String> {
-        let mut socket = connect_hub(url)?;
-        let (host, port) = (url.host_str()?, url.port_or_known_default()?);
-        let timeout = Duration::from_millis(800);
-        socket.set_read_timeout(Some(timeout)).ok()?;
-        socket.set_write_timeout(Some(timeout)).ok()?;
-        write!(socket, "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n").ok()?;
-        let mut reply = Vec::new();
-        let _ = socket.take(4096).read_to_end(&mut reply);
-        Some(String::from_utf8_lossy(&reply).into_owned())
-    };
-    let Some(reply) = read("/__desk_ready") else { return false; };
-    if reply.split_once("\r\n\r\n").is_some_and(|(headers, _)| {
-        headers.starts_with("HTTP/1.1 204 ") && headers.lines().any(|line| line.eq_ignore_ascii_case("x-agent-desk-ready: 1"))
-    }) { return true; }
-    // Pre-marker hubs expose this small authenticated response to localhost.
-    read("/api/instructions").is_some_and(|reply| {
-        reply.lines().next().is_some_and(|line| line.split_whitespace().nth(1) == Some("200"))
-            && reply.split_once("\r\n\r\n").is_some_and(|(headers, body)| headers.contains("application/json") && body.starts_with("{\"text\":"))
-    })
-}
-
-/// The agent-desk repository: AGENT_DESK_HOME, else the one this app was built from.
-fn repo_dir() -> PathBuf {
-    std::env::var_os("AGENT_DESK_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")))
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")))
-}
-
-/// Starts `node <script>` in its own process group (so it outlives the app), logging to
-/// data/<log>. Through a login shell: an app launched from Finder lacks the shell's PATH,
-/// which node and the agents' CLIs need.
-fn spawn_node(cwd: PathBuf, script: &str, log: &str, envs: &[(&str, String)]) -> Result<(), String> {
-    let log_path = repo_dir().join("data").join(log);
-    std::fs::create_dir_all(log_path.parent().unwrap()).map_err(|e| e.to_string())?;
-    let mut child = Command::new("/bin/zsh")
-        .arg("-lc")
-        .arg("umask 077; if [ -f src/runtime-log.ts ]; then node src/runtime-log.ts \"$2\" || exit; fi; exec node \"$1\" >>\"$2\" 2>&1")
-        .arg("agent-desk").arg(script).arg(&log_path)
-        .current_dir(&cwd)
-        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("node {script}: {e}"))?;
-    // Reap it if it exits while the app runs.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
-
-fn is_loopback(url: &Url) -> bool {
-    matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
-}
-
-#[cfg(target_os = "macos")]
-fn managed_state(hub: &Url) -> Result<Option<(serde_json::Value, PathBuf)>, String> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Ok(None);
-    };
-    let config_path = std::env::var_os("AGENT_DESK_UPDATE_CONFIG").map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share/agent-desk/update.json"));
-    let read_json = |path: &std::path::Path| -> Option<serde_json::Value> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-    };
-    let Some(config) = read_json(&config_path) else {
-        return if config_path.exists() { Err("관리형 업데이트 설정을 읽지 못했습니다.".into()) } else { Ok(None) };
-    };
-    let manages_hub = config["roles"].as_array().is_some_and(|roles| {
-        roles.iter().any(|role| role.as_str() == Some("hub"))
-    });
-    let port = config["environment"]["PORT"].as_str().unwrap_or("4317");
-    if !manages_hub || port.parse::<u16>().ok() != hub.port_or_known_default() {
-        return Ok(None);
-    }
-    let Some(deploy) = config["deploymentDir"].as_str().map(PathBuf::from) else {
-        return Err("관리형 허브의 배포 경로를 확인하지 못했습니다.".into());
-    };
-    let state_path = deploy.join("state.json");
-    if !state_path.exists() {
-        return Ok(None);
-    }
-    let Some(state) = read_json(&state_path) else {
-        return Err("관리형 허브의 실행 상태를 확인하지 못했습니다.".into());
-    };
-    if state["current"].is_null() && state["attempted"].is_null() && state["phase"] != "switching" {
-        return Ok(None);
-    }
-    let logs = config["dataDir"].as_str().map(PathBuf::from).unwrap_or(deploy).join("update-logs");
-    Ok(Some((state, logs)))
-}
-
-#[cfg(target_os = "macos")]
-fn start_managed_hub(hub: &Url) -> Result<bool, String> {
-    let Some((state, _)) = managed_state(hub)? else { return Ok(false); };
-    if !state["attempted"].is_null() && (state["restoreCurrent"].is_null() || state["restoreCurrent"] != state["current"]) {
-        return Err("교체가 중단됐습니다. 로그를 확인하고 수정된 후속 버전으로 복구하세요.".into());
-    }
-    let uid = Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .map_err(|err| format!("관리형 허브 시작 계정을 확인하지 못했습니다: {err}"))?;
-    let uid = String::from_utf8_lossy(&uid.stdout);
-    let result = Command::new("/bin/launchctl")
-        .args(["kickstart", &format!("gui/{}/com.agent-desk.managed", uid.trim())])
-        .output()
-        .map_err(|err| format!("관리형 허브 시작을 요청하지 못했습니다: {err}"))?;
-    if !result.status.success() {
-        return Err("관리형 허브를 시작하지 못했습니다. 로그인 시작 설정을 확인해 주세요.".into());
-    }
-    Ok(true)
-}
-
-/// Uses the registered login service for managed installations.
-fn start_local(hub: &Url) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    if start_managed_hub(hub)? {
-        return Ok(());
-    }
-    if connect_hub(hub).is_some() {
-        let port = hub.port_or_known_default().unwrap_or(4317);
-        return Err(format!("{port} 포트에서 Agent Desk 응답을 확인하지 못했습니다. 기존 서비스의 작업이 끝나면 정상 종료하고 다시 시도하세요."));
-    }
-    let repo = repo_dir();
-    if !repo.join("hub/src/index.ts").exists() {
-        return Err(format!("허브 코드를 찾을 수 없습니다: {}", repo.display()));
-    }
-    let port = hub.port_or_known_default().unwrap_or(4317).to_string();
-    spawn_node(repo.join("hub"), "src/index.ts", "hub.log", &[("PORT", port)])
-}
-
-#[tauri::command]
-async fn desk_startup(retry: bool) -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(move || {
-        let hub = hub_url();
-        let reachable = hub_reachable(&hub);
-        let mut info = serde_json::json!({ "ready": reachable });
-        if !is_loopback(&hub) || reachable { return info; }
-        if retry { if let Err(error) = start_local(&hub) { info["error"] = error.into(); } }
-        #[cfg(target_os = "macos")]
-        if let Ok(Some((state, logs))) = managed_state(&hub) {
-            for key in ["phase", "current", "candidate", "attempted", "blockedPort"] {
-                info[key] = state[key].clone();
-            }
-            info["canRestore"] = (!state["restoreCurrent"].is_null() && state["restoreCurrent"] == state["current"]).into();
-            info["logs"] = logs.to_string_lossy().into_owned().into();
-        }
-        info
-    }).await.unwrap_or_else(|_| serde_json::json!({ "ready": false }))
-}
-
 fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
-/// Runs on every page load (hub page and the local "hub not running" page). `start`: what
-/// happened to a hub that was not up ("starting", or why it could not be started).
-fn init_script(hub: &Url, start: &str) -> String {
+/// Runs on every page load, including the local connection page.
+fn init_script(hub: &Url) -> String {
     let hub_json = serde_json::to_string(hub.as_str()).unwrap();
-    let start_json = serde_json::to_string(start).unwrap();
     format!(
         "window.__AGENT_DESK_APP__ = true;\n\
          window.__AGENT_DESK_HUB_URL__ = {hub_json};\n\
-         window.__AGENT_DESK_START__ = {start_json};\n\
          window.dispatchEvent(new Event('desk-app'));\n\
          document.addEventListener('DOMContentLoaded', function () {{ window.dispatchEvent(new Event('desk-app')); }});"
     )
@@ -324,11 +144,13 @@ fn notification_origin(hub: &Url) -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission, desk_startup])
+        .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission, hub_startup::desk_startup])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             notify::init(app.handle());
-            let hub = hub_url();
+            let startup = Arc::new(DesktopHub::new());
+            let hub = startup.url.clone();
+            app.manage(startup.clone());
             // Only the configured hub origin can show notifications or change this window's zoom.
             // The local "hub not running" page gets zoom only, never notification permissions.
             // Tauri panics on a pattern it can't parse, and an IPv6 host ([::1]) is one: such a
@@ -353,34 +175,16 @@ pub fn run() {
                     .permission("allow-desk-startup")
                     .permission("core:webview:allow-set-webview-zoom"),
             )?;
-            let mut started = String::new();
-            let start = if hub_reachable(&hub) {
-                WebviewUrl::External(hub.clone())
-            } else {
-                started = if !is_loopback(&hub) {
-                    "remote".into()
-                } else {
-                    match start_local(&hub) {
-                        Ok(()) => "starting".into(),
-                        Err(e) => e,
-                    }
-                };
-                eprintln!("[agent-desk] hub not reachable at {hub}; {started}");
-                WebviewUrl::App("index.html".into())
-            };
-
             let nav_hub = hub.clone();
             let nav_handle = app.handle().clone();
             let popup_handle = app.handle().clone();
 
-            let window = WebviewWindowBuilder::new(app, "main", start)
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Agent Desk")
                 .inner_size(1500.0, 950.0)
                 .min_inner_size(800.0, 500.0)
                 .zoom_hotkeys_enabled(true)
-                .initialization_script(init_script(&hub, &started))
-                // Same-origin (hub) and internal app pages stay in the window;
-                // other http(s) links open in the system browser.
+                .initialization_script(init_script(&hub))
                 .on_navigation(move |url| {
                     match url.scheme() {
                         "http" | "https" => {
@@ -404,7 +208,9 @@ pub fn run() {
                 .build()?;
 
             let target = window.clone();
+            startup.monitor();
             window.on_window_event(move |event| {
+                if matches!(event, WindowEvent::Destroyed) { startup.close(); }
                 if let WindowEvent::DragDrop(dd) = event {
                     let js = match dd {
                         DragDropEvent::Enter { .. } => drag_js(true),

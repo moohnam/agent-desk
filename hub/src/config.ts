@@ -6,6 +6,7 @@
 
 import { dirname, join, resolve } from 'node:path';
 import { resolveLocalLaunchSettings } from './runner/local-launch.ts';
+import { configuredPort, deskPortDefaults, recordPortDefaults } from './ports.ts';
 
 const env = process.env;
 const REPO = resolve(import.meta.dirname, '../..');
@@ -17,15 +18,17 @@ const positive = (v: string | undefined, fallback: number) => {
 export const DB_PATH = env.AGENT_DESK_DB ?? join(REPO, 'data', 'agent-desk.db');
 const DATA_DIR = dirname(DB_PATH);
 const localLaunch = resolveLocalLaunchSettings(env, DATA_DIR);
+const ports = deskPortDefaults(DB_PATH, { ...env, AGENT_DESK_GATEWAY_DB: localLaunch.gatewayDbPath });
+export const recordDeskPortDefaults = () => recordPortDefaults(DATA_DIR, ports);
 
 export const config = {
   /** The hub's HTTP port; HOST=127.0.0.1 keeps it to this machine, else other devices connect with the access token. */
-  port: positive(env.PORT, 4317),
+  port: configuredPort(env.PORT, ports.hub),
   host: env.HOST ?? '0.0.0.0',
   dbPath: DB_PATH,
   gatewayDbPath: localLaunch.gatewayDbPath,
   localAuthorityTokenFile: localLaunch.tokenFile,
-  localAuthorityUrl: localLaunch.authorityUrl ?? `http://127.0.0.1:${positive(env.AGENT_DESK_SHARED_PORT, 4321)}/`,
+  localAuthorityUrl: localLaunch.authorityUrl ?? `http://127.0.0.1:${configuredPort(env.AGENT_DESK_SHARED_PORT, ports.workspace)}/`,
   uploadsDir: env.AGENT_DESK_UPLOADS ?? join(DATA_DIR, 'uploads'),
   accessTokenFile: env.AGENT_DESK_TOKEN_FILE ?? join(DATA_DIR, 'access-token'),
   /**
@@ -46,7 +49,7 @@ export const config = {
   },
   runner: {
     host: '127.0.0.1',
-    port: positive(env.RUNNER_PORT, 4318),
+    port: configuredPort(env.RUNNER_PORT, ports.daemon),
     log: env.RUNNER_LOG ?? join(DATA_DIR, 'runner.log'),
     pidFile: env.RUNNER_PID_FILE ?? join(DATA_DIR, 'runner.pid'),
     /** The secret a hub shows the runner when it connects (wire.ts). */
@@ -59,7 +62,7 @@ export const config = {
   shared: {
     directory: env.AGENT_DESK_SHARED_DIR ?? join(DATA_DIR, 'shared-runner'),
     address: env.AGENT_DESK_SHARED_ADDRESS,
-    port: positive(env.AGENT_DESK_SHARED_PORT, 4321),
+    port: configuredPort(env.AGENT_DESK_SHARED_PORT, ports.workspace),
     migrationRunnerId: env.AGENT_DESK_REMOTE_MIGRATED_RUNNER_ID,
   },
   remote: {

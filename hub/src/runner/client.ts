@@ -52,6 +52,7 @@ export interface RunnerClientOptions {
   port?: number;
   token?: () => string;
   onError?: (error: Error) => void;
+  ipv6DeskMcpUrl?: () => string | undefined;
 }
 
 /**
@@ -67,6 +68,7 @@ export class RunnerClient implements RunnerPort {
   private supportsConnectorMcp = false;
   private supportsModelCatalogs = false;
   private lastSpawn = 0;
+  private supportsIpv6Mcp = false;
   private retryMs = RETRY_MS;
   private retry?: ReturnType<typeof setTimeout>;
   connectionProblem?: RunnerConnectionProblem;
@@ -88,7 +90,7 @@ export class RunnerClient implements RunnerPort {
   /** Hand the already authenticated socket and its first hello to a fully constructed Hub. */
   handoff(onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener,
     hello: Extract<RunnerToHub,{type:'hello'}>) {
-    if (!this.connected || this.id !== hello.runnerId) throw new Error('기존 4318 러너 연결이 인계 전에 끊겼습니다');
+    if (!this.connected || this.id !== hello.runnerId) throw new Error('기존 로컬 러너 연결이 인계 전에 끊겼습니다');
     this.onMessage = onMessage;
     this.onConnection = onConnection;
     this.onMessage(hello);
@@ -98,7 +100,9 @@ export class RunnerClient implements RunnerPort {
   get connected() { return this.socket !== null && this.id !== null; }
   get skillSnapshotSupported() { return this.supportsSkillSnapshot; }
 
-  get connectorMcpSupported() { return this.supportsConnectorMcp; }
+  get connectorMcpSupported() {
+    return this.supportsConnectorMcp && (this.supportsIpv6Mcp || !this.options.ipv6DeskMcpUrl?.());
+  }
   has(sessionId: string) { return this.connected && this.live.has(sessionId); }
 
   refreshModels(force=false) {
@@ -113,10 +117,12 @@ export class RunnerClient implements RunnerPort {
       throw new HttpError(409, '현재 로컬 러너는 고정 스킬 버전을 지원하지 않습니다. 실행 중인 세션은 유지되며, 러너가 업데이트된 뒤 다시 보내주세요');
     if (cmd.type === 'start' && cmd.instructions !== undefined && cmd.instructions !== DEFAULT_INSTRUCTIONS && !this.supportsInstructions)
       throw new HttpError(409, '현재 로컬 러너는 사용자 지침을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요');
-    if (cmd.type === 'start' && cmd.connectorMcp && !this.supportsConnectorMcp)
+    if (cmd.type === 'start' && cmd.connectorMcp && !this.connectorMcpSupported)
       throw new HttpError(409, '외부 연결 도구를 사용하려면 로컬 러너를 업데이트하세요');
     if (cmd.type === 'start') {
       this.live.add(cmd.sessionId);
+      const ipv6DeskMcpUrl = this.supportsIpv6Mcp ? this.options.ipv6DeskMcpUrl?.() : undefined;
+      if (ipv6DeskMcpUrl) cmd = { ...cmd, ipv6DeskMcpUrl };
     }
     writeLine(this.socket, cmd);
   }
@@ -157,6 +163,7 @@ export class RunnerClient implements RunnerPort {
           this.supportsSkillSnapshot = !!m.capabilities.skillSnapshot;
           this.supportsInstructions = !!m.capabilities.instructions;
           this.supportsConnectorMcp = !!m.capabilities.connectorMcp;
+          this.supportsIpv6Mcp = m.capabilities.ipv6Mcp === true;
           this.supportsModelCatalogs = m.capabilities.modelCatalogs !== undefined;
           if (m.protocolVersion !== PROTOCOL_VERSION && this.options.spawnIfMissing !== false) {
             console.warn(`runner speaks protocol ${m.protocolVersion ?? '(none)'}, this hub ${PROTOCOL_VERSION}: restart the runner (npm run runner:stop)`);

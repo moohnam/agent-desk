@@ -76,7 +76,7 @@ export class LocalRuntime {
           const approvals = db.prepare("SELECT count(*) AS n FROM approval WHERE status='pending'").get() as {n:number};
           if (opts.takeover) {
             if (!opts.takeover.runner.connected || opts.takeover.runner.id !== opts.takeover.hello.runnerId)
-              throw new Error('기존 4318 러너 연결이 끊겼습니다');
+              throw new Error('기존 로컬 러너 연결이 끊겼습니다');
             verifyLocalTakeover(db,opts.takeover.hello);
           } else if (active.n || approvals.n) throw new Error('기존 세션 또는 승인이 진행 중입니다. 모두 끝난 뒤 로컬 작업공간을 전환하세요');
         }
@@ -112,7 +112,7 @@ export class LocalRuntime {
     if (this.closed) throw new Error('종료된 로컬 작업공간은 활성화할 수 없습니다');
     if (this.activated) return;
     if(this.takeoverRunnerId&&(!this.runner.connected||this.runner.id!==this.takeoverRunnerId))
-      throw new Error('기존 4318 러너 연결이 활성화 전에 끊겼습니다');
+      throw new Error('기존 로컬 러너 연결이 활성화 전에 끊겼습니다');
     const changed=this.hub.store.database.prepare("UPDATE local_authority SET activated_at=? WHERE id=1 AND host=? AND pid=? AND activated_at=''")
       .run(new Date().toISOString(),hostname(),process.pid).changes;
     if(changed!==1)throw new Error('로컬 작업공간 소유권이 바뀌어 활성화하지 못했습니다');
@@ -148,7 +148,7 @@ export async function connectLocalTakeover(dbPath:string, opts:{timeoutMs?:numbe
   return await new Promise<LocalRuntime>((resolve,reject)=>{
     let finished=false;
     let runner:RunnerClient|undefined;
-    const timer=setTimeout(()=>fail(new Error('기존 4318 러너의 인증된 hello를 받지 못했습니다')),opts.timeoutMs??5000);
+    const timer=setTimeout(()=>fail(new Error('기존 로컬 러너의 인증된 응답을 받지 못했습니다')),opts.timeoutMs??5000);
     const fail=(error:unknown)=>{
       if(finished)return;
       finished=true;clearTimeout(timer);runner?.close();closeSource();reject(error);

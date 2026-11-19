@@ -68,6 +68,7 @@ export class Hub extends DeskCore {
   connectorBroker?: ConnectorBroker;
   connectorQueriesPending?: () => boolean;
   connectorMcpUrl?: string;
+  ipv6DeskMcpUrl?: string;
   /** Only the colocated journal runtime can use this workspace's loopback MCP endpoint. */
   connectorRuntimeId?: string;
   withConnectorContext<T>(context: ConnectorExecutionContext | null, work: () => T): T {
@@ -112,8 +113,11 @@ export class Hub extends DeskCore {
       try { accepted = broker.stored(sessionId); } catch { accepted = null; }
     }
     if (this.unsupportedConnector(session,accepted)) return undefined;
-    const supported = session.engine !== 'agy' && this.remotes.canConnector(sessionId) && (!this.remotes.owns(session.runner_id) || session.runner_id === this.connectorRuntimeId);
+    const remote = this.remotes.owns(session.runner_id);
+    const supported = session.engine !== 'agy' && this.remotes.canConnector(sessionId) && (!remote || session.runner_id === this.connectorRuntimeId);
     if (!broker || !this.connectorMcpUrl || !supported) {
+      if (accepted && !remote && this.ipv6DeskMcpUrl)
+        throw new HttpError(409, 'IPv6 허브에서 외부 연결 도구를 사용하려면 로컬 러너를 업데이트한 뒤 다시 보내주세요');
       if (accepted) throw new HttpError(409, '이 실행에서 외부 연결 도구를 사용할 수 없습니다. 최신 공유 러너의 Codex 또는 Claude 작업을 사용하세요');
       return undefined;
     }
@@ -195,7 +199,9 @@ export class Hub extends DeskCore {
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
     this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
-    const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
+    const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection, {
+      ipv6DeskMcpUrl: () => this.ipv6DeskMcpUrl,
+    })))(
       (m) => this.onRunnerMessage(m),
       (connected, problem) => {
         if (!connected) this.remotes?.localUsageDisconnected();
