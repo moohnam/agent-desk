@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Modal } from './Modal.tsx';
@@ -181,11 +182,12 @@ function Picker({ value, onChange, find, chip, total, noun, empty }: {
           onChange={(e) => { setQ(e.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}
           onKeyDown={(e) => {
+            if (imeKey(e.nativeEvent) || e.defaultPrevented) return;
             if (e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); setIndex(Math.min(cur + 1, rows.length - 1)); }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setIndex(Math.max(cur - 1, 0)); }
             else if (e.key === 'Enter') {
               // Enter picks from the list instead of submitting the form.
-              if (e.nativeEvent.isComposing) return;
+              if (e.repeat) { e.preventDefault(); return; }
               if (open && rows[cur]) { e.preventDefault(); onChange(toggle(value, rows[cur].id)); setQ(''); }
             } else if (e.key === 'Backspace' && !q && value.length) onChange(value.slice(0, -1));
             else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); setOpen(false); }

@@ -197,12 +197,23 @@ export class Hub extends DeskCore {
     this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
     const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection)))(
       (m) => this.onRunnerMessage(m),
-      (connected) => this.publish({ type: 'runner', connected }),
+      (connected, problem) => {
+        if (!connected) this.remotes?.localUsageDisconnected();
+        this.publish({ type: 'runner', connected, problem });
+      },
     );
     this.remotes = new RemoteRunners(store, localRunner, (m, at) => this.atTime(at, () => this.onRunnerMessage(m)),
       (sessions, id) => this.reconcile(sessions, false, id), () => {
         this.publish({ type: 'runners', runners: this.remotes.list() });
-      }, this.skills, id => this.releaseRemoteScheduledReplies(id));
+      }, this.skills, id => this.releaseRemoteScheduledReplies(id), (id, rejected) => {
+        const session = this.store.getSession(id);
+        if (!session) return;
+        if (rejected.previousModel && !rejected.uncertain) this.store.updateSession(id, rejected.previousModel);
+        if (rejected.invalidatesQueue) this.dropQueue(id, session.task_id, '러너가 이전 요청의 기능을 지원하지 않아서');
+        this.onRunnerMessage({ type: 'event', sessionId: id, event: { kind: 'status', state: rejected.busy ? 'warning' : 'error',
+          detail: { message: rejected.message, sequences: rejected.sequences, reason: rejected.uncertain ? 'remote_delivery_uncertain' : 'remote_feature_unsupported' } } });
+        this.publishTask(session.task_id);
+      });
     this.runner = this.remotes;
     this.graceTimer = setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS);
     this.graceTimer.unref();
@@ -580,7 +591,7 @@ export class Hub extends DeskCore {
     if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...context });
     if (model || effort) {
       this.store.updateSession(session.id, { ...(model && { model }), ...(effort && { effort }) });
-      if (live || this.remotes.canQueue(session.id)) this.runner.handle({ type: 'set_model', sessionId: session.id, model, effort });
+      if (live || this.remotes.canQueue(session.id)) this.remotes.handle({ type: 'set_model', sessionId: session.id, model, effort }, { model: session.model, effort: session.effort });
       this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'model', detail: {
         model: model ?? session.model, effort: effort ?? session.effort,
       } });
@@ -708,9 +719,16 @@ export class Hub extends DeskCore {
     this.publishTask(session.task_id);
   }
 
-  deleteNote(taskId: string, eventId: number) {
+  deleteNote(taskId: string, eventId: number, expectedRevision?: number) {
     this.atomic(() => {
       this.requireNoteTask(taskId);
+      if (expectedRevision !== undefined) {
+        const event = this.store.eventsByIds(taskId, [eventId])[0];
+        if (!event) return;
+        if (event.kind !== 'user') throw new HttpError(404, '메모 게시글을 찾을 수 없습니다');
+        if (((event.payload as UserPayload).revision ?? 0) !== expectedRevision)
+          throw new HttpError(409, '메모 글이 변경되었습니다. 최신 글을 확인한 뒤 다시 잘라내세요');
+      }
       if (!this.store.deleteUserEvent(taskId, eventId)) throw new HttpError(404, '메모 게시글을 찾을 수 없습니다');
       this.store.touchTask(taskId);
       this.publish({ type: 'event_removed', task_id: taskId, event_id: eventId });
@@ -1129,9 +1147,11 @@ export class Hub extends DeskCore {
       this.localModelCatalogs = structuredClone(m.capabilities.modelCatalogs ?? {});
       this.localModelLabel = m.host;
       this.localModelsSupported = m.capabilities.modelCatalogs !== undefined;
+      this.remotes.localUsageHello(m.runnerId, m.capabilities.usage === true);
       this.reconcile(m.sessions);
       return;
     }
+    if (m.type === 'usage') { this.remotes.acceptLocalUsage(m.report); return; }
     const session = this.store.getSession(m.sessionId);
     if (!session) return;
     const taskId = session.task_id;

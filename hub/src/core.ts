@@ -106,7 +106,7 @@ export class DeskCore {
       approvals: this.store.pendingApprovals(),
       questions: this.store.pendingQuestions(),
       channels: this.store.listChannels(),
-      runner: { connected: this.runner.connected },
+      runner: { connected: this.runner.connected, problem: this.runner.connectionProblem },
     };
   }
 

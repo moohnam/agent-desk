@@ -3,6 +3,7 @@
 .model-dialog-form { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .model-dialog-scroll { min-height: 0; overflow-y: auto; padding: 18px 22px 0; }
 .model-dialog-intro { margin: 0 0 5px; }
+.model-usage-runner { margin: 10px 0 6px; }
 .model-dialog-source { margin: 0 0 18px; }
 .model-engine { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 32px; padding: 18px 0 22px; border-top: 1px solid var(--border); }
 .model-engine-settings { min-width: 0; padding: 0; margin: 0; border: 0; display: flex; flex-direction: column; gap: 14px; }

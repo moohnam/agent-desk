@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal.tsx';
 
@@ -64,6 +65,7 @@ export function ColumnFinder({ items, onPick, onClose }: { items: FinderItem[]; 
           onKeyUp={() => { navigationKey.current = null; }}
           onBlur={() => { navigationKey.current = null; }}
           onKeyDown={(e) => {
+            if (imeKey(e.nativeEvent) || e.defaultPrevented || (e.repeat && e.key === 'Enter')) return;
             const down = e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'n' || e.key === 'j'));
             const up = e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'p' || e.key === 'k'));
             if (down || up) {

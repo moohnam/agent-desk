@@ -26,6 +26,7 @@ let bufferSize = 0;
 
 const runner = new Runner(`local-${hostname()}`, (m) => {
   if (hub) { writeLine(hub, m); return; }
+  if (m.type === 'usage') return;
   const line = JSON.stringify(m) + '\n';
   buffer.push({ line, event: m.type === 'event' });
   bufferSize += line.length;
@@ -47,6 +48,7 @@ process.on('unhandledRejection', (err) => console.error('runner: unhandled rejec
 const token = runnerToken();
 /** How long a new connection has to show the token before it is dropped. */
 const AUTH_MS = 5000;
+let lastAuthWarning = 0;
 
 const server = createServer((socket) => {
   let authed = false;
@@ -56,15 +58,21 @@ const server = createServer((socket) => {
     if (!authed) {
       // Until it shows the token the connection is nobody's: the hub already connected keeps its place.
       const auth = m as { type?: string; token?: unknown; protocolVersion?: unknown };
-      if (auth?.type !== 'auth' || !sameToken(auth.token, token)) { console.error('runner: connection without the token, dropped'); socket.destroy(); return; }
+      if (auth?.type !== 'auth' || !sameToken(auth.token, token)) {
+        if (Date.now() - lastAuthWarning >= 60_000) {
+          lastAuthWarning = Date.now();
+          console.error('러너가 인증되지 않은 허브 연결을 거절했습니다. 양쪽의 연결 토큰 설정을 확인하세요.');
+        }
+        socket.destroy(); return;
+      }
       authed = true;
       clearTimeout(timer);
-      if (auth.protocolVersion !== PROTOCOL_VERSION) console.warn(`runner: hub speaks protocol ${auth.protocolVersion}, this runner ${PROTOCOL_VERSION}`);
+      if (auth.protocolVersion !== PROTOCOL_VERSION) console.warn('허브와 로컬 러너의 프로토콜 버전이 다릅니다. 필요한 기능이 지원되는지 확인하세요.');
       adopt(socket);
       return;
     }
     const cmd = checkHubToRunner(m);
-    if (typeof cmd === 'string') { console.error(`runner: dropped a command (${cmd})`); return; }
+    if (typeof cmd === 'string') { console.error('허브 명령의 형식이 잘못되었습니다.'); return; }
     runner.handle(cmd);
   });
   const drop = () => { clearTimeout(timer); if (hub === socket) hub = null; };

@@ -236,7 +236,11 @@ test('notes use an existing project, accept literal posts without a runner, and 
   assert.deepEqual(messages.find(m => m.type === 'event_updated'), { type: 'event_updated', event: edited });
   assert.throws(() => api('PATCH', row, { text: '   ' }), { status: 400 });
   assert.throws(() => api('DELETE', `${route}/notes/0`), { status: 400 });
-  assert.equal(api('DELETE', row).status, 200);
+  assert.throws(() => api('POST', `${row}/cut`, {}), { status: 400 });
+  assert.throws(() => api('POST', `${row}/cut`, { revision: 0 }), { status: 409 });
+  assert.deepEqual(hub.store.listEvents(note.id), [edited, second]);
+  assert.equal(api('POST', `${row}/cut`, { revision: 1 }).status, 200);
+  assert.equal(api('POST', `${row}/cut`, { revision: 1 }).status, 200);
   assert.deepEqual(messages.find(m => m.type === 'event_removed'), { type: 'event_removed', task_id: note.id, event_id: first.id });
   assert.deepEqual(hub.store.listEvents(note.id), [second]);
   assert.equal(api('GET', '/feed/count').body.posts, 1);

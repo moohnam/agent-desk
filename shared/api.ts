@@ -103,6 +103,8 @@ export interface TaskView<E = WireEvent> extends Task {
 /** Desk-wide defaults for new tasks of each engine; null leaves the choice to the engine. */
 export type Settings = Record<EngineName, { model: ModelName | null; effort: Effort | null }>;
 
+export type RunnerConnectionProblem = 'unreachable' | 'authentication' | 'token' | 'disconnected';
+
 export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'event'; event: E }
   | { type: 'event_updated'; event: E }
@@ -110,7 +112,7 @@ export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'task'; task: TaskView<E> }
   | { type: 'approval'; approval: A }
   | { type: 'question'; question: Question }
-  | { type: 'runner'; connected: boolean }
+  | { type: 'runner'; connected: boolean; problem?: RunnerConnectionProblem }
   | { type: 'runners'; runners: import('./remote.ts').RemoteRunnerView[] }
   | { type: 'channel'; channel: Channel }
   | { type: 'channel_entry'; entry: ChannelEntry }
@@ -130,7 +132,7 @@ export interface AccessView { requests: AccessRequest[]; devices: AccessDevice[]
 export interface DeskState<E = WireEvent, A = Approval> {
   projects: Project[]; tasks: TaskView<E>[]; approvals: A[]; questions: Question[];
   channels?: Channel[];
-  runner: { connected: boolean }; client?: { local: boolean };
+  runner: { connected: boolean; problem?: RunnerConnectionProblem }; client?: { local: boolean };
   /** For this Mac's own pages only. */
   access?: AccessView;
 }

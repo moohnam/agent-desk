@@ -38,11 +38,10 @@ if (workspaces) importLegacyWorkspaceLinks(DB_PATH,store);
 if (workspaces) importRemoteManifests(DB_PATH,store,true);
 const localAuthorityId = authorityTokenFile ? await workspaces!.configureLocal(config.localAuthorityUrl,readFileSync(authorityTokenFile,'utf8').trim()) : undefined;
 const access = new Access(TOKEN_FILE, PORT, undefined, config.allowedHosts);
-const server = createHttpServer(hub, access, UPLOADS_DIR, {workspaces,localAuthorityId,instructions:new InstructionStore(config.instructionsFile)}).listen(PORT, HOST, async () => {
+const server = createHttpServer(hub, access, UPLOADS_DIR, {workspaces,localAuthorityId,instructions:new InstructionStore(config.instructionsFile)}).listen(PORT, HOST, () => {
   console.log(`agent-desk hub listening on http://${HOST}:${PORT} (db: ${authorityTokenFile?config.gatewayDbPath:DB_PATH}${authorityTokenFile?`, canonical: ${DB_PATH}`:''})`);
   if (HOST === '127.0.0.1' || HOST === 'localhost') return;
-  const [first, ...rest] = access.urls();
-  console.log(`다른 기기에서 열기 (토큰: ${TOKEN_FILE}):\n${await access.qrTerminal(first)}${[first, ...rest].join('\n')}`);
+  console.log('다른 기기를 연결하려면 이 기기의 Agent Desk에서 다른 기기 연결을 여세요.');
 });
 await registerRuntimeControl({ role: 'hub', ready: () => server.listening && (!!authorityTokenFile || hub.runner.connected),
   blockers: () => hubBlockers(hub), stop: async () => {

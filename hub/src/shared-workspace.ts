@@ -20,6 +20,7 @@ import { handleConnectorMcp } from './connector-mcp.ts';
 import type { ConnectorGrant, ConnectorIdentity } from './connector-authority.ts';
 import { connectorInputScopes } from '../../shared/connector-tags.ts';
 import { connectorTagTools } from './connectors.ts';
+import { usageQuery, workspaceUsage } from './runner/usage-probe.ts';
 
 export const connectorUserInput = (method: string, path: string) => method === 'POST'
   && (/^\/(compose|tasks)$/.test(path.split('?')[0]) || /^\/tasks\/[^/]+\/(messages|reset|handoff)$/.test(path.split('?')[0])
@@ -211,7 +212,7 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1,note_cut:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
         if (req.method === 'GET' && url.pathname === '/v1/file-path') {
@@ -296,7 +297,15 @@ export class SharedWorkspace {
           res.on('close',()=>{clearInterval(ping);this.files.delete(res);});
           return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined, approvedPath);
         }
-        if (req.method === 'GET' && url.pathname === '/v1/read') return json(res,200,this.read(url.searchParams.get('path')!,peer));
+        if (req.method === 'GET' && url.pathname === '/v1/read') {
+          const path = url.searchParams.get('path')!;
+          if (path?.startsWith('/runner-usage') && /^\/runner-usage(?:\?|$)/.test(path)) {
+            const result = await workspaceUsage(this.hub.remotes, this.localAuthority, usageQuery(new URL(path,'http://workspace').searchParams));
+            this.assertPeer(peer);
+            return json(res,200,result);
+          }
+          return json(res,200,this.read(path,peer));
+        }
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
           const result = this.execute(peer,await readBody(req,8*1024*1024));
           return json(res,result.status,result.body);

@@ -8,6 +8,8 @@ import { startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 import { materializeSkillSnapshot, pruneSkillSnapshots } from './skill-input.ts';
 import type { RunnerMcp } from './managed-mcp.ts';
+import { checkUsageRequest, type UsageReport, type UsageRequest } from '../../../shared/runner-usage.ts';
+import { readRunnerUsage } from '../usage.ts';
 
 
 const ENGINES: Record<Engine, StartEngine> = { claude: startClaude, codex: startCodex, agy: startAgy };
@@ -39,6 +41,7 @@ export class Runner {
   private mcp?: RunnerMcp;
   private catalogListener?: () => void;
   private catalogSignature = '';
+  private usage = new Map<Engine, { requestId: string; report?: UsageReport }>();
 
   constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine; mcp?: RunnerMcp } = {}) {
     this.id = id;
@@ -49,7 +52,31 @@ export class Runner {
   }
 
   /** `close`: understands the close command (older runners ignore it). */
-  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true, instructions: true, connectorMcp: true, modelCatalogs: runnerModelCatalogs.snapshot() }; }
+  get capabilities(): Capabilities { return { engines: Object.keys(ENGINES), close: true, skillSnapshot: true, instructions: true, connectorMcp: true, modelCatalogs: runnerModelCatalogs.snapshot(), usage: true }; }
+
+  usageReports() {
+    return [...this.usage.values()].flatMap(({ report }) => report ? [report] : []);
+  }
+
+  exchangeUsage(sent: UsageReport[], requests: UsageRequest[] | undefined) {
+    for (const report of sent) {
+      const entry = this.usage.get(report.value.engine);
+      if (entry?.report === report) entry.report = undefined;
+    }
+    if (Array.isArray(requests)) for (const request of requests.slice(0, 3)) this.refreshUsage(request);
+  }
+
+  private refreshUsage(request: UsageRequest, deliver?: (report: UsageReport) => void) {
+    if (!checkUsageRequest(request) || this.usage.get(request.engine)?.requestId === request.requestId) return;
+    const entry: { requestId: string; report?: UsageReport } = { requestId: request.requestId };
+    this.usage.set(request.engine, entry);
+    void readRunnerUsage(request.engine, request.refresh).then(value => {
+      if (this.usage.get(request.engine) !== entry) return;
+      const report = { requestId: request.requestId, value };
+      if (deliver) deliver(report);
+      else entry.report = report;
+    });
+  }
 
   /** Production entry points opt in; metadata refresh never touches session adapters. */
   startModelRefresh(changed: () => void = () => {}) {
@@ -152,6 +179,7 @@ export class Runner {
     if (cmd.type === 'start' || cmd.type === 'send') requireAdmission();
     switch (cmd.type) {
       case 'refresh_models': this.refreshModels(cmd.force); break;
+      case 'refresh_usage': this.refreshUsage(cmd.request, report => this.emit({ type: 'usage', sessionId: cmd.sessionId, report })); break;
       case 'start': {
         const old = this.sessions.get(cmd.sessionId);
         if (old) { this.drop(cmd.sessionId, old); old.adapter?.close(); }

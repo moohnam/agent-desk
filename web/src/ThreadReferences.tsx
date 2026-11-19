@@ -50,6 +50,10 @@ const ReferenceBody = memo(function ReferenceBody({ visible, ...props }: { visib
 
 export const ThreadReferences = memo(ThreadReferencesInner, (a, b) => !a.visible && !b.visible && a.task.id === b.task.id && a.ids === b.ids && a.files === b.files && a.order === b.order && a.fileFocus === b.fileFocus);
 
+function markReferenceScroll(feed: HTMLDivElement) {
+  feed.toggleAttribute('data-scroll-middle', feed.scrollTop > 2 && feed.scrollHeight - feed.clientHeight - feed.scrollTop > 2);
+}
+
 function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, events, reload, onMove, onResolveFile, onRemoveFile, onRemove, onClear, onClose, onReveal, onError }: {
   visible: boolean; files?: string[]; onRemoveFile: (href:string)=>void;
   onMove: (entry: ReferenceEntry, direction: -1 | 1) => void;
@@ -71,6 +75,7 @@ function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, ev
     const openedFile = fileFocus && fileFocus.revision !== revealedFile.current;
     const pinned = ids.some(id => !previousIds.current.includes(id));
     if (openedFile || pinned) feed.current?.scrollTo({ top: 0, behavior: 'instant' });
+    if (feed.current) markReferenceScroll(feed.current);
     revealedFile.current = fileFocus?.revision;
     previousIds.current = ids;
   }, [visible, fileFocus?.revision, ids]);
@@ -112,7 +117,7 @@ function ThreadReferencesInner({ visible, task, ids, files, order, fileFocus, ev
       {(ids.length > 0 || !!files?.length) && <button className="link" onClick={onClear}>모두 해제</button>}
       <button className="icon-btn" title="고정한 글 창 닫기 · 선택은 유지" aria-label="고정한 글 창 닫기" onClick={onClose}><PanelLeftClose /></button>
     </header>
-    <div ref={feed} className="reference-feed">
+    <div ref={feed} className="reference-feed" onScroll={event => markReferenceScroll(event.currentTarget)}>
       {error && <p className="error" role="alert">글을 불러오지 못했습니다. <button className="link" onClick={() => setRetry(n => n + 1)}>다시 시도</button></p>}
       {ids.length === 0 && !files?.length && <p className="empty">오른쪽 스레드의 글에서 <Bookmark aria-label="고정" /> 버튼을 누르면 이곳에 차례로 쌓입니다.</p>}
       {entries.map((entry, index) => {

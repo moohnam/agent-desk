@@ -69,18 +69,19 @@ export function feedUrl(raw: unknown): URL {
 }
 
 /** Native HTTP avoids a second DNS lookup after validation (DNS rebinding). No cookies/credentials. */
-export const fetchPublicFeed: FeedFetcher = async (raw, headers, signal) => {
+export async function fetchPublicBody(raw: string, headers: Record<string, string>, signal: AbortSignal,
+  { maxBytes, maxRedirects, label, agent }: { maxBytes: number; maxRedirects: number; label: string; agent?: false }) {
   let url = feedUrl(raw);
-  for (let redirect = 0; redirect <= 4; redirect++) {
+  for (let redirect = 0; redirect <= maxRedirects; redirect++) {
     signal.throwIfAborted();
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await abortable(lookup(hostname, { all: true }), signal);
     signal.throwIfAborted();
-    if (!addresses.length || addresses.some((a) => !isPublicAddress(a.address))) throw new Error('공개 인터넷 주소의 피드만 수집할 수 있습니다');
+    if (!addresses.length || addresses.some((a) => !isPublicAddress(a.address))) throw new Error('공개 인터넷 주소만 읽을 수 있습니다');
     const pinned = addresses[0];
-    const response = await new Promise<FeedResponse & { location?: string }>((resolve, reject) => {
+    const response = await new Promise<{ status: number; headers: Record<string, string | undefined>; body: Buffer; location?: string }>((resolve, reject) => {
       const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
-        signal, headers: { ...headers, 'user-agent': 'AgentDesk/1.0 (feed reader)', 'accept-encoding': 'identity' },
+        agent, signal, headers: { 'user-agent': 'AgentDesk/1.0', ...headers, 'accept-encoding': 'identity' },
         lookup: (_name, opts, cb) => {
           if (typeof opts === 'object' && opts.all) cb(null, [pinned]);
           else cb(null, pinned.address, pinned.family);
@@ -88,30 +89,36 @@ export const fetchPublicFeed: FeedFetcher = async (raw, headers, signal) => {
       }, (res) => {
         const status = res.statusCode ?? 502;
         if ([301, 302, 303, 307, 308].includes(status)) {
-          res.resume(); resolve({ status, headers: {}, body: '', location: res.headers.location }); return;
+          res.destroy(); resolve({ status, headers: {}, body: Buffer.alloc(0), location: res.headers.location }); return;
         }
-        if (Number(res.headers['content-length']) > MAX_FEED_BYTES) { res.destroy(); reject(new Error('피드가 2 MiB를 넘습니다')); return; }
-        if (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity') { res.destroy(); reject(new Error('압축되지 않은 피드 응답이 필요합니다')); return; }
+        const tooBig = () => new Error(`${label}가 ${maxBytes / (1024 * 1024)} MiB를 넘습니다`);
+        if (Number(res.headers['content-length']) > maxBytes) { res.destroy(); reject(tooBig()); return; }
+        if (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity') { res.destroy(); reject(new Error(`압축되지 않은 ${label} 응답이 필요합니다`)); return; }
         const chunks: Buffer[] = []; let bytes = 0;
         res.on('data', (c: Buffer) => {
           bytes += c.length;
-          if (bytes > MAX_FEED_BYTES) { res.destroy(new Error('피드가 2 MiB를 넘습니다')); return; }
+          if (bytes > maxBytes) { res.destroy(tooBig()); return; }
           chunks.push(c);
         });
         res.on('error', reject);
-        res.on('end', () => resolve({ status, body: Buffer.concat(chunks).toString('utf8'), headers: {
+        res.on('end', () => resolve({ status, body: Buffer.concat(chunks), headers: {
           etag: res.headers.etag, 'last-modified': res.headers['last-modified'],
         } }));
       });
       request.on('error', reject); request.end();
     });
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-    if (!response.location || redirect === 4) throw new Error('피드 리다이렉트가 올바르지 않거나 너무 많습니다');
+    if (!response.location || redirect === maxRedirects) throw new Error(`${label} 리다이렉트가 올바르지 않거나 너무 많습니다`);
     const next = feedUrl(new URL(response.location, url).href);
     if (url.protocol === 'https:' && next.protocol !== 'https:') throw new Error('HTTPS 피드를 HTTP로 리다이렉트할 수 없습니다');
     url = next;
   }
-  throw new Error('피드를 가져오지 못했습니다');
+  throw new Error(`${label}를 가져오지 못했습니다`);
+}
+export const fetchPublicFeed: FeedFetcher = async (raw, headers, signal) => {
+  const { status, headers: resultHeaders, body } = await fetchPublicBody(raw, { ...headers, 'user-agent': 'AgentDesk/1.0 (feed reader)' },
+    signal, { maxBytes: MAX_FEED_BYTES, maxRedirects: 4, label: '피드' });
+  return { status, headers: { etag: resultHeaders.etag, 'last-modified': resultHeaders['last-modified'] }, body: body.toString('utf8') };
 };
 
 function stringValue(v: unknown): string {

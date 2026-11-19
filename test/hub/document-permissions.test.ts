@@ -129,7 +129,7 @@ test('local and remote HTTP previews require explicit canonical approval and kee
       if (localFinder) assert.deepEqual(opened,[{kind:'file',path:first,reveal:true}]);
       assert.equal((await metadata(second,grant)).status,403,'one grant cannot authorize a sibling document');
       assert.notEqual((await metadata(alias,grant,'wrong-task')).status,200);
-      assert.equal(await fetch(url + allowed.body.url).then(r => r.text()), '<html><head></head><body><h1>first fixture</h1></body></html>');
+      assert.match(await fetch(url + allowed.body.url).then(r => r.text()), /<body><h1>first fixture<\/h1><\/body>/);
       assert.equal((await fetch(url + allowed.body.url.replace(/[^/]*$/, 'style.css'))).status, 403);
       assert.equal((await post(input)).status, 403, 'an approved cache must not satisfy an unapproved request');
       await unlink(alias); await symlink(second, alias);
@@ -137,7 +137,7 @@ test('local and remote HTTP previews require explicit canonical approval and kee
       assert.equal((await reveal(alias,grant)).status,403,'a redirected source cannot be revealed');
       const changed = await post({...input, approved_path: first}); assert.equal(changed.status, 403); assert.equal(changed.body.path, second);
       const replacement = await post({...input, approved_path: second}); assert.equal(replacement.status, 200);
-      assert.equal(await fetch(url + replacement.body.url).then(r => r.text()), '<html><head></head><body><h1>second fixture</h1></body></html>');
+      assert.match(await fetch(url + replacement.body.url).then(r => r.text()), /<body><h1>second fixture<\/h1><\/body>/);
     }
     access.isLocal = () => false;
     access.hostAllowed = () => true;

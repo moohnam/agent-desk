@@ -80,7 +80,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
             value={editing.value} onChange={(e) => setTitleEdit({ ...editing, value: e.target.value, error: undefined })}
             onFocus={(e) => e.currentTarget.select()}
             onBlur={() => { void saveTitle(); }} onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (imeKey(e.nativeEvent) || e.defaultPrevented || e.repeat) return;
               if (e.key === 'Enter') { e.preventDefault(); void saveTitle(); }
               if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelTitleEdit(); }
             }} />
@@ -123,3 +123,4 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
     </header>
   );
 }
+import { imeKey } from './keys.ts';

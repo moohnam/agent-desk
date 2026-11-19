@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { X } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
 
@@ -12,7 +13,7 @@ const markTop = () => openModals.forEach((entry, index) => entry.element.setAttr
 // On the document, so a field inside that handles Esc itself (stopping it) goes first, and the
 // desk's own keys on the window never see it.
 document.addEventListener('keydown', (e) => {
-  if (!openModals.length || e.defaultPrevented) return;
+  if (!openModals.length || e.defaultPrevented || imeKey(e)) return;
   const top = openModals[openModals.length - 1];
   if (e.key === 'Tab') {
     const available = controls(top.element), first = available[0], last = available.at(-1);
@@ -23,7 +24,7 @@ document.addEventListener('keydown', (e) => {
     } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     return;
   }
-  if (e.key !== 'Escape' || e.isComposing || e.repeat) return;
+  if (e.key !== 'Escape' || e.repeat) return;
   e.preventDefault();
   e.stopPropagation();
   top.close();

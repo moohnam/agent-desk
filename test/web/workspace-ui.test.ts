@@ -4,6 +4,8 @@ import * as draftRetention from '../../web/src/draftRetention.ts';
 import * as posts from '../../web/src/posts.ts';
 import * as feedCache from '../../web/src/feedCache.ts';
 import * as noteEvents from '../../web/src/noteEvents.ts';
+import * as keys from '../../web/src/keys.ts';
+import * as documentLinks from '../../web/src/documentLinks.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -12,6 +14,7 @@ import ts from 'typescript';
 import * as compose from '../../shared/compose.ts';
 import * as modelCatalog from '../../shared/model-catalog.ts';
 import * as scheduledReply from '../../shared/scheduled-reply.ts';
+import * as runnerUsage from '../../shared/runner-usage.ts';
 
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
@@ -21,6 +24,7 @@ function load(file: string, imports: Record<string, unknown>, globals: Record<st
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
   const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
+    if (name === './keys.ts') return keys;
     assert.ok(name in imports, `missing mock: ${name}`);
     return imports[name];
   }, ...globals };
@@ -59,6 +63,28 @@ function hooks() {
 function workspace(id: string) {
   return { workspaceId: id, workspaceKey: (key: string) => id ? `${key}.workspace.${id}` : key };
 }
+
+test('clearing the reference pane closes it, resets the document focus and preserves another thread', () => {
+  const h = hooks(), saved = new Map<string, string>(), gone = new Set<string>();
+  const { useThreadReferences } = load('threadReferences.ts', { react: h.react, './workspace.ts': workspace(''), './documentLinks.ts': documentLinks }, {
+    localStorage: { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value) },
+  });
+  const render = (task: string) => h.render(() => useThreadReferences(task, gone));
+  render('other').toggle(10);
+  const first = render('current');
+  first.toggle(20);
+  first.addFile('current', '/preview.md');
+  const open = render('current');
+  assert.equal(open.open, true);
+  assert.equal(open.fileFocus?.href, '/preview.md');
+  open.clear();
+  const cleared = render('current');
+  assert.equal(cleared.open, false);
+  assert.equal(cleared.ids.length, 0);
+  assert.equal(cleared.files, undefined);
+  assert.equal(cleared.fileFocus, undefined);
+  assert.equal(render('other').ids[0], 10);
+});
 
 function askCardHarness(multi = false, stored = new Map<string, string>()) {
   const h = hooks();
@@ -812,6 +838,7 @@ test('existing model dialog selects actual models and supported effort while ret
     './modelCatalogs.ts':{useModelCatalogs:()=>({runners,loading:false,error:'',refresh(){}})},
     './workspace.ts':{workspaceId:''},'./settingsPanel.tsx':{SettingsEditor:'SettingsEditor',useSettingsPanel:()=>({active:false,embedded:true})},
     './settings.ts':{saveSettings:async(value:any)=>{saved.push(value);}},'./format.ts':{},'./model-dialog.css':{},
+    '../../shared/runner-usage.ts':runnerUsage,
   },{AbortController,AbortSignal,fetch:async()=>({ok:true,json:async()=>settings})});
   const render=()=>h.render(()=>module.ModelDialog({onClose(){}}));
   const all=(node:any,match:(node:any)=>boolean):any[]=>!node||typeof node!=='object'?[]:Array.isArray(node)?node.flatMap(child=>all(child,match)):[...(match(node)?[node]:[]),...all(node.props?.children,match)];
@@ -832,6 +859,61 @@ test('existing model dialog selects actual models and supported effort while ret
   assert.ok(all(select('Claude 기본 모델'),node=>node.type==='option').some(node=>node.props.value===fable&&node.props.disabled));
   const form=all(tree,node=>node.type==='form')[0];await form.props.onSubmit({preventDefault(){}});
   assert.equal(saved[0].claude.model,fable);assert.equal(saved[0].agy.model,hydrogen);
+  h.unmount();
+});
+
+test('model usage switches runners without letting the former response overwrite the selected runner', async () => {
+  const h = hooks();
+  const jsx = (type: any, props: any) => ({ type, props });
+  const settings = Object.fromEntries(compose.ENGINES.map(engine => [engine, { model: null, effort: null }]));
+  const local = { id: 'local', label: '이 Mac' };
+  const remote = { id: 'default', label: 'srv19', source: 'shared-source' };
+  const requests: { params: URLSearchParams; signal: AbortSignal; resolve: (response: Response) => void }[] = [];
+  const module = load('ModelDialog.tsx', {
+    react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {}, '../../shared/compose.ts': compose,
+    './settingsPanel.tsx': { SettingsEditor: 'SettingsEditor', useSettingsPanel: () => ({ active: true, embedded: true }) },
+    './settings.ts': {}, './format.ts': {}, './model-dialog.css': {}, '../../shared/runner-usage.ts': runnerUsage,
+  }, {
+    AbortController, AbortSignal, URLSearchParams,
+    fetch: (path: string, { signal }: { signal: AbortSignal }) => {
+      if (path === '/api/settings') return Promise.resolve(Response.json(settings));
+      if (path === '/api/runner-usage') return Promise.resolve(Response.json([local, remote]));
+      const { searchParams } = new URL(path, 'http://desk');
+      return new Promise<Response>(resolve => requests.push({ params: searchParams, signal, resolve }));
+    },
+  });
+  const render = () => h.render(() => module.ModelDialog({ onClose() {} }));
+  function find(node: any, matches: (node: any) => boolean): any {
+    if (!node || typeof node !== 'object') return;
+    if (matches(node)) return node;
+    const children = Array.isArray(node) ? node : [node.props?.children];
+    for (const child of children) {
+      const hit = find(child, matches);
+      if (hit) return hit;
+    }
+  }
+  render();
+  await new Promise(resolve => setImmediate(resolve));
+  let tree = render();
+  const selector = find(tree, node => node.type === 'select' && node.props.value === '/local');
+  assert.ok(selector);
+  assert.equal(requests.length, 3);
+  selector.props.onChange({ target: { value: 'shared-source/default' } });
+  tree = render();
+  assert.ok(requests.slice(0, 3).every(request => request.signal.aborted));
+  assert.ok(requests.slice(3).every(request => request.params.get('source') === remote.source));
+  assert.equal(requests.length, 6);
+  const reply = (request: typeof requests[number], usedPercent: number, status: string) => request.resolve(Response.json({
+    status, value: { engine: request.params.get('engine'), plan: null, fetchedAt: '2026-11-19T03:00:00Z',
+      windows: [{ label: '5시간', usedPercent, resetsAt: null }] },
+  }));
+  requests.slice(3).forEach(request => reply(request, 60, 'offline'));
+  requests.slice(0, 3).forEach(request => reply(request, 9, 'ready'));
+  await new Promise(resolve => setImmediate(resolve));
+  tree = render();
+  const row = find(tree, node => node.type?.name === 'UsageRows' && node.props.reading?.value?.engine === 'codex');
+  assert.equal(row.props.reading.status, 'offline');
+  assert.equal(row.props.reading.value.windows[0].usedPercent, 60);
   h.unmount();
 });
 

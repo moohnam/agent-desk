@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { api } from './api.ts';
 import { ResizableEditor } from './Compose.tsx';
@@ -49,7 +50,7 @@ export function NoteReply({ task, inputRef, onError, onSend, onBeforeResize }: {
     <ResizableEditor inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}>{({ id, rows }) => <div className="cmp-field">
       <textarea id={id} className="input" rows={rows} ref={inputRef} value={text} aria-label="메모 글" placeholder="메모를 작성하세요"
         onChange={(event) => edit(event.target.value)} onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+          if (imeKey(event.nativeEvent) || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
           event.preventDefault();
           if (!event.repeat) void submit();
         }} />
@@ -87,7 +88,7 @@ export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: ()
     <ResizableEditor inputRef={inputRef} rows={4} resizeFrom="bottom">{({ id, rows }) => <div className="cmp-field">
       <textarea id={id} ref={inputRef} className="input" rows={rows} autoFocus value={text} disabled={busy} aria-label="메모 글 수정"
         onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing) return;
+          if (imeKey(event.nativeEvent)) return;
           if (event.key === 'Escape') { event.stopPropagation(); if (!busy) onClose(); }
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();

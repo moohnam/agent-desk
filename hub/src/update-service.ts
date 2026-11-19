@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import type { UpdateMode, UpdateSummary, UpdateView } from '../../shared/update.ts';
 import { HttpError } from './errors.ts';
 import { assertTrustedPath } from './trusted-path.ts';
+import { openRuntimeLog } from './runtime-log.ts';
 import { readUpdateConfig, UpdateWorker, type UpdateApproval, type UpdateConfig } from './updater.ts';
 import { updateCiPassed, usesUpdateCi } from './update-ci.ts';
 
@@ -74,7 +75,7 @@ export class UpdateService {
       assertTrustedPath(dir, { kind: 'directory', allowMissing: true });
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       assertTrustedPath(file, { kind: 'file', private: true, allowMissing: true });
-      const log = openSync(file, 'a', 0o600);
+      const log = openRuntimeLog(file);
       try {
         const child = spawn(process.execPath, [CLI, 'apply', path, token], { detached: true, stdio: ['ignore', log, log] });
         child.once('error', reject);
@@ -203,7 +204,13 @@ export class UpdateService {
       else if (!busyChecking && state.phase === 'waiting' && !state.approval && !state.error && !result.available) result.phase = 'idle';
       const waitingForWork = state.phase === 'waiting' && state.error === '작업이 유휴 상태가 아닙니다';
       if (state.phase === 'failed' || (state.error && !waitingForWork)) {
-        result.error = '업데이트 처리 중 문제가 발생했습니다. 이 머신의 워커 상태를 확인하세요.';
+        result.error = state.recovered && state.recovered === state.current
+          ? '이전 버전을 다시 띄웠습니다. 현재 작업은 이어서 진행할 수 있습니다. 실행 로그를 확인한 뒤 수정된 버전을 다시 적용하세요.'
+          : state.attempted && !state.restoreCurrent
+            ? '후보가 데이터를 변경했을 수 있습니다. 이 머신에서 실행 로그를 확인하고 수정된 후속 버전으로 복구하세요.'
+            : state.blockedPort
+              ? `${state.blockedPort} 포트를 사용하는 작업이 끝나면 해당 서비스를 정상 종료하고 다시 시도하세요.`
+              : '업데이트 처리 중 문제가 발생했습니다. 이 머신의 워커 상태와 실행 로그를 확인하세요.';
         if (!busyChecking && state.phase === 'waiting') result.phase = 'failed';
       }
       const approval = state.approval;

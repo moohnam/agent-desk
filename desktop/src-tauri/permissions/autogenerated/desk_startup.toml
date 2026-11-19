@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desk-startup"
+description = "Enables the desk_startup command without any pre-configured scope."
+commands.allow = ["desk_startup"]
+
+[[permission]]
+identifier = "deny-desk-startup"
+description = "Denies the desk_startup command without any pre-configured scope."
+commands.deny = ["desk_startup"]

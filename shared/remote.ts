@@ -19,6 +19,8 @@ export interface RemoteExchange {
   sessions: import('./protocol.ts').LiveSession[];
   engines: string[];
   modelCatalogs?: import('./model-catalog.ts').ModelCatalogs;
+  /** An empty array also advertises support. Results wait for a successful exchange. */
+  usageReports?: import('./runner-usage.ts').UsageReport[];
   /** Absent from old agents; only true means frozen desk skill commands are safe to deliver. */
   skillSnapshot?: boolean;
   instructions?: boolean;
@@ -28,5 +30,6 @@ export interface RemoteReply {
   eventAck: number;
   refreshModels?: boolean;
   forceModelRefresh?: boolean;
+  usageRequests?: import('./runner-usage.ts').UsageRequest[];
   commands: Sequenced<import('./protocol.ts').HubToRunner>[];
 }

@@ -1,13 +1,17 @@
 import type { Post } from './types.ts';
 
+/** Some WebKit IME confirmation events are marked only by the legacy key code. */
+export function imeKey(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229 || e.key === 'Process';
+}
+
 /** Without a selected post, reply to the column's task or its newest post (feed order). */
 export function replyTaskId(selected: Post | undefined, threadTask: string | null, columnTaskIds?: string[], newest?: Post): string | null {
   return selected?.taskId ?? threadTask ?? (columnTaskIds?.length === 1 ? columnTaskIds[0] : null) ?? newest?.taskId ?? null;
 }
 
 /**
- * The key pressed as on a US layout, for shortcuts: a letter key under another input source (ㅏ on
- * a Korean one, or an IME's 'Process') counts as its Latin letter (k), uppercase with Shift.
+ * Normalize a shortcut key by position for non-Latin input sources, such as ㅏ → k.
  */
 export function latinKey(e: KeyboardEvent): string {
   const m = /^Key([A-Z])$/.exec(e.code);

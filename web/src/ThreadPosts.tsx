@@ -12,12 +12,13 @@ export interface ThreadPostActions {
   deny(post: Post): void;
   reference(post: Post): void;
   pick(post: Post): void;
+  cutNote(post: Post, control: HTMLButtonElement): void;
   attach(post: Post): void;
 }
 
 interface Props {
   col: DeckColumn; ctx: ColumnCtx; selected?: number; target?: number; flash: number | null; expanded: Set<number>;
-  picked?: number[]; referenced?: Set<number>; taskId: string | null;
+  picked?: number[]; referenced?: Set<number>; taskId: string | null; cuttingNoteId?: number | null;
   actions: RefObject<ThreadPostActions>; onError: (message: string) => void;
   feed: RefObject<HTMLDivElement | null>; atBottom: RefObject<boolean>; onPostsMounted: () => void;
 }
@@ -110,7 +111,7 @@ export class ThreadPosts extends PureComponent<Props, Range, ScrollAnchor> {
   }
 
   render() {
-    const { col, ctx, selected, flash, expanded, picked, referenced, taskId, actions, onError } = this.props;
+    const { col, ctx, selected, flash, expanded, picked, referenced, taskId, cuttingNoteId, actions, onError } = this.props;
     const { first, last } = this.state;
     const visible = col.placed.slice(lowerBound(col.placed, first), lowerBound(col.placed, last + 1));
     return visible.map(({ post: p, up, down }) => (
@@ -118,12 +119,13 @@ export class ThreadPosts extends PureComponent<Props, Range, ScrollAnchor> {
         approval={p.kind === 'approval' ? ctx.approvals.get(p.event.payload.approvalId) : undefined}
         question={p.kind === 'question' ? ctx.questions.get(p.event.payload.questionId) : undefined} onError={onError}
         colId={col.id} selected={selected === p.id} flash={flash === p.id}
-        expanded={expanded.has(p.id)} working={ctx.working.has(p.id)} inThread
+        expanded={expanded.has(p.id)} working={ctx.working.has(p.id)} inThread cuttingNote={p.id === cuttingNoteId}
         draft={ctx.drafts.has(p.id)}
         picked={picked && pickable(p.event) ? picked.includes(p.event.id) : undefined}
         referenced={referenced && p.taskId === taskId ? referenced.has(p.id) : undefined}
         onReference={() => actions.current.reference(p)} onPick={() => actions.current.pick(p)}
         onAttachNote={() => actions.current.attach(p)}
+        onCutNote={control => actions.current.cutNote(p, control)}
         onSelect={() => actions.current.select(p)} onToggle={() => actions.current.toggle(p)}
         onAllow={() => actions.current.allow(p)} onDeny={() => actions.current.deny(p)} />
     ));

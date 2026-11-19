@@ -905,13 +905,30 @@ await registerRuntimeControl({role:'shared',ready:()=>true,blockers:()=>[],stop:
     assert.match(worker.state().error ?? '', /./);
     assert.equal((await worker.status())[0].runtime!.commit, v1);
     assert.deepEqual(await worker.startCurrent(), []);
+    // A crash after the old role stopped and before candidate spawn can restore the verified current version.
+    const beforeSpawn = (await worker.status())[0].runtime!;
+    const prepared = await controlRequest(worker.socket('shared'), { action: 'prepare', instance: beforeSpawn.instance });
+    await controlRequest(worker.socket('shared'), { action: 'stop', instance: beforeSpawn.instance, lease: prepared.lease });
+    await gone();
+    writePrivateJson(worker.statePath, { current: v1, candidate: dirty, attempted: dirty, restoreCurrent: v1, phase: 'switching' });
+    const collision = createServer();
+    await new Promise<void>(resolve => collision.listen(port, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(worker.startCurrent(), new RegExp(`포트 ${port}`));
+      assert.equal(worker.state().blockedPort, port);
+      assert.equal(worker.state().restoreCurrent, v1);
+    } finally { await new Promise<void>(resolve => collision.close(() => resolve())); }
+    assert.deepEqual(await worker.startCurrent(), ['shared']);
+    assert.equal(worker.state().recovered, v1);
+    assert.equal(worker.state().attempted, undefined);
+    assert.equal(worker.state().blockedPort, undefined);
     // A switch whose candidate failed to start is not undone by start: a fixed successor commit recovers it.
     commit('broken', 'process.exit(17);');
     worker.approve(await worker.prepare(), 'immediate');
     await assert.rejects(worker.cycle(), /준비 전에 종료/);
     await gone();
     await assert.rejects(worker.startCurrent(), /끝나지 않은 교체/);
-    assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\none\n');
+    assert.equal(readFileSync(join(data, 'starts.txt'), 'utf8'), 'one\none\none\n');
   } finally {
     try {
       const status = (await worker.status())[0].runtime;

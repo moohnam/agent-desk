@@ -1,16 +1,26 @@
 import { modelReference } from '../../../shared/compose.ts';
 import { DEFAULT_INSTRUCTIONS } from '../instruction-store.ts';
 import { spawn } from 'node:child_process';
-import { mkdirSync, openSync } from 'node:fs';
+import { closeSync, mkdirSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { config } from '../config.ts';
 import { HttpError } from '../errors.ts';
+import { openRuntimeLog } from '../runtime-log.ts';
+import type { RunnerConnectionProblem } from '../../../shared/api.ts';
 import { PROTOCOL_VERSION, checkRunnerToHub, type HubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
 import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, writeLine } from './wire.ts';
 
 const RETRY_MS = 1000;
 const SPAWN_EVERY_MS = 10_000;
+const MAX_RETRY_MS = 30_000;
+const connectionLog: Record<RunnerConnectionProblem, string> = {
+  unreachable: '로컬 러너의 연결 주소와 실행 상태를 확인하세요.',
+  authentication: '로컬 러너가 연결을 확인하지 않았습니다. 연결 토큰 설정과 러너 로그를 확인하세요.',
+  token: '허브가 로컬 러너의 연결 토큰을 읽지 못했습니다. 파일 경로와 읽기 권한을 확인하세요.',
+  disconnected: '로컬 러너 연결이 끊겼습니다. 재연결을 시도합니다.',
+};
+type ConnectionListener = (connected: boolean, problem?: RunnerConnectionProblem) => void;
 
 /** What the hub needs of its runner connection; tests give the hub a fake one. */
 export interface RunnerPort {
@@ -19,6 +29,7 @@ export interface RunnerPort {
   readonly id: string | null;
   /** The engines the runner runs. */
   readonly engines: ReadonlySet<string>;
+  readonly connectionProblem?: RunnerConnectionProblem;
   /** Whether the runner still has the session open. */
   has(sessionId: string): boolean;
   /** Absent on test and legacy ports; only an explicit false forbids pinned inputs. */
@@ -33,7 +44,7 @@ export interface RunnerPort {
 }
 
 /** Makes the hub's runner connection, which reports messages and connection changes back. */
-export type RunnerFactory = (onMessage: (m: RunnerToHub) => void, onConnection: (connected: boolean) => void) => RunnerPort;
+export type RunnerFactory = (onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener) => RunnerPort;
 
 export interface RunnerClientOptions {
   spawnIfMissing?: boolean;
@@ -56,15 +67,18 @@ export class RunnerClient implements RunnerPort {
   private supportsConnectorMcp = false;
   private supportsModelCatalogs = false;
   private lastSpawn = 0;
+  private retryMs = RETRY_MS;
+  private retry?: ReturnType<typeof setTimeout>;
+  connectionProblem?: RunnerConnectionProblem;
   private onMessage: (m: RunnerToHub) => void;
-  private onConnection: (connected: boolean) => void;
+  private onConnection: ConnectionListener;
   private options: RunnerClientOptions;
   id: string | null = null;
   /** The engines the connected runner runs (its hello). */
   engines = new Set<string>();
 
-  /** `onConnection` fires after the hello is handled (true) and when an established connection drops (false). */
-  constructor(onMessage: (m: RunnerToHub) => void, onConnection: (connected: boolean) => void = () => {}, options: RunnerClientOptions = {}) {
+  /** `onConnection` reports a successful handshake or a changed failure reason. */
+  constructor(onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener = () => {}, options: RunnerClientOptions = {}) {
     this.onMessage = onMessage;
     this.onConnection = onConnection;
     this.options = options;
@@ -72,7 +86,7 @@ export class RunnerClient implements RunnerPort {
   }
 
   /** Hand the already authenticated socket and its first hello to a fully constructed Hub. */
-  handoff(onMessage: (m: RunnerToHub) => void, onConnection: (connected: boolean) => void,
+  handoff(onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener,
     hello: Extract<RunnerToHub,{type:'hello'}>) {
     if (!this.connected || this.id !== hello.runnerId) throw new Error('기존 4318 러너 연결이 인계 전에 끊겼습니다');
     this.onMessage = onMessage;
@@ -92,7 +106,7 @@ export class RunnerClient implements RunnerPort {
   }
 
   handle(cmd: HubToRunner) {
-    if (!this.socket) throw new Error('runner not connected');
+    if (!this.connected || !this.socket) throw new Error('runner not connected');
     if ((cmd.type === 'start' || cmd.type === 'set_model') && cmd.model && modelReference(cmd.model) && !this.supportsModelCatalogs)
       throw new HttpError(409,'현재 로컬 러너는 실제 모델 ID 선택을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요');
     if ((cmd.type === 'start' || cmd.type === 'send') && cmd.skillSnapshot && !this.supportsSkillSnapshot)
@@ -110,6 +124,7 @@ export class RunnerClient implements RunnerPort {
   /** Disconnects this authority without ending sessions in the independently living daemon. */
   close() {
     this.stopped = true;
+    if (this.retry) clearTimeout(this.retry);
     this.socket?.destroy();
     this.socket = null;
     this.id = null;
@@ -119,16 +134,23 @@ export class RunnerClient implements RunnerPort {
   private connect() {
     if (this.stopped) return;
     const socket = connect(this.options.port ?? RUNNER_PORT, this.options.host ?? RUNNER_HOST);
+    this.socket = socket;
+    let problem: RunnerConnectionProblem = 'unreachable';
+    const handshake = setTimeout(() => socket.destroy(), 6000);
     socket.on('connect', () => {
       if (this.stopped) { socket.destroy(); return; }
-      this.socket = socket;
+      problem = 'authentication';
       // Read now rather than once: a runner started meanwhile may have just written it.
-      writeLine(socket, { type: 'auth', token: (this.options.token ?? runnerToken)(), protocolVersion: PROTOCOL_VERSION } satisfies HubToRunner);
+      try { writeLine(socket, { type: 'auth', token: (this.options.token ?? runnerToken)(), protocolVersion: PROTOCOL_VERSION } satisfies HubToRunner); }
+      catch { problem = 'token'; socket.destroy(); return; }
       readLines(socket, (raw) => {
         const m = checkRunnerToHub(raw);
-        if (typeof m === 'string') { console.error(`runner: dropped a message (${m})`); return; }
+        if (typeof m === 'string') { console.error('러너 응답의 형식이 잘못되었습니다.'); return; }
         const hello = m.type === 'hello';
         if (m.type === 'hello') {
+          clearTimeout(handshake);
+          this.retryMs = RETRY_MS;
+          this.connectionProblem = undefined;
           this.id = m.runnerId;
           this.live = new Set(m.sessions.map((s) => s.sessionId));
           this.engines = new Set(m.capabilities.engines);
@@ -147,19 +169,25 @@ export class RunnerClient implements RunnerPort {
       });
     });
     socket.on('error', (err: NodeJS.ErrnoException) => {
-      if (!this.stopped && err.code === 'ECONNREFUSED' && this.options.spawnIfMissing !== false) this.spawnDaemon();
+      if (!this.stopped && err.code === 'ECONNREFUSED' && this.options.spawnIfMissing !== false) {
+        try { this.spawnDaemon(); } catch { console.error('로컬 러너를 시작하지 못했습니다. 실행 설정과 로그 파일 권한을 확인하세요.'); }
+      }
       this.options.onError?.(err);
     });
     socket.on('close', () => {
-      if (this.socket === socket) {
-        const wasConnected = this.connected;
-        this.socket = null;
-        this.id = null;
-        this.live.clear();
-        console.warn('runner connection lost; reconnecting');
-        if (wasConnected) this.onConnection(false);
+      clearTimeout(handshake);
+      if (this.socket !== socket || this.stopped) return;
+      if (this.connected) problem = 'disconnected';
+      this.socket = null;
+      this.id = null;
+      this.live.clear();
+      if (this.connectionProblem !== problem) {
+        this.connectionProblem = problem;
+        console.warn(connectionLog[problem]);
+        this.onConnection(false, problem);
       }
-      if (!this.stopped) setTimeout(() => this.connect(), RETRY_MS);
+      this.retry = setTimeout(() => this.connect(), this.retryMs);
+      this.retryMs = Math.min(this.retryMs * 2, MAX_RETRY_MS);
     });
   }
 
@@ -169,11 +197,14 @@ export class RunnerClient implements RunnerPort {
     if (now - this.lastSpawn < SPAWN_EVERY_MS) return;
     this.lastSpawn = now;
     mkdirSync(dirname(config.runner.log), { recursive: true });
-    const log = openSync(config.runner.log, 'a');
-    const child = spawn(process.execPath, [resolve(import.meta.dirname, 'daemon.ts')], {
-      detached: true, stdio: ['ignore', log, log], env: process.env,
-    });
-    child.unref();
-    console.log(`started runner daemon (pid ${child.pid}, log ${config.runner.log})`);
+    const log = openRuntimeLog(config.runner.log);
+    try {
+      const child = spawn(process.execPath, [resolve(import.meta.dirname, 'daemon.ts')], {
+        detached: true, stdio: ['ignore', log, log], env: process.env,
+      });
+      child.on('error', () => console.error('로컬 러너 프로세스를 시작하지 못했습니다.'));
+      child.unref();
+      console.log(`started runner daemon (pid ${child.pid}, log ${config.runner.log})`);
+    } finally { closeSync(log); }
   }
 }

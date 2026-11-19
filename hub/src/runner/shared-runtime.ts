@@ -65,14 +65,16 @@ export class SharedRuntime {
   exchange() {
     if(this.stopped || maintenanceActive())return;
     const snapshot=JSON.stringify(this.agent.runner.snapshot());
+    const usageReports=this.agent.runner.usageReports();
     if(this.journal.lastEvent===this.journal.eventAck && !this.hub.remotes.list()[0].pending
-      && snapshot===this.snapshot && Date.now()-this.exchangedAt<5000)return;
+      && !usageReports.length && snapshot===this.snapshot && Date.now()-this.exchangedAt<5000)return;
     for(let batch=0;batch<16;batch++) {
       const events=this.journal.events();
       const reply=this.hub.atomic(()=>this.hub.remotes.exchange(this.runnerId,{version:1,journalId:this.journal.id,commandAck:this.journal.commandAck,events,
         more:this.journal.lastEvent>(events.at(-1)?.seq??this.journal.eventAck),sessions:this.agent.runner.snapshot(),engines:this.agent.runner.capabilities.engines,
-        modelCatalogs:this.agent.runner.capabilities.modelCatalogs,skillSnapshot:this.agent.runner.capabilities.skillSnapshot,instructions:true,connectorMcp:true}));
+        modelCatalogs:this.agent.runner.capabilities.modelCatalogs,skillSnapshot:this.agent.runner.capabilities.skillSnapshot,instructions:true,connectorMcp:true,usageReports}));
       if (reply.refreshModels) this.agent.runner.refreshModels(reply.forceModelRefresh);
+      this.agent.runner.exchangeUsage(usageReports, reply.usageRequests);
       this.journal.acknowledge(reply.eventAck,events.at(-1)?.seq??this.journal.eventAck);
       this.journal.receive(reply.commands);this.agent.pump();
       this.exchangedAt=Date.now();this.snapshot=JSON.stringify(this.agent.runner.snapshot());

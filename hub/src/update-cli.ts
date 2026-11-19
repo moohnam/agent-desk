@@ -24,10 +24,14 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
     if (command === 'approve' ? args.length !== 2 : command === 'cancel' ? args.length !== 1 : command === 'apply' ? args.length > 1 || args[0] === '' : args.length)
     throw new Error('명령의 인수를 확인하세요');
   const worker = new UpdateWorker(readUpdateConfig(resolve(configPath)));
-  if (command === 'status') console.log(JSON.stringify({ deployment: worker.state(), runtimes: await worker.status() }, null, 2));
+  const printableState = () => {
+    const { approval, spentApproval: _, ...state } = worker.state();
+    return { ...state, ...(approval && { approval: { commit: approval.commit, mode: approval.mode } }) };
+  };
+  if (command === 'status') console.log(JSON.stringify({ deployment: printableState(), runtimes: await worker.status() }, null, 2));
   else if (command === 'cancel') {
     if (!/^[a-f0-9]{40}$/.test(args[0])) throw new Error('취소할 정확한 40자 커밋을 지정하세요');
-    console.log(JSON.stringify({cancelled: worker.cancelApproval(args[0]), state: worker.state()}));
+    console.log(JSON.stringify({cancelled: worker.cancelApproval(args[0]), state: printableState()}));
   }
   else {
     const approval = command === 'approve' ? worker.approve(args[0], args[1] as 'immediate' | 'when-idle')
@@ -49,12 +53,12 @@ if (!configPath || !['init', 'status', 'check', 'once', 'run', 'approve', 'apply
     if (claimed) {
       try {
         if (command === 'check') console.log(JSON.stringify({ prepared: await worker.prepare() }));
-        else if (command === 'start') console.log(JSON.stringify({ started: await worker.startCurrent(), state: worker.state() }));
+        else if (command === 'start') console.log(JSON.stringify({ started: await worker.startCurrent(), state: printableState() }));
         else do {
           if (approval && worker.state().approval?.token !== approval.token) break;
           try {
             const activated = approval ? await worker.activate(approval.commit, approval.token) : await worker.cycle();
-            console.log(JSON.stringify({ activated, state: worker.state() }));
+            console.log(JSON.stringify({ activated, state: printableState() }));
           }
           catch (error) { console.error(error instanceof Error ? error.message : String(error)); if (command !== 'run') { process.exitCode = 1; break; } }
           if (stopped || (command !== 'run' && !(approval?.mode === 'when-idle' && worker.state().approval?.token === approval.token))) break;

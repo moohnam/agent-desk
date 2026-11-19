@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useAnswerWriter, answerOperation, useAnswerPending, cancelAnswerTarget } from './answerComposer.tsx';
 import { useEffect, useState } from 'react';
 import { ASK_USER, type Answers } from '../../shared/protocol.ts';
@@ -128,7 +129,7 @@ export function AskCard({ post, approval, onError }: {
 
   return (
     <div className="approve-card question-card ask-card" onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); } }}>
+      onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); } }}>
       <div className="what">에이전트가 답을 기다립니다</div>
       {qs.map((q, i) => {
         const pick = picks[i];
@@ -175,7 +176,7 @@ export function AskCard({ post, approval, onError }: {
                 autoFocus={opts.length > 0} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
                 placeholder="답 입력…"
                 onChange={(e) => set(i, (x) => ({ ...x, other: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); } }} />
+                onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.repeat && e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); } }} />
             ) : (
               <div>
                 <button className="link" disabled={busy || sending} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}

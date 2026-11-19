@@ -187,7 +187,7 @@ export function HandoffPanel({ task, state: s, model, events, onError, onDone }:
         <div className="handoff-feedback">
           <input className="input" value={s.feedback} placeholder="에이전트에게 고칠 점 말하기 (예: 실패한 시도와 원인도 넣어 주세요)"
             onChange={(e) => up({ feedback: e.target.value })}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && s.feedback.trim() && s.summary.trim() && !waiting) { e.preventDefault(); void request({ feedback: s.feedback, current: s.summary }); } }} />
+            onKeyDown={(e) => { if (e.key === 'Enter' && !imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && s.feedback.trim() && s.summary.trim() && !waiting) { e.preventDefault(); void request({ feedback: s.feedback, current: s.summary }); } }} />
           <button className="btn" disabled={sending || waiting || !s.feedback.trim() || !s.summary.trim()}
             onClick={() => void request({ feedback: s.feedback, current: s.summary })}>수정 요청</button>
         </div>
@@ -227,3 +227,4 @@ export function HandoffPanel({ task, state: s, model, events, onError, onDone }:
     </div>
   );
 }
+import { imeKey } from './keys.ts';

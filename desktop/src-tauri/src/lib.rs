@@ -5,7 +5,7 @@
 //! the files' absolute paths. A local hub not yet running is started (and starts the runner) from
 //! this repository; both keep running after the app quits, for phones and running agents.
 
-use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -42,22 +42,42 @@ async fn desk_notify_permission() -> bool {
 fn hub_url() -> Url {
     let raw = std::env::var("AGENT_DESK_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
     Url::parse(raw.trim()).unwrap_or_else(|e| {
-        eprintln!("[agent-desk] invalid AGENT_DESK_URL {raw:?}: {e}; falling back to {DEFAULT_URL}");
+        eprintln!("[agent-desk] invalid AGENT_DESK_URL: {e}; falling back to {DEFAULT_URL}");
         Url::parse(DEFAULT_URL).unwrap()
     })
 }
 
-/// Quick TCP reachability check (does not spawn or touch the hub).
-fn hub_reachable(url: &Url) -> bool {
+fn connect_hub(url: &Url) -> Option<TcpStream> {
     let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-        return false;
+        return None;
     };
-    let Ok(addrs) = (host, port).to_socket_addrs() else {
-        return false;
+    (host.trim_matches(['[', ']']), port).to_socket_addrs().ok()?
+        .find_map(|address| TcpStream::connect_timeout(&address, Duration::from_millis(800)).ok())
+}
+
+/// Verify the local HTTP service, so a different process on the port is not opened as the Desk.
+fn hub_reachable(url: &Url) -> bool {
+    if !is_loopback(url) || url.scheme() != "http" { return connect_hub(url).is_some(); }
+    let read = |path| -> Option<String> {
+        let mut socket = connect_hub(url)?;
+        let (host, port) = (url.host_str()?, url.port_or_known_default()?);
+        let timeout = Duration::from_millis(800);
+        socket.set_read_timeout(Some(timeout)).ok()?;
+        socket.set_write_timeout(Some(timeout)).ok()?;
+        write!(socket, "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n").ok()?;
+        let mut reply = Vec::new();
+        let _ = socket.take(4096).read_to_end(&mut reply);
+        Some(String::from_utf8_lossy(&reply).into_owned())
     };
-    addrs
-        .into_iter()
-        .any(|a| TcpStream::connect_timeout(&a, Duration::from_millis(800)).is_ok())
+    let Some(reply) = read("/__desk_ready") else { return false; };
+    if reply.split_once("\r\n\r\n").is_some_and(|(headers, _)| {
+        headers.starts_with("HTTP/1.1 204 ") && headers.lines().any(|line| line.eq_ignore_ascii_case("x-agent-desk-ready: 1"))
+    }) { return true; }
+    // Pre-marker hubs expose this small authenticated response to localhost.
+    read("/api/instructions").is_some_and(|reply| {
+        reply.lines().next().is_some_and(|line| line.split_whitespace().nth(1) == Some("200"))
+            && reply.split_once("\r\n\r\n").is_some_and(|(headers, body)| headers.contains("application/json") && body.starts_with("{\"text\":"))
+    })
 }
 
 /// The agent-desk repository: AGENT_DESK_HOME, else the one this app was built from.
@@ -74,20 +94,15 @@ fn repo_dir() -> PathBuf {
 /// which node and the agents' CLIs need.
 fn spawn_node(cwd: PathBuf, script: &str, log: &str, envs: &[(&str, String)]) -> Result<(), String> {
     let log_path = repo_dir().join("data").join(log);
-    let out = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("{}: {e}", log_path.display()))?;
-    let err = out.try_clone().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(log_path.parent().unwrap()).map_err(|e| e.to_string())?;
     let mut child = Command::new("/bin/zsh")
         .arg("-lc")
-        .arg(format!("exec node {script}"))
+        .arg("umask 077; if [ -f src/runtime-log.ts ]; then node src/runtime-log.ts \"$2\" || exit; fi; exec node \"$1\" >>\"$2\" 2>&1")
+        .arg("agent-desk").arg(script).arg(&log_path)
         .current_dir(&cwd)
         .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
+        .stdout(Stdio::null())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("node {script}: {e}"))?;
@@ -103,36 +118,47 @@ fn is_loopback(url: &Url) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn start_managed_hub(hub: &Url) -> Result<bool, String> {
+fn managed_state(hub: &Url) -> Result<Option<(serde_json::Value, PathBuf)>, String> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let config_path = home.join(".local/share/agent-desk/update.json");
+    let config_path = std::env::var_os("AGENT_DESK_UPDATE_CONFIG").map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share/agent-desk/update.json"));
     let read_json = |path: &std::path::Path| -> Option<serde_json::Value> {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     };
     let Some(config) = read_json(&config_path) else {
-        return Ok(false);
+        return if config_path.exists() { Err("관리형 업데이트 설정을 읽지 못했습니다.".into()) } else { Ok(None) };
     };
     let manages_hub = config["roles"].as_array().is_some_and(|roles| {
         roles.iter().any(|role| role.as_str() == Some("hub"))
     });
     let port = config["environment"]["PORT"].as_str().unwrap_or("4317");
     if !manages_hub || port.parse::<u16>().ok() != hub.port_or_known_default() {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(deploy) = config["deploymentDir"].as_str().map(PathBuf::from) else {
-        return Ok(false);
+        return Err("관리형 허브의 배포 경로를 확인하지 못했습니다.".into());
     };
     let state_path = deploy.join("state.json");
     if !state_path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(state) = read_json(&state_path) else {
         return Err("관리형 허브의 실행 상태를 확인하지 못했습니다.".into());
     };
     if state["current"].is_null() && state["attempted"].is_null() && state["phase"] != "switching" {
-        return Ok(false);
+        return Ok(None);
+    }
+    let logs = config["dataDir"].as_str().map(PathBuf::from).unwrap_or(deploy).join("update-logs");
+    Ok(Some((state, logs)))
+}
+
+#[cfg(target_os = "macos")]
+fn start_managed_hub(hub: &Url) -> Result<bool, String> {
+    let Some((state, _)) = managed_state(hub)? else { return Ok(false); };
+    if !state["attempted"].is_null() && (state["restoreCurrent"].is_null() || state["restoreCurrent"] != state["current"]) {
+        return Err("교체가 중단됐습니다. 로그를 확인하고 수정된 후속 버전으로 복구하세요.".into());
     }
     let uid = Command::new("/usr/bin/id")
         .arg("-u")
@@ -155,12 +181,36 @@ fn start_local(hub: &Url) -> Result<(), String> {
     if start_managed_hub(hub)? {
         return Ok(());
     }
+    if connect_hub(hub).is_some() {
+        let port = hub.port_or_known_default().unwrap_or(4317);
+        return Err(format!("{port} 포트에서 Agent Desk 응답을 확인하지 못했습니다. 기존 서비스의 작업이 끝나면 정상 종료하고 다시 시도하세요."));
+    }
     let repo = repo_dir();
     if !repo.join("hub/src/index.ts").exists() {
         return Err(format!("허브 코드를 찾을 수 없습니다: {}", repo.display()));
     }
     let port = hub.port_or_known_default().unwrap_or(4317).to_string();
     spawn_node(repo.join("hub"), "src/index.ts", "hub.log", &[("PORT", port)])
+}
+
+#[tauri::command]
+async fn desk_startup(retry: bool) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hub = hub_url();
+        let reachable = hub_reachable(&hub);
+        let mut info = serde_json::json!({ "ready": reachable });
+        if !is_loopback(&hub) || reachable { return info; }
+        if retry { if let Err(error) = start_local(&hub) { info["error"] = error.into(); } }
+        #[cfg(target_os = "macos")]
+        if let Ok(Some((state, logs))) = managed_state(&hub) {
+            for key in ["phase", "current", "candidate", "attempted", "blockedPort"] {
+                info[key] = state[key].clone();
+            }
+            info["canRestore"] = (!state["restoreCurrent"].is_null() && state["restoreCurrent"] == state["current"]).into();
+            info["logs"] = logs.to_string_lossy().into_owned().into();
+        }
+        info
+    }).await.unwrap_or_else(|_| serde_json::json!({ "ready": false }))
 }
 
 fn same_origin(a: &Url, b: &Url) -> bool {
@@ -274,7 +324,7 @@ fn notification_origin(hub: &Url) -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission])
+        .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission, desk_startup])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             notify::init(app.handle());
@@ -300,6 +350,7 @@ pub fn run() {
                 tauri::ipc::CapabilityBuilder::new("local-window-zoom")
                     .local(true)
                     .window("main")
+                    .permission("allow-desk-startup")
                     .permission("core:webview:allow-set-webview-zoom"),
             )?;
             let mut started = String::new();

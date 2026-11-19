@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { ArrowDown, Ellipsis } from 'lucide-react';
 import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { PostView } from './PostView.tsx';
@@ -191,7 +192,7 @@ export function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRe
           <input className="input col-rename" defaultValue={def.title} aria-label="컬럼 이름" autoFocus
             onFocus={(e) => e.currentTarget.select()}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (imeKey(e.nativeEvent)) return;
               if (e.key === 'Enter') e.currentTarget.blur();
               else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.currentTarget.value = def.title; e.currentTarget.blur(); }
             }}

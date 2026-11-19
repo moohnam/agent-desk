@@ -11,6 +11,8 @@ import { SharedWorkspace, connectorUserInput } from './shared-workspace.ts';
 import { handleConnectorMcp } from './connector-mcp.ts';
 import { DocumentPreviews } from './document-previews.ts';
 import { DiagramBrowser } from './diagram-browser.ts';
+import { InteractivePreview } from './interactive-preview.ts';
+import { loadMarkdownImage } from './markdown-images.ts';
 import { DiagramCache } from './diagram-cache.ts';
 import { DocumentPermissionError, workspaceFile, workspaceDocumentPath } from './shared-files.ts';
 import { deviceName, ipOf, type Access } from './access.ts';
@@ -29,6 +31,7 @@ import { WorkspaceLinks } from './workspace-links.ts';
 import { handleBrokerMcp } from './request-broker.ts';
 import { ENGINES, parseCompose, parseNoteCompose, type EngineName } from '../../shared/compose.ts';
 import { UpdateService } from './update-service.ts';
+import { usageQuery, workspaceUsage } from './runner/usage-probe.ts';
 
 const WEB_DIST = config.webDist;
 const MIME: Record<string, string> = {
@@ -144,6 +147,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     })().catch(() => { /* Closed or revoked local authority fails its callers closed. */ }).finally(() => { directPoll = undefined; });
   };
   const diagramBrowser=new DiagramBrowser(WEB_DIST,config.diagramBrowser);
+  const interactivePreview=new InteractivePreview(config.diagramBrowser);
+  let fetchingImages = 0;
   const diagrams=new DiagramCache((source,signal)=>diagramBrowser.render(source,signal));
   const previews = new DocumentPreviews(async(source,task,href,base,receive,approvedPath)=>{
     if(source || localAuthorityId)return workspaces.previewFile(source||localAuthorityId!,task,href,base,receive,approvedPath);
@@ -181,6 +186,11 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
     if (!access.isLocal(req) && !access.hostAllowed(req)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       return res.end('이 주소로는 데스크에 접속할 수 없습니다. Mac의 IP 주소나 이름.local로 여세요 (다른 이름은 AGENT_DESK_HOSTS에 추가).');
+    }
+
+    if (req.method === 'GET' && url.pathname === '/__desk_ready' && access.isLocal(req)) {
+      res.writeHead(204, { 'x-agent-desk-ready': '1', 'cache-control': 'no-store' });
+      return res.end();
     }
 
     // Only an authenticated prepare call grants this narrow read capability. Sandboxed frames
@@ -253,6 +263,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       return res.end();
     }
     const local = client.kind === 'local';
+    const previewOwner = client.kind === 'device' ? `device/${client.device.id}` : client.kind;
 
     try {
       if (parts[0] === 'api' && parts[1] === 'connectors') {
@@ -298,10 +309,11 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       }
       if (url.pathname === '/api/instructions') {
         res.setHeader('cache-control', 'no-store');
-        if (req.method === 'GET') return send(res, 200, instructions.read());
+        if (req.method === 'GET') return send(res, 200, { ...instructions.read(), editable: access.isLocal(req) });
         if (req.method === 'PUT') {
+          if (!access.isLocal(req)) throw new HttpError(403, '기본 지침은 허브가 실행 중인 기기에서만 편집할 수 있습니다');
           const body = await readJson(req);
-          return send(res, 200, instructions.save(body.text, body.revision));
+          return send(res, 200, { ...instructions.save(body.text, body.revision), editable: true });
         }
         throw new HttpError(405, '지원하지 않는 기본 지침 요청입니다');
       }
@@ -327,6 +339,48 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         }finally{res.off('close',abort);}
         return;
       }
+      if (req.method === 'POST' && url.pathname === '/api/markdown-image') {
+        if (!sameOrigin(req) || req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403,'다른 사이트에서 보낸 요청은 받지 않습니다');
+        const timeout = setTimeout(() => req.destroy(), 5000);
+        const body = await readBody(req, 8192).finally(() => clearTimeout(timeout)) as { url?: unknown } | undefined;
+        if (res.destroyed) return;
+        if (!access.identify(req)) throw new HttpError(401,'접속 권한이 만료되었습니다.');
+        if (fetchingImages >= 4) throw new HttpError(429,'이미지를 불러오는 중입니다. 잠시 뒤 다시 시도하세요.');
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        res.once('close', abort);
+        fetchingImages++;
+        try {
+          const image = await loadMarkdownImage(body?.url, controller.signal);
+          if (res.destroyed) return;
+          if (!access.identify(req)) throw new HttpError(401,'접속 권한이 만료되었습니다.');
+          res.writeHead(200, { 'content-type': image.type, 'content-length': image.bytes.length, 'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff', 'content-security-policy': "sandbox; default-src 'none'" });
+          res.end(image.bytes);
+        } catch (error) {
+          if (!res.destroyed) throw error;
+        } finally {
+          fetchingImages--;
+          res.off('close', abort);
+        }
+        return;
+      }
+      if (req.method === 'POST' && (url.pathname === '/api/preview/interactive' || url.pathname === '/api/preview/input')) {
+        if (!sameOrigin(req) || req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+        const body = await readBody(req,4096) as Record<string, unknown> | undefined;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, '문서 요청 형식이 잘못되었습니다.');
+        if (url.pathname.endsWith('/input')) {
+          await interactivePreview.input(previewOwner,body);
+          return send(res,200,{ok:true});
+        }
+        if (typeof body.id!=='string'||typeof body.version!=='string'||!/^[a-f0-9]{64}$/.test(body.version)
+          ||typeof body.width!=='number'||!Number.isFinite(body.width)||typeof body.height!=='number'||!Number.isFinite(body.height))
+          throw new HttpError(400,'확인한 문서 버전과 미리보기 크기가 필요합니다.');
+        const leave = client.kind==='device' ? access.connect(client.device.id,ipOf(req),()=>res.destroy()) : ()=>{};
+        res.on('close',leave);
+        const document=await previews.interactive(body.id,body.version,previewOwner);
+        return await interactivePreview.stream(res,previewOwner,document,body.width,body.height);
+      }
       if((req.method==='DELETE'||req.method==='PUT')&&url.pathname==='/api/preview') {
         const b=await readJson(req);
         if(typeof b.id!=='string')throw new HttpError(400,'문서 ID가 필요합니다');
@@ -345,7 +399,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         const token=access.token;
         const allowed=()=> (client.kind==='local'||client.kind==='device'&&access.view().devices.some(d=>d.id===client.device.id)||client.kind==='shared'&&access.matches(token))
           && (!source||workspaces.list().some(w=>w.id===source));
-        const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed,b.approved_path);
+        const document=await previews.prepare(source,b.task_id,b.href,b.refresh===true,allowed,b.approved_path,previewOwner);
         if(res.destroyed){await previews.release(document.url.split('/')[2]);return;}
         return send(res,200,document);
       }
@@ -411,6 +465,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         if (parts.length >= 4) {
           if (id === localAuthorityId) throw new HttpError(404,'이 연결은 기본 작업공간입니다');
           const path='/'+parts.slice(3).join('/')+url.search;
+          if (parts.length === 4 && parts[3] === 'runner-usage')
+            throw new HttpError(404, '공유 러너 사용량은 데스크의 사용량 조회에서 확인하세요');
           if (req.method === 'POST' && path === '/open') {
             if (!local || !localOrigin(req.headers.origin)) throw new HttpError(403, '이 기기에서는 열 수 없습니다. 허브 머신에서 열어 주세요.');
             const b = await readJson(req);
@@ -551,6 +607,37 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           req.on('close', () => { clearInterval(ping); hub.bus.off('message', onMessage); leave(); });
           return;
         }
+        case 'GET /runner-usage': {
+          if (!sameOrigin(req) || req.headers['sec-fetch-site'] === 'cross-site')
+            throw new HttpError(403, '다른 사이트에서 보낸 요청은 받지 않습니다');
+          res.setHeader('cache-control', 'no-store');
+          const controller = new AbortController();
+          res.on('close', () => controller.abort());
+          const query = usageQuery(url.searchParams);
+          const source = url.searchParams.get('source');
+          const sendUsage = (result: unknown) => {
+            if (res.destroyed) return;
+            if (!access.identify(req)) throw new HttpError(401, '접속 권한이 만료되었습니다');
+            send(res, 200, result);
+          };
+          if (client.kind === 'device') res.on('close', access.connect(client.device.id, ipOf(req), () => res.destroy()));
+          if (!query) {
+            if (source !== null) throw new HttpError(400, '조회할 러너와 엔진을 지정하세요');
+            const localTargets = localAuthorityId
+              ? await workspaces.runnerUsageTargets(localAuthorityId, controller.signal)
+              : hub.remotes.usageTargets(true);
+            const sharedTargets = workspaces.list().filter(link => link.id !== localAuthorityId)
+              .map(link => ({ id: 'default', label: link.name, source: link.id }));
+            return sendUsage([...(localTargets.length ? localTargets : [{ id: 'local', label: '이 Mac' }]), ...sharedTargets]);
+          }
+          if (source !== null) {
+            if (source === localAuthorityId || query.runner !== 'default') throw new HttpError(404, '등록되지 않은 공유 러너입니다');
+            return sendUsage(await workspaces.runnerUsage(source, query, controller.signal));
+          }
+          return sendUsage(localAuthorityId
+            ? await workspaces.runnerUsage(localAuthorityId, query, controller.signal)
+            : await workspaceUsage(hub.remotes, true, query));
+        }
         case 'GET /usage':
           // `refresh=1`: read again now instead of reusing the last minute's reading.
           // `engine`: that engine only, so a client can show each as it arrives.
@@ -606,6 +693,6 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       directTimer = setInterval(pollDirect, 100); directTimer.unref();
     }
   });
-  server.on('close', () => { updates.close(); closingConnectors = true; clearInterval(directTimer); directWorkspace?.connectorBroker?.close(); connectorAuthority.close(); connectors.close(); hub.channels.stop(); diagrams.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
+  server.on('close', () => { updates.close(); closingConnectors = true; clearInterval(directTimer); directWorkspace?.connectorBroker?.close(); connectorAuthority.close(); connectors.close(); hub.channels.stop(); diagrams.close(); interactivePreview.close(); void diagramBrowser.close(); void previews.close(); void workspaces.close(); });
   return server;
 }

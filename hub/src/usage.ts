@@ -25,8 +25,11 @@ const windowLabel = (mins: number | null | undefined) =>
   mins == null ? '한도' : mins === 300 ? '5시간' : mins === 10080 ? '주간' : mins % 1440 === 0 ? `${mins / 1440}일` : mins % 60 === 0 ? `${mins / 60}시간` : `${mins}분`;
 
 const iso = (v: unknown): string | null => {
-  if (typeof v === 'number') return new Date(v * 1000).toISOString();
-  if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) return new Date(v).toISOString();
+  if (typeof v === 'number') {
+    const value = new Date(v * 1000);
+    return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+  }
+  if (typeof v === 'string' && Number.isFinite(Date.parse(v))) return new Date(v).toISOString();
   return null;
 };
 
@@ -61,7 +64,7 @@ async function claude(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
   const q = query({ prompt: idle, options: { cwd: tmpdir() } });
   try {
     const u = await withTimeout(q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }), 'Claude');
-    if (!u.rate_limits_available || !u.rate_limits) return { plan: u.subscription_type, windows: [], error: '구독 한도 정보가 없습니다 (API 키 사용 등)' };
+    if (!u.rate_limits_available || !u.rate_limits) return { plan: u.subscription_type, windows: [] };
     return { plan: u.subscription_type, windows: claudeWindows(u.rate_limits) };
   } finally {
     q.close();
@@ -87,8 +90,12 @@ function codex(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
     calls.set(++id, { resolve, reject });
     child.stdin.write(JSON.stringify({ id, method, params }) + '\n');
   });
-  child.on('error', (err) => { for (const c of calls.values()) c.reject(err); });
-  createInterface({ input: child.stdout }).on('line', (line) => {
+  const failed = (error: Error) => { for (const call of calls.values()) call.reject(error); };
+  child.on('error', failed);
+  child.stdin.on('error', failed);
+  child.on('close', () => failed(new Error('Codex 사용량 조회가 종료되었습니다')));
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', (line) => {
     let m: Json;
     try { m = JSON.parse(line); } catch { return; }
     const c = m.method === undefined ? calls.get(m.id) : undefined;
@@ -101,7 +108,7 @@ function codex(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
     child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
     const r = await request('account/rateLimits/read', null);
     return { plan: r?.rateLimits?.planType ?? null, windows: codexWindows(r) };
-  })(), 'Codex').finally(() => child.kill());
+  })(), 'Codex').finally(() => { calls.clear(); lines.close(); child.kill('SIGKILL'); });
 }
 
 /** agy: buckets by model group; it reports what remains, the desk shows what is used. */
@@ -115,7 +122,7 @@ export function agyWindows(data: Json): UsageWindow[] {
 
 function agy(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
   return new Promise((resolve, reject) => {
-    execFile(AGY_BIN, ['-p', '/usage', '--output-format', 'json'], { cwd: tmpdir(), timeout: TIMEOUT_MS }, (err, stdout) => {
+    execFile(AGY_BIN, ['-p', '/usage', '--output-format', 'json'], { cwd: tmpdir(), timeout: TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout) => {
       if (err) { reject(err); return; }
       try {
         const r = JSON.parse(stdout);
@@ -129,19 +136,35 @@ function agy(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
 const READERS: Record<EngineName, () => Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>>> = { claude, codex, agy };
 
 /** The last reading per engine. Engines are read separately: agy alone takes several seconds. */
-const last = new Map<EngineName, { at: number; value: Promise<EngineUsage> }>();
+const last = new Map<EngineName, { at: number; pending: boolean; value: Promise<EngineUsage> }>();
 
 /** One engine's usage; a failure comes back as `error`, not as a rejection. */
 export function readEngineUsage(engine: EngineName, refresh = false): Promise<EngineUsage> {
   const cached = last.get(engine);
-  if (!refresh && cached && Date.now() - cached.at < CACHE_MS) return cached.value;
-  const fetchedAt = new Date().toISOString();
-  const value: Promise<EngineUsage> = READERS[engine]().then(
-    (r) => ({ engine, fetchedAt, ...r }),
-    (e) => ({ engine, fetchedAt, plan: null, windows: [], error: e instanceof Error ? e.message : String(e) }));
-  last.set(engine, { at: Date.now(), value });
+  if (cached && (cached.pending || !refresh && Date.now() - cached.at < CACHE_MS)) return cached.value;
+  const value: Promise<EngineUsage> = Promise.resolve().then(READERS[engine]).then(
+    (r) => ({ engine, fetchedAt: new Date().toISOString(), ...r }),
+    (e) => ({ engine, fetchedAt: new Date().toISOString(), plan: null, windows: [], error: e instanceof Error ? e.message : String(e) }));
+  const entry = { at: Date.now(), pending: true, value };
+  last.set(engine, entry);
+  void value.then(() => { entry.pending = false; });
   return value;
 }
 
 /** Every engine's usage, once all have answered. */
 export const readUsage = (refresh = false) => Promise.all(ENGINES.map((e) => readEngineUsage(e, refresh)));
+
+/** Only normalized meter data crosses runner boundaries. Provider errors can contain local details. */
+export async function readRunnerUsage(engine: EngineName, refresh: boolean): Promise<EngineUsage> {
+  const { plan, windows, error, fetchedAt } = await readEngineUsage(engine, refresh);
+  return {
+    engine, fetchedAt, plan: typeof plan === 'string' ? plan.slice(0, 100) : null,
+    ...(error ? { error: '엔진의 사용량을 조회하지 못했습니다. 러너의 CLI 설치와 로그인 상태를 확인하세요.' } : {}),
+    windows: windows.slice(0, 40).map(window => ({
+      label: typeof window.label === 'string' ? window.label.slice(0, 140) : '한도',
+      usedPercent: window.usedPercent !== null && Number.isFinite(window.usedPercent)
+        ? Math.max(0, Math.min(100, window.usedPercent)) : null,
+      resetsAt: window.resetsAt,
+    })),
+  };
+}

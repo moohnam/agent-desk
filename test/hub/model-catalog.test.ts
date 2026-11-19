@@ -210,19 +210,23 @@ test('settings accept a model from the workspace union but each runner revalidat
     const remote=f.hub.compose('@remote:remote:/project 작업');assert.equal(remote.model,remoteOnly);
     const oldReply=f.hub.remotes.exchange(peer.id,input);
     assert.deepEqual(oldReply.commands,[],'a queued exact-model start cannot reach an old runner');
-    assert.equal(f.hub.remotes.list().find(r=>r.id===peer.id)?.pending,1,'the accepted start remains durable');
+    assert.equal(f.hub.remotes.list().find(r=>r.id===peer.id)?.pending,0,'an incompatible start leaves the queue');
+    assert.ok(f.store.listEvents(remote.id).some(event=>event.kind==='status' && (event.payload as {detail?:{reason?:string}}).detail?.reason==='remote_feature_unsupported'));
     assert.deepEqual(f.hub.remotes.catalogsFor(peer.id),{});
     assert.equal(f.hub.remotes.catalogsSupported(peer.id),false);
     assert.throws(()=>f.hub.createTask(remote.project_id,'','작업'),/아직 확인/);
     const restored=f.hub.remotes.exchange(peer.id,{...input,modelCatalogs:{claude:catalog('claude',[fable('5-2')])}});
-    assert.equal(restored.commands[0]?.value.type,'start','an upgraded runner receives the original pending start');
+    assert.deepEqual(restored.commands,[],'an upgrade does not replay the rejected request');
+    f.hub.sendMessage(remote.id,'사용자가 다시 요청');
+    const retry=f.hub.remotes.exchange(peer.id,{...input,modelCatalogs:{claude:catalog('claude',[fable('5-2')])}});
+    assert.equal(retry.commands[0]?.value.type,'start');
   } finally {f.close();}
 });
 
 
 test('a local legacy runner rejects exact and variant references before any wire write, including resume',()=>{
   const writes:string[]=[];
-  const port={socket:{write:(line:string)=>writes.push(line)},supportsModelCatalogs:false,live:new Set<string>()} as unknown as RunnerClient;
+  const port={connected:true,socket:{write:(line:string)=>writes.push(line)},supportsModelCatalogs:false,live:new Set<string>()} as unknown as RunnerClient;
   const start={type:'start' as const,sessionId:'resume',engine:'claude' as const,cwd:'/private/tmp',prompt:'retry',permissionMode:'default' as const,resume:'existing'};
   assert.throws(()=>RunnerClient.prototype.handle.call(port,{...start,model:catalogModelName('claude','claude-fable-5-1')}),/실제 모델 ID/);
   assert.throws(()=>RunnerClient.prototype.handle.call(port,{type:'set_model',sessionId:'resume',model:'variants:agy:gemini-4-hydrogen'}),/실제 모델 ID/);

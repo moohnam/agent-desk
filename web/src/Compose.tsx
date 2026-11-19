@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import {useModelCatalogs} from './modelCatalogs.ts';
 import {catalogModelTags,catalogsForTarget,type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
@@ -233,7 +234,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
         onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onBlur={() => { setDismissed(true); onBlur?.(); }} onFocus={() => setDismissed(false)}
         onKeyDown={(e) => {
-          if (e.nativeEvent.isComposing) return;
+          if (imeKey(e.nativeEvent) || e.defaultPrevented) return;
           if (e.key === 'Escape' && e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!e.repeat) onSubmit(); return; }
           if (open && sug) {
@@ -753,7 +754,7 @@ export function DenyDialog({ approval, onClose, onDone }: { approval: Approval; 
         <blockquote className="quote"><b>{approval.tool_name}</b> 실행을 거절합니다.</blockquote>
         <textarea ref={area} className="input" rows={3} value={text} placeholder="에이전트에게 전달할 거절 사유 (비워도 됨)"
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); } }} />
+          onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(); } }} />
         {error && <p className="error">{error}</p>}
         <div className="form-actions">
           <span className="muted"><kbd>⌘</kbd><kbd>↵</kbd> 거절 · Esc 취소</span>

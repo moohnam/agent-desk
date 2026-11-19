@@ -14,7 +14,9 @@ import { useUpdates } from './useUpdates.ts';
 import { UpdateSettingsButton } from './Updates.tsx';
 import { RunnersDialog } from './Runners.tsx';
 import { WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
-import { workspaceId } from './workspace.ts';
+import { SharedPending, workspaceId } from './workspace.ts';
+import { writeClipboardText } from './clipboard.ts';
+import { noteRevision } from './noteEvents.ts';
 import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
 import { ChannelsDialog } from './Channels.tsx';
@@ -142,6 +144,8 @@ export function App() {
   const [noteAttachment, setNoteAttachment] = useState<NoteContext[number]>();
   const pendingDelete = useRef(0);
   const pendingNoteDelete = useRef<{ postId: number; at: number } | null>(null);
+  const cuttingNote = useRef<number | null>(null);
+  const [cuttingNoteId, setCuttingNoteId] = useState<number | null>(null);
   const pendingG = useRef(0);
   const jumpIndex = useRef<Record<string, number>>({});
   const [tick, setTick] = useState(0);
@@ -1207,6 +1211,29 @@ export function App() {
     if (!references.open) { setDrawer(false); setActive(threadSlot(threadAfter)); }
     references.show(!references.open);
   };
+  const cutNote = async (post: Post, control: HTMLButtonElement) => {
+    const { text, clipped } = post.event.payload;
+    if (cuttingNote.current != null || clipped || typeof text !== 'string' || !text) return;
+    cuttingNote.current = post.id;
+    setCuttingNoteId(post.id);
+    let copied = false;
+    try {
+      const removed = await api.cutNote(post.taskId, post.id, noteRevision(post.event) ?? 0, async () => {
+        copied = await writeClipboardText(text, control).catch(() => false);
+        return copied;
+      });
+      if (removed) setToast('메모 글을 삭제했습니다. 클립보드의 원문을 다시 붙여넣을 수 있습니다.');
+      else setToast('클립보드에 복사하지 못했습니다. 메모 글은 그대로 있습니다.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setToast(error instanceof SharedPending ? `원문을 복사했습니다. ${message}`
+        : `${copied ? '원문은 복사했습니다. ' : ''}메모 글을 삭제하지 못했습니다: ${message}`);
+    } finally {
+      pendingNoteDelete.current = null;
+      cuttingNote.current = null;
+      setCuttingNoteId(null);
+    }
+  };
   // The deck's keys (deckKeys.ts). Registered again each render, so the handler sees the current state.
   useEffect(() => {
     const clear = () => { pendingNoteDelete.current = null; };
@@ -1267,6 +1294,7 @@ export function App() {
       references.toggle(p.id);
     },
     pick: p => togglePick(p.taskId, p.event.id),
+    cutNote: (p, control) => { void cutNote(p, control); },
     attach: p => {
       const task = hub.tasks.get(p.taskId);
       const text = p.event.payload.text;
@@ -1381,6 +1409,7 @@ export function App() {
               </div>
             )}
             <ThreadPosts key={threadTask} col={col} ctx={columnCtx.get(col.id)!} feed={threadFeedRef} atBottom={threadAtBottom}
+              cuttingNoteId={cuttingNoteId}
               target={selection[THREAD] ?? threadFocus ?? (!threadInteracted.current ? threadPosts.at(-1)?.id : undefined)}
               onPostsMounted={tryFocusQuestion}
               selected={i === activeIdx ? selection[col.id] : undefined} flash={flash} expanded={expanded}
@@ -1570,7 +1599,7 @@ export function App() {
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
         channels={[...hub.channels.values()]} onOpenChannel={openChannel} tasks={hub.tasks} onOpenSession={openThread}
-        onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} updateAvailable={newVersion} />}
+        onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} updateAvailable={newVersion} runnerProblem={hub.runnerProblem} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}

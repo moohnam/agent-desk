@@ -1,6 +1,8 @@
 import { readSse } from './sse-reader.ts';
-import type { HubMessage } from '../../shared/api.ts';
-import { isNoteInput, needsDefaultInstructions } from './workspace-api.ts';
+import type { EngineUsage, HubMessage } from '../../shared/api.ts';
+import { isNoteInput, needsDefaultInstructions, NOTE_CUT_ROUTE, workspaceRoute } from './workspace-api.ts';
+import { checkUsageReading, checkUsageTargets, type UsageReading, type UsageTarget } from '../../shared/runner-usage.ts';
+import type { UsageQuery } from './runner/usage-probe.ts';
 import { DEFAULT_INSTRUCTIONS } from './instruction-store.ts';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -24,6 +26,8 @@ import { parseComposeTarget, RESERVED_TAGS } from '../../shared/compose.ts';
 import { hasScheduledReply, scheduledReplyHint, scheduledReplyInstant } from '../../shared/scheduled-reply.ts';
 
 type Link = { id:string; name:string; url:string; workspace_id:string; token:string };
+const usageAccessDenied = (reply?: { status: number; body: any }) => reply?.status === 401 || reply?.status === 403
+  || (reply?.status === 409 && reply.body?.code === 'workspace_mismatch');
 type Delivery = { id:string; link_id:string; digest:string; payload:string; prepared_payload:string|null; result:string|null; status:number|null };
 type Legacy = {runner_id:string;link_id:string;address:string;fingerprint:string;legacy_json:string};
 function address(value: unknown) {
@@ -50,6 +54,7 @@ export class WorkspaceLinks {
   private timer:NodeJS.Timeout;
   private stopped = false;
   private requests = new Map<AbortController,string>();
+  private usageCache = new Map<string, { targets?: UsageTarget[]; values: Map<string, EngineUsage> }>();
   private files = new TemporaryFiles();
   constructor(store:Store,skills?:SkillStore) {
     this.db=store.database;
@@ -113,14 +118,14 @@ export class WorkspaceLinks {
     },{} as Record<string,unknown>),
     view_index:Number((this.db.prepare('SELECT seq FROM workspace_view_index WHERE link_id=?').get(link.id) as {seq:number}).seq),
     pending:Number((this.db.prepare('SELECT count(*) n FROM workspace_delivery WHERE link_id=? AND status IS NULL').get(link.id) as {n:number}).n)}));}
-  private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000):Promise<{status:number;body:any}|{response:Response;release:()=>void;signal:AbortSignal}> {
+  private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000,preserveErrorStatus=false):Promise<{status:number;body:any}|{response:Response;release:()=>void;signal:AbortSignal}> {
     if(this.stopped)throw new Error('종료 중입니다');
     const controller=new AbortController();this.requests.set(controller,link.id);
     const timer=setTimeout(()=>controller.abort(),timeoutMs);
     try {
       const response=await fetch(new URL(path,link.url),{...init,redirect:'error',headers:{'content-type':'application/json',...init.headers,authorization:`Bearer ${link.token}`,'x-workspace-id':link.workspace_id},signal:init.signal ? AbortSignal.any([controller.signal,init.signal]) : controller.signal});
       if(stream){clearTimeout(timer);return {response,signal:controller.signal,release:()=>{controller.abort();this.requests.delete(controller);}};}
-      const body=await response.json();
+      const body=await response.json().catch(error=>{if(!preserveErrorStatus||response.ok)throw error;return null;});
       return {status:response.status,body};
     } catch(e) { controller.abort();this.requests.delete(controller);throw e; }
     finally {clearTimeout(timer);if(!stream)this.requests.delete(controller);}
@@ -141,8 +146,10 @@ export class WorkspaceLinks {
     const previous=this.rows().find(row=>row.id===id);
     this.db.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,token=excluded.token').run(link.id,link.name,link.url,link.workspace_id,link.token);
     this.db.prepare('INSERT INTO workspace_view_index(link_id) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index WHERE link_id=?)').run(link.id,link.id);
-    if(previous&&(previous.url!==link.url||previous.token!==link.token))
+    if(previous&&(previous.url!==link.url||previous.token!==link.token)) {
+      this.usageCache.delete(link.id);
       for(const [controller,source] of this.requests)if(source===id)controller.abort();
+    }
     this.sourceCache=undefined;void this.syncSkills(link.id);
     return this.list().find(l=>l.id===link.id)!;
   }
@@ -298,6 +305,7 @@ export class WorkspaceLinks {
     if(this.flushing.has(id)||this.list().find(l=>l.id===id)!.pending)throw new HttpError(409,'전달 중이거나 미전달 입력이 있어 연결을 제거할 수 없습니다');
     this.db.prepare('DELETE FROM workspace_delivery WHERE link_id=?').run(id);
     this.db.prepare('DELETE FROM workspace_link WHERE id=?').run(id);
+    this.usageCache.delete(id);
     this.connectorAuthority?.revokeWorkspace(link.workspace_id);
     for(const [controller,link] of this.requests)if(link===id)controller.abort();
   }
@@ -308,10 +316,61 @@ export class WorkspaceLinks {
         text:r.status!==null&&r.status>=400&&typeof op.body?.text==='string'?op.body.text:undefined,
         error:r.result?JSON.parse(r.result).error:undefined};});
   }
-  async read(id:string,path:string) {
-    const reply=await this.request(this.link(id),`/v1/read?path=${encodeURIComponent(path)}`);
+  async read(id:string,path:string,timeout?:number,signal?:AbortSignal) {
+    const usage = /^\/runner-usage(?:\?|$)/.test(path);
+    const reply=await this.request(this.link(id),`/v1/read?path=${encodeURIComponent(path)}`,{signal},false,timeout,usage);
     if(!('status' in reply))throw new Error('작업공간 응답 형식이 잘못되었습니다');
     return reply;
+  }
+  async runnerUsageTargets(id: string, signal?: AbortSignal): Promise<UsageTarget[]> {
+    const link = this.link(id);
+    const cache = this.runnerUsageCache(id);
+    const response = await this.read(id, '/runner-usage', undefined, signal).catch(() => undefined);
+    if (!this.sameUsageLink(link)) return [];
+    if (usageAccessDenied(response)) { this.usageCache.delete(id); return []; }
+    if (signal?.aborted || this.usageCache.get(id) !== cache) return [];
+    if (response?.status === 200 && checkUsageTargets(response.body)) {
+      const targets = response.body.map(({ id, label }) => ({ id, label }));
+      cache.targets = targets;
+      return targets;
+    }
+    if (response && response.status < 500) return [];
+    return cache.targets ?? [];
+  }
+  async runnerUsage(id: string, query: UsageQuery, signal?: AbortSignal): Promise<UsageReading> {
+    const link = this.link(id);
+    const cache = this.runnerUsageCache(id);
+    const params = new URLSearchParams({ runner: query.runner, engine: query.engine, refresh: query.refresh ? '1' : '0' });
+    const response = await this.read(id, '/runner-usage?' + params, 41_000, signal).catch(() => undefined);
+    if (!this.sameUsageLink(link)) return { status: 'offline' };
+    if (usageAccessDenied(response)) {
+      this.usageCache.delete(id);
+      return { status: 'error', message: '작업공간 연결 권한을 확인하세요.' };
+    }
+    if (signal?.aborted || this.usageCache.get(id) !== cache) return { status: 'offline' };
+    const key = `${query.runner}/${query.engine}`;
+    if (response?.status === 200 && checkUsageReading(response.body, query.engine)) {
+      const reading = response.body;
+      if (reading.value) cache.values.set(key, reading.value);
+      else if (reading.status === 'unsupported') cache.values.delete(key);
+      else return { ...reading, value: cache.values.get(key) };
+      return reading;
+    }
+    if (response && response.status < 500) {
+      cache.values.delete(key);
+      if (response.status === 404) return { status: 'unsupported' };
+      return { status: 'error', message: '작업공간 연결 권한 또는 러너 설정을 확인하세요.' };
+    }
+    return { status: 'offline', value: cache.values.get(key) };
+  }
+  private sameUsageLink(before: Link) {
+    const current = this.rows().find(link => link.id === before.id);
+    return current?.url === before.url && current.token === before.token;
+  }
+  private runnerUsageCache(id: string) {
+    let cache = this.usageCache.get(id);
+    if (!cache) this.usageCache.set(id, cache = { values: new Map() });
+    return cache;
   }
   async trustedCall(id:string,path:string,body:unknown,headers:Record<string,string>={}) {
     const reply=await this.request(this.link(id),path,{method:'POST',body:JSON.stringify(body),headers},false,
@@ -497,6 +556,10 @@ export class WorkspaceLinks {
             if (!('status' in identity) || identity.status !== 200) { failure('notes_capability_unavailable'); break; }
             if (identity.body?.capabilities?.notes !== 1) {
               if (!await unsupported('notes','공유 러너가 메모를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요')) break;
+              continue;
+            }
+            if (workspaceRoute(op.method, op.path) === NOTE_CUT_ROUTE && identity.body?.capabilities?.note_cut !== 1) {
+              if (!await unsupported('note_cut','공유 러너가 메모 잘라내기를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 시도해 주세요')) break;
               continue;
             }
           }

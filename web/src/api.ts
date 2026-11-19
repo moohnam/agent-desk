@@ -6,6 +6,14 @@ import { workspaceId, SharedPending } from './workspace.ts';
 import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
 import { noteRevision, onNoteChange, reportNoteChange } from './noteEvents.ts';
 
+const noteWrites = new Set<number>();
+async function writeNotePost<T>(eventId: number, write: () => Promise<T>): Promise<T> {
+  if (noteWrites.has(eventId)) throw new Error('이 메모 글을 처리 중입니다. 잠시 뒤 다시 시도해 주세요.');
+  noteWrites.add(eventId);
+  try { return await write(); }
+  finally { noteWrites.delete(eventId); }
+}
+
 // getRandomValues works on phones using an HTTP LAN address.
 export const workspaceOperationId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
 
@@ -277,11 +285,17 @@ export const api = {
     call<{ task_id: string; queued_id: string }>('POST', `/tasks/${taskId}/scheduled-replies`, { text, scheduled_at: at, session_id: sessionId }, undefined, undefined, operationId),
   writeNote: (taskId: string, text: string) => call('POST', `/tasks/${taskId}/messages`, { text, note_only: true }),
   editNote: (taskId: string, eventId: number, text: string) =>
-    call<HubEvent>('PATCH', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`, { text })
-      .then(event => reportNoteChange({ type: 'event_updated', event })),
-  deleteNote: (taskId: string, eventId: number) =>
-    call<{ ok: true }>('DELETE', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`)
-      .then(() => reportNoteChange({ type: 'event_removed', task_id: taskId, event_id: eventId })),
+    writeNotePost(eventId, async () => {
+      const event = await call<HubEvent>('PATCH', `/tasks/${taskId}/notes/${nativeEventId(eventId)}`, { text });
+      reportNoteChange({ type: 'event_updated', event });
+    }),
+  cutNote: (taskId: string, eventId: number, revision: number, copy: () => Promise<boolean>) =>
+    writeNotePost(eventId, async () => {
+      if (!await copy()) return false;
+      await call<{ ok: true }>('POST', `/tasks/${taskId}/notes/${nativeEventId(eventId)}/cut`, { revision });
+      reportNoteChange({ type: 'event_removed', task_id: taskId, event_id: eventId });
+      return true;
+    }),
   renameTask: (taskId: string, title: string) => call<TaskView>('PATCH', `/tasks/${taskId}`, { title }),
   cancelQueued: (taskId: string, queuedId: string) => call('DELETE', `/tasks/${taskId}/queue/${queuedId}`),
   /** Sends a waiting message at once: into the running turn, like #now. */

@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useEffect, useRef, useState } from 'react';
 import type { AccessDevice, AccessRequest, AccessView } from '../../shared/api.ts';
 import { api } from './api.ts';
@@ -51,6 +52,7 @@ function DeviceRow({ d, onError }: { d: AccessDevice; onError: (msg: string) => 
           <input className="input" autoFocus value={name} maxLength={60} aria-label="기기 이름"
             onChange={(e) => setName(e.target.value)} onBlur={rename}
             onKeyDown={(e) => {
+              if (imeKey(e.nativeEvent) || e.defaultPrevented || e.repeat) return;
               if (e.key === 'Enter') rename();
               if (e.key === 'Escape') { e.stopPropagation(); cancelled.current = true; setName(null); }
             }} />

@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname, uptime } from 'node:os';
 import { createServer } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,7 @@ import { controlRequest, type RuntimeRole, type RuntimeStatus } from './runtime-
 import { assertTrustedPath, assertTrustedTree, destinationPath } from './trusted-path.ts';
 import { resolveLocalLaunchSettings } from './runner/local-launch.ts';
 import { updateCiPassed, usesUpdateCi } from './update-ci.ts';
+import { openRuntimeLog } from './runtime-log.ts';
 
 const exec = promisify(execFile);
 const ROLES: RuntimeRole[] = ['daemon', 'local', 'hub', 'shared', 'remote'];
@@ -21,10 +22,17 @@ export interface UpdateConfig {
 }
 type CandidateIdentity = Pick<RuntimeStatus, 'owner' | 'commit' | 'instance' | 'pid'>;
 export interface UpdateApproval { commit: string; mode: 'immediate' | 'when-idle'; token: string }
-export interface UpdateState { current?: string; candidate?: string; attempted?: string; spentApproval?: string; approval?: UpdateApproval; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
+export interface UpdateState { current?: string; candidate?: string; attempted?: string; restoreCurrent?: string; recovered?: string; blockedPort?: number; spentApproval?: string; approval?: UpdateApproval; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
 type WorkerLock = { host: string; pid: number; at?: number; token?: string };
 export class UpdateWorkerBusyError extends Error {
   constructor() { super('이 배포 경로를 관리하는 워커가 이미 있습니다'); }
+}
+class RuntimePortError extends Error {
+  readonly port: number;
+  constructor(port: number, role: RuntimeRole) {
+    super(`${role} 포트 ${port}을(를) 기존 프로세스가 사용 중입니다. 기존 작업이 끝나면 해당 서비스를 정상 종료한 뒤 다시 시도하세요`);
+    this.port = port;
+  }
 }
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const within = (base: string, path: string) => { const rel = relative(base, path); return !rel || (!rel.startsWith('..') && !isAbsolute(rel)); };
@@ -66,16 +74,22 @@ export function validateUpdateConfig(value: unknown): UpdateConfig {
   return { ...c, deploymentDir, dataDir, roles: ROLES.filter(r => c.roles.includes(r)) };
 }
 
-export function writePrivateJson(path: string, value: unknown, exclusive = false) {
+export function writePrivateJson(path: string, value: unknown, exclusive = false, durable = false) {
   assertTrustedPath(dirname(path), {kind: 'directory', allowMissing: true});
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   assertTrustedPath(dirname(path), {kind: 'directory'});
   assertTrustedPath(path, {kind: 'file', private: true, allowMissing: true});
   const temp = path + '.' + randomUUID();
   try {
-    writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    const fd = openSync(temp, 'wx', 0o600);
+    try { writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); if (durable) fsyncSync(fd); }
+    finally { closeSync(fd); }
     if (exclusive) linkSync(temp, path);
     else renameSync(temp, path);
+    if (durable) {
+      const dir = openSync(dirname(path), 'r');
+      try { fsyncSync(dir); } finally { closeSync(dir); }
+    }
   }
   finally { if (existsSync(temp)) unlinkSync(temp); }
 }
@@ -108,10 +122,11 @@ export class UpdateWorker {
   state(): UpdateState {
     assertTrustedPath(this.statePath, {kind: 'file', private: true, allowMissing: true});
     const state: UpdateState = existsSync(this.statePath) ? JSON.parse(readFileSync(this.statePath, 'utf8')) : { phase: 'preparing' };
-    if ([state.current, state.candidate, state.attempted].some(value => value !== undefined && !sha(value))) throw new Error('배포 상태의 커밋 형식이 잘못되었습니다');
+    if ([state.current, state.candidate, state.attempted, state.restoreCurrent, state.recovered].some(value => value !== undefined && !sha(value))) throw new Error('배포 상태의 커밋 형식이 잘못되었습니다');
     return { ...state, approval: this.readApproval() };
   }
-  private save({ approval: _approval, ...state }: UpdateState) { writePrivateJson(this.statePath, state); }
+  // A candidate must never run with only a cached record that would allow an old binary to return after reboot.
+  private save({ approval: _approval, ...state }: UpdateState) { writePrivateJson(this.statePath, state, false, true); }
   private get approvalPath() { return join(this.config.deploymentDir, 'approval.json'); }
   private readApproval(): UpdateApproval | undefined {
     assertTrustedPath(this.approvalPath, {kind: 'file', private: true, allowMissing: true});
@@ -395,7 +410,10 @@ export class UpdateWorker {
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('관리 런타임 포트가 잘못되었습니다');
       const probe = createServer();
       try { await new Promise<void>((resolve, reject) => { probe.once('error', reject); probe.listen(port, role === 'hub' ? env.HOST ?? '0.0.0.0' : '127.0.0.1', resolve); }); }
-      catch { throw new Error(`${role} 포트를 기존 프로세스가 사용 중입니다. 기존 서비스는 변경하지 않았습니다`); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
+        throw new RuntimePortError(port, role);
+      }
       finally { if (probe.listening) await new Promise<void>(resolve => probe.close(() => resolve())); }
     }
     const journal = role === 'remote' ? env.AGENT_DESK_REMOTE_DB : role === 'shared' ? join(env.AGENT_DESK_SHARED_DIR!, 'delivery.db') : undefined;
@@ -435,8 +453,9 @@ export class UpdateWorker {
       await controlRequest(this.socket(role), { action: 'cancel', instance: runtime.instance, lease: hold.lease }).catch(() => {});
     }
   }
-  private async start(role: RuntimeRole, commit: string) {
+  private async start(role: RuntimeRole, commit: string, beforeCandidate?: () => void) {
     let existing = await this.observe(role);
+    if (existing) beforeCandidate?.();
     if (existing && !existing.ready) { await this.cleanupFailedCandidate(role, existing); existing = undefined; }
     if (existing) {
       if (existing.commit !== commit || !existing.ready) throw new Error(`${role} 기존 런타임의 커밋 또는 준비 상태가 다릅니다`);
@@ -451,9 +470,12 @@ export class UpdateWorker {
     assertTrustedPath(logDir, {kind: 'directory', allowMissing: true});
     mkdirSync(logDir, { recursive: true, mode: 0o700 });
     assertTrustedPath(join(logDir, `${role}.log`), {kind: 'file', private: true, allowMissing: true});
-    const log = openSync(join(logDir, `${role}.log`), 'a', 0o600); chmodSync(join(logDir, `${role}.log`), 0o600);
+    const log = openRuntimeLog(join(logDir, `${role}.log`));
     let child;
-    try { child = spawn(this.node, [join(release, ENTRY[role])], { cwd: release, env: environment, detached: true, stdio: ['ignore', log, log] }); }
+    try {
+      beforeCandidate?.();
+      child = spawn(this.node, [join(release, ENTRY[role])], { cwd: release, env: environment, detached: true, stdio: ['ignore', log, log] });
+    }
     finally { closeSync(log); }
     let failure: Error | undefined, recorded = false; child.on('error', error => { failure = error; }); child.unref();
     for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
@@ -485,7 +507,14 @@ export class UpdateWorker {
     try { this.preparationIdle(); const activated = await this.activateApproved(commit, approval); waiting = !activated; return activated; }
     catch (error) {
       const state = this.state();
-      this.save({...state, phase: this.switched ? 'failed' : state.phase, error: error instanceof Error ? error.message : String(error)});
+      const message = error instanceof Error ? error.message : String(error);
+      this.save({...state, phase: this.switched ? 'failed' : state.phase, error: message, blockedPort: error instanceof RuntimePortError ? error.port : undefined});
+      if (this.switched && state.restoreCurrent && state.restoreCurrent === state.current) {
+        try { await this.restorePrevious(state); }
+        catch (recovery) {
+          this.save({ ...this.state(), blockedPort: recovery instanceof RuntimePortError ? recovery.port : undefined, error: `${message}\n이전 버전 복구를 마치지 못했습니다. ${recovery instanceof Error ? recovery.message : String(recovery)}` });
+        }
+      }
       throw error;
     }
     finally {
@@ -510,26 +539,37 @@ export class UpdateWorker {
       catch { throw new Error('자동 업데이트는 이전 실행 후보의 후속 커밋만 적용합니다. DB를 되돌리지 않았습니다'); }
     }
     let switching = false;
+    let canRestore = !!previous.current && previous.current !== commit && !previous.attempted && previous.phase !== 'switching' && !Object.keys(previous.started ?? {}).length;
+    const beforeCandidate = () => {
+      canRestore = false;
+      const state = this.state();
+      if (state.restoreCurrent) this.save({ ...state, restoreCurrent: undefined });
+    };
     const beginSwitch = () => {
       if (switching) return;
       this.changeApproval(() => {
         this.requireApproval(approval);
         // Commit the cancellation boundary immediately before the first stop, including failed-candidate cleanup.
-        this.save({ ...this.state(), attempted: commit, phase: 'switching', error: undefined });
+        this.save({ ...this.state(), attempted: commit, restoreCurrent: canRestore ? previous.current : undefined, recovered: undefined, blockedPort: undefined, phase: 'switching', error: undefined });
         unlinkSync(this.approvalPath); switching = true; this.switched = true;
       });
     };
     try {
-      for (const role of this.config.roles) if (!await this.observe(role)) await this.preflight(role, this.environment(role, commit));
+      for (const role of this.config.roles) {
+        const runtime = await this.observe(role);
+        if (runtime && runtime.commit !== previous.current) canRestore = false;
+        if (!runtime) await this.preflight(role, this.environment(role, commit));
+      }
       // Freeze input owners before their daemons; start later in the reverse dependency order.
       for (const role of [...this.config.roles].reverse()) {
         let runtime = await this.observe(role);
+        if (runtime && runtime.commit !== previous.current) beforeCandidate();
         if (runtime && !runtime.ready) { if (!switching) this.requireApproval(approval); await this.cleanupFailedCandidate(role, runtime, beginSwitch); runtime = undefined; }
         if (!runtime || runtime.commit === commit) continue;
         const reply = await controlRequest(this.socket(role), { action: 'prepare', instance: runtime.instance });
         if (!reply.ok || !reply.lease) {
           if (switching) throw new Error(reply.error ?? '실패 후보 정리 후 다른 런타임이 유휴 상태가 아닙니다');
-          this.save({ ...previous, phase: 'waiting', error: reply.error }); return false;
+          this.save({ ...this.state(), phase: 'waiting', error: reply.error }); return false;
         }
         prepared.push({ role, runtime, lease: reply.lease });
       }
@@ -542,9 +582,9 @@ export class UpdateWorker {
           await delay(100);
         }
       }
-      for (const role of this.config.roles) await this.start(role, commit);
+      for (const role of this.config.roles) await this.start(role, commit, beforeCandidate);
       const completed = this.state();
-      this.save({ ...completed, current: commit, attempted: undefined, started: undefined, phase: completed.candidate && completed.candidate !== commit ? 'waiting' : 'active', error: undefined });
+      this.save({ ...completed, current: commit, attempted: undefined, started: undefined, restoreCurrent: undefined, recovered: undefined, phase: completed.candidate && completed.candidate !== commit ? 'waiting' : 'active', error: undefined });
       try { this.pointCurrent(commit); }
       catch (error) { this.save({ ...this.state(), error: `현재 릴리스 링크를 갱신하지 못했습니다: ${error instanceof Error ? error.message : String(error)}` }); }
       try { await this.pruneReleases(); }
@@ -575,7 +615,28 @@ export class UpdateWorker {
     this.preparationIdle();
     const state = this.state(), commit = state.current;
     if (!commit) throw new Error('활성화한 릴리스가 없습니다. 후보를 준비하고 승인하세요');
-    if (state.phase === 'switching' || state.attempted) throw new Error('끝나지 않은 교체가 있습니다. status로 확인하고 수정된 후속 커밋으로 복구하세요');
+    try {
+      if (state.phase === 'switching' || state.attempted) {
+        if (state.restoreCurrent === commit && state.attempted && state.attempted !== commit) return await this.restorePrevious(state);
+        throw new Error('끝나지 않은 교체가 있습니다. 후보가 데이터를 변경했을 수 있습니다. status와 실행 로그를 확인하고 수정된 후속 커밋으로 복구하세요');
+      }
+      const started = await this.startVerifiedRelease(commit);
+      if (state.blockedPort) this.save({ ...this.state(), blockedPort: undefined });
+      return started;
+    } catch (error) {
+      if (error instanceof RuntimePortError) this.save({ ...this.state(), blockedPort: error.port, error: error.message });
+      throw error;
+    }
+  }
+  private async restorePrevious(state: UpdateState) {
+    const commit = state.current!;
+    const started = await this.startVerifiedRelease(commit);
+    this.save({ ...this.state(), attempted: undefined, restoreCurrent: undefined, recovered: commit, started: undefined, blockedPort: undefined,
+      phase: state.candidate && state.candidate !== commit ? 'waiting' : 'active',
+      error: state.error ?? '새 버전 실행 전에 교체가 중단되었습니다.' });
+    return started;
+  }
+  private async startVerifiedRelease(commit: string): Promise<RuntimeRole[]> {
     this.deploymentPaths(commit); this.protectedPaths();
     if (!existsSync(this.marker(commit))) throw new Error('검증하지 않은 릴리스는 실행할 수 없습니다');
     const release = join(this.config.deploymentDir, 'releases', commit);

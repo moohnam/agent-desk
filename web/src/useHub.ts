@@ -8,7 +8,7 @@ import { compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from 
 import { confirmedMissingTask } from './draftRetention.ts';
 import { noteRevision, onNoteChange, reportNoteChange, visibleNoteEvents } from './noteEvents.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
-import type { AccessView } from '../../shared/api.ts';
+import type { AccessView, RunnerConnectionProblem } from '../../shared/api.ts';
 
 const FEED_CAP = 3000;
 /** How long an open thread gathers cut live events before fetching them whole. */
@@ -39,6 +39,7 @@ export function useHub() {
   const [connected, setConnected] = useState(false);
   // Hub↔runner link; null until the first state arrives.
   const [runnerConnected, setRunnerConnected] = useState<boolean | null>(null);
+  const [runnerProblem, setRunnerProblem] = useState<RunnerConnectionProblem>();
   // Whether this browser runs on the hub's own machine (local links open only there).
   const [local, setLocal] = useState(true);
   // Devices asking to connect and devices let in: on this Mac's pages only.
@@ -122,7 +123,7 @@ export function useHub() {
             setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
             const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
             setQuestions(new Map([...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))));
-            if (s.runner) setRunnerConnected(s.runner.connected);
+            if (s.runner) { setRunnerConnected(s.runner.connected); setRunnerProblem(s.runner.problem); }
             if (s.client) setLocal(s.client.local);
             setAccess(s.access ?? null);
           };
@@ -183,6 +184,7 @@ export function useHub() {
           for (const r of m.runners) runnerUpdates.set(r.id, r.connected);
         } else if (m.type === 'runner') {
           setRunnerConnected(m.connected);
+          setRunnerProblem(m.problem);
         } else if (m.type === 'event') {
           events.push(m.event);
         } else if (m.type === 'removed') {
@@ -265,7 +267,7 @@ export function useHub() {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, local, access, synced, gone, availableSources, refresh, onEvent };
+  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, runnerProblem, local, access, synced, gone, availableSources, refresh, onEvent };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */

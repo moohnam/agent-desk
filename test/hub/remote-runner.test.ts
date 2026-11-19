@@ -13,6 +13,9 @@ import type { StartOptions } from '../../hub/src/runner/engine.ts';
 import type { HubToRunner, RunnerToHub } from '../../shared/protocol.ts';
 import type { RemoteExchange } from '../../shared/remote.ts';
 import { remoteLocation } from '../../shared/remote.ts';
+import { catalogModelName } from '../../shared/compose.ts';
+import type { StatusPayload } from '../../shared/events.ts';
+import type { EngineUsage } from '../../shared/api.ts';
 
 function setup() {
   const dir=mkdtempSync(join(tmpdir(),'desk-remote-'));
@@ -49,6 +52,40 @@ function setup() {
   function cleanup() { for(const s of agent.runner.snapshot())agent.runner.handle({type:'close',sessionId:s.sessionId});hub.remotes.close();journal.close();store.database.close();rmSync(dir,{recursive:true,force:true}); }
   return {hub,store,dir,skills,makeHub,registered,journal,starts,sent,agent,localSent,localSay:(m:RunnerToHub)=>localSay(m),request,exchange,finish,cleanup};
 }
+
+test('runner usage is isolated, shares simultaneous requests and keeps the last reading offline', async () => {
+  const t = setup();
+  try {
+    const id = t.registered.runner.id;
+    const remote = (usageReports?: RemoteExchange['usageReports'], more = false) => t.hub.atomic(() =>
+      t.hub.remotes.exchange(id, { ...t.request(), usageReports, more }));
+    remote();
+    assert.deepEqual(await t.hub.remotes.readUsage(id, 'codex', false), { status: 'unsupported' });
+    assert.equal(remote().usageRequests, undefined);
+    remote([], true);
+    t.localSay({ type: 'hello', runnerId: 'local-test', host: 'host', capabilities: { engines: ['codex'], usage: true }, sessions: [] });
+    const local = t.hub.remotes.readUsage('local', 'codex', false);
+    const fromRemote = t.hub.remotes.readUsage(id, 'codex', false);
+    assert.equal(t.hub.remotes.readUsage(id, 'codex', true), fromRemote);
+    const cmd = t.localSent.at(-1)!;
+    assert.equal(cmd.type, 'refresh_usage');
+    if (cmd.type !== 'refresh_usage') throw new Error('missing local probe');
+    const [request] = remote([], true).usageRequests!;
+    assert.notEqual(request.requestId, cmd.request.requestId);
+    const meter = (usedPercent: number): EngineUsage => ({
+      engine: 'codex', plan: 'test', fetchedAt: new Date().toISOString(), windows: [{ label: '5시간', usedPercent, resetsAt: null }],
+    });
+    const localValue = meter(9), remoteValue = meter(82);
+    t.localSay({ type: 'usage', sessionId: cmd.sessionId, report: { requestId: cmd.request.requestId, value: localValue } });
+    assert.equal(remote([{ requestId: cmd.request.requestId, value: localValue }]).usageRequests?.[0].requestId, request.requestId);
+    assert.equal(remote([{ requestId: request.requestId, value: remoteValue }]).usageRequests, undefined);
+    assert.deepEqual(await local, { status: 'ready', value: localValue });
+    assert.deepEqual(await fromRemote, { status: 'ready', value: remoteValue });
+    t.hub.remotes.rotate(id);
+    assert.deepEqual(await t.hub.remotes.readUsage(id, 'codex', false), { status: 'offline', value: remoteValue });
+    assert.equal(t.hub.remotes.list()[0].pending, 0);
+  } finally { t.cleanup(); }
+});
 
 test('only an explicitly named new remote project creates a missing directory on its runner', () => {
   const t = setup();
@@ -203,8 +240,11 @@ test('an old remote runner accepts plain work but cannot receive pinned skill co
     const oldExchange={...t.request(),skillSnapshot:false};
     const reply=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,oldExchange));
     assert.deepEqual(reply.commands,[]);
-    assert.equal(t.hub.remotes.pendingFor(t.store.latestSession(pinned.id)!.id),1);
+    assert.equal(t.hub.remotes.pendingFor(t.store.latestSession(pinned.id)!.id),0);
     assert.throws(()=>t.hub.sendMessage(pinned.id,'#parent next'),/고정 스킬 버전/);
+    t.exchange();
+    assert.equal(t.starts.length,0);
+    t.hub.sendMessage(pinned.id,'#parent next');
     t.exchange();
     assert.equal(t.starts.length,1);
   }finally{t.cleanup();}
@@ -228,28 +268,82 @@ test('a queued skill input stays queued across an old remote exchange and drains
   }finally{t.cleanup();}
 });
 
-test('accepted custom instructions wait for support on every remote delivery attempt',()=>{
+test('an incompatible queued start and dependent user input do not block other sessions',()=>{
   const t=setup();try{
     const exchange=(instructions:boolean)=>t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,{...t.request(),instructions}));
     exchange(true);
     const task=t.hub.withInstructions('접수 당시 사용자 지침',()=>t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`));
     const session=t.store.latestSession(task.id)!;
-    // A runner may restart with an older executable while its durable journal stays intact.
-    assert.deepEqual(exchange(false).commands,[]);
-    assert.equal(t.hub.remotes.pendingFor(session.id),1);
-    const supported=exchange(true);
-    assert.equal(supported.commands.length,1);
-    assert.equal(supported.commands[0].value.type,'start');
-    if(supported.commands[0].value.type==='start')assert.equal(supported.commands[0].value.instructions,'접수 당시 사용자 지침');
-    // Even an already offered command must not be retried to an unsupported runner before ACK.
-    assert.deepEqual(exchange(false).commands,[]);
-    assert.equal(t.hub.remotes.pendingFor(session.id),1);
-    const retry=exchange(true);
-    assert.deepEqual(retry.commands,supported.commands);
-    t.journal.receive(retry.commands);t.agent.pump();
+    t.hub.remotes.handle({type:'send',sessionId:session.id,text:'dependent'});
+    const unaffected=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex unaffected`);
+    const delivered=exchange(false);
+    assert.deepEqual(delivered.commands.map(({value})=>value.type === 'start' ? value.sessionId : null),[t.store.latestSession(unaffected.id)!.id]);
+    assert.equal(t.hub.remotes.pendingFor(session.id),0);
+    assert.equal(t.store.getTask(task.id)?.status,'error');
+    assert.ok(t.store.listEvents(task.id).some(event=>event.kind==='status' && (event.payload as StatusPayload).detail?.reason==='remote_feature_unsupported'));
+    t.journal.receive(delivered.commands);t.agent.pump();
+    t.exchange();
     assert.equal(t.starts.length,1);
-    assert.equal(t.starts[0].instructions,'접수 당시 사용자 지침');
+    assert.equal(t.starts[0].prompt,'unaffected');
+    assert.deepEqual(t.sent,[]);
+    assert.deepEqual(exchange(true).commands,[]);
   }finally{t.cleanup();}
+});
+
+test('a previously offered incompatible command is recorded as uncertain and is never replayed after upgrade',()=>{
+  const t=setup(); try {
+    const exchange=(instructions:boolean)=>t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,{...t.request(),instructions}));
+    exchange(true);
+    const task=t.hub.withInstructions('사용자 지침',()=>t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`));
+    const [offered]=exchange(true).commands; // No runner ACK yet.
+    const [barrier]=exchange(false).commands;
+    assert.equal(barrier.value.type,'close');
+    assert.ok(barrier.seq>offered.seq);
+    assert.equal(t.hub.remotes.list()[0].pending,0);
+    assert.ok(t.store.listEvents(task.id).some(event=>event.kind==='status' && (event.payload as StatusPayload).detail?.reason==='remote_delivery_uncertain'));
+    t.journal.receive([barrier]);t.agent.pump();
+    assert.equal(t.journal.commandAck,barrier.seq);
+    assert.deepEqual(exchange(true).commands,[]);
+  }finally{t.cleanup();}
+});
+
+test('a rejected model change blocks dependent replies and preserves an independent approval mode change',()=>{
+  const t=setup(); try {
+    const id=t.registered.runner.id;
+    const exchange=(modelCatalogs?: RemoteExchange['modelCatalogs'])=>t.hub.atomic(()=>t.hub.remotes.exchange(id,{...t.request(),modelCatalogs}));
+    exchange({});
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`);
+    t.journal.receive(exchange({}).commands);t.agent.pump();
+    t.finish();exchange({});
+    const session=t.store.latestSession(task.id)!;
+    const model=catalogModelName('codex','modern');
+    t.store.database.prepare('UPDATE remote_runner SET last_seen=NULL WHERE id=?').run(id);
+    t.store.updateSession(session.id,{model});
+    t.hub.remotes.handle({type:'set_model',sessionId:session.id,model},{model:session.model,effort:session.effort});
+    t.hub.remotes.handle({type:'set_mode',sessionId:session.id,permissionMode:'default'});
+    t.hub.sendMessage(task.id,'dependent');
+    assert.equal(t.store.queued({taskId:task.id}).length,1);
+    const reply=exchange();
+    assert.deepEqual(reply.commands.map(command=>command.value.type),['set_mode']);
+    assert.equal(t.store.latestSession(task.id)?.model,session.model);
+    assert.equal(t.store.queued({taskId:task.id}).length,0);
+    assert.equal(t.store.getTask(task.id)?.status,'error');
+    assert.throws(()=>t.hub.remotes.handle({type:'set_model',sessionId:session.id,model}),/실제 모델 ID 선택/);
+  } finally { t.cleanup(); }
+});
+
+test('a rejected skill steer leaves an earlier ordinary reply and a compatible model command intact',()=>{
+  const t=setup(); try {
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`);
+    t.exchange();t.exchange();
+    const session=t.store.latestSession(task.id)!;
+    t.hub.sendMessage(task.id,'ordinary reply');
+    t.hub.sendMessage(task.id,'#parent #now steer');
+    t.hub.remotes.handle({type:'set_model',sessionId:session.id,model:'sol'},{model:session.model,effort:session.effort});
+    const reply=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,{...t.request(),skillSnapshot:false}));
+    assert.deepEqual(reply.commands.map(item=>item.value.type),['set_model']);
+    assert.deepEqual(t.store.queued({taskId:task.id}).map(item=>item.text),['ordinary reply']);
+  } finally { t.cleanup(); }
 });
 
 test('remote Codex skill steering preserves the message and leaves skill paths to the remote adapter',()=>{

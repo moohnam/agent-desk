@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 
-interface Instructions { text: string; revision: string; defaults: string }
+interface Instructions { text: string; revision: string; defaults: string; editable?: boolean }
 class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
@@ -51,7 +51,7 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
     onClose();
   };
   const save = async (revision = saved?.revision) => {
-    if (!revision || busy || loading) return;
+    if (!revision || saved?.editable !== true || busy || loading) return;
     setBusy(true); setError(''); setNotice('');
     try {
       const value = await request(undefined, {text, revision});
@@ -67,9 +67,9 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
       <p className="muted small">이 허브에서 시작하는 로컬·원격 실행에 전달합니다. 기존 대화는 재접속·문맥 재구성 후에도 시작할 때의 지침을 유지합니다.</p>
       {loading && <p className="muted small" role="status">{load.kind === 'initial' ? '기본 지침을 불러오는 중…' : '서버의 변경 내용을 불러오는 중…'}</p>}
       <label className="field"><span className="lbl">에이전트에게 전달할 지침</span>
-        <textarea className="input" spellCheck={false} rows={12} value={text} disabled={!saved || busy} onChange={event => {setText(event.target.value); setNotice('');}} />
+        <textarea className="input" spellCheck={false} rows={12} value={text} disabled={!saved || busy} readOnly={saved?.editable !== true} onChange={event => {setText(event.target.value); setNotice('');}} />
       </label>
-      <p className="muted small">빈 내용도 저장할 수 있습니다. 스킬 경로와 참조 안내는 자동으로 추가하며, 엔진 자체 지침과 프로젝트 지침은 유지됩니다.</p>
+      {saved && <p className="muted small">{saved.editable ? '빈 내용도 저장할 수 있습니다. 스킬 경로와 참조 안내는 자동으로 추가하며, 엔진 자체 지침과 프로젝트 지침은 유지됩니다.' : '기본 지침은 허브가 실행 중인 기기에서 편집할 수 있습니다.'}</p>}
       {error && <p className="error" role="alert">{error}</p>}
       {notice && <p className="muted small" role="status">{notice}</p>}
       {conflict && <div className="instructions-conflict">
@@ -82,8 +82,8 @@ export function InstructionsDialog({ onClose }: {onClose: () => void}) {
       </div>}
       <div className="form-actions">
         {!saved && !loading && <button className="btn" type="button" onClick={() => setLoad(previous => ({kind: 'initial', attempt: previous.attempt + 1}))}>다시 불러오기</button>}
-        <button className="btn" type="button" disabled={!saved || busy} onClick={() => {setText(saved!.defaults); setNotice('');}}>기본값 불러오기</button>
-        <button className="btn primary" type="submit" disabled={!saved || busy || loading || conflict || text === saved.text}>{busy ? '저장 중…' : '저장'}</button>
+        {saved?.editable && <><button className="btn" type="button" disabled={busy} onClick={() => {setText(saved.defaults); setNotice('');}}>기본값 불러오기</button>
+        <button className="btn primary" type="submit" disabled={busy || loading || conflict || text === saved.text}>{busy ? '저장 중…' : '저장'}</button></>}
         {!panel.embedded && <button className="btn" type="button" onClick={close} disabled={busy}>닫기</button>}
       </div>
     </form>

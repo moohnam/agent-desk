@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.ts';
 import { Modal } from './Modal.tsx';
@@ -148,13 +149,13 @@ export function SkillsDialog({ onClose }: { onClose: () => void }) {
               ))}
               <input className="input sk-path" placeholder="새 파일 (예: scripts/run.sh)" value={newPath}
                 onChange={(e) => setNewPath(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') void addFile(); }} />
+                onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && e.key === 'Enter') void addFile(); }} />
               <button className="btn" disabled={!newPath.trim() || saving || loading} onClick={addFile}>추가</button>
             </div>}
             <textarea ref={editor} className="input sk-editor" spellCheck={false} disabled={saving || loading} aria-label="스킬 본문" value={content}
               onChange={(e) => { setContent(e.target.value); setNote(null); }}
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && (e.code === 'KeyS' || e.key === 'Enter')) { e.preventDefault(); void save(); }
+                if (!imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && (e.metaKey || e.ctrlKey) && (e.code === 'KeyS' || e.key === 'Enter')) { e.preventDefault(); void save(); }
               }} />
             <div className="form-actions">
               {error ? <p className="error">{error}</p>

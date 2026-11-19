@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, truncateSy
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createServer, request, type Server } from 'node:http';
+import { createServer, request, type Server, type ServerResponse } from 'node:http';
 import { SharedRuntime } from '../../hub/src/runner/shared-runtime.ts';
 import { Store } from '../../hub/src/db.ts';
 import { Hub } from '../../hub/src/hub.ts';
@@ -22,6 +22,68 @@ const delay=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 const listen=(server:Server,port=0)=>new Promise<string>(r=>server.listen(port,'127.0.0.1',()=>r(`http://127.0.0.1:${(server.address() as {port:number}).port}`)));
 const stop=(server:Server)=>new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());});
 const wait=async(check:()=>boolean|Promise<boolean>)=>{const end=Date.now()+9000;while(!await check()){if(Date.now()>end)throw Error('wait timeout');await delay(30);}};
+
+test('the settings usage endpoint routes shared readings and keeps the last result while unreachable', async () => {
+  const f = fixture();
+  const authority = f.runtime.workspace.server();
+  const origin = await listen(authority);
+  const peer = f.runtime.workspace.grant('meter-test');
+  const store = new Store(':memory:');
+  const hub = new Hub(store, { skills: new SkillStore(join(f.dir, 'usage-skills')),
+    runner: () => ({ connected: false, id: null, engines: new Set(), has: () => false, handle: () => { throw Error('unexpected local probe'); } }) });
+  const links = new WorkspaceLinks(store);
+  const server = createHttpServer(hub, new Access(join(f.dir, 'usage-token'), 4317), join(f.dir, 'usage-uploads'), { workspaces: links });
+  try {
+    const link = await links.attach({ name: '연결한 러너', url: origin, token: peer.token });
+    const gateway = await listen(server);
+    const endpoint = gateway + '/api/runner-usage';
+    const read = (url: string) => fetch(url).then(res => res.json()) as Promise<any>;
+    assert.deepEqual(await read(endpoint), [{ id: 'local', label: '이 Mac' }, { id: 'default', label: '연결한 러너', source: link.id }]);
+    assert.equal((await fetch(origin + '/v1/read?path=/runner-usage')).status, 401);
+    assert.equal((await fetch(gateway + '/api/workspaces/' + link.id + '/runner-usage?runner=default&engine=codex')).status, 404);
+    const remoteId = f.runtime.hub.remotes.list()[0].id;
+    const input = { version: 1 as const, journalId: f.runtime.journal.id, commandAck: 0,
+      events: [], more: false, sessions: [], engines: ['codex'], usageReports: [] };
+    const url = endpoint + '?' + new URLSearchParams({ runner: 'default', source: link.id, engine: 'codex' });
+    assert.equal((await fetch(url, { headers: { origin: 'https://unrelated.example' } })).status, 403);
+    const usage = read(url);
+    let requestId: string | undefined;
+    await wait(() => {
+      requestId = f.runtime.hub.atomic(() => f.runtime.hub.remotes.exchange(remoteId, input)).usageRequests?.[0]?.requestId;
+      return !!requestId;
+    });
+    const value = { engine: 'codex' as const, plan: 'test', fetchedAt: new Date().toISOString(),
+      windows: [{ label: '주간', usedPercent: 17, resetsAt: null }] };
+    f.runtime.hub.atomic(() => f.runtime.hub.remotes.exchange(remoteId, { ...input, usageReports: [{ requestId: requestId!, value }] }));
+    assert.deepEqual(await usage, { status: 'ready', value });
+    assert.deepEqual(await read(endpoint + '?runner=local&engine=codex'), { status: 'offline' });
+    await stop(authority);
+    assert.deepEqual(await read(url), { status: 'offline', value });
+    assert.equal((await fetch(endpoint + '?runner=default&engine=other&source=' + link.id)).status, 400);
+    const delayed = Promise.withResolvers<ServerResponse>();
+    let reads = 0;
+    authority.removeAllListeners('request');
+    authority.on('request', (_req, res) => {
+      if (++reads === 1) delayed.resolve(res);
+      else if (reads === 2) {
+        res.writeHead(401, { 'content-type': 'text/html' });
+        res.end('<p>Unauthorized</p>');
+      } else res.destroy();
+    });
+    await listen(authority, Number(new URL(origin).port));
+    const old = read(url);
+    const delayedResponse = await delayed.promise;
+    assert.equal((await read(url)).status, 'error');
+    delayedResponse.writeHead(200, { 'content-type': 'application/json' });
+    delayedResponse.end(JSON.stringify({ status: 'ready', value }));
+    assert.deepEqual(await old, { status: 'offline' });
+    assert.deepEqual(await read(url), { status: 'offline' });
+  } finally {
+    if (authority.listening) await stop(authority);
+    if (server.listening) await stop(server);
+    await links.close(); hub.dispose(); store.database.close(); f.close();
+  }
+});
 
 test('shared file links stream from the task runner to a private local copy and preserve reveal rules',async()=>{
  const f=fixture(),runner=f.runtime.workspace.server();let gateway:Server|undefined;
@@ -309,7 +371,9 @@ test('a workspace gateway delivers note operations without reading connector or 
     const updated = await deliver('PATCH', post, { text: '#jira #new 수정' });
     assert.equal(updated.status, 200);
     assert.deepEqual(updated.body.payload, { text: '#jira #new 수정', revision: 1 });
-    assert.equal((await deliver('DELETE', post, {})).status, 200);
+    assert.equal((await deliver('POST', `${post}/cut`, { revision: 0 })).status, 409);
+    assert.deepEqual(f.runtime.hub.store.listEvents(created.body.id).map(e => e.payload), [updated.body.payload]);
+    assert.equal((await deliver('POST', `${post}/cut`, { revision: 1 })).status, 200);
     assert.equal(f.runtime.hub.store.listEvents(created.body.id).length, 0);
     assert.equal(f.starts.length, 0);
   } finally {
@@ -323,14 +387,16 @@ test('a rolled-back workspace preserves note receipts and rejects only new unsup
   const result = { status: 201, body: { id: 'saved-note', kind: 'note' } };
   const requests: string[] = [];
   let receiptEndpoint = false;
+  let supportsNotes = false;
   try {
     store.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run('test', 'test', 'http://localhost/', 'workspace', 'hidden');
     (links as any).request = async (_link: unknown, path: string) => {
       requests.push(path);
-      if (path === '/v1/identity') return { status: 200, body: { capabilities: {} } };
+      if (path === '/v1/identity') return { status: 200, body: { capabilities: supportsNotes ? { notes: 1 } : {} } };
       if (path === `/v1/receipts/${committed}`) return { status: 200, body: result };
       if (path === `/v1/receipts/${missing}`) return { status: 404, body: {} };
       if (path === `/v1/receipts/${unavailable}`) return { status: 404, body: receiptEndpoint ? {code:'receipt_not_found'} : {error:'지원하지 않는 공유 API입니다'} };
+      if (receiptEndpoint && path.startsWith('/v1/receipts/')) return { status: 404, body: { code: 'receipt_not_found' } };
       if (path === '/v1/operation') return {status:201,body:{id:'following'}};
       return { status: 503, body: {} };
     };
@@ -355,6 +421,15 @@ test('a rolled-back workspace preserves note receipts and rejects only new unsup
     receiptEndpoint = true;
     await links.flush('test');
     assert.equal(links.deliveries('test').find(row=>row.id===unavailable)?.status,409);
+    assert.equal(requests.filter(path=>path==='/v1/operation').length,1);
+    supportsNotes = true;
+    const cutId = randomUUID();
+    links.enqueue('test', { id: cutId, method: 'POST', path: '/tasks/saved-note/notes/1/cut', body: { revision: 0 } });
+    await links.flush('test');
+    const cut = store.database.prepare('SELECT status, result FROM workspace_delivery WHERE id=?').get(cutId) as
+      { status: number; result: string };
+    assert.equal(cut.status, 409);
+    assert.equal(JSON.parse(cut.result).feature, 'note_cut');
     assert.equal(requests.filter(path=>path==='/v1/operation').length,1);
   } finally {
     await links.close(); store.database.close();

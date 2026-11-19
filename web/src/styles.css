@@ -312,6 +312,9 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .markdown-copy-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px; margin-bottom: 8px; }
 .md .markdown-copy-block > :is(pre, table) { margin: 0; }
 .md a { color: var(--accent); }
+.md img { max-width: 100%; height: auto; }
+.markdown-external-image { color: var(--muted); }
+.markdown-external-image > button { color: var(--accent); }
 /* Opens in a local app (via the hub), not a browser tab. */
 .md a.local-link { text-decoration-style: dotted; }
 .md a.local-link::after { content: '↗'; font-size: 0.8em; margin-left: 1px; opacity: 0.6; }
@@ -722,6 +725,11 @@ textarea.input { resize: none; }
 .reference-head h2 span { font-size: 12px; color: var(--muted); font-weight: 500; }
 .reference-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .reference-feed { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; background: var(--bg); overscroll-behavior: contain; }
+.reference-feed { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.reference-feed[data-scroll-middle] { scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
+.reference-feed::-webkit-scrollbar { width: 6px; }
+.reference-feed::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.reference-feed[data-scroll-middle]::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 55%, transparent); }
 .reference-card { margin-bottom: 12px; padding: 10px 14px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--col); overflow-wrap: anywhere; }
 .reference-tools { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--faint); margin-bottom: 4px; }
 .reference-tools .icon-btn:disabled { opacity: .35; cursor: default; }
@@ -737,7 +745,11 @@ textarea.input { resize: none; }
 .document-card { padding: 10px; }
 .document-card .reference-tools strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-frame { display: block; width: 100%; height: min(72vh, 900px); min-height: 300px; border: 0; background: white; }
+.document-script-toggle[aria-pressed="true"] { color: var(--accent); }
+.document-interactive { position: relative; overflow: hidden; }
+.document-interactive img { display: block; width: 100%; height: 100%; user-select: none; }
+.document-interactive > span { display: block; padding: 12px; color: var(--muted); }
+.document-scroll-thumb { position: absolute; width: 5px; right: 2px; border-radius: 4px; background: #63686b99; pointer-events: none; }
 .document-overlay > .deck-space { position: absolute; inset: 0; z-index: 20; }
 .document-overlay > .thread-split { visibility: hidden; pointer-events: none; }
 .document-overlay .thread-references { z-index: 6; }
-.document-card .md img { max-width: 100%; height: auto; }

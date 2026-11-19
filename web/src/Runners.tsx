@@ -24,7 +24,7 @@ export function RunnersDialog({ onClose }: { onClose: () => void }) {
       {runners.map(r=><div className="field-group" key={r.id}>
         <strong>{r.address}</strong> · {r.connected?'연결됨':'연결 대기'} · 미수신 명령 {r.pending}개
         <button className="btn" disabled={busy||!!receipt} onClick={async()=>{if(busy)return;setBusy(true);try{setReceipt(await api.rotateRunner(r.id));}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}}}>연결 토큰 재발급</button>
-        <div className="muted small">{r.last_seen?`마지막 연결 ${new Date(r.last_seen).toLocaleString()}`:'아직 연결하지 않았거나 연결이 끊겼습니다'}</div>
+        <div className="muted small">{r.last_seen?`마지막 연결 ${new Date(r.last_seen).toLocaleString()}`:'러너 머신에서 실행 상태와 로그를 확인하세요. 인증 오류가 있으면 허브 주소와 연결 토큰 설정을 확인하세요.'}</div>
       </div>)}
       <form className="form" onSubmit={async e=>{
         e.preventDefault();if(busy)return;setBusy(true);setError('');

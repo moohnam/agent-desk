@@ -109,18 +109,34 @@ test('hub settings API owns its file, enforces origin and detects concurrent edi
   const db = new Store(':memory:');
   const hub = new Hub(db, {skills:new SkillStore(join(dir, 'skills')), runner:()=>({connected:true,id:'fake',engines:new Set(),has:()=>false,handle:()=>{}})});
   const instructions = new InstructionStore(join(dir, 'instructions.md'));
-  const server = createHttpServer(hub, new Access(join(dir, 'token'), 4317), join(dir, 'uploads'), {instructions});
+  const access = new Access(join(dir, 'token'), 4317);
+  const server = createHttpServer(hub, access, join(dir, 'uploads'), {instructions});
   try {
     const url = await listen(server);
+    const ready = await fetch(url + '/__desk_ready');
+    assert.equal(ready.status, 204);
+    assert.equal(ready.headers.get('x-agent-desk-ready'), '1');
     const get = await fetch(url + '/api/instructions');
     assert.equal(get.status, 200);
     assert.equal(get.headers.get('cache-control'), 'no-store');
-    const saved = await get.json() as {revision:string};
+    const saved = await get.json() as {revision:string; editable:boolean};
+    assert.equal(saved.editable, true);
     const put = (text:string, origin=url) => fetch(url + '/api/instructions', {method:'PUT',headers:{'content-type':'application/json',origin},body:JSON.stringify({text,revision:saved.revision})});
     assert.equal((await put('다른 사이트', 'http://evil.invalid')).status, 403);
     assert.equal((await put('허브 지침')).status, 200);
     assert.equal(hub.defaultInstructions(), '허브 지침');
     assert.equal((await put('덮어쓰기')).status, 409);
+    access.hostAllowed = () => true;
+    access.isLocal = () => false;
+    assert.equal((await fetch(url + '/__desk_ready')).headers.get('x-agent-desk-ready'), null);
+    const headers = { authorization: `Bearer ${access.token}` };
+    const remote = await fetch(url + '/api/instructions', { headers });
+    assert.equal(remote.status, 200);
+    const visible = await remote.json() as {revision:string; editable:boolean; text:string};
+    assert.equal(visible.editable, false);
+    assert.equal(visible.text, '허브 지침');
+    assert.equal((await fetch(url + '/api/instructions', {method:'PUT', headers:{...headers, 'content-type':'application/json', origin:url}, body:JSON.stringify({text:'원격 변경',revision:visible.revision})})).status, 403);
+    assert.equal(hub.defaultInstructions(), '허브 지침');
   } finally { await stop(server); hub.dispose(); db.database.close(); rmSync(dir,{recursive:true,force:true}); }
 });
 

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.agentdesk.desktop",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../startup"
   },
   "app": {
     "windows": [],

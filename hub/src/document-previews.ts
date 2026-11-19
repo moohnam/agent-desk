@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { posix } from 'node:path';
@@ -10,8 +10,11 @@ import { TemporaryFiles } from './shared-files.ts';
 
 const TTL = 24 * 60 * 60 * 1000;
 const LEASE = 90_000;
+const PREVIEW_SCROLL_STYLE = 'html { scrollbar-width: none; } html::-webkit-scrollbar { display: none; }';
 const PARALLEL_SOURCES = 4;
 const MAX_TRANSFERS = 32;
+const versionOf = (identity: string | undefined, bytes: Buffer) =>
+  createHash('sha256').update(identity ?? '').update('\0').update(bytes).digest('hex');
 const MIME: Record<string,string> = {
   '.html':'text/html; charset=utf-8','.htm':'text/html; charset=utf-8','.md':'text/plain; charset=utf-8','.markdown':'text/plain; charset=utf-8',
   '.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8',
@@ -62,7 +65,13 @@ function staticDocument(source:string,svg:boolean) {
       visit(node,depth+1);return true;
     });
   };
-  visit(document);return serialize(document);
+  visit(document);
+  if(!svg) {
+    const head=document.childNodes.flatMap(node=>'tagName' in node&&node.tagName==='html'?node.childNodes:[])
+      .find(node=>'tagName' in node&&node.tagName==='head');
+    if(head&&'childNodes' in head)head.childNodes.push(...parseFragment(`<style>${PREVIEW_SCROLL_STYLE}</style>`).childNodes);
+  }
+  return serialize(document);
 }
 export function documentPath(href:string) {
   let path:string;
@@ -72,7 +81,7 @@ export function documentPath(href:string) {
   return posix.normalize(path);
 }
 type Entry = { approvedPath?:string; identity?:string; source:string; task:string; href:string; name:string; at:number; busy:number; files:Map<string,Promise<string>> };
-type Grant = { entry:Entry; until:number; allowed:()=>boolean };
+type Grant = { entry:Entry; until:number; allowed:()=>boolean; owner?:string };
 export type PreviewReader = (source:string,task:string,href:string,base:string|undefined,receive:(r:Response)=>Promise<string>,approvedPath?:string)=>Promise<string>;
 
 /** Private copies with document-scoped, revocable read capabilities for sandboxed frames. */
@@ -178,7 +187,7 @@ export class DocumentPreviews {
     this.transfers.add(work);
     return work;
   }
-  async prepare(source:string,task:string,href:string,refresh:boolean,allowed:()=>boolean,approvedPath?:string) {
+  async prepare(source:string,task:string,href:string,refresh:boolean,allowed:()=>boolean,approvedPath?:string,owner?:string) {
     href=documentPath(href);
     if(approvedPath!==undefined&&(typeof approvedPath!=='string'||!posix.isAbsolute(approvedPath)||approvedPath.length>4096||/[\x00-\x1f]/.test(approvedPath)))throw new HttpError(400,'확인한 문서의 절대 경로가 필요합니다');
     const ext=posix.extname(href).toLowerCase();
@@ -199,16 +208,33 @@ export class DocumentPreviews {
       const path=await this.file(entry,entry.name);
       const kind=ext==='.md'||ext==='.markdown'?'markdown':'html';
       const text=kind==='markdown'?await readFile(path,'utf8'):undefined;
+      const scriptVersion=kind==='html'?versionOf(entry.identity,await readFile(path)):undefined;
       if(!allowed())throw new HttpError(403,'문서 접근 권한이 취소되었습니다');
       if(this.grants.size>=256)throw new HttpError(429,'열어 둔 문서가 너무 많습니다');
       const id=randomBytes(24).toString('base64url');
-      this.grants.set(id,{entry,allowed,until:Date.now()+LEASE});
+      this.grants.set(id,{entry,allowed,until:Date.now()+LEASE,owner});
       const url=`/_preview/${id}/${encodeURIComponent(entry.name)}`;
-      return {url,name:entry.name,kind,...(entry.identity&&{identity:entry.identity}),...(text!==undefined?{text}:{})};
+      return {url,name:entry.name,kind,...(entry.identity&&{identity:entry.identity}),...(text!==undefined?{text}:{}),...(scriptVersion&&{scriptVersion})};
     } catch(error) {
       if(this.entries.get(key)===entry)this.entries.delete(key);
       throw error;
     } finally {entry.busy--;void this.collect().catch(()=>{});}
+  }
+  async interactive(id: string, version: string, owner: string) {
+    this.expireGrants();
+    const grant = this.grants.get(id);
+    if (!grant || grant.owner!==owner || !/\.html?$/i.test(grant.entry.name)) throw new HttpError(404,'HTML 미리보기를 다시 열어 주세요');
+    const {source,task,href,approvedPath}=grant.entry;
+    const refreshed=await this.prepare(source,task,href,true,grant.allowed,approvedPath,owner);
+    const nextId=refreshed.url.split('/')[2];
+    try {
+      if(refreshed.scriptVersion!==version)throw new HttpError(409,'문서가 변경되었습니다. 다시 확인한 뒤 JavaScript를 허용하세요.');
+      const entry=this.grants.get(nextId)!.entry;
+      const bytes=await readFile(await this.file(entry,entry.name));
+      if(!grant.allowed()||!this.grants.has(id))throw new HttpError(403,'문서 접근 권한이 취소되었습니다');
+      if(versionOf(entry.identity,bytes)!==version)throw new HttpError(409,'문서가 변경되었습니다. 다시 확인한 뒤 JavaScript를 허용하세요.');
+      return { html:bytes.toString('utf8'), allowed:()=>this.grants.get(id)===grant&&grant.until>Date.now()&&grant.allowed() };
+    } finally { await this.release(nextId); }
   }
   async release(id:string) {
     const grant=this.grants.get(id);if(!grant)return;

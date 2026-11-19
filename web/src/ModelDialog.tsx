@@ -2,19 +2,18 @@ import { catalogModel } from '../../shared/model-catalog.ts';
 import {useModelCatalogs} from './modelCatalogs.ts';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { workspaceId } from './workspace.ts';
 import { ENGINE_EFFORTS, ENGINE_INFO, ENGINE_LABEL, ENGINE_MODELS, ENGINES, MODEL_LABEL, catalogModelName, modelReference, modelEngine, modelLabel, type EngineName, type ModelName } from '../../shared/compose.ts';
 import { SettingsEditor, useSettingsPanel } from './settingsPanel.tsx';
 import { saveSettings } from './settings.ts';
 import { resetTime } from './format.ts';
-import type { EngineUsage, Settings } from './types.ts';
+import type { Settings } from './types.ts';
+import { checkUsageReading, checkUsageTargets, type UsageReading, type UsageTarget } from '../../shared/runner-usage.ts';
 import './model-dialog.css';
 
-const LOW_AT = 80;
+const LOW_AT = 20;
 const errorMessage = (error: unknown) => error instanceof Error && error.name === 'TimeoutError'
   ? '응답 시간이 초과되었습니다. 다시 시도하세요.' : error instanceof Error ? error.message : String(error);
 
-/** Settings and usage belong to this hub, independently of the selected task's workspace. */
 async function read<T>(path: string, signal: AbortSignal, timeout = 15000): Promise<T> {
   const response = await fetch(`/api/${path}`, {
     signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
@@ -40,32 +39,36 @@ function fetchedTime(value: string) {
   });
 }
 
-type UsageState = { value: EngineUsage } | { error: string };
-function UsageRows({ state }: {state: UsageState | undefined}) {
-  if (!state) return <p className="muted small" role="status">사용량을 불러오는 중…</p>;
-  if ('error' in state) return <p className="error small" role="alert">사용량 조회 실패: {state.error}</p>;
-  const usage = state.value;
+const usageKey = (target: UsageTarget) => `${target.source ?? ''}/${target.id}`;
+function UsageRows({ reading }: { reading: UsageReading | undefined }) {
+  if (!reading) return <p className="muted small" role="status">사용량을 불러오는 중…</p>;
+  if (reading.status === 'unsupported') return <p className="muted small">이 러너에서 사용량을 조회할 수 없습니다. 러너 버전과 엔진 지원 여부를 확인하세요.</p>;
+  const usage = reading.value;
+  const notice = reading.status === 'offline' ? '러너 연결이 끊겼습니다.'
+    : reading.status === 'error' ? reading.message ?? '사용량을 조회하지 못했습니다.' : '';
   return <>
+    {notice && <p className="muted small" role="status">{notice}{usage && ' 마지막 조회값을 표시합니다.'}</p>}
+    {usage && <>
     <div className="model-usage-heading"><strong>사용량{usage.plan ? ` · ${usage.plan}` : ''}</strong>
       <span className="muted small">조회 {fetchedTime(usage.fetchedAt)}</span></div>
-    {usage.error && <p className="error small" role="alert">조회 안내: {usage.error}</p>}
-    {!usage.windows.length && !usage.error && <p className="muted small">이 계정에서 제공한 사용량 정보가 없습니다.</p>}
+    {!usage.windows.length && <p className="muted small">이 계정에서 제공한 한도 정보가 없습니다.</p>}
     {!!usage.windows.length && <ul className="model-usage-list">
       {usage.windows.map((window, index) => {
-        const percent = window.usedPercent != null && Number.isFinite(window.usedPercent) ? Math.max(0, Math.min(100, window.usedPercent)) : null;
+        const percent = window.usedPercent == null ? null : Math.round((100 - window.usedPercent) * 10) / 10;
         const reset = window.resetsAt && !Number.isNaN(Date.parse(window.resetsAt)) ? resetTime(window.resetsAt) : null;
-        return <li key={`${window.label}-${index}`} className={percent != null && percent >= LOW_AT ? 'low' : undefined}>
+        return <li key={`${window.label}-${index}`} className={percent != null && percent <= LOW_AT ? 'low' : undefined}>
           <span className="model-usage-name">{window.label}</span>
-          <span className="model-usage-percent">{percent === null ? '정보 없음' : `${percent}% 사용`}</span>
+          <span className="model-usage-percent">{percent === null ? '정보 없음' : `${percent}% 남음`}</span>
           <span className="model-usage-bar" aria-hidden="true"><i style={{width: `${percent ?? 0}%`}} /></span>
           <span className="model-usage-reset muted">{reset ? `초기화 ${reset}` : '초기화 시각 없음'}</span>
         </li>;
       })}
     </ul>}
+    </>}
   </>;
 }
 
-/** New-task defaults and the hub CLI accounts' plan usage share one editor. */
+/** New-task defaults and runner account meters share one editor. */
 export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => void; prefetchUsage?:boolean }) {
   const models = useModelCatalogs();
   const [savedPick, setSavedPick] = useState('');
@@ -74,12 +77,17 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
   const [settingsAttempt, setSettingsAttempt] = useState(0);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsError, setSettingsError] = useState('');
-  const [usage, setUsage] = useState<Partial<Record<EngineName, UsageState>>>({});
+  const [targets, setTargets] = useState<UsageTarget[]>([]);
+  const [targetsError, setTargetsError] = useState('');
+  const [selectedRunner, setSelectedRunner] = useState('');
+  const [usage, setUsage] = useState<{ key: string; values: Partial<Record<EngineName, UsageReading>> }>();
   const [usageAttempt, setUsageAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const panel = useSettingsPanel(!!pick && JSON.stringify(pick) !== savedPick, saving);
   const usageActive = prefetchUsage || panel.active;
+  const target = targets.find(candidate => usageKey(candidate) === selectedRunner) ?? targets[0];
+  const targetId = target?.id, targetSource = target?.source, targetKey = target && usageKey(target);
   const alive = useRef(false);
   const saveRequest = useRef<AbortController | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; saveRequest.current?.abort(); }; }, []);
@@ -93,21 +101,38 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
     return () => controller.abort();
   }, [settingsAttempt]);
   useEffect(() => {
-    if (workspaceId || !usageActive) return;
+    if (!usageActive) return;
     const controller = new AbortController();
-    setUsage({});
+    void read<unknown>('runner-usage', controller.signal).then(value => {
+      if (!checkUsageTargets(value)) throw new Error('러너 목록 응답을 확인하지 못했습니다.');
+      if (!controller.signal.aborted) { setTargets(value); setTargetsError(''); }
+    }).catch(error => { if (!controller.signal.aborted) setTargetsError(errorMessage(error)); });
+    return () => controller.abort();
+  }, [usageActive, usageAttempt]);
+  useEffect(() => {
+    if (!usageActive || !targetId || !targetKey) return;
+    const controller = new AbortController();
+    setUsage({ key: targetKey, values: {} });
+    const params = new URLSearchParams({ runner: targetId });
+    if (targetSource) params.set('source', targetSource);
+    if (usageAttempt) params.set('refresh', '1');
+    const update = (engine: EngineName, reading: UsageReading) => {
+      if (!controller.signal.aborted) setUsage(previous => previous?.key === targetKey
+        ? { key: targetKey, values: { ...previous.values, [engine]: reading } } : previous);
+    };
     for (const engine of ENGINES) {
-      // The hub's CLI readers time out after 30 seconds; leave time for that error to arrive.
-      void read<EngineUsage>(`usage?engine=${engine}${usageAttempt ? '&refresh=1' : ''}`, controller.signal, 35000).then(value => {
-        if (!value || !Array.isArray(value.windows)) throw new Error('사용량 응답을 확인하지 못했습니다');
-        if (!controller.signal.aborted) setUsage(previous => ({...previous, [engine]: {value}}));
+      params.set('engine', engine);
+      void read<unknown>(`runner-usage?${params}`, controller.signal, 45_000).then(value => {
+        if (!checkUsageReading(value, engine)) throw new Error('사용량 응답을 확인하지 못했습니다.');
+        update(engine, value);
       }).catch(error => {
-        if (!controller.signal.aborted) setUsage(previous => ({...previous, [engine]: {error: errorMessage(error)}}));
+        update(engine, { status: 'error', message: errorMessage(error) });
       });
     }
     return () => controller.abort();
-  }, [usageAttempt, usageActive]);
-  const loadingUsage = !workspaceId && ENGINES.some(engine => !usage[engine]);
+  }, [targetId, targetSource, targetKey, usageAttempt, usageActive]);
+  const readings = usage?.key === targetKey ? usage?.values : undefined;
+  const loadingUsage = !!target && ENGINES.some(engine => !readings?.[engine]);
   const set = (engine: EngineName, value: Partial<Settings[EngineName]>) => {
     setPick(previous => previous ? {...previous, [engine]: {...previous[engine], ...value}} : previous);
     setError(''); setNotice('');
@@ -130,7 +155,16 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
     <form onSubmit={submit} className="model-dialog-form">
       <div className="model-dialog-scroll">
         <p className="muted small model-dialog-intro">모델·effort 태그 없이 시작하는 새 작업의 기본값입니다. 작업에서 태그를 지정하면 해당 작업에 유지됩니다.</p>
-        <p className="muted small model-dialog-source">사용량은 허브 기기의 CLI 로그인 계정 전체 기준이며, 터미널 사용도 포함합니다.</p>
+        <label className="field model-usage-runner">
+          <span className="lbl">사용량을 조회할 러너</span>
+          <select className="input model-select" value={targetKey ?? ''} disabled={!targets.length}
+            onChange={event => { setSelectedRunner(event.target.value); setUsageAttempt(0); }}>
+            {!targets.length && <option value="">러너 목록을 불러오는 중…</option>}
+            {targets.map(candidate => <option key={usageKey(candidate)} value={usageKey(candidate)}>{candidate.label}</option>)}
+          </select>
+        </label>
+        <p className="muted small model-dialog-source">러너가 로그인한 계정의 전체 한도입니다. 같은 계정을 쓰는 러너와 터미널은 한도를 공유합니다.</p>
+        {targetsError && <p className="error small" role="alert">러너 목록을 조회하지 못했습니다. {targetsError}</p>}
         {settingsLoading && <p className="muted small" role="status">저장된 기본 모델 설정을 불러오는 중…</p>}
         {settingsError && <div className="model-settings-error"><p className="error small" role="alert">설정 조회 실패: {settingsError}</p>
           <button type="button" className="btn" onClick={() => setSettingsAttempt(value => value + 1)}>설정 다시 불러오기</button></div>}
@@ -174,7 +208,7 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
             </div>
           </fieldset>
           <div className="model-engine-usage" aria-label={`${ENGINE_LABEL[engine]} 사용량`}>
-            {workspaceId ? <p className="muted small">사용량은 허브 화면에서 확인할 수 있습니다.</p> : <UsageRows state={usage[engine]} />}
+            {target && <UsageRows reading={readings?.[engine]} />}
           </div>
         </section>; })}
       </div>
@@ -182,8 +216,8 @@ export function ModelDialog({ onClose, prefetchUsage=false }: { onClose: () => v
         {error && <p className="error small" role="alert">{error}</p>}
         {notice && <p className="muted small" role="status">{notice}</p>}
         <div className="form-actions">
-          {!workspaceId && <button type="button" className="btn" disabled={loadingUsage || saving} onClick={() => setUsageAttempt(value => value + 1)}>
-            <RefreshCw aria-hidden="true" />{loadingUsage ? '조회 중…' : '사용량 새로고침'}</button>}
+          <button type="button" className="btn" disabled={loadingUsage || saving} onClick={() => setUsageAttempt(value => value + 1)}>
+            <RefreshCw aria-hidden="true" />{loadingUsage ? '조회 중…' : '사용량 새로고침'}</button>
           <button type="button" className="btn" disabled={models.loading || saving} onClick={models.refresh}><RefreshCw aria-hidden="true" />{models.loading ? '모델 조회 중…' : '모델 목록 새로고침'}</button>
           <span className="spacer" />
           {!panel.embedded && <button type="button" className="btn" disabled={saving} onClick={close}>취소</button>}

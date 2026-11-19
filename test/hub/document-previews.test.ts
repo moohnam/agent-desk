@@ -61,6 +61,28 @@ test('document paths accept editor suffixes but reject schemes and ambiguous dec
  }
 });
 
+test('interactive HTML binds the current file bytes and the preview owner', async () => {
+  let html = '<!doctype html><button>start</button><script>document.title="old"</script>';
+  let allowed = true;
+  const cache = new DocumentPreviews(async (_source, _task, _href, _base, receive) =>
+    receive(new Response(html, { headers: { 'content-length': String(Buffer.byteLength(html)), 'x-desk-filename': 'test.html' } })));
+  try {
+    const original = await cache.prepare('', 'task', 'test.html', true, () => allowed, undefined, 'device/a');
+    const id = original.url.split('/')[2];
+    const version = original.scriptVersion!;
+    assert.match(version, /^[a-f0-9]{64}$/);
+    await assert.rejects(cache.interactive(id, version, 'device/b'), { status: 404 });
+    const active = await cache.interactive(id, version, 'device/a');
+    assert.equal(active.html, html);
+    html += '<!-- edit -->';
+    await assert.rejects(cache.interactive(id, version, 'device/a'), { status: 409 });
+    const edited = await cache.prepare('', 'task', 'test.html', true, () => allowed, undefined, 'device/a');
+    assert.notEqual(edited.scriptVersion, version);
+    allowed = false;
+    assert.equal(active.allowed(), false);
+  } finally { await cache.close(); }
+});
+
 test('preview reports valid source identity only after the document has been read and authorized', async () => {
  const identity = 'a'.repeat(64);
  let header = identity;

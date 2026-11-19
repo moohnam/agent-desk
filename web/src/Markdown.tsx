@@ -10,6 +10,7 @@ import { DocumentLink } from './DocumentLink.tsx';
 import { CopyButton } from './CopyButton.tsx';
 import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownMath.ts';
 import { prepareMarkdown } from './markdownSource.ts';
+import { MarkdownImage } from './MarkdownImage.tsx';
 
 /** Links a local app opens: AKB documents (Lectern), file URLs, and paths (no scheme). */
 const APP_LINK = /^(akb|lectern|file):/i;
@@ -55,12 +56,7 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, onNotice, re
   const components = useMemo<Components>(() => ({
         pre: CodeBlock,
         table: Table,
-        ...(resourceBase ? { img: ({ node: _, src, ...props }: ComponentProps<'img'> & ExtraProps) => {
-          // Document images stay in its capability directory; no absolute filesystem requests.
-          const path=typeof src==='string'&&!/^(?:[a-z][a-z\d+.-]*:|[~/])/i.test(src)&&!src.split('/').includes('..')
-            ? resourceBase.replace(/[^/]*$/,'')+src : undefined;
-          return path?<img {...props} src={path} loading="lazy"/>:<span>{props.alt??'이미지 경로를 지원하지 않습니다'}</span>;
-        }} : {}),
+        img: ({ src, alt, title }) => <MarkdownImage src={src} alt={alt} title={title} resourceBase={resourceBase}/>,
         a: ({ node: _, ...props }) => {
           if (!onLocalLink || !isLocalLink(props.href)) return <a {...props} target="_blank" rel="noreferrer" />;
           const path=documentPath(props.href!,linkBase), document=!!taskId&&isDocumentLink(path);

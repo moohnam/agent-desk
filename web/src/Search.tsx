@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { Save, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { suggestSearch, type SearchOption } from './search.ts';
@@ -47,7 +48,7 @@ export function SearchHead({ value, onChange, inputRef, projects, tasks, count, 
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onBlur={() => setDismissed(true)} onFocus={() => setDismissed(false)}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (imeKey(e.nativeEvent) || e.defaultPrevented) return;
               if (e.key === 'Escape') {
                 e.preventDefault(); e.stopPropagation();
                 if (!e.repeat) { if (open && sug) setDismissed(true); else onClose(); }

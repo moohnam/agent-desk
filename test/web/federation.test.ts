@@ -75,13 +75,17 @@ test('shared note edits preserve the newest snapshot during a stale history read
    started.resolve();
    const page = await pending;
    assert.deepEqual(page.events, [mapEvent(source, index, edited)]);
-   await api.deleteNote(taskId, eventId(index, original.id));
+   const scopedEventId = eventId(index, original.id);
+   assert.equal(await api.cutNote(taskId, scopedEventId, 1, async () => false), false);
+   assert.equal(writes.length, 1);
+   assert.equal(await api.cutNote(taskId, scopedEventId, 1, async () => true), true);
    const delayed = mapMessage(source, index, { type: 'event_updated', event: edited });
    assert.equal(delayed?.type, 'event_updated');
    if (delayed?.type === 'event_updated') reportNoteChange(delayed);
    assert.deepEqual(visibleNoteEvents(page.events), []);
    assert.deepEqual(visibleNoteEvents([original]), [original], 'the local event ID is independent');
-   assert.deepEqual(writes, Array(2).fill(`/api/workspaces/${source}/tasks/task/notes/${original.id}`));
+   const notePath = `/api/workspaces/${source}/tasks/task/notes/${original.id}`;
+   assert.deepEqual(writes, [notePath, `${notePath}/cut`]);
  } finally {
    started.resolve();
    globalThis.fetch = restoreFetch;

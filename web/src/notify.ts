@@ -206,7 +206,7 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
     const latest = (taskId: string, fallback: string) => said.current.get(taskId) || fallback;
     // Another device asking to connect (this Mac's pages only get these).
     for (const r of hub.access?.requests ?? []) {
-      if (!before.access.has(r.id)) notes.push({ kind: 'ask', id: `access:${r.id}`, title: `접속 요청 · ${r.name}`, body: `${r.ip}에서 데스크 접속을 요청했습니다 · 코드 ${r.code}` });
+      if (!before.access.has(r.id)) notes.push({ kind: 'ask', id: `access:${r.id}`, title: `접속 요청 · ${r.name}`, body: `${r.ip}에서 데스크 접속을 요청했습니다. 앱의 다른 기기 연결에서 확인하세요.` });
     }
     for (const a of hub.approvals.values()) {
       if (before.approvals.has(a.id)) continue;

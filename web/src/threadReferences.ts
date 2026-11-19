@@ -160,6 +160,10 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
     move,
     toggle: (id: number) => { if (taskId) setState(s => toggleReference(s, taskId, id)); },
     show: (open: boolean) => { if (taskId) setState(s => ({ ...s, [taskId]: { ...(Object.hasOwn(s, taskId) ? s[taskId] : EMPTY), open } })); },
-    clear: () => { if (taskId) setState(s => ({ ...s, [taskId]: { ids: [], open: true } })); },
+    clear: () => {
+      if (!taskId) return;
+      setFileFocus(undefined);
+      setState(s => ({ ...s, [taskId]: { ids: [], open: false } }));
+    },
   };
 }

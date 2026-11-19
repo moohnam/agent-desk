@@ -1,16 +1,15 @@
 /**
  * Emacs editing keys in every text field, whatever the input source (a Korean one included): keys
- * are read by position (`code`), not by the character they would type. Option is Alt (Meta): it
- * moves and deletes by word and never types its special characters (∫, ƒ …).
+ * are read by position (`code`). Unassigned Option chords retain the native input behavior.
  *
  * Only on a Mac, where Ctrl is free; elsewhere Ctrl+A, Ctrl+F … are the system's own shortcuts.
  */
 
+import { imeKey } from './keys.ts';
+
 type Field = HTMLInputElement | HTMLTextAreaElement;
 
 const WORD = /[\p{L}\p{N}_]/u;
-/** Alt with one of these types a special character on a Mac; with Option as Alt it types nothing. */
-const CHAR_KEY = /^(Key.|Digit.|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Comma|Period|Slash|Backquote|Space|IntlBackslash)$/;
 
 /** Text killed by Ctrl+K / Alt+D, put back by Ctrl+Y. */
 let killed = '';
@@ -141,14 +140,13 @@ function action(e: KeyboardEvent, el: Field): (() => void) | null {
       default: return null;
     }
   }
-  if (e.altKey && !e.ctrlKey) {
+  if (e.altKey && !e.ctrlKey && !e.shiftKey) {
     switch (e.code) {
       case 'KeyB': return () => moveTo(el, wordBack(v(), at()));
       case 'KeyF': return () => moveTo(el, wordForward(v(), atEnd()));
       case 'KeyD': return () => { const i = at(), to = wordForward(v(), i); killed = v().slice(i, to); replace(el, i, to, ''); };
       case 'Backspace': return () => { const i = at(), from = wordBack(v(), i); killed = v().slice(from, i); replace(el, from, i, ''); };
-      // Option types nothing else: no ∫, ƒ, ¬ … (Alt+arrows and other keys keep their own meaning).
-      default: return CHAR_KEY.test(e.code) ? () => {} : null;
+      default: return null;
     }
   }
   return null;
@@ -157,17 +155,12 @@ function action(e: KeyboardEvent, el: Field): (() => void) | null {
 export function installEmacsKeys() {
   if (!/Mac|iPhone|iPad/.test(navigator.platform)) return;
   window.addEventListener('keydown', (e) => {
-    if (e.metaKey || !(e.ctrlKey || e.altKey)) return;
+    if (e.defaultPrevented || imeKey(e) || e.key === 'Dead' || e.metaKey || !(e.ctrlKey || e.altKey)) return;
     const el = textField(e.target);
     if (!el || el.readOnly || el.disabled) return;
     const run = action(e, el);
     if (!run) return;
     e.preventDefault();
-    if (!e.isComposing) { run(); return; }
-    // Mid-composition (a Korean syllable being typed): act once the IME has committed it.
-    let done = false;
-    const go = () => { if (!done) { done = true; el.removeEventListener('compositionend', go); setTimeout(run); } };
-    el.addEventListener('compositionend', go);
-    setTimeout(go, 50);
+    run();
   }, true);
 }

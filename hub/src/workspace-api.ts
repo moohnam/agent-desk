@@ -45,6 +45,8 @@ function noteEventId(input: string): number {
   return id;
 }
 
+export const NOTE_CUT_ROUTE = 'POST /tasks/:id/notes/:id/cut';
+
 const routes = [
   'GET /settings',
   'GET /models',
@@ -60,6 +62,7 @@ const routes = [
   'POST /tasks/:id/scheduled-replies',
   'PATCH /tasks/:id/notes/:id',
   'DELETE /tasks/:id/notes/:id',
+  NOTE_CUT_ROUTE,
   'DELETE /tasks/:id/queue/:id',
   'POST /tasks/:id/queue/:id/send',
   'PUT /tasks/:id/queue/:id',
@@ -113,7 +116,7 @@ export function localAuthorityRoute(method:string,pathname:string) {
 /** Note writes do not participate in connector, skill snapshot or instruction selection. */
 export function isNoteInput(method: string, path: string, body: Record<string, unknown>, hub?: Hub): boolean {
   const route = workspaceRoute(method, path);
-  if (route === 'PATCH /tasks/:id/notes/:id' || route === 'DELETE /tasks/:id/notes/:id') return true;
+  if (route === 'PATCH /tasks/:id/notes/:id' || route === 'DELETE /tasks/:id/notes/:id' || route === NOTE_CUT_ROUTE) return true;
   if (typeof body.text !== 'string') return false;
   if (route === 'POST /compose') return body.note_only === true || !!parseNoteCompose(body.text) || !!hub?.noteReplyTarget(body.text);
   return route === 'POST /tasks/:id/messages' && (body.note_only === true || hub?.store.getTask(path.split('/')[2])?.kind === 'note');
@@ -197,6 +200,11 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
           return reply(202, hub.scheduleReply(id, body.text, body.scheduled_at, scheduleAcceptedAt, body.session_id));
         case 'PATCH /tasks/:id/notes/:id':
           return reply(200, hub.updateNote(id, noteEventId(parts[4]), body.text));
+        case NOTE_CUT_ROUTE:
+          if (!Number.isSafeInteger(body.revision) || body.revision < 0)
+            throw new HttpError(400, '복사한 메모 글의 버전이 필요합니다');
+          hub.deleteNote(id, noteEventId(parts[4]), body.revision);
+          return reply(200, { ok: true });
         case 'DELETE /tasks/:id/notes/:id':
           hub.deleteNote(id, noteEventId(parts[4]));
           return reply(200, { ok: true });

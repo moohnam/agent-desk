@@ -33,8 +33,8 @@ export function readLines(socket: Socket, onMessage: (m: unknown) => void) {
       buf = buf.slice(i + 1);
       if (!line.trim()) continue;
       let m: unknown;
-      try { m = JSON.parse(line); } catch (err) { console.error('bad message', err); continue; }
-      try { onMessage(m); } catch (err) { console.error('message handling failed', err); }
+      try { m = JSON.parse(line); } catch { console.error('러너 연결의 JSON 메시지 형식이 잘못되었습니다.'); continue; }
+      try { onMessage(m); } catch { console.error('러너 연결 메시지를 처리하지 못했습니다.'); }
     }
   });
 }

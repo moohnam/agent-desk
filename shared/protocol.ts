@@ -5,6 +5,7 @@
 import type { Effort, EngineName, ModelName, PermissionMode } from './compose.ts';
 import { checkModelCatalogs, type ModelCatalogs } from './model-catalog.ts';
 import type { RunnerStatusState } from './events.ts';
+import { checkUsageReport, checkUsageRequest, type UsageReport, type UsageRequest } from './runner-usage.ts';
 
 /**
  * Answers to an ASK_USER approval (a multiple-choice question from the agent), keyed by question
@@ -26,7 +27,7 @@ export interface SkillSnapshot { version: 1; selected: string[]; files: SkillTra
 export const PROTOCOL_VERSION = 1;
 
 /** What a runner can do: the engines it runs, and `close`: it understands the close command. */
-export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean; modelCatalogs?: ModelCatalogs }
+export interface Capabilities { engines: string[]; close?: boolean; skillSnapshot?: boolean; instructions?: boolean; connectorMcp?: boolean; modelCatalogs?: ModelCatalogs; usage?: true }
 
 /** A Codex question asked in passing (delivery 'async'): the user's next message answers it. */
 export interface AsyncQuestion { title: string; options: string[] }
@@ -52,6 +53,7 @@ export type HubToRunner =
   /** Changes what is given; takes effect from the next turn. */
   /** Metadata only; sessionId is a control-channel identifier, never an engine session. */
   | { type: 'refresh_models'; sessionId: string; force?: boolean }
+  | { type: 'refresh_usage'; sessionId: string; request: UsageRequest }
   | { type: 'set_model'; sessionId: string; model?: ModelName; effort?: Effort }
   | { type: 'interrupt'; sessionId: string }
   /** Ends the session now (the user closed it); a turn in progress is cut. */
@@ -82,6 +84,7 @@ export interface LiveSession {
 export type RunnerToHub =
   /** `protocolVersion`: absent from runners before it. */
   | { type: 'hello'; runnerId: string; host: string; capabilities: Capabilities; sessions: LiveSession[]; protocolVersion?: number }
+  | { type: 'usage'; sessionId: string; report: UsageReport }
   | { type: 'engine_session'; sessionId: string; engineSessionId: string }
   | { type: 'event'; sessionId: string; event: RunnerEvent }
   | { type: 'busy'; sessionId: string; busy: boolean }
@@ -139,6 +142,7 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'set_mode': return MODES.includes(m.permissionMode as string) ? m as HubToRunner : 'set_mode: bad mode';
     case 'set_model': return optStr(m.model) && optStr(m.effort) ? m as HubToRunner : 'set_model: bad fields';
     case 'refresh_models': return m.force === undefined || typeof m.force === 'boolean' ? m as HubToRunner : 'refresh_models: bad force';
+    case 'refresh_usage': return checkUsageRequest(m.request) ? m as HubToRunner : 'refresh_usage: bad request';
     case 'interrupt': case 'close': return m as HubToRunner;
     case 'approval_result':
       return str(m.approvalId) && typeof m.allow === 'boolean' && optStr(m.message) && (m.answers === undefined || isObj(m.answers))
@@ -157,6 +161,7 @@ export function checkRunnerToHub(m: unknown): RunnerToHub | string {
   }
   if (!str(m.sessionId)) return `${m.type}: no sessionId`;
   switch (m.type) {
+    case 'usage': return checkUsageReport(m.report) ? m as RunnerToHub : 'usage: bad report';
     case 'engine_session': return str(m.engineSessionId) ? m as RunnerToHub : 'engine_session: no id';
     case 'event': return isObj(m.event) && str(m.event.kind) ? m as RunnerToHub : 'event: no kind';
     case 'busy': return typeof m.busy === 'boolean' ? m as RunnerToHub : 'busy: not a boolean';

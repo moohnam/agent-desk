@@ -49,6 +49,14 @@ test('custom caret movement scrolls only the text field and releases its measuri
     assert.equal(attached, 0, 'no measuring element remains after a key');
   };
   const field = new Textarea();
+  for (const keys of [{ isComposing: true, ctrlKey: true, code: 'KeyN' }, { keyCode: 229, altKey: true, code: 'KeyB' },
+    { altKey: true, code: 'KeyN', key: 'Dead' }, { altKey: true, code: 'KeyA', key: 'å' }]) {
+    const event = new Event('keydown', { cancelable: true });
+    Object.defineProperties(event, { target: { value: field }, ...Object.fromEntries(Object.entries(keys).map(([name, value]) => [name, { value }])) });
+    view.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, false);
+    assert.equal(field.selectionStart, 0);
+  }
   key(field, 'KeyN');
   assert.equal(field.selectionStart, 6);
   assert.equal(field.scrollTop, 160, 'caret below the viewport is revealed');
