@@ -87,7 +87,7 @@ export type RunnerToHub =
   | { type: 'usage'; sessionId: string; report: UsageReport }
   | { type: 'engine_session'; sessionId: string; engineSessionId: string }
   | { type: 'event'; sessionId: string; event: RunnerEvent }
-  | { type: 'busy'; sessionId: string; busy: boolean }
+  | { type: 'busy'; sessionId: string; busy: boolean; awaitingContinuation?: boolean }
   /** Everything the session has running in the background now (replaces the last list). */
   | { type: 'background'; sessionId: string; tasks: BackgroundTask[] }
   | { type: 'approval_request'; sessionId: string; approvalId: string; toolName: string; input: unknown }

@@ -200,6 +200,7 @@ export class Hub extends DeskCore {
       dispatch: (sessionId, body, skills, steer) => this.connectorContext.run(null, () => this.dispatch(sessionId, body, skills, steer)),
       drain: (sessionId) => this.drain(sessionId),
       ready: (sessionId) => !this.foreignRun(sessionId) && !this.store.origins.stopping(sessionId) && this.remotes.ready(sessionId) && !this.approvalPending(sessionId) && !this.connectorSwitchBlocked(sessionId,null,false),
+      connected: (sessionId) => this.remotes.ready(sessionId),
       bindApproval: (approvalId, sessionId) => this.connectorBroker?.bindApproval(approvalId, sessionId),
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
@@ -239,6 +240,7 @@ export class Hub extends DeskCore {
   /** Stops timers and read-only sources before the owning store is closed. */
   dispose() {
     clearTimeout(this.graceTimer);
+    this.requests.dispose();
     clearTimeout(this.scheduledReplyTimer);
     for (const timer of this.scheduledReplyRetries.values()) clearTimeout(timer);
     this.scheduledReplyRetries.clear();
@@ -316,6 +318,16 @@ export class Hub extends DeskCore {
     }
     this.busy = new Set([...this.busy].filter(id => !ownedSession(id)).concat(sessions.filter(s => s.busy).map(s => s.sessionId)));
     this.background = new Map([...this.background].filter(([id]) => !ownedSession(id)).concat(sessions.filter(s => s.background?.length).map(s => [s.sessionId, s.background!] as [string, import("../../shared/protocol.ts").BackgroundTask[]])));
+    if (!presumed) {
+      const waiting = new Set(this.store.openRequests().filter(r => r.status === 'running').map(r => r.to_session_id));
+      for (const s of sessions) {
+        if (s.busy || s.background?.length) this.requests.cancelBackgroundFinish(s.sessionId);
+        else this.requests.backgroundFinished(s.sessionId, waiting);
+      }
+      const live = new Set(sessions.map(s => s.sessionId));
+      for (const id of waiting) if (ownedSession(id) && !live.has(id) && this.store.getSession(id)?.source === 'app')
+        this.requests.answerRequests(id, '대상 작업의 세션이 끝나');
+    }
     for (const s of sessions) this.finishConnectorInput(s.sessionId);
     for (const s of sessions) if (s.background?.length) { const t = this.store.getSession(s.sessionId)?.task_id; if (t) touched.push(t); }
     // Messages that waited for a session the runner no longer has will not be sent.
@@ -609,7 +621,8 @@ export class Hub extends DeskCore {
       this.connectorBroker?.assertScopedTools(session.id);
     // Behind messages already waiting too, so they keep their order.
     const offline = !this.remotes.ready(session.id);
-    const wait = !asked && content && (foreignInput || this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
+    const wait = !asked && content && (foreignInput || this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline ||
+      this.requests.awaitsContinuation(session.id) || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
     // model and the change applies from the next turn.
     const model = c.model; // An explicit repeat also retries a runner-side model-change failure.
@@ -863,7 +876,8 @@ export class Hub extends DeskCore {
   }
   private drainInner(sessionId: string) {
     if (maintenanceActive()) return;
-    if (!this.remotes.ready(sessionId) || this.busy.has(sessionId) || this.approvalPending(sessionId)) return;
+    if (!this.remotes.ready(sessionId) || this.busy.has(sessionId) || this.approvalPending(sessionId)
+      || this.requests.awaitsContinuation(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
     if (next?.kind === 'scheduled' && this.remotes.canQueue(sessionId)
       && this.store.getSession(sessionId)?.runner_id !== this.scheduledExchangeRunner) return;
@@ -930,6 +944,8 @@ export class Hub extends DeskCore {
     this.requireRunner(q.session_id);
     this.requireSkillSnapshotRunner(q.skill_snapshot, q.session_id);
     if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
+    if (this.requests.awaitsContinuation(q.session_id))
+      throw new HttpError(409, '백그라운드 조사 결과를 받는 중입니다. 메시지는 대기열에 보관됩니다');
     if (this.connectorSwitchBlocked(q.session_id,q.connector_context)) throw new HttpError(409, this.connectorBroker!.switchBlockedMessage(q.session_id,q.connector_context ?? undefined));
     if (this.store.origins.stopping(q.session_id) || this.foreignRun(q.session_id,this.store.origins.queued(q.id))) throw new HttpError(409, '다른 허브의 실행이 끝날 때까지 기다려 주세요');
     if (scheduled) this.store.dropScheduledReply(taskId, queuedId);
@@ -1228,6 +1244,7 @@ export class Hub extends DeskCore {
         break;
       case 'busy':
         if (m.busy) {
+          this.requests.cancelBackgroundFinish(session.id);
           this.busy.add(session.id);
           this.transition(taskId, session.id, 'turn_started');
           break;
@@ -1235,6 +1252,7 @@ export class Hub extends DeskCore {
         this.busy.delete(session.id);
         this.finishConnectorInput(session.id);
         this.transition(taskId, session.id, 'turn_ended');
+        if (m.awaitingContinuation) this.requests.backgroundFinished(session.id);
         this.requests.answerRequests(session.id);
         this.drain(session.id);
         break;
@@ -1263,12 +1281,16 @@ export class Hub extends DeskCore {
         }
         break;
       }
-      case 'background':
-        if (m.tasks.length) this.background.set(session.id, m.tasks); else this.background.delete(session.id);
+      case 'background': {
+        if (m.tasks.length) {
+          this.requests.cancelBackgroundFinish(session.id);
+          this.background.set(session.id, m.tasks);
+        } else if (this.background.delete(session.id)) this.requests.backgroundFinished(session.id);
         this.finishConnectorInput(session.id);
         this.publishTask(taskId);
         if (!m.tasks.length) this.drain(session.id);
         break;
+      }
       case 'closed': {
         this.connectorBroker?.deactivate(session.id);
         this.busy.delete(session.id);

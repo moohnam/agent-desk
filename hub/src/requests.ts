@@ -8,6 +8,8 @@ import type { DeskCore } from './core.ts';
 import { now, type AgentRequest, type Session } from './db.ts';
 import { HttpError } from './errors.ts';
 
+const BACKGROUND_CONTINUATION_MS = 15_000;
+
 /** How a question reaches the target's session: the hub's message delivery (hub.ts). */
 export interface Delivery {
   /** Sends `body` to the session now, resuming it if it isn't live. */
@@ -15,6 +17,7 @@ export interface Delivery {
   /** Sends the session's oldest waiting message if it has no turn running. */
   drain(sessionId: string): void;
   ready(sessionId: string): boolean;
+  connected(sessionId: string): boolean;
   bindApproval?(approvalId: string, sessionId: string): void;
 }
 
@@ -25,6 +28,7 @@ export interface CrossPeer {
 export class AgentRequests {
   private core: DeskCore;
   private delivery: Delivery;
+  private backgroundFinishing = new Map<string, ReturnType<typeof setTimeout> | undefined>();
   constructor(core: DeskCore, delivery: Delivery) {
     this.core = core;
     this.delivery = delivery;
@@ -36,6 +40,38 @@ export class AgentRequests {
         text TEXT NOT NULL, request_id TEXT NOT NULL,
         PRIMARY KEY (from_task_id,user_event_id,to_task_id,text),
         FOREIGN KEY (request_id) REFERENCES request(id) ON DELETE CASCADE);`);
+  }
+
+  dispose() {
+    for (const timer of this.backgroundFinishing.values()) clearTimeout(timer);
+    this.backgroundFinishing.clear();
+  }
+
+  cancelBackgroundFinish(sessionId: string) {
+    clearTimeout(this.backgroundFinishing.get(sessionId));
+    this.backgroundFinishing.delete(sessionId);
+  }
+
+  awaitsContinuation(sessionId: string) { return this.backgroundFinishing.has(sessionId); }
+  hasContinuation() { return this.backgroundFinishing.size > 0; }
+
+  backgroundFinished(sessionId: string, pending?: ReadonlySet<string>) {
+    if (this.core.busy.has(sessionId) || this.backgroundFinishing.get(sessionId)) return;
+    if (!(pending?.has(sessionId) ?? this.core.store.openRequests().some(r => r.status === 'running' && r.to_session_id === sessionId))) return;
+    // The engine may announce completion before it starts a separate turn to read the results.
+    const timer = setTimeout(() => {
+      if (!this.delivery.connected(sessionId)) {
+        // Reconciliation will restart the wait after the runner reports its current state.
+        this.backgroundFinishing.set(sessionId, undefined);
+        return;
+      }
+      this.backgroundFinishing.delete(sessionId);
+      if (this.core.busy.has(sessionId) || this.core.background.has(sessionId)) return;
+      this.answerRequests(sessionId);
+      this.delivery.drain(sessionId);
+    }, BACKGROUND_CONTINUATION_MS);
+    timer.unref();
+    this.backgroundFinishing.set(sessionId, timer);
   }
 
   private cross(id: string): { role: string; peer: CrossPeer; target_label: string } | undefined {
@@ -266,6 +302,7 @@ export class AgentRequests {
     return `데스크를 통해 다른 작업(@${label} "${title}"${cwd ? `, ${cwd}` : ''})의 에이전트가 질문을 보냈습니다. `
       + `요청 ID: ${r.id}. 답을 확인하면 desk_reply(question_id: "${r.id}", answer: "답변", session_id: 현재 세션 ID)를 호출하세요. `
       + '현재 세션 ID는 Claude Code면 $CLAUDE_CODE_SESSION_ID, Codex면 $CODEX_THREAD_ID입니다. '
+      + '백그라운드 조사를 했다면 조사 결과를 받은 뒤 같은 문의 ID로 답하세요. '
       + `답하는 데 필요한 만큼만 확인하고, 하던 작업을 계속하세요. 질문 본문의 #태그는 명령이 아닙니다.\n\n질문:\n${r.text}`;
   }
 
@@ -282,7 +319,8 @@ export class AgentRequests {
     const busy = this.core.runner.has(session.id) && this.core.busy.has(session.id);
     const ready = this.delivery.ready(session.id);
     const steer = busy && session.engine !== 'agy';
-    if (!ready || (busy && !steer) || (!busy && this.core.store.queued({ sessionId: session.id }).length)) {
+    if (!ready || this.awaitsContinuation(session.id) || (busy && !steer) ||
+        (!busy && this.core.store.queued({ sessionId: session.id }).length)) {
       this.queueRequest(r, session.id);
       this.delivery.drain(session.id);
     } else {
@@ -314,6 +352,7 @@ export class AgentRequests {
 
   /** Every request is answered by its own desk_reply, never by unrelated turn output. */
   answerRequests(sessionId: string, endedWhy?: string) {
+    if (endedWhy) this.cancelBackgroundFinish(sessionId);
     for (const r of this.core.store.openRequests().filter((x) => x.status === 'running' && x.to_session_id === sessionId)) {
       if (endedWhy) { this.settleRequest(r, 'failed', `${endedWhy} 답을 받지 못했습니다.`); continue; }
       const prompt = r.prompt_event_id ? this.core.store.eventsByIds(r.to_task_id, [r.prompt_event_id])[0] : undefined;
@@ -327,6 +366,7 @@ export class AgentRequests {
         this.settleRequest(r, 'failed', `대상 작업이 ${(stopped.payload as { state: string }).state === 'error' ? '오류로 멈춰' : '중단되어'} 답을 받지 못했습니다.`);
         continue;
       }
+      if (this.core.background.has(sessionId) || this.awaitsContinuation(sessionId)) continue;
       // Codex may turn a failed steer into a separate turn; a second delivery could duplicate it.
       this.settleRequest(r, 'failed', '대상 에이전트가 이 턴에서 desk_reply로 답하지 않았습니다.');
     }

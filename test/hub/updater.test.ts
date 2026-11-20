@@ -346,7 +346,7 @@ test('stable data environment paths cannot reach a release through an existing p
 
 test('runtime blockers include live connector work but exclude expired, revoked, completed and orphaned rows', () => {
   const store = new Store(':memory:'), db = store.database;
-  const hub = {store, busy: new Set(), background: new Map()} as unknown as Hub;
+  const hub = {store, busy: new Set(), background: new Map(), requests: {hasContinuation: () => false}} as unknown as Hub;
   const now = Date.now();
   try {
     assert.deepEqual(hubBlockers(hub), []);

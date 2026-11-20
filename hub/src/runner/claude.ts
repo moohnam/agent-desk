@@ -73,7 +73,20 @@ export const startClaude: StartEngine = (opts) => {
   let closing = false;
   // A turn is in progress: one we sent, or one the agent started itself (a background subagent finished).
   let busy = false;
-  const setBusy = (b: boolean) => { if (busy !== b) { busy = b; emit({ type: 'busy', sessionId, busy: b }); } };
+  let hadBackground = false;
+  let awaitingBackgroundTurn = false;
+  let backgroundTurn = false;
+  const setBusy = (b: boolean, awaitingContinuation?: boolean) => {
+    if (busy === b) return;
+    busy = b;
+    emit({ type: 'busy', sessionId, busy: b, ...(awaitingContinuation && { awaitingContinuation }) });
+  };
+  const startBackgroundTurn = () => {
+    if (busy || (!awaitingBackgroundTurn && !hadBackground)) return;
+    awaitingBackgroundTurn = false;
+    backgroundTurn = true;
+    setBusy(true);
+  };
 
   const q = query({
     prompt: prompts,
@@ -104,6 +117,7 @@ export const startClaude: StartEngine = (opts) => {
   const handle = (m: SDKMessage) => {
     if (m.type === 'system' && m.subtype === 'init') {
       if (started) {
+        startBackgroundTurn();
         if (m.model !== model) {
           model = m.model;
           emit({ type: 'event', sessionId, event: { kind: 'status', state: 'model_changed', detail: { model: m.model } } });
@@ -118,7 +132,11 @@ export const startClaude: StartEngine = (opts) => {
       // The whole list each time; ambient tasks (watchers) are not work the agent is doing.
       const tasks: BackgroundTask[] = m.tasks.filter((t) => !t.ambient)
         .map((t) => ({ id: t.task_id, type: t.task_type, description: t.description, ...(t.subagent_type && { agent: t.subagent_type }) }));
+      awaitingBackgroundTurn = !tasks.length && (awaitingBackgroundTurn || hadBackground && !busy);
+      hadBackground = tasks.length > 0;
       emit({ type: 'background', sessionId, tasks });
+    } else if (m.type === 'system' && m.subtype === 'session_state_changed' && m.state === 'running') {
+      startBackgroundTurn();
     } else if (m.type === 'assistant' && m.parent_tool_use_id === null) {
       setBusy(true);
       for (const block of m.message.content) {
@@ -139,7 +157,15 @@ export const startClaude: StartEngine = (opts) => {
     } else if (m.type === 'result') {
       // A background task's completion notice yields an empty turn with no model call; it neither
       // says anything nor ends the user's turn.
-      if (m.subtype === 'success' && m.num_turns === 0) return;
+      if (m.subtype === 'success' && m.num_turns === 0) {
+        if (backgroundTurn) {
+          backgroundTurn = false;
+          awaitingBackgroundTurn = true;
+          setBusy(false, true);
+        }
+        return;
+      }
+      backgroundTurn = awaitingBackgroundTurn = false;
       const state = m.subtype === 'success' ? 'turn_done' : interrupting ? 'interrupted' : 'error';
       interrupting = false;
       emit({ type: 'event', sessionId, event: {
@@ -161,6 +187,7 @@ export const startClaude: StartEngine = (opts) => {
   })();
 
   const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
+    backgroundTurn = awaitingBackgroundTurn = false;
     busy = true;
     emit({ type: 'busy', sessionId, busy: true });
     prompts.push(skillSnapshotHome ? steeringSkillText(text, skills, skillSnapshotHome) : withSkills(text, skills), steer ? 'next' : 'later');

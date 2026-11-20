@@ -33,7 +33,8 @@ export function hubBlockers(hub: Hub): string[] {
       WHERE call.result IS NULL AND call.error IS NULL AND grant.revoked=0 AND grant.expires_at>? LIMIT 1`).get(now);
   return [hub.busy.size ? '실행 중인 턴' : '', hub.background.size ? '백그라운드 작업' : '',
     hub.store.pendingApprovals().length ? '승인 대기' : '', hub.store.pendingQuestions().length ? '질문 대기' : '',
-    hub.store.queued({}).length ? '대기 중인 입력' : '', connectorPending ? '외부 조회 처리 중' : ''].filter(Boolean);
+    hub.store.queued({}).length ? '대기 중인 입력' : '', hub.requests.hasContinuation() ? '백그라운드 문의 답변 대기' : '',
+    connectorPending ? '외부 조회 처리 중' : ''].filter(Boolean);
 }
 
 /** An independent, owner-only control socket. It never takes over the daemon's hub connection. */

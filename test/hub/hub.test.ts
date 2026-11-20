@@ -539,6 +539,53 @@ test('an approved request steers a busy target and only its receiving session ca
   assert.equal(hub.store.getRequest(request.id)?.answer, '정확한 답');
 });
 
+test('a background investigation keeps the explicit request open until its continuation replies or finishes', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { hub, runner, taskId, sessionId, dir } = started();
+  try {
+    hub.store.updateSession(sessionId, { engine_session_id: 'receiving-thread' });
+    const asker = hub.external.attachExternal({ title: 'asker', summary: '질문', cwd: dir });
+    const send = (text: string) => {
+      const request = hub.requests.request({ to: taskId, text, fromTaskId: asker.id });
+      hub.resolveApproval(request.approval_id!, true);
+      return request.id;
+    };
+    const background = () => runner.say({ type: 'background', sessionId,
+      tasks: [{ id:'work',type:'local_agent',description:'조사' }] });
+    const request = send('늦은 답변');
+    background();
+    runner.say({ type: 'busy', sessionId, busy: false });
+    t.mock.timers.tick(30_000);
+    assert.equal(hub.store.getRequest(request)?.status, 'running');
+    runner.say({ type: 'background', sessionId, tasks: [] });
+    const before = runner.sent.length;
+    hub.sendMessage(taskId, '#now 조사 뒤에 보낼 입력');
+    const queued = hub.store.queued({ sessionId });
+    assert.equal(queued.length, 1);
+    assert.equal(runner.sent.length, before);
+    assert.throws(() => hub.sendQueuedNow(taskId, queued[0].id), /백그라운드 조사 결과/);
+    runner.connected = false;
+    t.mock.timers.tick(30_000);
+    assert.equal(hub.store.getRequest(request)?.status, 'running', 'disconnect must not end the request');
+    runner.hello([{ sessionId, busy: true, approvals: [] }]);
+    runner.say({ type: 'busy', sessionId, busy: true });
+    runner.say({ type: 'busy', sessionId, busy: false, awaitingContinuation: true });
+    assert.equal(hub.store.getRequest(request)?.status, 'running', 'the SDK completion notice is an empty turn');
+    runner.say({ type: 'busy', sessionId, busy: true });
+    t.mock.timers.tick(30_000);
+    assert.equal(hub.requests.replyRequest(request, '조사 결과', 'receiving-thread').status, 'answered');
+    runner.say({ type: 'busy', sessionId, busy: false });
+    assert.equal(hub.store.queued({ sessionId }).length, 0);
+
+    const unanswered = send('답 없음');
+    background();
+    runner.say({ type: 'busy', sessionId, busy: false });
+    runner.hello([{sessionId,busy:false,approvals:[]}]); // Completion happened while disconnected.
+    t.mock.timers.tick(15_000);
+    assert.equal(hub.store.getRequest(unanswered)?.status, 'failed');
+  } finally { hub.dispose(); }
+});
+
 test('an Antigravity target is rejected before a local request is created', () => {
   const { hub, taskId, dir } = started(setup(), '#agy 진행');
   const asker = hub.external.attachExternal({ title: 'asker', summary: '질문', cwd: dir });
