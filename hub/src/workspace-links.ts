@@ -1,5 +1,5 @@
-import { sshLogin } from './ssh-client.ts';
-import { validatePublicKey } from './ssh-signature.ts';
+import { enrollmentCall, requestEnrollment, sshLogin } from './ssh-client.ts';
+import { agentPublicKeys, validatePublicKey } from './ssh-signature.ts';
 import { readSse } from './sse-reader.ts';
 import type { EngineUsage, HubMessage } from '../../shared/api.ts';
 import { isNoteInput, needsDefaultInstructions, NOTE_CUT_ROUTE, workspaceRoute } from './workspace-api.ts';
@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import type { SharedWorkspaceView, WorkspaceOperation } from '../../shared/workspace.ts';
+import type { SharedWorkspaceView, WorkspaceOperation, SshConnectRequest, WorkspaceConnectRequest, OutgoingConnectRequest } from '../../shared/workspace.ts';
 import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
 import { canonical, digest, json, operation, connectorUserInput } from './shared-workspace.ts';
@@ -31,6 +31,9 @@ type Link = { id:string; name:string; url:string; workspace_id:string; token:str
 const usageAccessDenied = (reply?: { status: number; body: any }) => reply?.status === 401 || reply?.status === 403
   || (reply?.status === 409 && reply.body?.code === 'workspace_mismatch');
 type Delivery = { id:string; link_id:string; digest:string; payload:string; prepared_payload:string|null; result:string|null; status:number|null };
+type Outgoing = OutgoingConnectRequest & {
+  link_id: string; link_binding: string; remote_id: string; workspace_id: string; url: string; key: string;
+};
 type Legacy = {runner_id:string;link_id:string;address:string;fingerprint:string;legacy_json:string};
 function address(value: unknown) {
   if (typeof value !== 'string') throw new HttpError(400,'공유 러너 주소가 필요합니다');
@@ -55,6 +58,9 @@ export class WorkspaceLinks {
   private connectorPolling = new Map<string,Promise<void>>();
   private lastSync = new Map<string,number>();
   private sourceCache?:{at:number;versions:Map<string,SkillBundle>};
+  private readonly startingEnrollment = new Set<string>();
+  private enrollmentPoll?: Promise<void>;
+  private enrollmentNext = 0;
   private timer:NodeJS.Timeout;
   private stopped = false;
   private requests = new Map<AbortController,string>();
@@ -65,6 +71,8 @@ export class WorkspaceLinks {
     this.skills=skills;
     this.db.exec(`PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS workspace_link(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,workspace_id TEXT NOT NULL UNIQUE,token TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workspace_ssh_outgoing(id TEXT PRIMARY KEY,link_id TEXT NOT NULL,link_binding TEXT NOT NULL,url TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,name TEXT NOT NULL,key TEXT NOT NULL,remote_id TEXT NOT NULL,status TEXT NOT NULL,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_ssh_link(link_id TEXT PRIMARY KEY,public_key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_delivery(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,link_id TEXT NOT NULL,digest TEXT NOT NULL,payload TEXT NOT NULL,prepared_payload TEXT,result TEXT,status INTEGER);
       CREATE TABLE IF NOT EXISTS workspace_view_index(seq INTEGER PRIMARY KEY AUTOINCREMENT,link_id TEXT NOT NULL UNIQUE);
@@ -82,9 +90,14 @@ export class WorkspaceLinks {
       void this.flush(link.id);
       void this.pollConnectors(link.id);
       if(Date.now()-(this.lastSync.get(link.id)??0)>15_000)void this.syncSkills(link.id);
-    }},1500);this.timer.unref();
+    }
+      if (!this.enrollmentPoll && Date.now() >= this.enrollmentNext) {
+        this.enrollmentNext = Date.now()+6000;
+        this.enrollmentPoll = this.pollEnrollment().catch(()=>{}).finally(()=>{ this.enrollmentPoll=undefined; });
+      }
+    },1500);this.timer.unref();
   }
-  async close() { this.stopped=true;clearInterval(this.timer);await closeRequestBroker(this);for(const c of this.requests.keys())c.abort();await Promise.all([...this.flushing.values(),...this.syncing.values(),...this.connectorPolling.values()]);await this.files.close(); }
+  async close() { this.stopped=true;clearInterval(this.timer);await closeRequestBroker(this);for(const c of this.requests.keys())c.abort();await Promise.all([...this.flushing.values(),...this.syncing.values(),...this.connectorPolling.values()]);await this.enrollmentPoll;await this.files.close(); }
   private rows() {return (this.db.prepare('SELECT * FROM workspace_link').all() as Link[]).map(l=>this.withSsh(l));}
   private withSsh(link:Link){const key=this.db.prepare('SELECT public_key FROM workspace_ssh_link WHERE link_id=?').get(link.id) as {public_key:string}|undefined;return {...link,...(key?{publicKey:key.public_key}:{})};}
   private link(id:string) {const link=this.db.prepare('SELECT * FROM workspace_link WHERE id=?').get(id) as Link|undefined;if(!link)throw new HttpError(404,'공유 작업공간 연결이 없습니다');return this.withSsh(link);}
@@ -138,6 +151,101 @@ export class WorkspaceLinks {
     const path='/v1/ssh/peers'+(target?'/'+encodeURIComponent(target):'');
     return this.request(this.link(id),path,{method,...(body?{body:JSON.stringify(body)}:{})},false,20000);
   }
+  async incomingSshRequests(): Promise<WorkspaceConnectRequest[]> {
+    const incoming = await Promise.all(this.rows().filter(link => link.publicKey).map(async link => {
+      try {
+        const reply = await this.request(link,'/v1/ssh/requests');
+        if ('status' in reply && reply.status===200 && Array.isArray(reply.body))
+          return (reply.body as SshConnectRequest[]).map(item=>({...item,linkId:link.id,workspaceName:link.name}));
+      } catch { /* An offline or older runner has no requests to show here. */ }
+      return [];
+    }));
+    return incoming.flat();
+  }
+
+  decideSshRequest(linkId:string, requestId:string, approve:boolean) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(requestId)) throw new HttpError(400,'잘못된 연결 요청입니다');
+    return this.request(this.link(linkId),'/v1/ssh/requests/'+requestId,{method:'POST',body:JSON.stringify({approve})});
+  }
+
+  outgoingSshRequests(): OutgoingConnectRequest[] {
+    return (this.db.prepare('SELECT id,name,status,expires FROM workspace_ssh_outgoing ORDER BY expires').all() as unknown as OutgoingConnectRequest[]);
+  }
+
+  async startSshRequest(input: { name?:unknown; ownerName?:unknown; hubName?:unknown; url?:unknown; workspaceId?:unknown; publicKey?:unknown; linkId?:unknown }) {
+    const name = typeof input.name==='string' ? input.name.trim() : '';
+    const ownerName = typeof input.ownerName==='string' ? input.ownerName.trim() : '';
+    const hubName = typeof input.hubName==='string' ? input.hubName.trim() : '';
+    const workspaceId = input.workspaceId;
+    if (!hubName || hubName.length>100 || !name || !ownerName || name.length>100 || ownerName.length>100 ||
+        typeof workspaceId!=='string' || !/^[a-f0-9-]{36}$/.test(workspaceId))
+      throw new HttpError(400,'작업공간 ID와 허브 이름, 소유자 표시 이름을 입력하세요');
+    const url = address(input.url);
+    const keys = await agentPublicKeys();
+    const key = input.publicKey===undefined && keys.length===1 ? keys[0].key : keys.find(k=>k.key===input.publicKey)?.key;
+    if (!key) throw new HttpError(400,'이 허브의 ssh-agent에 등록된 공개키를 선택하세요');
+    const existing = this.rows().find(link=>link.workspace_id===workspaceId);
+    if (input.linkId!==undefined && (!existing || existing.id!==input.linkId || existing.url!==url))
+      throw new HttpError(409,'기존 연결 주소 또는 작업공간이 바뀌었습니다');
+    if (existing && input.linkId!==existing.id) throw new HttpError(409,'기존 작업공간의 연결 갱신을 이용하세요');
+    if (existing?.publicKey) throw new HttpError(409,'이미 SSH 공개키로 연결된 작업공간입니다');
+    const linked = existing?.id ?? '';
+    const binding = this.linkBinding(existing);
+    const pending = this.db.prepare("SELECT id FROM workspace_ssh_outgoing WHERE workspace_id=? AND link_binding=? AND status IN ('pending','approved') AND expires>?")
+      .get(workspaceId,binding,Date.now());
+    if (pending) return this.outgoingSshRequests().find(item=>item.id===pending.id)!;
+    if (this.startingEnrollment.has(workspaceId)) throw new HttpError(409,'같은 작업공간으로 이미 연결 요청을 보내고 있습니다');
+    if (existing && this.db.prepare('SELECT 1 FROM workspace_delivery WHERE link_id=? AND status IS NULL LIMIT 1').get(existing.id))
+      throw new HttpError(409,'기존 인증으로 보낸 미전달 입력이 있어 자동 전환할 수 없습니다. 전달 내역에서 원문을 확인하세요');
+    if (this.db.prepare('SELECT count(*) AS n FROM workspace_ssh_outgoing').get()!.n as number >= 32)
+      throw new HttpError(429,'대기 중인 연결 요청이 많습니다');
+    this.startingEnrollment.add(workspaceId);
+    try {
+      const remoteId = await requestEnrollment(url,workspaceId,{name:hubName,ownerName,publicKey:key});
+      if (this.stopped) throw new HttpError(503,'허브가 종료 중입니다');
+      if (binding!==this.linkBinding(this.rows().find(link=>link.workspace_id===workspaceId)))
+        throw new HttpError(409,'요청을 보내는 동안 기존 연결이 변경됐습니다');
+      if (this.db.prepare('SELECT count(*) AS n FROM workspace_ssh_outgoing').get()!.n as number >= 32)
+        throw new HttpError(429,'대기 중인 연결 요청이 많습니다');
+      const item = { id:randomUUID(), name, status:'pending' as const, expires:Date.now()+15*60_000 };
+      this.db.prepare('INSERT INTO workspace_ssh_outgoing VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(item.id,linked,binding,url,workspaceId,name,key,remoteId,item.status,item.expires);
+      return item;
+    } finally { this.startingEnrollment.delete(workspaceId); }
+  }
+
+  private linkBinding(link:Link|undefined) {
+    return link ? digest(canonical(link)) : '';
+  }
+
+  private async pollEnrollment() {
+    this.db.prepare('DELETE FROM workspace_ssh_outgoing WHERE expires<?').run(Date.now()-60_000);
+    const pending=this.db.prepare("SELECT * FROM workspace_ssh_outgoing WHERE status IN ('pending','approved')").all() as unknown as Outgoing[];
+    await Promise.all(pending.map(async item=>{
+      const finish=(status:OutgoingConnectRequest['status'])=>this.db.prepare('UPDATE workspace_ssh_outgoing SET status=? WHERE id=?').run(status,item.id);
+      if (item.expires<=Date.now()) { finish('expired');return; }
+      const controller=new AbortController();
+      this.requests.set(controller,item.link_id);
+      try {
+        const result=await enrollmentCall(item.url,'status',{id:item.remote_id},controller.signal);
+        if (this.stopped) return;
+        if (result.status==='rejected' || result.status==='expired') { finish(result.status); return; }
+        if (result.status!=='approved') return;
+        if (item.status!=='approved') finish('approved');
+        const current=this.rows().find(link=>link.workspace_id===item.workspace_id);
+        if (current?.publicKey===item.key && current.url===item.url) { finish('connected'); return; }
+        const stillExpected=()=> {
+          const link=this.rows().find(link=>link.workspace_id===item.workspace_id);
+          return !this.stopped && this.linkBinding(link)===item.link_binding;
+        };
+        if (!stillExpected()) { finish('expired');return; }
+        await this.attach({name:item.name,url:item.url,workspaceId:item.workspace_id,publicKey:item.key},item.link_id||undefined,stillExpected);
+        finish('connected');
+      } catch { /* Retry after the runner is reachable or pending deliveries have drained. */ }
+      finally { this.requests.delete(controller); }
+    }));
+  }
+
   private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000,preserveErrorStatus=false):Promise<{status:number;body:any}|{response:Response;release:()=>void;signal:AbortSignal}> {
     if(this.stopped)throw new Error('종료 중입니다');
     const controller=new AbortController();this.requests.set(controller,link.id);
@@ -151,7 +259,7 @@ export class WorkspaceLinks {
     } catch(e) { controller.abort();this.requests.delete(controller);throw e; }
     finally {clearTimeout(timer);if(!stream)this.requests.delete(controller);}
   }
-  async attach(input:{name?:unknown;url?:unknown;token?:unknown;publicKey?:unknown;workspaceId?:unknown},id?:string) {
+  async attach(input:{name?:unknown;url?:unknown;token?:unknown;publicKey?:unknown;workspaceId?:unknown},id?:string,unchanged?:()=>boolean) {
     if(typeof input.name!=='string'||!input.name.trim()||input.name.length>100)throw new HttpError(400,'작업공간 이름이 필요합니다');
     const ssh=input.publicKey!==undefined;
     if(ssh&&(typeof input.workspaceId!=='string'||!/^[a-f0-9-]{36}$/.test(input.workspaceId)))throw new HttpError(400,'설치 시 확인한 작업공간 ID가 필요합니다');
@@ -169,6 +277,7 @@ export class WorkspaceLinks {
       throw new HttpError(409,'이관한 원격 작업공간의 신원이 일치하지 않습니다');
     if(id&&this.db.prepare('SELECT 1 FROM workspace_link WHERE id=?').get(id)&&this.link(id).workspace_id!==link.workspace_id)throw new HttpError(409,'기존 연결을 다른 작업공간으로 바꿀 수 없습니다');
     if(this.rows().some(l=>l.workspace_id===link.workspace_id&&l.id!==id))throw new HttpError(409,'이미 연결한 공유 작업공간입니다');
+    if (unchanged && !unchanged()) throw new HttpError(409,'대기하는 동안 기존 연결이 변경되었습니다');
     const previous=this.rows().find(row=>row.id===id);
     if(previous && previous.publicKey!==key && this.db.prepare('SELECT 1 FROM workspace_delivery WHERE link_id=? AND status IS NULL LIMIT 1').get(link.id))throw new HttpError(409,'미전달 입력이 있어 인증 키를 바꿀 수 없습니다. 기존 입력을 먼저 처리하세요');
     this.db.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,token=excluded.token').run(link.id,link.name,link.url,link.workspace_id,link.token);
@@ -501,6 +610,10 @@ export class WorkspaceLinks {
       throw new HttpError(400,'내부 지침·스킬 필드는 작업공간 연결에서만 설정합니다');
     if(old&&(old.digest!==hash||old.link_id!==id))throw new HttpError(409,'같은 명령 ID의 내용 또는 대상이 바뀌었습니다');
     if(!old){
+      const enrollment=this.db.prepare("SELECT 1 FROM workspace_ssh_outgoing WHERE link_id=? AND link_binding=? AND status IN ('pending','approved') AND expires>?")
+        .get(id,this.linkBinding(link),Date.now());
+      if (this.startingEnrollment.has(link.workspace_id)||enrollment)
+        throw new HttpError(409,'SSH 연결 요청을 처리 중입니다. 연결이 갱신된 뒤 다시 보내세요');
       const literalNote = isNoteInput(op.method, op.path, op.body);
       const text=typeof op.body.text==='string'?op.body.text:typeof op.body.prompt==='string'?op.body.prompt:undefined;
       const path = op.path.split('?')[0];

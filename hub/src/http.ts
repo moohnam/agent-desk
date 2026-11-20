@@ -1,3 +1,4 @@
+import { agentPublicKeys } from './ssh-signature.ts';
 import { multiplexStream } from './stream-mux.ts';
 import { InstructionStore } from './instruction-store.ts';
 import { readFile } from 'node:fs/promises';
@@ -448,6 +449,22 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       }
       if (parts[1] === 'workspaces') {
         if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list().filter(link=>link.id!==localAuthorityId));
+        if (parts.length === 3 && ['ssh-keys','ssh-requests','ssh-outgoing'].includes(id)) {
+          if (!local || !localOrigin(req.headers.origin)) throw new HttpError(403,'허브 머신에서만 SSH 연결을 관리할 수 있습니다');
+          if (req.method==='GET' && id==='ssh-keys') return send(res,200,await agentPublicKeys());
+          if (req.method==='GET' && id==='ssh-requests') return send(res,200,await workspaces.incomingSshRequests());
+          if (req.method==='GET' && id==='ssh-outgoing') return send(res,200,workspaces.outgoingSshRequests());
+          if (req.method==='POST' && id==='ssh-outgoing') return send(res,202,await workspaces.startSshRequest(await readJson(req)));
+          throw new HttpError(405,'지원하지 않는 연결 요청입니다');
+        }
+        if (parts.length===5 && parts[3]==='ssh-requests' && req.method==='POST') {
+          if (!local || !localOrigin(req.headers.origin) || id===localAuthorityId) throw new HttpError(403,'허브 머신에서만 승인할 수 있습니다');
+          const body=await readJson(req) as {approve?:unknown};
+          if (typeof body?.approve!=='boolean') throw new HttpError(400,'승인 또는 거절을 선택하세요');
+          const result=await workspaces.decideSshRequest(id,parts[4],body.approve);
+          if (!('status' in result)) throw new HttpError(502,'허브 관리 응답이 잘못되었습니다');
+          return send(res,result.status,result.body);
+        }
         if (parts.length === 2 && req.method === 'POST') {
           if (!local) throw new HttpError(403,'공유 러너 연결은 허브 머신에서만 등록할 수 있습니다');
           return send(res,201,await workspaces.attach(await readJson(req)));

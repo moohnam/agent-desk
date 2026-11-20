@@ -14,7 +14,7 @@ import { SettingsDialog } from './SettingsDialog.tsx';
 import { useUpdates } from './useUpdates.ts';
 import { UpdateSettingsButton } from './Updates.tsx';
 import { RunnersDialog } from './Runners.tsx';
-import { WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
+import { SshPeers, useWorkspaceRequests, WorkspaceDialog, initialLocation, inLocation } from './Workspaces.tsx';
 import { SharedPending, workspaceId } from './workspace.ts';
 import { writeClipboardText } from './clipboard.ts';
 import { noteRevision } from './noteEvents.ts';
@@ -95,8 +95,7 @@ export function App() {
   const [custom, setCustom] = useColumns();
   const { view, setView, byTask: viewByTask, setByTask: setViewByTask, order: viewOrder, setOrder: setViewOrder } = useView();
   const [widths, setWidth] = useColumnWidths();
-  // Index into the approval queue while it has keyboard focus (`a`).
-  const [queueFocus, setQueueFocus] = useState<number | null>(null);
+  const [queueFocusId, setQueueFocusId] = useState<string | null>(null);
   const [queueAll, setQueueAll] = useState(false);
   const [threadTask, setThreadTask] = useState<string | null>(null);
   const references = useThreadReferences(threadTask, hub.gone);
@@ -136,6 +135,7 @@ export function App() {
   const [accessOpen, setAccessOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceApproval, setWorkspaceApproval] = useState<string>();
   const [runnersOpen, setRunnersOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [channelsOpen, setChannelsOpen] = useState(false);
@@ -480,14 +480,17 @@ export function App() {
   }, [hub.synced, deck, feeds, hub.channels]);
   const selectedPost = activeCol?.posts.find((p) => p.id === selection[activeCol.id]);
 
-  const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values()), [hub.approvals, hub.questions, hub.tasks]);
-  // Keep the queue focus on a valid row as approvals are resolved.
+  const workspaceRequests=useWorkspaceRequests(hub.local);
+  const queue = useMemo(() => queueItems(hub.approvals.values(), hub.questions.values(), hub.tasks.values(),workspaceRequests.requests),
+    [hub.approvals, hub.questions, hub.tasks,workspaceRequests.requests]);
+  // Network updates can reorder the queue between focusing a row and pressing a key.
+  const queueIndex = queue.findIndex(item=>item.id===queueFocusId);
+  const queueFocus = queueIndex < 0 ? null : queueIndex;
+  const setQueueFocus = (index:number|null) => setQueueFocusId(index===null ? null : queue[index]?.id ?? null);
   useEffect(() => {
-    if (queueFocus == null) return;
-    if (!queue.length) setQueueFocus(null);
-    else if (queueFocus >= queue.length) setQueueFocus(queue.length - 1);
-    else if (queueFocus >= QUEUE_ROWS) setQueueAll(true);
-  }, [queue, queueFocus]);
+    if (queueFocusId && queueFocus===null) setQueueFocusId(null);
+    if (queueIndex >= QUEUE_ROWS) setQueueAll(true);
+  }, [queueFocusId, queueFocus, queueIndex]);
   const counts = useMemo(() => {
     const c = { running: 0, error: 0 };
     for (const t of hub.tasks.values()) { if(taskRunning(t))c.running++; if(t.status==='error')c.error++; }
@@ -733,7 +736,7 @@ export function App() {
   });
 
   const notifyState = useNotifyState();
-  useDeskNotifications(hub, (taskId) => openThread(taskId));
+  useDeskNotifications(hub, (taskId) => openThread(taskId),workspaceRequests.requests);
   /**
    * Opens a task's thread. `from`: the column it was opened from; the thread column moves right of
    * it (otherwise it stays where it is). `post`: start reading at that post's top; otherwise the
@@ -995,7 +998,8 @@ export function App() {
   };
   const openQueueItem = (item: QueueItem) => {
     // A Codex async question: answered by a reply in its thread.
-    if (item.kind === 'ask') { setQueueFocus(null); replyTo(item.task_id); }
+    if (item.kind === 'workspace') { setQueueFocus(null); setWorkspaceApproval(item.request.linkId); }
+    else if (item.kind === 'ask') { setQueueFocus(null); replyTo(item.task_id); }
     else if (item.kind === 'question' || isAsk(item.approval.tool_name)) answerQuestion(item.task_id, item.id);
     else { setQueueFocus(null); openThread(item.task_id); }
   };
@@ -1620,6 +1624,7 @@ export function App() {
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}
       {modelOpen && <ModelDialog onClose={() => setModelOpen(false)} />}
       {runnersOpen && <RunnersDialog onClose={() => setRunnersOpen(false)} />}
+      {workspaceApproval && <SshPeers workspaceId={workspaceApproval} requestsView={workspaceRequests} onClose={()=>{setWorkspaceApproval(undefined);void workspaceRequests.refresh();}} />}
       {workspaceOpen && <WorkspaceDialog value={locationFilter} onChange={changeLocation} onClose={() => setWorkspaceOpen(false)} />}
       {channelsOpen && <ChannelsDialog channels={[...hub.channels.values()]} onClose={() => setChannelsOpen(false)} onChanged={hub.refresh} onOpen={openChannel} />}
     </div>

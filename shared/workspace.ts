@@ -16,3 +16,13 @@ export interface WorkspaceDelivery {
 export interface SshPeerView {
   peerId:string; ownerId:string; ownerName:string; fingerprint:string; name:string; publicKey:string; admin:boolean; revoked:boolean;
 }
+
+export interface SshConnectRequest {
+  id: string; name: string; ownerName: string; fingerprint: string; created_at: string;
+}
+export interface WorkspaceConnectRequest extends SshConnectRequest {
+  linkId: string; workspaceName: string;
+}
+export interface OutgoingConnectRequest {
+  id: string; name: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'connected'; expires: number;
+}

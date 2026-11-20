@@ -58,6 +58,13 @@ interface Props {
 }
 
 const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
+const avatarSegments = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : undefined;
+
+function userAvatar(name: unknown) {
+  if (typeof name !== 'string') return '나';
+  const label = name.trim();
+  return avatarSegments?.segment(label).containing(0)?.segment ?? Array.from(label)[0] ?? '나';
+}
 
 /** Everything except my own posts is said by the task's engine. */
 function author(post: Post, task: TaskView | undefined) {
@@ -124,7 +131,7 @@ function PostViewInner(props: Props) {
     : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink, props.onError]);
   const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
   const engine = task?.engine ?? 'claude';
-  const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', '나'] : post.kind === 'alert' ? ['alert', '!']
+  const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', userAvatar(p.author?.ownerName)] : post.kind === 'alert' ? ['alert', '!']
     : [engine, ENGINE_SHORT[engineOf(engine)]];
   const tag = isNote && !inThread ? <span className="tag via">메모</span>
     : post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>

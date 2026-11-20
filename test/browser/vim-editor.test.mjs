@@ -14,6 +14,7 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 
 function fixtureServer() {
   const fixture = interactionData(24);
+  let enrollmentPending = true;
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -25,8 +26,25 @@ function fixtureServer() {
       if (url.pathname.startsWith('/api/')) {
         const layout = request.headers['x-desk-fixture'];
         const note = layout === 'note';
+        if (layout === 'workspace-request' || layout === 'queue-reorder') {
+          const connection={ id:'request-key',linkId:'shared-link',workspaceName:'srv19 공유',name:'oh-mac',
+            ownerName:'오 사용자',fingerprint:'SHA256:fixture',created_at:'2026-01-01T00:00:00Z' };
+          if (url.pathname==='/api/workspaces/ssh-requests' || url.pathname==='/api/workspaces/shared-link/ssh-peers' ||
+              url.pathname==='/api/workspaces/shared-link/ssh-requests/request-key') {
+            response.writeHead(200,{'content-type':'application/json'});
+            if (request.method==='POST') enrollmentPending=false;
+            response.end(JSON.stringify(url.pathname.endsWith('request-key')?{ok:true}:
+              url.pathname.endsWith('ssh-peers')?[]:(layout==='queue-reorder'?request.headers['x-desk-request-ready']==='1':enrollmentPending)?[connection]:[]));
+            return;
+          }
+        }
         const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
         let body = fixture(url);
+        if (layout === 'queue-reorder' && url.pathname==='/api/state') {
+          body.approvals=['first','second'].map((id,index)=>({id,task_id:'t'+index,session_id:'s'+index,
+            tool_name:'Bash',input:{command:id},status:'pending',created_at:`2026-01-02T00:00:0${index}Z`}));
+        }
+
         if (note && url.pathname === '/api/state') body.tasks = body.tasks.map(task => ({ ...task, kind: 'note' }));
         if (layout === 'channel' || layout === 'feed-channel') {
           const channel = { id: 'news', name: '테스트 채널', source: layout === 'feed-channel' ? 'feed' : 'push', enabled: true, read_through_id: 0, latest_entry_id: 1, unread_count: 1 };
@@ -40,6 +58,10 @@ function fixtureServer() {
           const payload = note ? { text: '저장된 메모' } : questions ? { text: '에이전트의 질문', questions } : undefined;
           body = { events: payload ? [{ id: 300, task_id: route[1], kind: note ? 'user' : 'assistant',
             ts: '2026-01-01T00:00:00Z', payload }] : [], more: false };
+          if (layout==='ssh-author-avatar') body={events:['남무현','👩‍💻 개발',null].map((ownerName,index)=>({
+            id:300+index,task_id:route[1],kind:'user',ts:'2026-01-01T00:00:00Z',
+            payload:{text:`메시지 ${index+1}`,...(ownerName?{author:{ownerName}}:{})},
+          })),more:false};
         }
         if (route?.[2] === 'messages' && request.method === 'POST') body = { task_id: route[1] };
         response.writeHead(200, { 'content-type': 'application/json' });
@@ -195,6 +217,42 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       state = 'deleted';
       await page.reload({ waitUntil: 'networkidle2' });
       assert.equal((await saved()).length, 0);
+    }));
+
+    await t.test("a shared author's avatar uses the first displayed character of their name", () => withPage(async page => {
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'ssh-author-avatar'});
+      await openReply(page,origin);
+      await page.waitForFunction(()=>[...document.querySelectorAll('[data-post] .name')].some(name=>name.textContent==='남무현'));
+      const avatars=await page.$$eval('[data-post]',posts=>Object.fromEntries(posts.flatMap(post=>{
+        const name=post.querySelector('.name')?.textContent, avatar=post.querySelector('.av.user')?.textContent;
+        return name&&avatar?[[name,avatar]]:[];
+      })));
+      assert.equal(avatars['남무현'],'남');
+      assert.equal(avatars['👩‍💻 개발'],'👩‍💻');
+      assert.equal(avatars['나'],'나');
+    }));
+
+    await t.test('a hub connection request appears in the response queue and opens approval management', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'workspace-request'});
+      await page.goto(origin,{waitUntil:'domcontentloaded'});
+      await page.waitForFunction(()=>document.querySelector('.queue')?.textContent.includes('oh-mac'));
+      await page.click('.queue-row .yes');
+      const dialog='[role="dialog"][aria-label="공유 러너 허브 승인"]';
+      await page.waitForFunction(selector=>document.querySelector(selector)?.textContent.includes('SHA256:fixture'),{},dialog);
+      await page.$eval(dialog,element=>[...element.querySelectorAll('button')].find(button=>button.textContent==='승인').click());
+      await page.waitForFunction(()=>!document.querySelector('.queue-row'));
+    }));
+
+    await t.test('an older connection request cannot redirect keyboard approval to another item', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'queue-reorder'});
+      await page.goto(origin,{waitUntil:'domcontentloaded'});
+      await page.waitForSelector('.queue-row[data-queue-index="1"] .yes');
+      await page.click('.queue-row[data-queue-index="1"] .where');
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'queue-reorder','x-desk-request-ready':'1'});
+      await page.waitForFunction(()=>document.querySelector('.queue-row[data-queue-index="0"]')?.textContent.includes('oh-mac'),{timeout:10000});
+      const sent=page.waitForRequest(request=>request.method()==='POST' && new URL(request.url()).pathname.includes('/approvals/'));
+      await page.keyboard.press('y');
+      assert.match(new URL((await sent).url()).pathname,/\/approvals\/second(?:\/|$)/);
     }));
 
     for (const editorMode of ['vim', 'emacs']) {

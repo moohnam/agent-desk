@@ -195,6 +195,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
         case 'k': case 'ArrowUp': setQueueFocus(Math.max(queueFocus - 1, 0)); break;
         case 'y': case 'n':
           if (a) { if (e.key === 'y') allow(a); else setDenying(a); }
+          else if (item?.kind==='workspace') setToast('연결 요청은 Enter로 승인 관리에서 확인합니다.');
           else if (item) setToast('질문은 Enter로 스레드를 열어 답합니다.');
           break;
         case 'Enter': if (item) openQueueItem(item); break;

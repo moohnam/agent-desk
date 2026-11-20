@@ -24,7 +24,7 @@ export class SshAuthority {
   peers():SshPeer[]{return (this.db.prepare(`SELECT s.*,p.name,p.revoked FROM ssh_peer s JOIN workspace_peer p ON p.id=s.peer_id`).all() as any[]).map(p=>({peerId:p.peer_id,ownerId:p.owner_id,ownerName:p.owner_name,publicKey:p.public_key,fingerprint:p.fingerprint,name:p.name,admin:!!p.admin,revoked:!!p.revoked}));}
   identity(peer:string){const p=this.peers().find(p=>p.peerId===peer&&!p.revoked);if(!p)throw new HttpError(401,'허브 연결 권한이 취소되었습니다');return p;}
   assertAdmin(peer:string){if(!this.identity(peer).admin)throw new HttpError(403,'첫 관리자 허브만 연결을 승인할 수 있습니다');}
-  async register(input:{name?:unknown;ownerName?:unknown;publicKey?:unknown},adminPeer?:string,existingPeer?:string,authorize?:()=>void){
+  async register(input:{name?:unknown;ownerName?:unknown;publicKey?:unknown},adminPeer?:string,existingPeer?:string,authorize?:()=>void,onRegistered?:()=>void){
     authorize?.();
     if(adminPeer)this.assertAdmin(adminPeer);else if(this.enabled)throw new HttpError(409,'첫 관리자 등록은 이미 완료됐습니다');
     const name=text(input.name),ownerName=text(input.ownerName),key=await validatePublicKey(input.publicKey);
@@ -38,6 +38,7 @@ export class SshAuthority {
       if(!existingPeer)this.db.prepare('INSERT INTO workspace_peer(id,name,token_hash) VALUES (?,?,?)').run(peer,name,hash(randomBytes(32).toString('hex')));
       this.db.prepare('INSERT INTO ssh_peer VALUES (?,?,?,?,?,?)').run(peer,randomUUID(),ownerName,key.key,key.fingerprint,adminPeer?0:1);
       this.db.prepare('INSERT OR IGNORE INTO ssh_auth_config VALUES(1,1)').run();
+      onRegistered?.();
       this.db.exec('RELEASE ssh_register');return this.identity(peer);
     }catch(e){this.db.exec('ROLLBACK TO ssh_register; RELEASE ssh_register');throw e;}
   }

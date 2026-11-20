@@ -1,3 +1,4 @@
+import type { WorkspaceConnectRequest } from '../../shared/workspace.ts';
 import { legacySourceId, legacyTaskId, scopeId, splitId } from './federation.ts';
 // OS notifications for what needs the user while the desk is not in front: approval requests, agent
 // questions, and tasks that finished or failed. The desktop app shows them through its own commands
@@ -158,8 +159,8 @@ const interrupted = (t: TaskView) => {
  * `open`: the task's thread, for a click on a browser notification.
  */
 export function useDeskNotifications(hub: { synced: number; tasks: Map<string, TaskView>; approvals: Map<string, Approval>; questions: Map<string, Question>;
-  onEvent: (fn: (e: HubEvent) => void) => () => void; access: AccessView | null; gone: Set<string> }, open: (taskId: string) => void) {
-  const prev = useRef<{ access: Set<string>; approvals: Set<string>; questions: Set<string>; tasks: Map<string, { status: string; ask: number | null }> } | null>(null);
+  onEvent: (fn: (e: HubEvent) => void) => () => void; access: AccessView | null; gone: Set<string> }, open: (taskId: string) => void, workspaceRequests: WorkspaceConnectRequest[] = []) {
+  const prev = useRef<{ access: Set<string>; workspace: Set<string>; approvals: Set<string>; questions: Set<string>; tasks: Map<string, { status: string; ask: number | null }> } | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
   /** Each task's latest agent message seen live; events reach this before the state they come with renders. */
@@ -195,6 +196,7 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
     if (!hub.synced) return;
     const now = {
       access: new Set(hub.access?.requests.map((r) => r.id)),
+      workspace: new Set(workspaceRequests.map(r=>`${r.linkId}:${r.id}`)),
       approvals: new Set(hub.approvals.keys()),
       questions: new Set(hub.questions.keys()),
       tasks: new Map([...hub.tasks].map(([id, t]) => [id, { status: t.status, ask: t.pending_ask?.event_id ?? null }])),
@@ -203,6 +205,11 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
     prev.current = now;
     if (!before) return;
     const notes: (Note & { kind: 'ask' | 'done' | 'error' })[] = [];
+    for (const request of workspaceRequests) {
+      const key=`${request.linkId}:${request.id}`;
+      if (!before.workspace.has(key)) notes.push({kind:'ask',id:'workspace:'+key,title:'응답 필요 · 공유 러너 연결 요청',
+        body:clip(`${request.workspaceName} · ${request.name} · ${request.ownerName}`)});
+    }
     const latest = (taskId: string, fallback: string) => said.current.get(taskId) || fallback;
     // Another device asking to connect (this Mac's pages only get these).
     for (const r of hub.access?.requests ?? []) {
@@ -244,5 +251,5 @@ export function useDeskNotifications(hub: { synced: number; tasks: Map<string, T
       return;
     }
     for (const n of fresh) show(n, go);
-  }, [hub.synced, hub.tasks, hub.approvals, hub.questions, hub.access]);
+  }, [hub.synced, hub.tasks, hub.approvals, hub.questions, hub.access, workspaceRequests]);
 }

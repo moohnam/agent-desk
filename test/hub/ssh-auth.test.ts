@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { request as httpRequest } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
 import { Hub } from '../../hub/src/hub.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../../hub/src/db.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
-import { publicKey, signWithAgent } from '../../hub/src/ssh-signature.ts';
-import { sshLogin } from '../../hub/src/ssh-client.ts';
+import { agentPublicKeys, publicKey, signWithAgent, SSH_ENROLL_NAMESPACE } from '../../hub/src/ssh-signature.ts';
+import { enrollmentCall, requestEnrollment, sshLogin } from '../../hub/src/ssh-client.ts';
 
 // Real OpenSSH signing with disposable keys and an isolated agent. Never uses personal keys.
 test('SSH bootstrap, signatures, pinned workspace, replay, expiry, revocation and recovery', async t => {
@@ -23,8 +25,11 @@ test('SSH bootstrap, signatures, pinned workspace, replay, expiry, revocation an
   const hub=new Hub(store,{skills:new SkillStore(join(dir,'skills')),runner:()=>({connected:true,id:'fixture',engines:new Set(['claude','codex']),has:()=>false,handle:()=>{}})});
   const workspace=new SharedWorkspace(hub);
   const server=workspace.server();
+  const requesterStore=new Store(join(dir,'requester.db'));
+  const requester=new WorkspaceLinks(requesterStore);
   t.after(async()=>{
     if(server.listening){server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
+    await requester.close();requesterStore.database.close();
     hub.dispose();store.database.close();
     if(previous===undefined)delete process.env.SSH_AUTH_SOCK;else process.env.SSH_AUTH_SOCK=previous;
     if(agentPid)process.kill(agentPid,'SIGTERM');
@@ -32,12 +37,14 @@ test('SSH bootstrap, signatures, pinned workspace, replay, expiry, revocation an
   });
   const keyFile=join(dir,'key');
   const otherFile=join(dir,'other');
-  for(const file of [keyFile,otherFile])execFileSync('/usr/bin/ssh-keygen',['-q','-t','ed25519','-N','','-f',file]);
+  const candidateFile=join(dir,'candidate');
+  const rejectedFile=join(dir,'rejected');
+  for(const file of [keyFile,otherFile,candidateFile,rejectedFile])execFileSync('/usr/bin/ssh-keygen',['-q','-t','ed25519','-N','','-f',file]);
   const key=readFileSync(keyFile+'.pub','utf8'),other=readFileSync(otherFile+'.pub','utf8');
   const out=execFileSync('/usr/bin/ssh-agent',['-s','-a',join(dir,'agent.sock')],{encoding:'utf8'});
   agentPid=Number(out.match(/SSH_AGENT_PID=(\d+)/)![1]);
   process.env.SSH_AUTH_SOCK=join(dir,'agent.sock');
-  execFileSync('/usr/bin/ssh-add',[keyFile,otherFile],{stdio:'ignore'});
+  execFileSync('/usr/bin/ssh-add',[keyFile,otherFile,candidateFile,rejectedFile],{stdio:'ignore'});
   const legacy=workspace.grant('old-hub');
   const runtime=workspace.grant('agent-desk-runtime');
   const admin=await workspace.ssh.register({name:'Mac',ownerName:'남무현',publicKey:key},undefined,legacy.id);
@@ -76,6 +83,54 @@ test('SSH bootstrap, signatures, pinned workspace, replay, expiry, revocation an
   assert.equal((await fetch(url+'/v1/ssh/peers',{headers:{...headers,origin:'https://untrusted.example'}})).status,403);
   const memberSession=await sshLogin(url,workspace.id,other,AbortSignal.timeout(10000));
   assert.equal((await fetch(url+'/v1/ssh/peers',{headers:{...headers,authorization:`Bearer ${memberSession.token}`}})).status,403);
+  const enrolledKey=publicKey(readFileSync(candidateFile+'.pub','utf8')).key;
+  assert.ok((await agentPublicKeys()).some(k=>k.key===enrolledKey));
+  const initial={workspaceId:workspace.id,name:'new-Mac',ownerName:'새 사용자',publicKey:enrolledKey};
+  const proof=await enrollmentCall(url,'challenge',initial);
+  await assert.rejects(enrollmentCall(url,'submit',{id:proof.id,signature:await signWithAgent(key,proof.message,SSH_ENROLL_NAMESPACE)}),{status:401});
+  await assert.rejects(enrollmentCall(url,'submit',{id:proof.id,signature:await signWithAgent(enrolledKey,proof.message,SSH_ENROLL_NAMESPACE)}),{status:401});
+  const linkId=randomUUID();
+  requesterStore.database.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?)').run(linkId,'공유 공간',url+'/',workspace.id,legacy.token);
+  requesterStore.database.prepare('INSERT INTO workspace_view_index(link_id) VALUES(?)').run(linkId);
+  const outgoing=await requester.startSshRequest({...initial,name:'공유 공간',hubName:initial.name,url,linkId});
+  assert.equal(outgoing.status,'pending');
+  assert.throws(()=>requester.enqueue(linkId,{id:randomUUID(),method:'POST',path:'/compose',body:{text:'이전 인증으로 들어온 메시지'}}),
+    {status:409});
+  assert.equal(requester.list()[0]?.pending,0);
+  await assert.rejects(sshLogin(url,workspace.id,enrolledKey,AbortSignal.timeout(10000)),{status:401});
+  const list=async (auth=headers)=>fetch(url+'/v1/ssh/requests',{headers:auth});
+  assert.equal((await list({...headers,authorization:`Bearer ${memberSession.token}`})).status,403);
+  let [incoming]=await (await list()).json() as {id:string;name:string;ownerName:string;fingerprint:string}[];
+  assert.equal(incoming.ownerName,initial.ownerName);
+  assert.equal(incoming.fingerprint,publicKey(enrolledKey).fingerprint);
+  const respond=(approve:boolean,auth=headers)=>fetch(url+'/v1/ssh/requests/'+incoming.id,{
+    method:'POST',headers:{...auth,'content-type':'application/json'},body:JSON.stringify({approve}),
+  });
+  assert.equal((await respond(true,{...headers,authorization:`Bearer ${memberSession.token}`})).status,403);
+  assert.equal((await respond(true)).status,200);
+  assert.deepEqual(await (await list()).json(),[]);
+  assert.equal((await respond(false)).status,409);
+  const deadline=Date.now()+10000;
+  while (requester.outgoingSshRequests()[0]?.status!=='connected' && Date.now()<deadline) await delay(50);
+  assert.equal(requester.outgoingSshRequests()[0]?.status,'connected');
+  assert.equal(requester.list()[0]?.id,linkId);
+  assert.equal(requester.list()[0]?.publicKey,enrolledKey);
+  const newPeer=workspace.ssh.peers().find(p=>p.fingerprint===incoming.fingerprint)!;
+  assert.equal(newPeer.ownerName,initial.ownerName);
+  workspace.revoke(newPeer.peerId);
+  assert.equal((await enrollmentCall(url,'status',{id:incoming.id})).status,'rejected');
+  await assert.rejects(requestEnrollment(url,workspace.id,initial),{status:409});
+  assert.deepEqual(await (await list()).json(),[]);
+  const rejectedKey=readFileSync(rejectedFile+'.pub','utf8');
+  await assert.rejects(requestEnrollment(url,randomUUID(),{...initial,publicKey:rejectedKey}),{status:404});
+  const rejectedId=await requestEnrollment(url,workspace.id,{...initial,publicKey:rejectedKey});
+  [incoming]=await (await list()).json() as typeof incoming[];
+  assert.equal(rejectedId,incoming.id);
+  assert.equal((await respond(false)).status,200);
+  assert.equal((await enrollmentCall(url,'status',{id:rejectedId})).status,'rejected');
+  assert.deepEqual(await (await list()).json(),[]);
+  assert.equal((await respond(true)).status,409);
+  await assert.rejects(sshLogin(url,workspace.id,rejectedKey,AbortSignal.timeout(10000)),{status:401});
   const target=workspace.execute(admin.peerId,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@target:${dir} #claude original`}}).body;
   const sessionId=store.latestSession(target.id)!.id;
   const requestId=randomUUID();

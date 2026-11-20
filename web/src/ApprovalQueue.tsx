@@ -1,4 +1,5 @@
-import { ArrowUpRight, ChevronDown, MessageCircleQuestion } from 'lucide-react';
+import type { WorkspaceConnectRequest } from '../../shared/workspace.ts';
+import { ArrowUpRight, ChevronDown, KeyRound, MessageCircleQuestion } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
@@ -14,10 +15,11 @@ export type QueueItem =
   | { kind: 'approval'; id: string; task_id: string; created_at: string; approval: Approval }
   | { kind: 'question'; id: string; task_id: string; created_at: string; question: Question }
   /** A Codex async question: its turn goes on, and my next message in the thread answers it. */
-  | { kind: 'ask'; id: string; task_id: string; created_at: string; text: string };
+  | { kind: 'ask'; id: string; task_id: string; created_at: string; text: string }
+  | { kind: 'workspace'; id: string; task_id: ''; created_at: string; request: WorkspaceConnectRequest };
 
 /** Pending approvals and questions, Codex's async ones included, oldest first. */
-export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Question>, tasks: Iterable<TaskView> = []): QueueItem[] {
+export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Question>, tasks: Iterable<TaskView> = [], requests: WorkspaceConnectRequest[] = []): QueueItem[] {
   const out: QueueItem[] = [];
   for (const t of tasks) {
     const q = t.pending_ask;
@@ -25,6 +27,7 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
   }
   for (const a of approvals) out.push({ kind: 'approval', id: a.id, task_id: a.task_id, created_at: a.created_at, approval: a });
   for (const q of questions) out.push({ kind: 'question', id: q.id, task_id: q.task_id, created_at: q.created_at, question: q });
+  for (const request of requests) out.push({kind:'workspace',id:`workspace:${request.linkId}:${request.id}`,task_id:'',created_at:request.created_at,request});
   return out.sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
@@ -79,6 +82,16 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
       </header>
       <div className="queue-list" ref={list}>
       {rows.map((item, i) => {
+        if (item.kind === 'workspace') return (
+          <div key={item.id} data-queue-index={i} tabIndex={0} className={`queue-row${focus===i?' selected':''}`}
+            onClick={()=>onFocus(i)} onFocus={()=>onFocus(i)} onDoubleClick={()=>onOpen(item)}>
+            <span className="av mini"><KeyRound size={13} aria-hidden="true" /></span>
+            <span className="where"><b>{item.request.workspaceName}</b></span>
+            <span className="tool"><span className="qtag">허브 연결</span> {item.request.name} · {item.request.ownerName}</span>
+            <time dateTime={item.created_at}>{relTime(item.created_at)}</time>
+            <span className="acts"><button className="yes" onClick={e=>{e.stopPropagation();onOpen(item);}}>요청 확인</button></span>
+          </div>
+        );
         const task = tasks.get(item.task_id);
         const engine = task?.engine ?? 'claude';
         return (
@@ -122,7 +135,7 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
           {showAll ? '접기' : <>외 {rest}건 <ChevronDown /></>}
         </button>
       )}
-      <p className="queue-hint">{focus == null ? 'a 키로 목록 선택 · 버튼으로 바로 승인·거절' : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
+      <p className="queue-hint">{focus == null ? 'a 키로 목록 선택 · 버튼으로 바로 승인·거절' : cur?.kind === 'workspace' ? 'j/k 이동 · Enter 연결 요청 확인 · Esc 목록 선택 끝내기' : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
         ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 목록 선택 끝내기'
         : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 목록 선택 끝내기'}</p>
       </section>}

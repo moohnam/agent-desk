@@ -1,3 +1,4 @@
+import { SshEnrollment } from './ssh-enrollment.ts';
 import { SshAuthority } from './ssh-authority.ts';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
@@ -56,6 +57,7 @@ class ConnectorPermissionError extends HttpError {
 /** One canonical workspace, many separately revocable hub credentials. */
 export class SharedWorkspace {
   readonly id: string;
+  private readonly enrollment: SshEnrollment;
   readonly ssh: SshAuthority;
   readonly connectorBroker?: ConnectorBroker;
   private db: DatabaseSync;
@@ -75,6 +77,7 @@ export class SharedWorkspace {
     if (!this.db.prepare('SELECT id FROM workspace_identity').get()) this.db.prepare('INSERT INTO workspace_identity VALUES (?)').run(randomUUID());
     this.id = (this.db.prepare('SELECT id FROM workspace_identity').get() as { id: string }).id;
     this.ssh = new SshAuthority(this.db,this.id);
+    this.enrollment = new SshEnrollment(this.db,this.ssh);
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspace_runtime_peer (peer_id TEXT PRIMARY KEY)`);
     if (hub) {
       this.connectorBroker = new ConnectorBroker(this.db, this.id, {
@@ -230,6 +233,14 @@ export class SharedWorkspace {
         const url = new URL(req.url ?? '/', 'http://workspace');
         if (url.pathname === '/v1/connector-mcp' && this.connectorBroker)
           return await handleConnectorMcp(this.connectorBroker, req, res);
+        if (!this.localAuthority && req.method==='POST' && url.pathname.startsWith('/v1/ssh/enrollment/')) {
+          const body = await readBody(req,32768) as any;
+          if (!body || typeof body !== 'object') throw new HttpError(400,'연결 요청이 올바르지 않습니다');
+          if (url.pathname==='/v1/ssh/enrollment/challenge') return json(res,200,this.enrollment.challenge(body));
+          if (url.pathname==='/v1/ssh/enrollment/submit') return json(res,201,await this.enrollment.submit(body));
+          if (url.pathname==='/v1/ssh/enrollment/status') return json(res,200,this.enrollment.state(body.id));
+          throw new HttpError(404,'지원하지 않는 연결 요청입니다');
+        }
         if (!this.localAuthority && req.method==='POST' && url.pathname==='/v1/ssh/challenge') {
           const b=await readBody(req,20000) as any;return json(res,200,this.ssh.challenge(b?.fingerprint,b?.workspaceId));
         }
@@ -251,6 +262,15 @@ export class SharedWorkspace {
           return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1,note_cut:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
+        if (req.method==='GET' && url.pathname==='/v1/ssh/requests')
+          return json(res,200,this.enrollment.list(peer));
+        if (req.method==='POST' && url.pathname.startsWith('/v1/ssh/requests/')) {
+          this.ssh.assertAdmin(peer);
+          const input = await readBody(req,1024) as { approve?: unknown };
+          if (typeof input?.approve !== 'boolean') throw new HttpError(400,'승인 또는 거절을 선택하세요');
+          await this.enrollment.decide(peer,url.pathname.slice('/v1/ssh/requests/'.length),input.approve,assertAuthorized);
+          return json(res,200,{ok:true});
+        }
         if(url.pathname==='/v1/ssh/peers') {
           this.ssh.assertAdmin(peer);
           if(req.method==='GET')return json(res,200,this.ssh.peers());
