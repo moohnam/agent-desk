@@ -162,4 +162,5 @@ export interface SkillFile { path: string; size: number; executable: boolean }
 export interface Skill { name: string; description: string; files: SkillFile[]; updated_at: string; error?: string }
 
 export interface UsageWindow { label: string; usedPercent: number | null; resetsAt: string | null }
-export interface EngineUsage { engine: EngineName; plan: string | null; windows: UsageWindow[]; error?: string; fetchedAt: string }
+export type EngineAuth = 'authenticated' | 'signed-out' | 'unknown';
+export interface EngineUsage { engine: EngineName; plan: string | null; windows: UsageWindow[]; error?: string; fetchedAt: string; auth?: EngineAuth }

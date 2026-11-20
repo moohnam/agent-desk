@@ -44,9 +44,12 @@ function UsageRows({ reading }: { reading: UsageReading | undefined }) {
   if (!reading) return <p className="muted small" role="status">사용량을 불러오는 중…</p>;
   if (reading.status === 'unsupported') return <p className="muted small">이 러너에서 사용량을 조회할 수 없습니다. 러너 버전과 엔진 지원 여부를 확인하세요.</p>;
   const usage = reading.value;
+  const auth = reading.auth ?? (reading.status === 'ready' ? usage?.auth : undefined);
   const notice = reading.status === 'offline' ? '러너 연결이 끊겼습니다.'
     : reading.status === 'error' ? reading.message ?? '사용량을 조회하지 못했습니다.' : '';
   return <>
+    {auth && <p className="muted small">Claude {auth === 'authenticated' ? '인증 설정 감지됨'
+      : auth === 'signed-out' ? '로그인 필요 · 러너의 실행 계정에서 다시 로그인하세요.' : '로그인 상태를 확인하지 못했습니다.'}</p>}
     {notice && <p className="muted small" role="status">{notice}{usage && ' 마지막 조회값을 표시합니다.'}</p>}
     {usage && <>
     <div className="model-usage-heading"><strong>사용량{usage.plan ? ` · ${usage.plan}` : ''}</strong>

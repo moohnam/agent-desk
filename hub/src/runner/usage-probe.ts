@@ -67,7 +67,7 @@ export class UsageProbe {
   accept(report: UsageReport) {
     const value = report.value;
     if (this.pending.get(value.engine)?.request.requestId !== report.requestId) return;
-    if (value.error) this.finish(value.engine, { status: 'error', message: value.error, value: this.lastSuccess.get(value.engine) });
+    if (value.error) this.finish(value.engine, { status: 'error', message: value.error, value: this.lastSuccess.get(value.engine), auth: value.auth });
     else {
       this.lastSuccess.set(value.engine, value);
       this.finish(value.engine, { status: 'ready', value });

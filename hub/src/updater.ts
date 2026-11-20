@@ -40,6 +40,10 @@ const within = (base: string, path: string) => { const rel = relative(base, path
 const persistentEnvironmentPath = (key: string) => /(?:_DB|_DIR|_FILE|_HOME|RUNNER_LOG|AGENT_DESK_UPLOADS)$/.test(key);
 /** Not for the runtimes or build commands: the launching agent session's identity and the terminal's state. */
 const SESSION_ENV = /^(CLAUDECODE$|CLAUDE_CODE_|CLAUDE_PID$|CODEX_THREAD_ID$|AI_AGENT$|GHOSTTY_|STARSHIP_|TERM_PROGRAM|XPC_|SECURITYSESSIONID$|SHLVL$|OLDPWD$|PWD$|_$)/;
+export function inheritedUpdateEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(AGENT_DESK_|RUNNER_|PORT$|HOST$)/.test(key) && !SESSION_ENV.test(key)));
+}
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; } };
 function previousBoot(at: number | undefined): boolean {
   if (at === undefined) return false;
@@ -367,7 +371,7 @@ export class UpdateWorker {
   }
   private environment(role: RuntimeRole, commit: string): NodeJS.ProcessEnv {
     const d = this.config.dataDir;
-    const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(AGENT_DESK_|RUNNER_|PORT$|HOST$)/.test(key) && !SESSION_ENV.test(key)));
+    const inherited = inheritedUpdateEnvironment();
     const env = { ...inherited, AGENT_DESK_DB: join(d, 'agent-desk.db'),
       AGENT_DESK_UPLOADS: join(d, 'uploads'), AGENT_DESK_TOKEN_FILE: join(d, 'access-token'),
       AGENT_DESK_INSTRUCTIONS_FILE: join(d, 'instructions.md'), AGENT_DESK_SKILLS_HOME: join(d, 'desk-plugin'),

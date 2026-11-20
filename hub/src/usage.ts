@@ -5,10 +5,12 @@
 //   agy     `agy -p /usage --output-format json`
 
 import { execFile, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { EngineUsage, UsageWindow } from '../../shared/api.ts';
+import type { EngineAuth, EngineUsage, UsageWindow } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { ENGINES, type EngineName } from '../../shared/compose.ts';
 
@@ -18,6 +20,7 @@ const TIMEOUT_MS = 30_000;
 /** Answers within this long reuse the last reading, unless a refresh is asked for. */
 const CACHE_MS = 60_000;
 const { codexBin: CODEX_BIN, agyBin: AGY_BIN } = config;
+const resolveSdk = createRequire(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk'));
 
 type Json = any;
 
@@ -58,7 +61,28 @@ export function claudeWindows(r: Json): UsageWindow[] {
     .filter(([k]) => r?.[k]).map(([k, label]) => ({ label, usedPercent: r[k].utilization ?? null, resetsAt: iso(r[k].resets_at) }));
 }
 
-async function claude(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
+function claudeAuth(): Promise<EngineAuth> {
+  const platform = `${process.platform}-${process.arch}`;
+  for (const variant of process.platform === 'linux' ? [platform, `${platform}-musl`] : [platform]) {
+    let manifest: string;
+    try { manifest = resolveSdk.resolve(`@anthropic-ai/claude-agent-sdk-${variant}/package.json`); }
+    catch { continue; }
+    const binary = join(dirname(manifest), process.platform === 'win32' ? 'claude.exe' : 'claude');
+    return new Promise(resolve => {
+      execFile(binary, ['auth', 'status', '--json'], { cwd: tmpdir(), timeout: 5000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+        // The CLI also emits JSON and exits with code 1 when signed out.
+        if (error && error.code !== 1) { resolve('unknown'); return; }
+        try {
+          const status = JSON.parse(stdout)?.loggedIn;
+          resolve(status === true && !error ? 'authenticated' : status === false ? 'signed-out' : 'unknown');
+        } catch { resolve('unknown'); }
+      });
+    });
+  }
+  return Promise.resolve('unknown');
+}
+
+async function claudeMeters(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
   // A session that never gets a prompt: only its control channel is used.
   const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
   const q = query({ prompt: idle, options: { cwd: tmpdir() } });
@@ -69,6 +93,14 @@ async function claude(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
   } finally {
     q.close();
   }
+}
+
+async function claude(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
+  const [auth, meters] = await Promise.all([
+    claudeAuth(),
+    claudeMeters().catch(() => ({ plan: null, windows: [], error: 'Claude 사용량을 조회하지 못했습니다.' })),
+  ]);
+  return { ...meters, auth };
 }
 
 /** Codex: each limit's primary and secondary windows. */
@@ -156,9 +188,10 @@ export const readUsage = (refresh = false) => Promise.all(ENGINES.map((e) => rea
 
 /** Only normalized meter data crosses runner boundaries. Provider errors can contain local details. */
 export async function readRunnerUsage(engine: EngineName, refresh: boolean): Promise<EngineUsage> {
-  const { plan, windows, error, fetchedAt } = await readEngineUsage(engine, refresh);
+  const { plan, windows, error, fetchedAt, auth } = await readEngineUsage(engine, refresh);
   return {
     engine, fetchedAt, plan: typeof plan === 'string' ? plan.slice(0, 100) : null,
+    ...(auth ? { auth } : {}),
     ...(error ? { error: '엔진의 사용량을 조회하지 못했습니다. 러너의 CLI 설치와 로그인 상태를 확인하세요.' } : {}),
     windows: windows.slice(0, 40).map(window => ({
       label: typeof window.label === 'string' ? window.label.slice(0, 140) : '한도',

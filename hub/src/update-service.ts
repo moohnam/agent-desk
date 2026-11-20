@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateMode, UpdateSummary, UpdateView } from '../../shared/update.ts';
 import { HttpError } from './errors.ts';
+import { launchGuiUpdate } from './gui-update.ts';
 import { assertTrustedPath } from './trusted-path.ts';
 import { openRuntimeLog } from './runtime-log.ts';
 import { readUpdateConfig, UpdateWorker, type UpdateApproval, type UpdateConfig } from './updater.ts';
@@ -67,21 +68,24 @@ export class UpdateService {
     this.ciPassed = options.ciPassed ?? updateCiPassed;
     this.workerFactory = options.worker ?? (config => new UpdateWorker(config));
     this.runCheck = options.runCheck ?? (async path => { await exec(process.execPath, [CLI, 'check', path], { timeout: 20 * 60_000, maxBuffer: 64 * 1024 }); });
-    this.launchApproval = options.launchApproval ?? ((path, token) => new Promise((resolve, reject) => {
-      // The worker must outlive this hub while replacing it. No shell or service edits; its output
-      // goes to the data directory's update logs, where a failed switch can be read up afterwards.
-      const dir = join(readUpdateConfig(path).dataDir, 'update-logs');
-      const file = join(dir, 'worker.log');
-      assertTrustedPath(dir, { kind: 'directory', allowMissing: true });
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      assertTrustedPath(file, { kind: 'file', private: true, allowMissing: true });
-      const log = openRuntimeLog(file);
-      try {
-        const child = spawn(process.execPath, [CLI, 'apply', path, token], { detached: true, stdio: ['ignore', log, log] });
-        child.once('error', reject);
-        child.once('spawn', () => { child.unref(); resolve(); });
-      } finally { closeSync(log); }
-    }));
+    this.launchApproval = options.launchApproval ?? (async (path,token) => {
+      if (await launchGuiUpdate(path,token)) return;
+      return new Promise((resolve, reject) => {
+        // The worker must outlive this hub while replacing it. No shell or service edits; its output
+        // goes to the data directory's update logs, where a failed switch can be read up afterwards.
+        const dir = join(readUpdateConfig(path).dataDir, 'update-logs');
+        const file = join(dir, 'worker.log');
+        assertTrustedPath(dir, { kind: 'directory', allowMissing: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        assertTrustedPath(file, { kind: 'file', private: true, allowMissing: true });
+        const log = openRuntimeLog(file);
+        try {
+          const child = spawn(process.execPath, [CLI, 'apply', path, token], { detached: true, stdio: ['ignore', log, log] });
+          child.once('error', reject);
+          child.once('spawn', () => { child.unref(); resolve(); });
+        } finally { closeSync(log); }
+      });
+    });
   }
 
   private discover(config: UpdateConfig, refreshLatest = false) {
