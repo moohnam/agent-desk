@@ -15,15 +15,11 @@ function closeOnEscape(event: KeyboardEvent<HTMLFormElement>, close: () => void)
   if (!event.repeat) close();
 }
 
-function noteKey(event: globalThis.KeyboardEvent, leave: boolean, submit: () => Promise<void>, close: () => void) {
+function noteKey(event: globalThis.KeyboardEvent, submit: () => Promise<void>) {
   if (imeKey(event) || event.defaultPrevented) return;
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     if (!event.repeat) void submit();
-  } else if (event.key === 'Escape' && leave && !event.metaKey && !event.ctrlKey && !event.altKey) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!event.repeat) close();
   }
 }
 
@@ -71,7 +67,7 @@ export function NoteReply({ task, inputRef, onError, onSend, onEscape, onBeforeR
     onKeyDown={(event) => closeOnEscape(event, onEscape)}>
     <ResizableEditor inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}>{({ id, rows }) => <div className="cmp-field">
       <EditorInput id={id} rows={rows} inputRef={inputRef} value={text} label="메모 글" placeholder="메모를 작성하세요"
-        onChange={edit} onKey={(event, mode) => noteKey(event, mode.leave, submit, onEscape)} />
+        onChange={edit} onKey={(event) => noteKey(event, submit)} />
     </div>}</ResizableEditor>
     <div className="reply-tools">
       <span><kbd>⌘</kbd><kbd>↵</kbd> 게시</span><span className="spacer" />
@@ -81,20 +77,38 @@ export function NoteReply({ task, inputRef, onError, onSend, onEscape, onBeforeR
 }
 
 export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: () => void; onError?: (message: string) => void }) {
-  const [text, setText] = useState(() => String(post.event.payload.text ?? ''));
+  const saved = String(post.event.payload.text ?? '');
+  const key = `note-edit:${post.taskId}:${post.id}`;
+  const [text, setText] = useState(() => getDraft<string>(key) ?? saved);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<DeskInput>(null);
   const saving = useRef(false);
+  const edit = (value: string) => {
+    setText(value);
+    setDraft(key, value, { taskId: post.taskId, empty: value === saved });
+  };
+  const discard = () => setDraft(key, null, { empty: true });
+  const cancel = () => {
+    if (saving.current) return;
+    if (text !== saved && !window.confirm('저장하지 않은 메모 변경을 버릴까요?')) return;
+    discard();
+    onClose();
+  };
   const submit = async () => {
     if (saving.current || !text.trim()) return;
-    if (text === post.event.payload.text) { onClose(); return; }
+    if (text === saved) { discard(); onClose(); return; }
     saving.current = true;
     setBusy(true);
+    const submitted = getDraft(key);
+    const finish = () => {
+      if (getDraft(key) === submitted) discard();
+      onClose();
+    };
     try {
       await api.editNote(post.taskId, post.id, text);
-      onClose();
+      finish();
     } catch (error) {
-      if (error instanceof SharedPending) onClose();
+      if (error instanceof SharedPending) finish();
       onError?.(error instanceof Error ? error.message : String(error));
     } finally {
       saving.current = false;
@@ -103,14 +117,14 @@ export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: ()
   };
 
   return <form onSubmit={(event) => { event.preventDefault(); void submit(); }}
-    onKeyDown={(event) => closeOnEscape(event, () => { if (!busy) onClose(); })}>
+    onKeyDown={(event) => closeOnEscape(event, cancel)}>
     <ResizableEditor inputRef={inputRef} rows={4} resizeFrom="bottom">{({ id, rows }) => <div className="cmp-field">
       <EditorInput id={id} rows={rows} inputRef={inputRef} autoFocus value={text} disabled={busy} label="메모 글 수정"
-        onChange={setText} onKey={(event, mode) => noteKey(event, mode.leave, submit, onClose)} />
+        onChange={edit} onKey={(event) => noteKey(event, submit)} />
     </div>}</ResizableEditor>
     <div className="reply-tools">
       <span className="spacer" />
-      <button className="btn" type="button" disabled={busy} onClick={onClose}>취소</button>
+      <button className="btn" type="button" disabled={busy} onClick={cancel}>취소</button>
       <button className="btn primary" type="submit" disabled={busy || !text.trim()}>저장</button>
     </div>
   </form>;

@@ -5,6 +5,7 @@ import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { flushSync } from 'react-dom';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
 import { AccessDialog, AccessRequests } from './AccessDialog.tsx';
@@ -142,6 +143,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const composeRef = useRef<DeskInput>(null);
   const replyRef = useRef<DeskInput>(null);
+  const focusDrawer = useRef(false);
   const [noteAttachment, setNoteAttachment] = useState<NoteContext[number]>();
   const pendingDelete = useRef(0);
   const pendingNoteDelete = useRef<{ postId: number; at: number } | null>(null);
@@ -221,13 +223,22 @@ export function App() {
   }, [flash]);
 
   const setDrawer = (open: boolean) => {
+    if (!open) focusDrawer.current = false;
     setDrawerState(open);
     try { localStorage.setItem(DRAWER_KEY, open ? '1' : '0'); } catch { /* ignore */ }
   };
   const openDrawer = () => {
+    if (drawer && composeRef.current) composeRef.current.focus();
+    else focusDrawer.current = true;
     setDrawer(true);
-    requestAnimationFrame(() => composeRef.current?.focus());
   };
+  useLayoutEffect(() => {
+    if (!drawer || !focusDrawer.current) return;
+    focusDrawer.current = false;
+    const input = composeRef.current;
+    input?.focus();
+    if (input && 'value' in input) input.setSelectionRange(input.value.length, input.value.length);
+  }, [drawer]);
 
   const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, loadEarlier }
     = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced);
@@ -968,9 +979,12 @@ export function App() {
       else setToast(EXTERNAL_NOTE);
       return;
     }
-    openThread(taskId, { from });
-    // The reply box mounts with the thread column; wait a frame for it.
-    requestAnimationFrame(() => requestAnimationFrame(() => replyRef.current?.focus()));
+    if (hub.gone.has(taskId)) return;
+    // Commit the new reply target before the next keystroke can reach the deck.
+    flushSync(() => openThread(taskId, { from }));
+    const input = replyRef.current;
+    input?.focus();
+    if (threadTask !== taskId && input && 'value' in input) input.setSelectionRange(input.value.length, input.value.length);
   };
 
   const fail = (err: unknown) => setToast(err instanceof Error ? err.message : String(err));

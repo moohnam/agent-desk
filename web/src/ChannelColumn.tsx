@@ -36,6 +36,12 @@ export function ChannelColumn({ def, channel, active, keyboardEnabled, width, sy
   const [drawn, setDrawn] = useState(40);
   const [chatOpen, setChatOpen] = useState(false);
   const reply = useRef<DeskInput>(null);
+  useLayoutEffect(() => {
+    if (!chatOpen) return;
+    const input = reply.current;
+    input?.focus();
+    if (input && 'value' in input) input.setSelectionRange(input.value.length, input.value.length);
+  }, [chatOpen]);
   const sourcesKey = `channel-sources:${id}`;
   const [picked, setPicked] = useState(() => new Map(getDraft<[number, string][]>(sourcesKey) ?? []));
   const [sourceRevision, setSourceRevision] = useState(0);
@@ -48,8 +54,8 @@ export function ChannelColumn({ def, channel, active, keyboardEnabled, width, sy
   };
   const openChat = (entry?: ChannelEntry) => {
     if (entry) { if (!picked.has(entry.id) && picked.size >= CHANNEL_CONTEXT_MAX_ENTRIES) { onError(`자료는 최대 ${CHANNEL_CONTEXT_MAX_ENTRIES}개까지 선택할 수 있습니다.`); return; } pickSource(entry, true); }
+    if (chatOpen) reply.current?.focus();
     setChatOpen(true);
-    requestAnimationFrame(() => reply.current?.focus());
   };
   const feed = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);

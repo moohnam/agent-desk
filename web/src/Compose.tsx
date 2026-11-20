@@ -464,6 +464,12 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
     } finally { setBusy(false); }
   };
   const example = (s: string) => {
+    const input = inputRef.current;
+    if (input && 'replaceRange' in input) {
+      input.replaceRange(0, editorText(text).length, s);
+      input.focus();
+      return;
+    }
     editText(s);
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(s.length, s.length); });
   };
@@ -658,7 +664,10 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onE
     const message = q.scheduled_at ? scheduledReplyDraft(q.scheduled_at, q.text) : q.text;
     const next = text.trim() ? `${message}\n${text}` : message;
     setDraft(draftKey, { text: next, pick }, { taskId: task.id, empty: false });
-    setText(next); setSent(null);
+    const input = inputRef.current;
+    if (input && 'replaceRange' in input) input.replaceRange(0, editorText(text).length, next);
+    else setText(next);
+    setSent(null);
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(message.length, message.length); });
     try { await api.cancelQueued(task.id, q.id); }
     catch (e) {

@@ -23,7 +23,20 @@ function fixtureServer() {
         return;
       }
       if (url.pathname.startsWith('/api/')) {
-        const body = url.pathname === '/api/tasks/t0/events' ? { events: [], more: false } : fixture(url);
+        const layout = request.headers['x-desk-fixture'];
+        const note = layout === 'note';
+        const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
+        let body = fixture(url);
+        if (note && url.pathname === '/api/state') body.tasks = body.tasks.map(task => ({ ...task, kind: 'note' }));
+        if (layout === 'channel') {
+          const channel = { id: 'news', name: '테스트 채널', source: 'push', enabled: true, read_through_id: 0, latest_entry_id: 1, unread_count: 1 };
+          if (url.pathname === '/api/state') body.channels = [channel];
+          if (url.pathname === '/api/channels') body = [channel];
+          if (url.pathname === '/api/channels/news/entries') body = { entries: [], more: false, total: 0 };
+        }
+        if (route?.[2] === 'events') body = { events: note ? [{ id: 300, task_id: route[1], kind: 'user',
+          ts: '2026-01-01T00:00:00Z', payload: { text: '저장된 메모' } }] : [], more: false };
+        if (route?.[2] === 'messages' && request.method === 'POST') body = { task_id: route[1] };
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify(body ?? {}));
         return;
@@ -39,8 +52,8 @@ function fixtureServer() {
   });
 }
 
-async function text(page) {
-  return page.$eval(input, element => [...element.querySelectorAll('.cm-line')].map(line => {
+async function text(page, selector = input) {
+  return page.$eval(selector, element => [...element.querySelectorAll('.cm-line')].map(line => {
     const copy = line.cloneNode(true);
     copy.querySelector('.cm-placeholder')?.remove();
     return copy.textContent.replace(/\u200b/g, '');
@@ -78,20 +91,20 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     const executablePath = process.env.CHROME_BIN ?? (process.platform === 'darwin'
       ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome');
     browser = await puppeteer.launch({ executablePath, headless: true, pipe: true, args: ['--disable-background-networking'] });
-    const withPage = async (callback, emulateWebKit = false) => {
+    const withPage = async (callback, emulateWebKit = false, editorMode = 'vim') => {
       const context = await browser.createBrowserContext();
       try {
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
-        await page.evaluateOnNewDocument(emulateWebKit => {
-          localStorage.setItem('agent-desk.editor-mode', 'vim');
+        await page.evaluateOnNewDocument(({ emulateWebKit, editorMode }) => {
+          localStorage.setItem('agent-desk.editor-mode', editorMode);
           if (emulateWebKit) Object.defineProperty(navigator, 'userAgent', { value: 'Mozilla/5.0 AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15' });
-        }, emulateWebKit);
+        }, { emulateWebKit, editorMode });
         await callback(page);
       } finally { await context.close(); }
     };
 
-    await t.test('cold loading does not edit the draft and remembers Escape', () => withPage(async page => {
+    await t.test('cold loading retains initial input and remembers Escape', () => withPage(async page => {
       let ready;
       const importRequest = new Promise(resolve => { ready = resolve; });
       await page.setRequestInterception(true);
@@ -104,14 +117,150 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       const request = await importRequest;
       await page.focus(textarea);
       try {
+        assert.equal(await page.$eval(textarea, element => element.readOnly), false);
+        await page.keyboard.type('initial');
+        await page.keyboard.press('Escape');
         assert.equal(await page.$eval(textarea, element => element.readOnly), true);
         await page.keyboard.type('unwanted');
-        assert.equal(await page.$eval(textarea, element => element.value), '');
-        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval(textarea, element => element.value), 'initial');
       } finally { await request.continue(); }
       await expectMode(page, '일반');
       assert.equal(await page.$eval(input, element => element === document.activeElement), true);
+      assert.equal(await text(page), 'initial');
+    }));
+
+    for (const [layout, opener, area] of [['reply', 'r', '.reply-box'], ['drawer', 'i', '.compose'],
+      ['note', 'r', '.reply-box'], ['channel', 'r', '.channel-chat-compose']]) {
+      await t.test(`Vim Escape switches mode first and returns focus without closing (${layout})`, () => withPage(async page => {
+        const requests = [];
+        page.on('request', request => { if (request.method() !== 'GET') requests.push(request.url()); });
+        await page.setExtraHTTPHeaders({ 'x-desk-fixture': layout });
+        if (layout === 'channel') await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2',
+          JSON.stringify([{ id: 'news-col', title: '테스트 채널', filter: {}, channelId: 'news' }])));
+        await page.goto(origin, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector(layout === 'channel' ? 'section[data-col="news-col"] button[role="tab"]' : '[data-post]');
+        if (layout === 'channel') await page.click('section[data-col="news-col"] header');
+        await page.keyboard.press(opener);
+        const field = `${area} [data-desk-input]`;
+        await page.waitForSelector(field);
+        assert.equal(await page.$eval(field, element => element === document.activeElement), true);
+        await page.keyboard.press('Escape');
+        await page.$eval(field, element => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape',
+          bubbles: true, cancelable: true, repeat: true })));
+        assert.equal(await page.$eval(field, element => element === document.activeElement), true);
+        for (const key of ['s', 'Escape', 'y', 'd', 'd', 'D', 'D']) await page.keyboard.press(key);
+        assert.equal(await page.$eval(field, element => element === document.activeElement), true);
+        assert.deepEqual(requests, []);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval(field, element => element === document.activeElement), true);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval(field, element => element === document.activeElement), false);
+        if (layout !== 'channel') {
+          await page.keyboard.press('?');
+          await page.waitForSelector('[role="dialog"][aria-label="단축키"]');
+        }
+      }));
+    }
+
+    for (const editorMode of ['vim', 'emacs']) {
+      await t.test(`opening an editor by key accepts the next character (${editorMode})`, () => withPage(async page => {
+        await page.goto(origin, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-post]');
+        for (const [open, region] of [['r', '.reply-box'], ['i', '.compose']]) {
+          await page.keyboard.press(open);
+          await page.keyboard.type('first');
+          await page.waitForFunction(region => {
+            const input = document.querySelector(`${region} [data-desk-input], ${region} textarea`);
+            return input && (input.value ?? input.textContent) === 'first';
+          }, {}, region);
+          if (open === 'r') await page.click('[aria-label="스레드 닫기"]');
+        }
+      }, false, editorMode));
+    }
+
+    await t.test('memo cancellation confirms dirty edits and Emacs reply Escape goes back once', () => withPage(async page => {
+      await page.setViewport({ width: 525, height: 880 });
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note' });
+      await page.evaluateOnNewDocument(() => {
+        window.backCalls = 0;
+        const back = history.back.bind(history);
+        history.back = () => { window.backCalls++; back(); };
+      });
+      await openReply(page, origin);
+      await page.waitForSelector('[data-note-action="edit"]');
+      await page.click('[data-note-action="edit"]');
+      const item = 'textarea[aria-label="메모 글 수정"]';
+      await page.waitForSelector(item);
+      await page.keyboard.type(' 수정');
+      const dialogClosed = new Promise(resolve => page.once('dialog', dialog => { void dialog.dismiss().then(resolve); }));
+      await page.keyboard.press('Escape');
+      await dialogClosed;
+      assert.match(await page.$eval(item, element => element.value), /수정/);
+      await page.click('[aria-label="스레드 닫기"]');
+      await page.waitForSelector(textarea, { hidden: true });
+      await page.evaluate(() => { document.activeElement?.blur(); });
+      await page.keyboard.press('r');
+      await page.waitForSelector('[data-note-action="edit"]');
+      await page.click('[data-note-action="edit"]');
+      await page.waitForSelector(item);
+      assert.match(await page.$eval(item, element => element.value), /수정/);
+      const dialogueAccepted = new Promise(resolve => page.once('dialog', dialog => { void dialog.accept().then(resolve); }));
+      await page.keyboard.press('Escape');
+      await dialogueAccepted;
+      await page.waitForSelector(item, { hidden: true });
+      await page.evaluate(() => { window.backCalls = 0; });
+      await page.focus(textarea);
+      await page.keyboard.press('Escape');
+      await page.waitForSelector(textarea, { hidden: true });
+      assert.equal(await page.evaluate(() => window.backCalls), 1);
+    }, false, 'emacs'));
+
+    await t.test('insert undo/redo works and a sent draft cannot be restored', () => withPage(async page => {
+      await openReply(page, origin);
+      await expectMode(page, '입력');
+      const mod = await page.evaluate(() => /Mac/.test(navigator.platform) ? 'Meta' : 'Control');
+      const press = async (key, shift = false) => {
+        await page.keyboard.down(mod);
+        if (shift) await page.keyboard.down('Shift');
+        await page.keyboard.press(key);
+        if (shift) await page.keyboard.up('Shift');
+        await page.keyboard.up(mod);
+      };
+      await page.keyboard.type('draft');
+      await press('z');
       assert.equal(await text(page), '');
+      await press('z', true);
+      assert.equal(await text(page), 'draft');
+      await press('Enter');
+      await page.waitForFunction(selector => !document.querySelector(`${selector} .cm-line`)?.innerText.replace(/\n/g, '').trim() ||
+        !!document.querySelector(`${selector} .cm-placeholder`), {}, input);
+      await press('z');
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('u');
+      assert.equal(await text(page), '');
+    }));
+
+    await t.test('Vim can undo a chosen example but cannot revive a draft replaced by another tab', () => withPage(async page => {
+      await page.goto(origin, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-post]');
+      await page.keyboard.press('i');
+      const field = '.compose [data-desk-input]';
+      await page.waitForSelector(field);
+      await page.keyboard.type('original');
+      await page.click('.compose .examples button');
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('u');
+      assert.equal(await text(page, field), 'original');
+      await page.waitForFunction(() => JSON.parse(localStorage.getItem('agent-desk.drafts.v1') ?? '{}').drawer?.value === 'original');
+      await page.evaluate(() => {
+        const key = 'agent-desk.drafts.v1';
+        const newValue = JSON.stringify({ drawer: { value: 'from another tab', at: Date.now() } });
+        localStorage.setItem(key, newValue);
+        dispatchEvent(new StorageEvent('storage', { key, newValue }));
+      });
+      await page.waitForFunction(selector => document.querySelector(selector)?.textContent === 'from another tab', {}, field);
+      await page.keyboard.press('u');
+      assert.equal(await text(page, field), 'from another tab');
     }));
 
     await t.test('normal, visual and literal argument modes reject unhandled DOM edits', () => withPage(async page => {

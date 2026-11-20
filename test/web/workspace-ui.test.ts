@@ -360,17 +360,17 @@ test('loading Vim keeps a focused draft intact and carries Escape into normal mo
     './editorMode.ts': { useEditorMode: () => 'vim' }, './VimInput.tsx': { VimInput },
   }, { document });
   const inputRef = { current: null };
-  let edits = 0, exits = 0, sends = 0;
+  let edits = 0, exits = 0, sends = 0, blurs = 0;
   const render = () => h.render(() => EditorInput({
     inputRef, id: 'reply', rows: 2, value: native.value,
     onChange: () => { edits++; }, onKey: (e: KeyboardEvent) => { if (e.key === 'Enter') sends++; else exits++; },
   }));
   const textarea = render().props.children[0].props;
-  assert.equal(textarea.readOnly, true);
+  assert.equal(textarea.readOnly, false);
   textarea.ref(native);
   assert.equal(inputRef.current, native);
   textarea.onChange({ target: { value: 'accidental edit', selectionStart: 2 } });
-  assert.equal(edits, 0);
+  assert.equal(edits, 1);
   textarea.onKeyDown({ key: 'Enter', metaKey: true, nativeEvent: { key: 'Enter' } });
   assert.equal(sends, 1);
   let blocked = 0;
@@ -379,6 +379,14 @@ test('loading Vim keeps a focused draft intact and carries Escape into normal mo
     preventDefault() { blocked++; }, stopPropagation() { blocked++; },
   });
   assert.equal(blocked, 2);
+  assert.equal(exits, 0);
+  const normal = render().props.children[0].props;
+  assert.equal(normal.readOnly, true);
+  normal.onChange({ target: { value: 'blocked', selectionStart: 2 } });
+  assert.equal(edits, 1);
+  normal.onKeyDown({ key: 'Escape', nativeEvent: { key: 'Escape' }, currentTarget: { blur() { blurs++; } },
+    preventDefault() {}, stopPropagation() {} });
+  assert.equal(blurs, 1);
   assert.equal(exits, 0);
   await new Promise<void>(resolve => setImmediate(resolve));
   const editor = render();
@@ -398,7 +406,7 @@ test('note forms keep IME Escape local and close once on the next plain Escape',
     const { [name]: component } = load('Note.tsx', {
       react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, './api.ts': { api: {} },
       './Compose.tsx': { ResizableEditor: () => null },
-      './drafts.ts': { getDraft: () => ({ text: 'draft' }), setDraft() {}, useDraftSync() {} },
+      './drafts.ts': { getDraft: (key: string) => key.startsWith('reply:') ? { text: 'draft' } : undefined, setDraft() {}, useDraftSync() {} },
       './workspace.ts': {},
     });
     let closed = 0;

@@ -570,7 +570,7 @@ textarea.input { resize: none; }
   .reply-box { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
   .reply-tools > span:has(kbd) { display: none; }
   /* iOS zooms into inputs with text under 16px. */
-  textarea, input, select { font-size: 16px !important; }
+  textarea, input, select, .vim-host > .cm-editor { font-size: 16px !important; }
   .overlay { padding: 6vh 8px 8px; }
   .dialog.wide { max-height: 92dvh; }
 }
@@ -763,7 +763,7 @@ textarea.input { resize: none; }
 .vim-host > .cm-editor.cm-focused {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
-.vim-host .cm-scroller { min-height: 0; font-family: inherit; }
+.vim-host .cm-scroller { min-height: 0; font-family: inherit; line-height: inherit; }
 .vim-host .cm-content { padding-block: 0; }
 .vim-host .cm-line { padding-inline: 9px; }
 .cmp-field:has(.attach) .vim-host .cm-line { padding-right: 30px; }

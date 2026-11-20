@@ -47,7 +47,8 @@ export function EditorInput(props: EditorProps) {
   const [failed, setFailed] = useState(false);
   const [composing, setComposing] = useState(false);
   const composingNow = useRef(false);
-  const startInInsert = useRef(true);
+  const [startInInsert, setStartInInsert] = useState(true);
+  const escapeArmed = useRef(false);
   const native = useRef<HTMLTextAreaElement>(null);
   const handoff = useRef<{ focused: boolean; start: number; end: number }>(undefined);
   const attach = useCallback((element: HTMLTextAreaElement | null) => {
@@ -67,7 +68,7 @@ export function EditorInput(props: EditorProps) {
     }
   }, [inputRef]);
   useEffect(() => {
-    if (!vim) { setLoaded(undefined); setFailed(false); startInInsert.current = true; handoff.current = undefined; return; }
+    if (!vim) { setLoaded(undefined); setFailed(false); setStartInInsert(true); escapeArmed.current = false; handoff.current = undefined; return; }
     if (composing || Loaded) return;
     let active = true;
     void loadVim().then(component => {
@@ -79,31 +80,35 @@ export function EditorInput(props: EditorProps) {
     return () => { active = false; };
   }, [vim, composing, Loaded]);
   const showVim = vim && !!Loaded;
-  const pending = vim && !failed && !composing;
-  useEffect(() => { if (!showVim) onMode?.(!pending); }, [showVim, pending, onMode]);
-  if (showVim) return <Loaded {...props} handoff={handoff.current} startInInsert={startInInsert.current} />;
+  const pending = vim && !failed;
+  const readOnly = pending && !startInInsert && !composing;
+  useEffect(() => { if (!showVim) onMode?.(!readOnly); }, [showVim, readOnly, onMode]);
+  if (showVim) return <Loaded {...props} handoff={handoff.current} startInInsert={startInInsert} startEscapeArmed={escapeArmed.current} />;
 
   return <>
     <textarea id={props.id} className="input" ref={attach} rows={props.rows} value={props.value} aria-label={props.label}
-      placeholder={props.placeholder} disabled={props.disabled} readOnly={pending} autoFocus={props.autoFocus}
-      onChange={e => { if (!pending) props.onChange(e.target.value, e.target.selectionStart); }}
+      placeholder={props.placeholder} disabled={props.disabled} readOnly={readOnly} autoFocus={props.autoFocus}
+      onChange={e => { if (!readOnly) props.onChange(e.target.value, e.target.selectionStart); }}
       onSelect={e => props.onSelect?.(e.currentTarget.selectionStart)}
-      onFocus={props.onFocus} onBlur={props.onBlur}
+      onFocus={props.onFocus} onBlur={() => { escapeArmed.current = false; props.onBlur?.(); }}
+      onPointerDown={() => { escapeArmed.current = false; }}
       onCompositionStart={() => { composingNow.current = true; setComposing(true); }}
       onCompositionEnd={() => { composingNow.current = false; setComposing(false); }}
       onKeyDown={e => {
         if (!pending) { props.onKey?.(e.nativeEvent, { insert: true, leave: true }); return; }
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-          props.onKey?.(e.nativeEvent, { insert: false, leave: false });
+        const escape = e.key === 'Escape' || (e.code === 'Escape' && imeKey(e.nativeEvent));
+        if (escape && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+          const plain = !imeKey(e.nativeEvent) && !composingNow.current;
+          if (!e.repeat) {
+            if (!startInInsert && escapeArmed.current && plain) e.currentTarget.blur();
+            else { escapeArmed.current = true; setStartInInsert(false); }
+          }
+          if (plain) e.preventDefault();
+          e.stopPropagation();
           return;
         }
-        if (e.key !== 'Escape' || imeKey(e.nativeEvent) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-        if (!e.repeat) {
-          if (startInInsert.current) startInInsert.current = false;
-          else props.onKey?.(e.nativeEvent, { insert: false, leave: true });
-        }
-        e.preventDefault();
-        e.stopPropagation();
+        escapeArmed.current = false;
+        props.onKey?.(e.nativeEvent, { insert: !readOnly, leave: false });
       }} />
     {vim && <div className="editor-mode muted small" role="status">{failed ? 'Vim 편집기를 불러오지 못했습니다. 기본 입력창을 사용 중입니다.' : 'Vim 편집기를 불러오는 중입니다.'}</div>}
   </>;

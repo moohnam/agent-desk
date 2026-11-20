@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Annotation, Compartment, EditorState, Prec, Transaction, type Text } from '@codemirror/state';
-import { EditorView, drawSelection, placeholder } from '@codemirror/view';
-import { history } from '@codemirror/commands';
+import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
+import { history, historyKeymap, isolateHistory } from '@codemirror/commands';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 import { editorText, type DeskInput, type EditorProps } from './EditorInput.tsx';
 import { imeKey, latinKey } from './keys.ts';
@@ -27,7 +27,7 @@ function sameImeText(stroke: CommandStroke | undefined, text: string | null): st
     (text === stroke.key || koreanLetter(text)?.toLowerCase() === stroke.key.toLowerCase());
 }
 
-export function VimInput(props: EditorProps & { handoff?: { focused: boolean; start: number; end: number }; startInInsert: boolean }) {
+export function VimInput(props: EditorProps & { handoff?: { focused: boolean; start: number; end: number }; startInInsert: boolean; startEscapeArmed: boolean }) {
   const { inputRef, disabled = false, label, placeholder: hint } = props;
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -35,10 +35,12 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
   latest.current = props;
   const sent = useRef(props.value);
   const settings = useRef(new Compartment());
+  const editHistory = useRef(new Compartment());
   const nativeInput = useRef(new Compartment());
   const compositionEnd = useRef(-Infinity);
   const exitAfterComposition = useRef(false);
   const settlingEscape = useRef<{ text?: string }>(undefined);
+  const escapeArmed = useRef(props.startEscapeArmed);
   const resumeInsert = useRef<{ doc: Text; normal: number; insert: number }>(undefined);
   const heldCommands = useRef(new Map<string, CommandStroke>());
   const lastImeCommand = useRef<CommandStroke>(undefined);
@@ -74,7 +76,8 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         doc,
         selection: { anchor: Math.min(start, doc.length), head: Math.min(end, doc.length) },
         extensions: [
-          vim(), drawSelection(), history(), EditorView.lineWrapping, EditorState.allowMultipleSelections.of(true),
+          vim(), drawSelection(), editHistory.current.of(history()), keymap.of(historyKeymap),
+          EditorView.lineWrapping, EditorState.allowMultipleSelections.of(true),
           settings.current.of(config()),
           // The browser must not maintain a composing text input in command mode.
           // Vim commands can still edit the document through CodeMirror transactions.
@@ -167,7 +170,8 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       const length = editor.state.doc.length;
       const start = Math.min(from, length);
       const text = editorText(insert);
-      editor.dispatch({ changes: { from: start, to: Math.min(to, length), insert: text }, selection: { anchor: start + text.length }, scrollIntoView: true });
+      editor.dispatch({ changes: { from: start, to: Math.min(to, length), insert: text }, selection: { anchor: start + text.length },
+        annotations: isolateHistory.of('full'), scrollIntoView: true });
     };
     const handle: DeskInput = {
       element: editor.contentDOM,
@@ -197,8 +201,11 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     editor.dispatch({
       changes: { from: 0, to: editor.state.doc.length, insert: doc },
       selection: { anchor: Math.min(anchor, doc.length), head: Math.min(head, doc.length) },
+      effects: editHistory.current.reconfigure([]),
       annotations: [fromDesk.of(true), Transaction.addToHistory.of(false)],
     });
+    // A send or a draft update from another window starts a new editing history.
+    editor.dispatch({ effects: editHistory.current.reconfigure(history()) });
   }, [props.value]);
   useLayoutEffect(() => {
     const editor = view.current;
@@ -234,11 +241,13 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
 
   return <div className="vim-field" data-editor-mode="vim" id={props.id}
     style={{ '--editor-rows': props.rows } as CSSProperties}
+    onPointerDown={() => { escapeArmed.current = false; }}
     onFocus={e => { if (!e.currentTarget.contains(e.relatedTarget)) props.onFocus?.(); }}
     onBlur={e => {
       if (!e.currentTarget.contains(e.relatedTarget)) {
         exitAfterComposition.current = false;
         settlingEscape.current = undefined;
+        escapeArmed.current = false;
         resumeInsert.current = undefined;
         heldCommands.current.clear();
         lastImeCommand.current = undefined;
@@ -278,6 +287,8 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       const event = e.nativeEvent;
       const escape = (e.key === 'Escape' || (e.code === 'Escape' && imeKey(event))) &&
         !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+      const secondEscape = escape && escapeArmed.current;
+      if (!escape || !e.repeat) escapeArmed.current = false;
       // WebKit may send the IME confirmation key immediately after compositionend.
       const recentComposition = webkit && performance.now() - compositionEnd.current < 100;
       const hasPhysicalLetter = /^Key[A-Z]$/.test(event.code);
@@ -310,10 +321,11 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         if (imeLetter) lastImeCommand.current = stroke;
       }
       if (escape && state?.insertMode && editor.compositionStarted) {
-        if (!e.repeat) exitAfterComposition.current = true;
+        if (!e.repeat) { exitAfterComposition.current = true; escapeArmed.current = true; }
         e.stopPropagation();
         return;
       }
+      if (escape && e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
       if (e.key === 'Enter' && (imeKey(event) || editor.compositionStarted ||
         recentComposition)) { e.stopPropagation(); return; }
       if (escape && cm && state?.insertMode && !e.repeat) {
@@ -322,6 +334,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         if (recentComposition || /\p{Script=Hangul}/u.test(before)) {
           props.onKey?.(event, { insert: true, leave: false });
           if (!event.defaultPrevented) {
+            escapeArmed.current = true;
             if (recentComposition) leaveAfterComposition(editor);
             else leaveAfterIme(editor);
           }
@@ -332,6 +345,13 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       }
       if (e.key === 'Escape' && (imeKey(event) || editor.compositionStarted ||
         recentComposition)) { e.stopPropagation(); return; }
+      if (secondEscape && state && !state.insertMode && !state.visualMode && !state.exMode && !cm?.state.dialog &&
+          !pending?.operator && !pending?.registerName && !pending?.keyBuffer.length && !pending?.prefixRepeat.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.contentDOM.blur();
+        return;
+      }
       const resume = resumeInsert.current;
       if (resume && cm && !state?.insertMode && e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
         resumeInsert.current = undefined;
@@ -354,9 +374,8 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         syncNativeInput(editor);
         return;
       }
-      const leave = !!state && !state.insertMode && !state.visualMode && !state.exMode &&
-        !pending?.operator && !pending?.registerName && !pending?.keyBuffer.length && !pending?.prefixRepeat.length;
-      props.onKey?.(e.nativeEvent, { insert: !!state?.insertMode, leave });
+      props.onKey?.(e.nativeEvent, { insert: !!state?.insertMode, leave: false });
+      if (escape && !e.defaultPrevented) escapeArmed.current = true;
     }}>
     <div className="vim-host" ref={host} />
     <div className="editor-mode muted small" role="status">Vim · {labels[mode] ?? labels.normal} 모드</div>
