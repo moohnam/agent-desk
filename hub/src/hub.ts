@@ -328,6 +328,14 @@ export class Hub extends DeskCore {
       this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나');
       if (!this.store.origins.stopped(r.id)) this.dropQueue(r.id, r.task_id, '세션이 종료되어', true);
     }
+    // A completed turn is not in Store.reconcile's lost set. The authoritative hello
+    // still confirms that an unacknowledged revoked session no longer exists.
+    if (!presumed) for (const id of this.store.origins.stoppingSessions()) {
+      if (ownedSession(id) && !live.has(id)) {
+        this.store.origins.stopped(id);
+        this.revokedCloseSent.delete(id);
+      }
+    }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }
@@ -1080,7 +1088,7 @@ export class Hub extends DeskCore {
     for (const id of this.store.origins.runs(peer)) {
       if (this.store.origins.stopping(id) && this.revokedCloseSent.has(id)) continue;
       const session=this.store.getSession(id);
-      if (!session || !(this.busy.has(id)||this.background.get(id)?.length||this.approvalPending(id))) continue;
+      if (!session || !(this.store.origins.stopping(id)||this.busy.has(id)||this.background.get(id)?.length||this.approvalPending(id))) continue;
       this.store.origins.stop(id);
       try {
         if (!this.remotes.cancelSession(id)) this.runner.handle({type:'close',sessionId:id});

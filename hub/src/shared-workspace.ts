@@ -236,7 +236,9 @@ export class SharedWorkspace {
         if (!this.localAuthority && req.method==='POST' && url.pathname==='/v1/ssh/session') {
           const b=await readBody(req,20000) as any;return json(res,200,await this.ssh.authenticateChallenge(b?.id,b?.signature));
         }
-        const peer = this.authenticate(req.headers.authorization?.match(/^Bearer (.+)$/)?.[1],true);
+        const token=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+        const peer = this.authenticate(token,true);
+        const assertAuthorized=()=>{if(this.authenticate(token,true)!==peer)throw new HttpError(401,'인증된 허브가 변경되었습니다');};
         if(this.ssh.enabled && this.isRuntime(peer) && url.pathname!=='/v1/mcp')throw new HttpError(403,'실행 엔진 전용 인증입니다');
         if (req.method === 'GET' && url.pathname === '/v1/identity') {
           const migrated=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_import'").get()
@@ -252,7 +254,7 @@ export class SharedWorkspace {
         if(url.pathname==='/v1/ssh/peers') {
           this.ssh.assertAdmin(peer);
           if(req.method==='GET')return json(res,200,this.ssh.peers());
-          if(req.method==='POST')return json(res,201,await this.ssh.register(await readBody(req,20000) as any,peer));
+          if(req.method==='POST')return json(res,201,await this.ssh.register(await readBody(req,20000) as any,peer,undefined,assertAuthorized));
         }
         if(req.method==='DELETE'&&url.pathname.startsWith('/v1/ssh/peers/')) {
           this.ssh.assertAdmin(peer);const target=url.pathname.slice('/v1/ssh/peers/'.length);
@@ -264,7 +266,7 @@ export class SharedWorkspace {
           if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
           if (this.localAuthority && remoteLocation(this.hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
           const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined);
-          this.assertPeer(peer);
+          assertAuthorized();
           return json(res, 200, { path });
         }
         if(req.method==='GET'&&url.pathname.startsWith('/v1/receipts/')) {
@@ -275,7 +277,7 @@ export class SharedWorkspace {
           if (req.method === 'GET' && url.pathname === '/v1/connectors/poll') return json(res, 200, this.connectorBroker.poll(peer));
           if (req.method === 'POST') {
             const body = await readBody(req) as { callId?: string; completion?: ConnectorCompletion; callIds?: string[] };
-            this.assertPeer(peer);
+            assertAuthorized();
             if (url.pathname === '/v1/connectors/complete' && typeof body?.callId === 'string' && body.completion)
               return json(res, 200, this.connectorBroker.complete(peer, body.callId, body.completion));
             if (url.pathname === '/v1/connectors/ack' && Array.isArray(body?.callIds)) {
@@ -288,7 +290,7 @@ export class SharedWorkspace {
           return json(res,200,{hashes:peerSkillManifest(this.db,this.hub.skills,peer)});
         if (req.method === 'POST' && url.pathname === '/v1/skills/sync') {
           const input=await readBody(req,8*1024*1024) as {bundle?:SkillBundle;names?:string[]};
-          this.assertPeer(peer);
+          assertAuthorized();
           if (input?.bundle) syncSkillVersion(this.db,this.hub.skills,peer,input.bundle);
           else if (input?.names) removeAbsentSkills(this.db,this.hub.skills,peer,input.names);
           else throw new HttpError(400,'동기화할 스킬 내용 또는 명단이 없습니다');
@@ -296,7 +298,7 @@ export class SharedWorkspace {
         }
         if (req.method === 'POST' && url.pathname === '/v1/skills/prepare') {
           const input=await readBody(req,8*1024*1024) as {op_id?:string;bundle?:SkillBundle};
-          this.assertPeer(peer);
+          assertAuthorized();
           if(!input?.op_id||!input.bundle)throw new HttpError(400,'스킬 준비 명령 ID와 내용이 필요합니다');
           applySkillBundle(this.db,this.hub.skills,peer,input.op_id,input.bundle);
           return json(res,200,{ok:true});
@@ -305,15 +307,15 @@ export class SharedWorkspace {
           const action=url.pathname.slice('/v1/broker/'.length);
           if(!/^[a-z-]+$/.test(action))throw new HttpError(404,'지원하지 않는 broker 요청입니다');
           const body=await readBody(req);
-          const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{this.assertPeer(peer);return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {});}));
+          const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {});}));
           return json(res,result.status,result.body);
         }
-        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>this.assertPeer(peer)));
+        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized()));
         if (this.localAuthority && req.method === 'POST' && url.pathname.startsWith('/v1/runner-exchange/')) {
           const runnerId=decodeURIComponent(url.pathname.slice('/v1/runner-exchange/'.length));
           if (!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token'])) throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');
           const body=await readBody(req);
-          return json(res,200,this.hub.atomic(()=>{this.assertPeer(peer);
+          return json(res,200,this.hub.atomic(()=>{assertAuthorized();
             if(!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token']))throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');
             return this.hub.remotes.exchange(runnerId,body as import('../../shared/remote.ts').RemoteExchange); }));
         }
@@ -321,7 +323,7 @@ export class SharedWorkspace {
           const channelId=decodeURIComponent(url.pathname.slice('/v1/channel-ingest/'.length));
           if (!this.hub.channels.acceptsToken(channelId,req.headers['x-channel-token'] as string|undefined)) throw new HttpError(401,'이 채널의 입력 토큰이 필요합니다');
           const body=await readBody(req) as Record<string,unknown>;
-          this.assertPeer(peer);
+          assertAuthorized();
           if(!this.hub.channels.acceptsToken(channelId,req.headers['x-channel-token'] as string|undefined))throw new HttpError(401,'이 채널의 연결 토큰이 필요합니다');
           return json(res,200,this.hub.channels.ingest(channelId,body?.entries===undefined?body:body.entries));
         }
@@ -345,13 +347,15 @@ export class SharedWorkspace {
           const path = url.searchParams.get('path')!;
           if (path?.startsWith('/runner-usage') && /^\/runner-usage(?:\?|$)/.test(path)) {
             const result = await workspaceUsage(this.hub.remotes, this.localAuthority, usageQuery(new URL(path,'http://workspace').searchParams));
-            this.assertPeer(peer);
+            assertAuthorized();
             return json(res,200,result);
           }
           return json(res,200,this.read(path,peer));
         }
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
-          const result = this.execute(peer,await readBody(req,8*1024*1024));
+          const body=await readBody(req,8*1024*1024);
+          assertAuthorized();
+          const result = this.execute(peer,body);
           return json(res,result.status,result.body);
         }
         if (req.method === 'GET' && url.pathname === '/v1/stream') {

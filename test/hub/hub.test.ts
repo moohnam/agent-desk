@@ -893,7 +893,7 @@ test('revocation persists while a runner is disconnected and retries close on re
   hub.revokeInputPeer(peer.id);
   assert.equal(runner.last('close')?.sessionId,sessionId);
   const closes=runner.sent.filter(c=>c.type==='close').length;
-  runner.hello([{sessionId,busy:true,approvals:[]}]);
+  runner.hello([{sessionId,busy:false,approvals:[]}]);
   hub.revokeInputPeer(peer.id);
   assert.equal(runner.sent.filter(c=>c.type==='close').length,closes+1,'an unacknowledged close is resent after hello');
 });
@@ -915,4 +915,36 @@ test('approving another hubs agent request does not change its author',async t=>
   workspace.revoke(a.id);
   assert.equal(hub.store.queued({taskId:target.id}).length,0);
   assert.notEqual(runner.last('close')?.sessionId,hub.store.latestSession(target.id)!.id);
+});
+
+
+test('restoring an unattributed input does not inherit the timers revoked author', async t=>{
+  const {SharedWorkspace}=await import('../../hub/src/shared-workspace.ts');
+  const store=new Store(':memory:');t.after(()=>store.database.close());
+  const workspace=new SharedWorkspace(undefined,store),peer=workspace.grant('timer-author');
+  store.origins.remember('legacy-input');
+  workspace.revoke(peer.id);
+  const author={peerId:peer.id,ownerId:peer.id,ownerName:'timer',fingerprint:'test'};
+  assert.equal(store.origins.with(author,()=>store.origins.restore('legacy-input',()=>store.origins.current())),undefined);
+});
+
+
+test('a missing closed notification cannot strand other inputs after an idle revoked session disappears',async t=>{
+  const {SharedWorkspace}=await import('../../hub/src/shared-workspace.ts');
+  const {hub,runner,dir}=setup();
+  t.after(()=>{hub.dispose();hub.store.database.close();rmSync(dir,{recursive:true,force:true});});
+  const workspace=new SharedWorkspace(hub),peer=workspace.grant('A');
+  const author={peerId:peer.id,ownerId:peer.id,ownerName:'A',fingerprint:'test'};
+  const task=hub.store.origins.with(author,()=>hub.compose(`@closed:${dir} first`));
+  const sessionId=hub.store.latestSession(task.id)!.id;
+  hub.sendMessage(task.id,'preserve this input');
+  workspace.revoke(peer.id);
+  runner.say({type:'busy',sessionId,busy:false});
+  assert.equal(hub.store.getTask(task.id)?.status,'done');
+  assert.equal(hub.store.origins.stopping(sessionId),true);
+  assert.equal(hub.store.queued({taskId:task.id}).length,1);
+  runner.hello([]);
+  assert.equal(hub.store.origins.stopping(sessionId),false);
+  assert.equal(hub.store.queued({taskId:task.id}).length,0);
+  assert.match(runner.last('start')!.prompt,/preserve this input/);
 });

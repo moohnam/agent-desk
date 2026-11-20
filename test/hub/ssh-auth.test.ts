@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { request as httpRequest } from 'node:http';
+import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -91,9 +93,42 @@ test('SSH bootstrap, signatures, pinned workspace, replay, expiry, revocation an
   const reopened=new SharedWorkspace(undefined,store);
   assert.equal(reopened.ssh.identity(admin.peerId).ownerName,'남무현');
   await assert.rejects(reopened.ssh.register({name:'again',ownerName:'again',publicKey:key}),/이미 완료/);
+  // A request authenticated at the headers must not retain access while its body stalls.
+  for(const [path,body] of [
+    ['/v1/ssh/peers',{name:'late',ownerName:'late',publicKey:other}],
+    ['/v1/operation',{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@late:${dir} reject this work`}}],
+  ] as const) {
+    const fresh=await sshLogin(url,workspace.id,key,AbortSignal.timeout(10000));
+    const arriving=once(server,'request');
+    const responseReady=Promise.withResolvers<number>();
+    const slow=httpRequest(url+path,{method:'POST',headers:{...headers,authorization:`Bearer ${fresh.token}`,'content-type':'application/json'}},res=>{res.resume();res.on('end',()=>responseReady.resolve(res.statusCode!));});
+    slow.on('error',responseReady.reject);slow.write('{');
+    await arriving;
+    workspace.ssh.invalidate(admin.peerId);
+    slow.end(JSON.stringify(body).slice(1));
+    assert.equal(await responseReady.promise,401,`invalidated session cannot use ${path} after body reception`);
+  }
+  // Invalidation must also cancel verification already running outside SQLite.
+  c=workspace.ssh.challenge(admin.fingerprint,workspace.id);
+  const pendingSignature=await signWithAgent(key,c.message);
+  const pendingAuthentication=workspace.ssh.authenticateChallenge(c.id,pendingSignature);
+  workspace.ssh.invalidate(admin.peerId);
+  await assert.rejects(pendingAuthentication,/인증 정보가 변경/);
+  c=workspace.ssh.challenge(admin.fingerprint,workspace.id);
+  const staleChallengeSignature=await signWithAgent(key,c.message);
+  // A consumed challenge must carry its issued generation, not reread a newer one.
+  store.database.prepare('UPDATE ssh_challenge SET generation=0 WHERE id=?').run(c.id);
+  await assert.rejects(workspace.ssh.authenticateChallenge(c.id,staleChallengeSignature),/인증 정보가 변경/);
   // Rotating to the same public key still revokes pre-recovery sessions.
   const rotated=await workspace.ssh.rotate(admin.peerId,key);
   assert.equal(rotated.ownerId,admin.ownerId);
   assert.throws(()=>workspace.authenticate(session.token),/만료/);
+  // Even a stale insert committed after another process invalidates cannot revive access.
+  const staleToken='late-session-after-invalidation';
+  const {createHash}=await import('node:crypto');
+  store.database.prepare('INSERT INTO ssh_session(token_hash,peer_id,expires,generation) VALUES(?,?,?,?)')
+    .run(createHash('sha256').update(staleToken).digest('hex'),admin.peerId,Date.now()+60000,0);
+  assert.throws(()=>workspace.authenticate(staleToken),/만료/);
+
   assert.equal(publicKey(key).fingerprint,rotated.fingerprint);
 });
