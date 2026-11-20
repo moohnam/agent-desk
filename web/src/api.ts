@@ -38,7 +38,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   if(source) {
     await discoverSources();
     sourceIndex(source);
-    for(const key of ['before','since','ids']) {
+    for(const key of ['before','since','after','ids']) {
       const value=url.searchParams.get(key);if(value)url.searchParams.set(key,value.split(',').map(v=>String(nativeEventId(Number(v)))).join(','));
     }
   }
@@ -106,9 +106,9 @@ function remember(source:string,m:HubMessage) {
 }
 let projects:Project[]=[];
 /** Publish each workspace as it arrives; pending/offline workspaces retain their last snapshot. */
-async function state(onProgress?: (value: DeskState) => void): Promise<DeskState> {
-  await discoverSources();
-  const sources = [{ id: '', view_index: 0 }, ...getSources()];
+async function state(onProgress?: (value: DeskState) => void, scope?: string): Promise<DeskState> {
+  if (scope === undefined) await discoverSources();
+  const sources = [{ id: '', view_index: 0 }, ...getSources()].filter(source => scope === undefined || source.id === scope);
   const available = new Set<string>();
   const unavailable = new Set<string>();
   const values = new Map(sources.flatMap(source => {
@@ -120,8 +120,10 @@ async function state(onProgress?: (value: DeskState) => void): Promise<DeskState
     const local = values.get('') ?? { projects: [], tasks: [], approvals: [], questions: [], channels: [], runner: { connected: false } };
     const current = sources.filter(source => !source.id || getSources().some(s => s.id === source.id));
     const all = current.flatMap(source => values.get(source.id) ?? []);
-    projects = all.flatMap(s => s.projects).filter(p => !removedProjects.has(p.id));
-    return { ...local, projects, tasks: all.flatMap(s => s.tasks), approvals: all.flatMap(s => s.approvals),
+    const fetchedProjects = all.flatMap(s => s.projects).filter(p => !removedProjects.has(p.id));
+    projects = scope === undefined ? fetchedProjects
+      : [...projects.filter(p => splitId(p.id)[0] !== scope), ...fetchedProjects];
+    return { ...local, projects: fetchedProjects, tasks: all.flatMap(s => s.tasks), approvals: all.flatMap(s => s.approvals),
       questions: all.flatMap(s => s.questions), availableSources: current.filter(s => available.has(s.id)).map(s => s.id),
       unavailableSources: current.filter(s => unavailable.has(s.id)).map(s => s.id) };
   };
@@ -158,15 +160,16 @@ async function state(onProgress?: (value: DeskState) => void): Promise<DeskState
   for (const id of snapshots.keys()) if (id && !getSources().some(s => s.id === id)) snapshots.delete(id);
   return combined();
 }
-export interface FeedPage { events: HubEvent[]; complete: boolean }
-async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal,onProgress?: (page: FeedPage) => void) {
-  await discoverSources();
+export interface FeedPage { events: HubEvent[]; complete: boolean; incompleteSources?: string[] }
+async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:AbortSignal,onProgress?: (page: FeedPage) => void,scope?: string) {
+  if (scope === undefined) await discoverSources();
   signal?.throwIfAborted();
-  const all=[{id:'',view_index:0},...getSources()];
+  const all=[{id:'',view_index:0},...getSources()].filter(source => scope === undefined || source.id === scope);
   const pages = new Map<string, FeedPage>();
   let failed = false;
   const combined = (): FeedPage => ({ events: [...pages.values()].flatMap(page => page.events).sort(compareEvents).slice(-limit),
-    complete: pages.size === all.length && [...pages.values()].every(page => page.complete) });
+    complete: pages.size === all.length && [...pages.values()].every(page => page.complete),
+    ...([...pages].some(([,page]) => !page.complete) && { incompleteSources: [...pages].filter(([,page]) => !page.complete).map(([id]) => id) }) });
   await Promise.all(all.map(async source=>{
     const filter=sourceFilter(source.id,q);
     if(!filter) { pages.set(source.id, {events:[],complete:true}); return; }
@@ -190,17 +193,35 @@ async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:
   signal?.throwIfAborted();
   return combined();
 }
-async function feedCount(q:FeedQuery,signal?:AbortSignal) {
-  await discoverSources();
-  const counts=await Promise.all([{id:''},...getSources()].map(async source=>{
-    const filter=sourceFilter(source.id,q);if(!filter)return {posts:0,tasks:0};
+export interface FeedTotal { posts: number; tasks: number }
+function sumCounts(counts: Iterable<FeedTotal>): FeedTotal {
+  let posts = 0, tasks = 0;
+  for (const count of counts) { posts += count.posts; tasks += count.tasks; }
+  return { posts, tasks };
+}
+async function feedCount(q:FeedQuery,signal?:AbortSignal,scope?:string,details=false): Promise<FeedTotal & { bySource?: Map<string, FeedTotal> }> {
+  if (scope === undefined) await discoverSources();
+  const counts=await Promise.all([{id:''},...getSources()].filter(source => scope === undefined || scope === source.id).map(async source=>{
+    const empty = [source.id, {posts:0,tasks:0}] as const;
+    const filter=sourceFilter(source.id,q);if(!filter)return empty;
     let r:Response;
     try {r=await fetch(sourceBase(source.id)+'/feed/count?'+feedSearch(filter),{signal});}
-    catch(error){if(!source.id&&!signal?.aborted)return {posts:0,tasks:0};throw error;}
-    if(!r.ok){if(!source.id&&r.status>=500)return {posts:0,tasks:0};throw Error('글 수를 불러오지 못했습니다');}
-    return await r.json() as {posts:number;tasks:number};
+    catch(error){
+      if (details && scope === undefined && source.id && !signal?.aborted) return;
+      if (!source.id && scope === undefined && !signal?.aborted) return empty;
+      throw error;
+    }
+    if(!r.ok){
+      if (scope===undefined && r.status>=500) {
+        if (!source.id) return empty;
+        if (details) return;
+      }
+      throw Error('글 수를 불러오지 못했습니다');
+    }
+    return [source.id, await r.json() as FeedTotal] as const;
   }));
-  return counts.reduce((a,b)=>({posts:a.posts+b.posts,tasks:a.tasks+b.tasks}),{posts:0,tasks:0});
+  const bySource=new Map(counts.filter(count=>count!==undefined));
+  return { ...sumCounts(bySource.values()), ...(details && {bySource}) };
 }
 
 /** Events per feed page: a full page means older ones may exist. */
@@ -235,24 +256,25 @@ export const api = {
    * column shows. Tool calls and results come cut (`clipped`); a task's own events are whole.
    */
   feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal).then(page=>page.events),
-  feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal, onProgress?: (page: FeedPage) => void) => feeds(limit,before,q,signal,onProgress),
+  feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal, onProgress?: (page: FeedPage) => void, scope?: string) => feeds(limit,before,q,signal,onProgress,scope),
   feedCount,
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
    * every event from `since` on. `more`: older events exist before the page.
    */
-  events: (taskId: string, at: { since?: number; before?: number; ids?: number[] } = {}, signal?: AbortSignal) => {
+  events: (taskId: string, at: { since?: number; before?: number; after?: number; ids?: number[] } = {}, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (at.ids?.length) q.set('ids', at.ids.join(','));
     if (at.since) q.set('since', String(at.since));
     if (at.before) q.set('before', String(at.before));
+    if (at.after) { q.set('after', String(at.after)); q.set('since', String(at.after)); }
     const qs = q.toString();
     const edits = new Map<number, HubEvent>();
     const offNotes = onNoteChange(change => {
       if (change.type === 'event_updated' && change.event.task_id === taskId) edits.set(change.event.id, change.event);
     });
     // A hub not yet restarted answers with the bare array (newest 500, no paging).
-    return call<{ events: HubEvent[]; more: boolean } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
+    return call<{ events: HubEvent[]; more: boolean; incremental?: true } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
       .then((r) => {
         const page = Array.isArray(r) ? { events: r, more: false } : r;
         if (!edits.size) return page;
@@ -272,8 +294,6 @@ export const api = {
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     return data as { path: string };
   },
-  /** Has the hub download a web file (an image dragged in from a page); returns the saved path. */
-  uploadUrl: (url: string) => call<{ path: string }>('POST', '/uploads', { url }),
   createProject: (name: string, root_path: string) => call<Project>('POST', '/projects', { name, root_path }),
   compose: (text: string, source?: string, noteContext?: NoteContext, noteOnly?: boolean) =>
     call<TaskView>('POST', '/compose', { text, note_context: noteContext, note_only: noteOnly }, undefined, composeSource(text, projects, source)),

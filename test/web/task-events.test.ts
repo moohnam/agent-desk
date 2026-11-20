@@ -6,7 +6,7 @@ import ts from 'typescript';
 import { mergeTaskEvents } from '../../web/src/posts.ts';
 import * as noteEvents from '../../web/src/noteEvents.ts';
 
-type Page = { events: ReturnType<typeof event>[]; more: boolean };
+type Page = { events: ReturnType<typeof event>[]; more: boolean; incremental?: true };
 
 function event(id: number, task = 'a', clipped = false) {
   return { id, task_id: task, kind: 'assistant', payload: { text: String(id), ...(clipped && { clipped: true }) }, ts: '' };
@@ -18,7 +18,7 @@ function harness() {
   let effects: (() => void)[] = [];
   const timers = new Map<number, { fn: () => void; ms: number }>();
   let nextTimer = 0;
-  const requests: { task: string; at: { since?: number; before?: number }; signal: AbortSignal; resolve: (page: Page) => void; reject: (error: Error) => void }[] = [];
+  const requests: { task: string; at: { since?: number; before?: number; after?: number }; signal: AbortSignal; resolve: (page: Page) => void; reject: (error: Error) => void }[] = [];
   const listeners = new Set<(value: ReturnType<typeof event>) => void>();
   const react = {
     useState(initial: any) {
@@ -57,9 +57,9 @@ function harness() {
   const onEvent = (fn: (value: ReturnType<typeof event>) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
   return {
     requests, timers,
-    render(task: string | null, reload = 0, since?: number) {
+    render(task: string | null, reload = 0, since?: number, sourceReload = 0) {
       cursor = 0;
-      const result = useTaskEvents(task, onEvent, since, reload);
+      const result = useTaskEvents(task, onEvent, since, reload, sourceReload);
       const pending = effects; effects = []; pending.forEach(fn => fn());
       return result as { events: ReturnType<typeof event>[]; loaded: boolean; more: boolean; loadEarlier: () => void };
     },
@@ -70,6 +70,26 @@ function harness() {
 }
 
 const settled = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test('a source reload fills only the open task cursor gap and keeps the existing history visible', async () => {
+  const h = harness();
+  try {
+    h.render('a');
+    h.requests[0].resolve({ events: [event(10),event(11)], more: true });
+    await settled();
+    h.live(event(14));
+    h.render('a',0,undefined,1);
+    assert.equal(h.render('a',0,undefined,1).loaded,true);
+    assert.equal(h.requests[1].at.after,11);
+    h.requests[1].resolve({ events:[event(12)],more:true,incremental:true });
+    await settled();
+    assert.equal(h.requests[2].at.after,12);
+    h.requests[2].resolve({ events:[event(13),event(14)],more:false,incremental:true });
+    await settled();
+    assert.equal(h.render('a',0,undefined,1).events.map(e=>e.id).join(','),'10,11,12,13,14');
+    assert.equal(h.render('a',0,undefined,1).more,true);
+  } finally { h.unmount(); }
+});
 
 test('failed initial history retries and replaces a cut live event with its whole payload', async () => {
   const h = harness();

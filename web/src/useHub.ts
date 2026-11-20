@@ -1,6 +1,6 @@
 import { openSourceStream } from './sourceStream.ts';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { api, FEED_PAGE, type FeedQuery } from './api.ts';
+import { api, FEED_PAGE, type FeedQuery, type FeedTotal } from './api.ts';
 import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
 import { mergeEvents, mergeTaskEvents } from './posts.ts';
 import { assignProjectColors, forgetProjectColors } from './projects.ts';
@@ -51,6 +51,7 @@ export function useHub() {
   const batchListeners = useRef(new Set<(batch: FeedEventBatch) => void>());
   // Counts state reloads (each SSE (re)connect): feed columns reload their newest page with it.
   const [synced, setSynced] = useState(0);
+  const [sourceSynced, setSourceSynced] = useState(new Map<string, number>());
   // Tasks deleted while this page is open: their events, wherever cached, are no longer shown.
   const [gone, setGone] = useState<Set<string>>(new Set());
   const [availableSources, setAvailableSources] = useState<Set<string>>(new Set());
@@ -72,16 +73,20 @@ export function useHub() {
   const approvalRefresh=useRef<Map<string,Approval>|null>(null);
   const questionRefresh=useRef<Map<string,Question>|null>(null);
   const refreshingState = useRef<Promise<void> | null>(null);
-  const refreshAgain = useRef(false);
+  const refreshQueue = useRef(new Set<string | undefined>());
   const subscribed = useRef(true);
-  const refresh = useCallback((repeat = true): Promise<void> => {
+  const refresh = useCallback((repeat = true, scope?: string): Promise<void> => {
     if (refreshingState.current) {
-      if (repeat) refreshAgain.current = true;
+      if (repeat) refreshQueue.current.add(scope);
       return refreshingState.current;
     }
+    refreshQueue.current.add(scope);
     const run = async () => {
-      do {
-        refreshAgain.current = false;
+      let failure: unknown;
+      while (refreshQueue.current.size && subscribed.current) {
+        const scope = refreshQueue.current.values().next().value;
+        refreshQueue.current.delete(scope);
+        const targeted = (id: string) => scope === undefined || splitId(id)[0] === scope;
         const channelUpdates = new Map<string, Channel | null>();
         const taskUpdates = new Map<string, TaskView | null>();
         const approvalUpdates=new Map<string,Approval>(),questionUpdates=new Map<string,Question>();
@@ -94,7 +99,7 @@ export function useHub() {
             const nextTasks = new Map(s.tasks.filter(t => !deleted.current.has(t.id)).map(t => [t.id, t]));
             for(const [id,task] of currentTasks.current) {
               const source = splitId(id)[0];
-              if ((!source || getSources().some(s => s.id === source)) && !s.availableSources?.includes(source)
+              if ((!targeted(id) || !source || getSources().some(s => s.id === source)) && !s.availableSources?.includes(source)
                 && !nextTasks.has(id) && !deleted.current.has(id))
                 nextTasks.set(id, s.unavailableSources?.includes(source) ? {...task,runner_connected:false} : task);
             }
@@ -110,36 +115,56 @@ export function useHub() {
             }
             knownTasks.current = new Set(nextTasks.keys());
             // Columns own history paging; the global stream needs only task previews and live events.
-            const previews = [...nextTasks.values()].flatMap(task => task.last_event ?? []);
+            const previews = [...nextTasks.values()].filter(task => targeted(task.id)).flatMap(task => task.last_event ?? []);
             setEvents((prev) => mergeEvents(prev.filter(e => !deleted.current.has(e.task_id)),
               visibleNoteEvents(previews.filter(e => !deleted.current.has(e.task_id))), FEED_CAP));
             const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
-            assignProjectColors(nextProjects);
-            setProjects(nextProjects);
+            if (scope === undefined || s.availableSources?.includes(scope)) {
+              assignProjectColors(nextProjects);
+              setProjects(prev => scope === undefined ? nextProjects : [...prev.filter(p => !targeted(p.id)), ...nextProjects]);
+            }
             if (available.has('') && channelRefresh.current === channelUpdates) {
               const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
               for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
               setChannels(next);
             }
             commitTasks(() => nextTasks);
-            setAvailableSources(new Set(s.availableSources ?? []));
+            setAvailableSources(prev => {
+              if (scope === undefined) return new Set(s.availableSources ?? []);
+              const next = new Set(prev);
+              if (s.availableSources?.includes(scope)) next.add(scope); else next.delete(scope);
+              return next;
+            });
             const allApprovals=new Map(s.approvals.map(a=>[a.id,a]));for(const [id,a] of approvalUpdates)allApprovals.set(id,a);
-            setApprovals(new Map([...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))));
+            const preserve = (id: string) => !targeted(id) || !s.availableSources?.includes(scope!);
+            setApprovals(prev => new Map([...(scope === undefined ? [] : [...prev].filter(([id])=>preserve(id)&&!allApprovals.has(id))),
+              ...[...allApprovals].filter(([,a])=>a.status==='pending'&&!deleted.current.has(a.task_id))]));
             const allQuestions=new Map((s.questions??[]).map(q=>[q.id,q]));for(const [id,q] of questionUpdates)allQuestions.set(id,q);
-            setQuestions(new Map([...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))));
-            if (s.runner) { setRunnerConnected(s.runner.connected); setRunnerProblem(s.runner.problem); }
-            if (s.client) setLocal(s.client.local);
-            setAccess(s.access ?? null);
+            setQuestions(prev => new Map([...(scope === undefined ? [] : [...prev].filter(([id])=>preserve(id)&&!allQuestions.has(id))),
+              ...[...allQuestions].filter(([,q])=>q.status==='pending'&&!deleted.current.has(q.task_id))]));
+            if (scope === undefined || scope === '') {
+              if (s.runner) { setRunnerConnected(s.runner.connected); setRunnerProblem(s.runner.problem); }
+              if (s.client) setLocal(s.client.local);
+              if (scope === undefined || s.availableSources?.includes('')) setAccess(s.access ?? null);
+            }
           };
-          apply(await api.state(apply));
-          if (subscribed.current) setSynced((n) => n + 1);
+          const snapshot = await api.state(apply, scope);
+          apply(snapshot);
+          if (!subscribed.current) continue;
+          if (scope === undefined) setSynced((n) => n + 1);
+          else if (snapshot.availableSources?.includes(scope))
+            setSourceSynced(prev => new Map(prev).set(scope, (prev.get(scope) ?? 0) + 1));
+          else throw new Error('작업공간 상태를 다시 불러오지 못했습니다');
+        } catch (error) {
+          failure ??= error;
         } finally {
           if (channelRefresh.current === channelUpdates) channelRefresh.current = null;
           if (taskRefresh.current === taskUpdates) taskRefresh.current = null;
           if(approvalRefresh.current===approvalUpdates)approvalRefresh.current=null;
           if(questionRefresh.current===questionUpdates)questionRefresh.current=null;
         }
-      } while (refreshAgain.current && subscribed.current);
+      }
+      if (failure) throw failure;
     };
     const pending = run().finally(() => { refreshingState.current = null; });
     refreshingState.current = pending;
@@ -235,15 +260,40 @@ export function useHub() {
       for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
     const streams=new Map<string,ReturnType<typeof openSourceStream>>();
+    const recovery = new Map<string, { timer?: ReturnType<typeof setTimeout> }>();
+    const cancelRecovery = (id: string) => {
+      clearTimeout(recovery.get(id)?.timer);
+      recovery.delete(id);
+    };
+    let openedLocal = false;
     const update=()=>{
       const sources=[{id:'',view_index:0},...getSources()];
-      for(const [id,stream] of streams)if(!sources.some(s=>s.id===id)){stream.close();streams.delete(id);void refresh().catch(()=>{});}
+      for(const [id,stream] of streams)if(!sources.some(s=>s.id===id)){
+        cancelRecovery(id);stream.close();streams.delete(id);void refresh().catch(()=>{});
+      }
       for(const source of sources) {
         if(streams.has(source.id))continue;
         const es=openSourceStream(source.id);streams.set(source.id,es);
         // A pending snapshot may predate this connection. Always queue one recovery read.
-        es.onopen=()=>{if(!source.id)setConnected(true);else sourceConnected(source.id,true);void refresh().catch(()=>{});};
+        es.onopen=()=>{
+          if(!source.id)setConnected(true);else sourceConnected(source.id,true);
+          const scope = !source.id && !openedLocal ? undefined : source.id;
+          if (!source.id) openedLocal = true;
+          cancelRecovery(source.id);
+          const attempt: { timer?: ReturnType<typeof setTimeout> } = {};
+          recovery.set(source.id, attempt);
+          const refreshSource = (target: string | undefined, delay: number) => {
+            void refresh(true, target).then(() => {
+              if (recovery.get(source.id) === attempt) recovery.delete(source.id);
+            }, () => {
+              if (recovery.get(source.id) !== attempt) return;
+              attempt.timer = setTimeout(() => refreshSource(source.id, Math.min(30_000, delay * 2)), delay);
+            });
+          };
+          refreshSource(scope, 1000);
+        };
         es.onerror=()=>{
+          cancelRecovery(source.id);
           if(source.id){sourceConnected(source.id,false);commitTasks(prev=>{let next=prev;for(const [id,t] of prev)if(id.startsWith(`w:${source.id}:`)&&t.runner_connected!==false){if(next===prev)next=new Map(prev);next.set(id,{...t,runner_connected:false});}return next;});}
           else {setConnected(false);fetch('/api/state',{method:'HEAD'}).then(r=>{if(r.status===401)location.reload();},()=>{});}
         };
@@ -261,7 +311,8 @@ export function useHub() {
     update();
     const poll=setInterval(()=>{void discoverSources(true).catch(()=>{});},5000);
     void discoverSources(true).then(update,()=>{});
-    return()=>{subscribed.current=false;unsubscribe();unsubscribeNotes();clearInterval(poll);for(const es of streams.values())es.close();clearTimeout(timer);clearTimeout(projectTimer);};
+    return()=>{subscribed.current=false;refreshQueue.current.clear();unsubscribe();unsubscribeNotes();clearInterval(poll);
+      for(const [id, es] of streams){cancelRecovery(id);es.close();}clearTimeout(timer);clearTimeout(projectTimer);};
   }, [refresh, commitTasks]);
 
   const onEvent = useCallback((fn: (e: HubEvent, task?: TaskView) => void) => {
@@ -278,7 +329,7 @@ export function useHub() {
     channelListeners.current.add(fn);
     return () => { channelListeners.current.delete(fn); };
   }, []);
-  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, runnerProblem, local, access, synced, gone, availableSources, refresh, onEvent, onEventBatch };
+  return { projects, channels, onChannelEntry, tasks, updateTaskTitle, approvals, questions, events, connected, runnerConnected, runnerProblem, local, access, synced, sourceSynced, gone, availableSources, refresh, onEvent, onEventBatch };
 }
 
 /** The event kinds a post kind comes from (postKind in posts.ts). */
@@ -330,7 +381,20 @@ const NEWEST_FEED_PAGE = 200;
  * missed some and fetches its newest page again when shown. `at`: the state reload (`synced`) its
  * newest page is from.
  */
-interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean; token: object; requestedAt?: number; olderCursor?: HubEvent }
+interface FeedEntry extends ColumnFeed {
+  q: FeedQuery; at: number; live: boolean; token: object; requestedAt?: number; olderCursor?: HubEvent;
+  sourceTotals?: Map<string, FeedTotal>;
+  verifiedNewest?: Map<string, HubEvent>;
+}
+
+function retryPause(ms: number, signal: AbortSignal) {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
 
 /**
  * Each feed column's events, filtered by the hub to what the column shows, newest page first and
@@ -340,7 +404,8 @@ interface FeedEntry extends ColumnFeed { q: FeedQuery; at: number; live: boolean
  * pages until it returns to the top; trimmed records can always be paged from the hub again.
  */
 export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks: Map<string, TaskView>,
-  onEvent: (fn: (e: HubEvent, task?: TaskView) => void) => () => void, synced: number, gone: Set<string> = new Set(), onEventBatch?: SubscribeEventBatch) {
+  onEvent: (fn: (e: HubEvent, task?: TaskView) => void) => () => void, synced: number, gone: Set<string> = new Set(), onEventBatch?: SubscribeEventBatch,
+  sourceSynced?: ReadonlyMap<string, number>) {
   const cache = useRef(new Map<string, FeedEntry>());
   const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.filter((d) => !d.channelId).map((d) => [d.id, feedQuery(d.filter, tasks)]));
@@ -353,6 +418,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const requests = useRef(new Map<string, Set<AbortController>>());
   const retries = useRef(new Map<string, number>());
   const retryAttempts = useRef(new Map<string, number>());
+  const sourceEpochs = useRef(sourceSynced);
   const protectedQuery = (key: string) => [...reading.current].some(id => shown.current.get(id) === key);
 
   const set = (key: string, f: (e: FeedEntry) => FeedEntry) => {
@@ -376,13 +442,25 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   };
   // Counts waiting to be fetched, by query key.
   const counting = useRef(new Map<string, number>());
+  const applyCounts = (key: string, total: FeedTotal & { bySource?: Map<string, FeedTotal> }) => set(key, entry => {
+    if (!total.bySource) return { ...entry, total };
+    const configured = new Set(['', ...getSources().map(source => source.id)]);
+    const sourceTotals = new Map([...(entry.sourceTotals ?? []), ...total.bySource]);
+    let posts = 0, tasks = 0;
+    for (const [source, counts] of sourceTotals) {
+      if (!configured.has(source)) { sourceTotals.delete(source); continue; }
+      posts += counts.posts;
+      tasks += counts.tasks;
+    }
+    return { ...entry, sourceTotals, total: { posts, tasks } };
+  });
   const count = (key: string, delay = 0) => {
     if (counting.current.has(key)) return;
     counting.current.set(key, window.setTimeout(() => {
       counting.current.delete(key);
       const e = cache.current.get(key);
       // A hub not yet restarted has no count: the column shows only what it loaded.
-      if (e) request(key, signal => api.feedCount(e.q, signal), total => set(key, x => ({ ...x, total })));
+      if (e) request(key, signal => api.feedCount(e.q, signal, undefined, true), total => applyCounts(key,total));
     }, delay));
   };
   const cancelRetry = (key: string) => {
@@ -447,13 +525,20 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
         const received = visibleNoteEvents(page.events);
         // A note missing in the fresh page's range was deleted or stopped matching this query.
         const kept = ids ? e.events.filter(event => !savedNotes.has(event) || ids.has(event.id) || checkOlder.has(event)) : e.events;
+        const verifiedNewest = new Map(e.verifiedNewest);
+        for (const event of page.events) {
+          const source = splitId(event.task_id)[0];
+          const previous = verifiedNewest.get(source);
+          if (!previous || compareEvents(event, previous) > 0) verifiedNewest.set(source, event);
+        }
         return { ...e, events: mergeEvents(kept, received),
-          more: page.complete ? page.events.length >= limit : e.more,
-          olderCursor: page.complete ? page.events[0] : e.olderCursor,
+          verifiedNewest,
+          more: page.events.length >= limit || (!page.complete && e.more),
+          olderCursor: page.complete ? page.events[0] : e.olderCursor ?? page.events[0],
           loading: false, at: page.complete ? epoch : e.at };
       });
       if (page.complete) { cancelRetry(key); recheckNotes(key, older); }
-      else retry();
+      else if (!page.incompleteSources?.every(id => id && getSources().some(source => source.id === id && source.connected === false))) retry();
     }, () => { set(key, e => ({ ...e, loading: false })); retry(); });
   };
   const drop = (key: string) => {
@@ -511,6 +596,48 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     for (const [key] of idle.slice(0, Math.max(0, idle.length - IDLE_QUERY_LIMIT))) drop(key);
     bump();
   }, [sig, synced]);
+
+  useEffect(() => {
+    const previous = sourceEpochs.current;
+    sourceEpochs.current = sourceSynced;
+    for (const [source, epoch] of sourceSynced ?? []) {
+      if (previous?.get(source) === epoch) continue;
+      for (const [key, entry] of cache.current) {
+        if (!entry.live) continue;
+        const notes = entry.events.filter(event => splitId(event.task_id)[0] === source && noteRevision(event) !== undefined);
+        request(key, async signal => {
+          // A live event may arrive before the scoped state read. Only a fetched page covers the gap.
+          const anchor = entry.verifiedNewest?.get(source) ?? entry.olderCursor;
+          let before: HubEvent | undefined, delay = 1000;
+          let newest: HubEvent | undefined;
+          for (;;) {
+            const page = await api.feedPage(NEWEST_FEED_PAGE, before, entry.q, signal, undefined, source).catch(() => null);
+            if (!page?.complete) {
+              await retryPause(delay, signal);
+              delay = Math.min(10_000, delay * 2);
+              continue;
+            }
+            if (signal.aborted) return;
+            delay = 1000;
+            const oldest: HubEvent | undefined = page.events[0];
+            newest ??= page.events.at(-1);
+            set(key, e => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page.events)),
+              more: e.more || (!before && page.events.length >= NEWEST_FEED_PAGE) }));
+            if (!anchor || !oldest || page.events.length < NEWEST_FEED_PAGE || compareEvents(oldest, anchor) <= 0) return newest;
+            before = oldest;
+          }
+        }, newest => {
+          if (newest) set(key, e => {
+            const previous = e.verifiedNewest?.get(source);
+            if (previous && compareEvents(newest, previous) <= 0) return e;
+            return { ...e, verifiedNewest: new Map([...(e.verifiedNewest ?? []), [source, newest]]) };
+          });
+          recheckNotes(key, notes);
+        });
+        request(key, signal => api.feedCount(entry.q, signal, source, true), total => applyCounts(key,total));
+      }
+    }
+  }, [sourceSynced]);
 
   useEffect(() => {
     const receive = (batch: FeedEventBatch) => {
@@ -624,6 +751,7 @@ interface TaskHistory {
   firstLive: number | null;
   since: number | undefined;
   reload: number;
+  sourceReload: number;
   loaded: boolean;
   loadingEarlier: boolean;
 }
@@ -654,7 +782,7 @@ function recentHistory(history: TaskHistory, cursor: number): TaskHistory | unde
  * Earlier pages stay available while the task is open. A revisit displays its recent cached page
  * immediately, and every open/reload still reads the authoritative source.
  */
-export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0) {
+export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0, sourceReload = 0) {
   const active = useRef<TaskHistory | undefined>(undefined);
   const [history, setHistory] = useState<TaskHistory | undefined>(undefined);
   const cache = useRef(new Map<string, TaskHistory>());
@@ -672,17 +800,49 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     const held = previous?.taskId === taskId ? previous : cache.current.get(taskId);
     cache.current.delete(taskId);
     const kept = visibleNoteEvents(held?.events ?? EMPTY_TASK_EVENTS);
+    const reconnect = !!held?.loaded && held === previous && held.since === since && held.reload === reload
+      && held.sourceReload !== sourceReload && held.cursor != null;
     const oldestNote = held?.events.find(e => noteRevision(e) !== undefined)?.id;
-    const oldNotes = oldestNote == null ? undefined : new Set(kept);
+    const oldNotes = reconnect || oldestNote == null ? undefined : new Set(kept);
     publish({ taskId, events: kept, more: held?.more ?? false, cursor: held?.cursor ?? null,
-      firstLive: held?.firstLive ?? null, since, reload, loaded: false, loadingEarlier: false });
+      firstLive: held?.firstLive ?? null, since, reload, sourceReload, loaded: reconnect, loadingEarlier: false });
     const floor = () => historyFloor(active.current, oldestNote == null ? since : Math.min(oldestNote, since ?? Infinity));
     const controller = new AbortController();
     let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let retryDelay = 1000;
+    const catchUp = async () => {
+      let after = active.current!.cursor!;
+      for (;;) {
+        const page = await api.events(taskId, { after }, controller.signal);
+        if (!alive) return;
+        const events = page.events.filter(event => event.id > after);
+        if (!events.length) break;
+        after = events.at(-1)!.id;
+        const current = active.current!;
+        publish({ ...current, events: mergeTaskEvents(current.events, visibleNoteEvents(events)), cursor: after, firstLive: null });
+        if (!('incremental' in page && page.incremental) || !page.more) break;
+      }
+      // Edits and deletions in an older loaded note do not get a new history ID.
+      const notes = kept.filter(event => noteRevision(event) !== undefined);
+      for (let offset = 0; offset < notes.length; offset += 500) {
+        const held = new Map(notes.slice(offset, offset + 500).map(event => [event.id, event]));
+        const page = await api.events(taskId, { ids: [...held.keys()] }, controller.signal);
+        if (!alive) return;
+        const received = new Map(visibleNoteEvents(page.events).map(event => [event.id, event]));
+        const current = active.current!;
+        const events = current.events.flatMap(event => {
+          if (held.get(event.id) !== event) return [event];
+          const fresh = received.get(event.id);
+          if (!fresh) return [];
+          return [(noteRevision(fresh) ?? 0) > (noteRevision(event) ?? 0) ? fresh : event];
+        });
+        publish({ ...current, events });
+      }
+    };
     const fetchHistory = async () => {
       try {
+        if (reconnect) { await catchUp(); return; }
         let page = await api.events(taskId, { since: floor() }, controller.signal);
         if (!alive) return;
         // A live event can arrive while the newest page is in flight. Cover the gap before
@@ -773,7 +933,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       clearTimeout(timer); clearTimeout(retry);
       controller.abort();
     };
-  }, [taskId, since, onEvent, reload]);
+  }, [taskId, since, onEvent, reload, sourceReload]);
 
   const loadEarlier = useCallback(() => earlier.current?.(), []);
   const shown = taskId == null ? undefined : history?.taskId === taskId ? history : cache.current.get(taskId);

@@ -871,31 +871,46 @@ test('pagination resumes at the oldest retained post after live compaction', asy
   } finally { h.unmount(); }
 });
 
-test('workspace connections share one refresh and partial state becomes usable before it finishes', async () => {
-  const h=hooks(),streams:any[]=[],reads:{progress:(s:any)=>void;finish:(s:any)=>void}[]=[];
+test('a reconnect refreshes only its workspace and leaves the other workspaces available', async () => {
+  const h=hooks(),streams:any[]=[],reads:{scope?:string;progress:(s:any)=>void;finish:(s:any)=>void}[]=[];
+  const retries: (() => void)[] = [];
   const sources=[{id:'a'},{id:'b'}];
   const value={projects:[{id:'project'}],tasks:[{id:'local-task',project_id:'project'},{id:'w:a:task',project_id:'project'}],approvals:[],questions:[],availableSources:[''],unavailableSources:[]};
   const module=load('useHub.ts',{
-    react:h.react,'./api.ts':{api:{state:(progress:any)=>new Promise(resolve=>reads.push({progress,finish:resolve})),
+    react:h.react,'./api.ts':{api:{state:(progress:any,scope?:string)=>new Promise(resolve=>reads.push({scope,progress,finish:resolve})),
       feed:()=>{throw Error('columns own feed requests');},remember(){}},FEED_PAGE:1000},
     './federation.ts':{...federation,discoverSources:async()=>{},getSources:()=>sources,subscribeSources:()=>()=>{},sourceConnected(){}},
     './posts.ts':posts,'./projects.ts':{assignProjectColors(){},forgetProjectColors(){}},'./feedCache.ts':{},
-  },{EventSource:class{onopen:any;constructor(){streams.push(this);}close(){}},setTimeout,clearTimeout,setInterval:()=>0,clearInterval(){}});
+  },{EventSource:class{onopen:any;constructor(){streams.push(this);}close(){}},
+    setTimeout:(fn:()=>void,ms:number) => ms === 1000 ? retries.push(fn) : setTimeout(fn,ms),
+    clearTimeout,setInterval:()=>0,clearInterval(){}});
   const render=()=>h.render(()=>module.useHub());
   try {
-    render();for(const stream of streams)stream.onopen();
-    assert.equal(reads.length,1,'three SSE connections must not start three state reads');
+    render();streams[0].onopen();
     reads[0].progress(value);
     assert.ok(render().tasks.has('local-task'),'the remote state is still pending');
-    const refresh=render().refresh();render().refresh();
-    streams[0].onopen(); // A reconnect after this source's snapshot also requires a follow-up.
-    sources.splice(0,1);
-    const current={...value,tasks:value.tasks.slice(0,1)};
-    reads[0].finish(current);await new Promise(r=>setTimeout(r,0));
-    assert.equal(reads.length,2,'explicit refreshes during a read coalesce into one follow-up');
-    reads[1].finish(current);await refresh;
-    assert.equal(render().synced,2);
-    assert.equal(render().tasks.has('w:a:task'),false,'detaching a source must not retain its old tasks');
+    const other={id:'w:b:other',project_id:'w:b:p',title:'유지'};
+    reads[0].finish({...value,tasks:[...value.tasks,other],availableSources:['','a','b']});
+    await new Promise(r=>setTimeout(r,0));
+    streams[1].onopen();
+    assert.equal(reads.length,2);
+    assert.equal(reads[1].scope,'a');
+    reads[1].finish({...value,projects:[],tasks:[],availableSources:[],unavailableSources:['a']});
+    await new Promise(r=>setTimeout(r,0));
+    assert.equal(render().sourceSynced.size,0,'recover missed events only after the source is readable');
+    assert.equal(retries.length,1);
+    retries[0]();
+    assert.equal(reads[2].scope,'a');
+    reads[2].finish({...value,projects:[],tasks:[],availableSources:['a']});
+    await new Promise(r=>setTimeout(r,0));
+    const result=render();
+    assert.equal(result.synced,1);
+    assert.equal(result.sourceSynced.size,1);
+    assert.equal(result.sourceSynced.get('a'),1);
+    assert.equal(result.tasks.get(other.id),other);
+    assert.equal(result.tasks.has('local-task'),true);
+    assert.equal(result.tasks.has('w:a:task'),false);
+    assert.deepEqual([...result.availableSources].sort(),['','a','b']);
   }finally{h.unmount();}
 });
 
@@ -928,6 +943,36 @@ test('partial column pages remain visible and do not move the paging cursor befo
     assert.equal(requests[1].signal.aborted,true);
     requests[1].finish({events:[],complete:true});await new Promise(r=>setTimeout(r,0));
   }finally{h.unmount();}
+});
+
+test('scoped feed recovery covers the gap even when a newer live event has already arrived', async () => {
+  const h = hooks();
+  const event = (id: number) => ({ id, task_id: 'w:a:t', session_id: 'w:a:s', ts: String(id).padStart(4, '0'), kind: 'assistant', payload: {} });
+  const page = (first: number, length: number) => Array.from({ length }, (_, i) => event(first + i));
+  const calls: Array<{ scope?: string; before?: number }> = [];
+  let receive: (event: ReturnType<typeof page>[number]) => void = () => {};
+  const onEvent = (fn: typeof receive) => { receive = fn; return () => {}; };
+  const defs = [{ id: 'column', filter: {} }];
+  const module = load('useHub.ts', {
+    react: h.react, './api.ts': { api: {
+      feedPage: async (_limit: number, before: { id: number } | undefined, _q: unknown, _signal: AbortSignal, _progress: unknown, scope?: string) => {
+        calls.push({ scope, before: before?.id });
+        return { complete: true, events: !scope ? [event(1)] : before ? page(1, 2) : page(3, 200) };
+      }, feedCount: async () => ({ posts: 0, tasks: 0 }),
+    }, FEED_PAGE: 1000 }, './posts.ts': posts, './feedCache.ts': feedCache, './federation.ts': federation, './projects.ts': {},
+  }, { AbortController, window: { setTimeout: () => 0 }, setTimeout, clearTimeout });
+  let epochs = new Map<string, number>();
+  const render = () => h.render(() => module.useColumnFeeds(defs, () => defs, new Map(), onEvent, 0, new Set(), undefined, epochs));
+  try {
+    render();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    receive(event(203));
+    epochs = new Map([['a', 1]]);
+    render();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(calls, [{ scope: undefined, before: undefined }, { scope: 'a', before: undefined }, { scope: 'a', before: 3 }]);
+    assert.equal(render().feeds.get('column').events.length, 203);
+  } finally { h.unmount(); }
 });
 
 test('SSE connects after a snapshot starts always recovers changes missed before connection', async()=> {

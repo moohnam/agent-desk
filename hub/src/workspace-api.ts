@@ -185,6 +185,11 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
             const list = ids.split(',').map(Number).filter(Number.isInteger).slice(0, 500);
             return reply(200, { events: hub.store.eventsByIds(id, list), more: false });
           }
+          const after = intParam(url, 'after', undefined);
+          if (after !== undefined) {
+            const events = hub.store.eventsAfter(id, after, 501);
+            return reply(200, { events: events.slice(0, 500), more: events.length > 500, incremental: true });
+          }
           const events = hub.store.listEvents(id, 500, intParam(url, 'since', undefined), intParam(url, 'before', undefined));
           return reply(200, { events, more: events.length > 0 && hub.store.hasEventsBefore(id, events[0].id) });
         }

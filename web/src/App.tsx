@@ -241,7 +241,8 @@ export function App() {
   }, [drawer]);
 
   const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, loadEarlier }
-    = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced);
+    = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced,
+      threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) : undefined);
   const threadPosts = useMemo(() => buildPosts(threadEvents), [threadEvents]);
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
@@ -314,7 +315,7 @@ export function App() {
   // Every view's columns: their loaded events stay while any of them uses the query.
   const keptDefs = () => [...custom, ...(['project', 'task', 'status'] as const)
     .flatMap((v) => viewColumns(v, hub.tasks, hub.projects, stalled, drafts, viewByTask))];
-  const { feeds, loadEarlier: loadEarlierColumn, setReading: keepColumnHistory } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone, hub.onEventBatch);
+  const { feeds, loadEarlier: loadEarlierColumn, setReading: keepColumnHistory } = useColumnFeeds(feedDefs, keptDefs, hub.tasks, hub.onEvent, hub.synced, hub.gone, hub.onEventBatch, hub.sourceSynced);
   // "글 많은 순": a column takes its place by its first count, and keeps it until the view opens again.
   useEffect(() => {
     if (viewOrder[view] !== 'count') return;
@@ -1374,7 +1375,7 @@ export function App() {
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
     if (col.def?.channelId) return <ChannelColumn key={col.id} def={col.def} channel={hub.channels.get(col.def.channelId)}
-      active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help && !drawerOverlays} width={widthOf(col.id)} synced={hub.synced} onEntry={hub.onChannelEntry}
+      active={i === activeIdx} keyboardEnabled={queueFocus == null && !menu && !help && !drawerOverlays} width={widthOf(col.id)} synced={hub.synced + (hub.sourceSynced.get('') ?? 0)} onEntry={hub.onChannelEntry}
       onPress={() => { setActive(i); setQueueFocus(null); }} onResize={(px) => setWidth(col.id, px)} onManage={() => setChannelsOpen(true)}
       onClose={() => phone ? setPhoneChannel(null) : deleteColumn(col.id)} onError={setToast} onRead={() => {}}
       chat={{ projects: hub.projects.filter(p=>!splitId(p.id)[0]), tasks: hub.tasks, approvals: hub.approvals, questions: hub.questions, onEvent: hub.onEvent,
