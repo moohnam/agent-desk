@@ -11,6 +11,7 @@ const labels: Record<Mode, string> = { insert: '입력', normal: '일반', visua
 const disabledState = (disabled: boolean) => [EditorState.readOnly.of(disabled), EditorView.editable.of(!disabled)];
 const fromDesk = Annotation.define<boolean>();
 const webkit = /AppleWebKit/.test(navigator.userAgent) && !/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent);
+const delayedImeCommit = webkit || /Android/.test(navigator.userAgent);
 const koreanLetters = 'ㅁㅠㅊㅇㄷㄹㅎㅗㅑㅓㅏㅣㅡㅜㅐㅔㅂㄱㄴㅅㅕㅍㅈㅌㅛㅋ';
 const shiftedKoreanLetters: Record<string, string> = { ㅃ: 'Q', ㄸ: 'E', ㄲ: 'R', ㅆ: 'T', ㅉ: 'W', ㅒ: 'O', ㅖ: 'P' };
 const imePairMs = 100;
@@ -27,7 +28,7 @@ function sameImeText(stroke: CommandStroke | undefined, text: string | null): st
     (text === stroke.key || koreanLetter(text)?.toLowerCase() === stroke.key.toLowerCase());
 }
 
-export function VimInput(props: EditorProps & { handoff?: { focused: boolean; start: number; end: number } }) {
+export function VimInput(props: EditorProps & { handoff?: { focused: boolean; start: number; end: number }; startInInsert: boolean }) {
   const { inputRef, disabled = false, label, placeholder: hint } = props;
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -37,11 +38,12 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
   const settings = useRef(new Compartment());
   const compositionEnd = useRef(-Infinity);
   const exitAfterComposition = useRef(false);
+  const settlingEscape = useRef<{ text?: string }>(undefined);
   const resumeInsert = useRef<{ doc: Text; normal: number; insert: number }>(undefined);
   const heldCommands = useRef(new Map<string, CommandStroke>());
   const lastImeCommand = useRef<CommandStroke>(undefined);
   const discardedComposition = useRef<{ text: string; at: number }>(undefined);
-  const [mode, setMode] = useState<Mode>('insert');
+  const [mode, setMode] = useState<Mode>(props.startInInsert ? 'insert' : 'normal');
   const config = () => [
     disabledState(latest.current.disabled ?? false),
     latest.current.placeholder ? placeholder(latest.current.placeholder) : [],
@@ -95,6 +97,22 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
             current.dispatch({ selection: current.state.selection });
             return true;
           })),
+          // Vim sees literal arguments and supported native keys first. Any unhandled
+          // DOM edit in command mode must not reach CodeMirror's default insertion.
+          Prec.lowest(EditorView.inputHandler.of((current, _from, _to, text) => {
+            const cm = getCM(current);
+            const state = cm?.state.vim;
+            if (!state || state.insertMode || state.exMode || cm?.state.dialog ||
+                (state.expectLiteralNext && current.composing && text.length === 1)) return false;
+            current.dispatch({ selection: current.state.selection });
+            return true;
+          })),
+          Prec.highest(EditorView.domEventHandlers({ beforeinput(event) {
+            const settling = settlingEscape.current;
+            // A late IME commit may still belong to the previous insertion.
+            return !!settling && !event.isComposing && event.inputType !== 'insertCompositionText' &&
+              event.inputType !== 'insertFromComposition' && event.data !== settling.text;
+          } })),
           EditorView.domEventObservers({ beforeinput(event, current) {
             const stroke = lastImeCommand.current;
             if (event.isComposing || !sameImeText(stroke, event.data) || !stroke.composing) return;
@@ -124,7 +142,8 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       latest.current.onMode?.(next === 'insert' || next === 'replace');
       if (next === 'insert' || next === 'replace') latest.current.onSelect?.(editor.state.selection.main.head);
     });
-    Vim.handleKey(cm, 'i', 'script');
+    if (initial.startInInsert) Vim.handleKey(cm, 'i', 'script');
+    else initial.onMode?.(false);
     const replaceRange = (from: number, to: number, insert: string) => {
       if (latest.current.disabled) return;
       const length = editor.state.doc.length;
@@ -178,12 +197,19 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     resumeInsert.current = !cm.state.vim?.insertMode && selection.main.empty && editor.state.doc === doc && normal !== selection.main.head
       ? { doc, normal, insert: selection.main.head } : undefined;
   };
-  const leaveAfterComposition = (editor: EditorView) => editor.requestMeasure({
-    read: () => undefined,
-    write: () => queueMicrotask(() => {
+  const leaveAfterComposition = (editor: EditorView, text?: string) => {
+    const settling = { text };
+    settlingEscape.current = settling;
+    const finish = () => {
+      if (settlingEscape.current !== settling) return;
+      settlingEscape.current = undefined;
       if (view.current === editor && editor.hasFocus && !editor.compositionStarted) leaveAfterIme(editor);
-    }),
-  });
+    };
+    // CodeMirror processes queued composition mutations before this microtask.
+    // Keep the measurement boundary on platforms that can deliver the commit later.
+    if (delayedImeCommit) editor.requestMeasure({ read: () => undefined, write: () => queueMicrotask(finish) });
+    else queueMicrotask(finish);
+  };
 
   return <div className="vim-field" data-editor-mode="vim" id={props.id}
     style={{ '--editor-rows': props.rows } as CSSProperties}
@@ -191,6 +217,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     onBlur={e => {
       if (!e.currentTarget.contains(e.relatedTarget)) {
         exitAfterComposition.current = false;
+        settlingEscape.current = undefined;
         resumeInsert.current = undefined;
         heldCommands.current.clear();
         lastImeCommand.current = undefined;
@@ -198,13 +225,20 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         props.onBlur?.();
       }
     }}
+    onCompositionStartCapture={() => {
+      const editor = view.current;
+      if (!settlingEscape.current || !editor || editor.compositionStarted) return;
+      // A new composition must see the requested Normal mode, even before the next frame.
+      settlingEscape.current = undefined;
+      leaveAfterIme(editor);
+    }}
     onCompositionEndCapture={e => { if (e.nativeEvent.isTrusted) compositionEnd.current = performance.now(); }}
-    onCompositionEnd={() => {
+    onCompositionEnd={e => {
       if (!exitAfterComposition.current) return;
       exitAfterComposition.current = false;
       const editor = view.current;
       // CodeMirror reads the final IME edit and selection before the measurement callback.
-      if (editor) leaveAfterComposition(editor);
+      if (editor) leaveAfterComposition(editor, e.data);
     }}
     onKeyDown={e => {
       // Some Escape actions clear Vim state without marking the native event handled.

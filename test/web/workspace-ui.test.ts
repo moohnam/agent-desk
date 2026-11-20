@@ -349,6 +349,48 @@ test('different workspaces neither claim each other’s questions nor suppress b
   assert.equal(new Set(nativeIds).size, 3);
 });
 
+test('loading Vim keeps a focused draft intact and carries Escape into normal mode', async () => {
+  const h = hooks();
+  const jsx = (type: unknown, props: unknown) => ({ type, props });
+  const VimInput = () => null;
+  const native = { value: 'draft', selectionStart: 1, selectionEnd: 3 };
+  const document = { activeElement: native as unknown };
+  const { EditorInput } = load('EditorInput.tsx', {
+    react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: Symbol('Fragment') },
+    './editorMode.ts': { useEditorMode: () => 'vim' }, './VimInput.tsx': { VimInput },
+  }, { document });
+  const inputRef = { current: null };
+  let edits = 0, exits = 0, sends = 0;
+  const render = () => h.render(() => EditorInput({
+    inputRef, id: 'reply', rows: 2, value: native.value,
+    onChange: () => { edits++; }, onKey: (e: KeyboardEvent) => { if (e.key === 'Enter') sends++; else exits++; },
+  }));
+  const textarea = render().props.children[0].props;
+  assert.equal(textarea.readOnly, true);
+  textarea.ref(native);
+  assert.equal(inputRef.current, native);
+  textarea.onChange({ target: { value: 'accidental edit', selectionStart: 2 } });
+  assert.equal(edits, 0);
+  textarea.onKeyDown({ key: 'Enter', metaKey: true, nativeEvent: { key: 'Enter' } });
+  assert.equal(sends, 1);
+  let blocked = 0;
+  textarea.onKeyDown({
+    key: 'Escape', nativeEvent: { isComposing: false },
+    preventDefault() { blocked++; }, stopPropagation() { blocked++; },
+  });
+  assert.equal(blocked, 2);
+  assert.equal(exits, 0);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const editor = render();
+  assert.equal(editor.type, VimInput);
+  assert.equal(editor.props.startInInsert, false);
+  assert.equal(editor.props.value, 'draft');
+  assert.equal(JSON.stringify(editor.props.handoff), JSON.stringify({ focused: true, start: 1, end: 3 }));
+  document.activeElement = null;
+  textarea.ref(null);
+  assert.equal(editor.props.handoff.focused, false);
+});
+
 test('note forms keep IME Escape local and close once on the next plain Escape', () => {
   for (const name of ['NoteReply', 'NoteEditor']) {
     const h = hooks();
