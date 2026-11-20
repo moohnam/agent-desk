@@ -823,3 +823,96 @@ for (const engine of ['codex','claude']) test(`live ${engine} skill steering sen
     assert.deepEqual(t.runner.last('send')!.skillSnapshot?.selected,['parent']);
   }finally{t.hub.remotes.close();t.hub.store.database.close();}
 });
+
+test('revoking one hub stops only its turn and preserves other hubs queued inputs', async t => {
+  const { SharedWorkspace } = await import('../../hub/src/shared-workspace.ts');
+  const f=setup();const {hub,runner,dir}=f;
+  t.after(()=>{hub.dispose();hub.store.database.close();rmSync(dir,{recursive:true,force:true});});
+  const workspace=new SharedWorkspace(hub);
+  const a=workspace.grant('A'),b=workspace.grant('B');
+  const author=(peerId:string)=>({peerId,ownerId:peerId,ownerName:peerId===a.id?'남무현':'B',fingerprint:'test'});
+  const from=<T>(peerId:string,fn:()=>T)=>hub.store.origins.with(author(peerId),fn);
+  const task=from(a.id,()=>hub.compose(`@ssh:${dir} first`));
+  const id=hub.store.latestSession(task.id)!.id;
+  runner.say({type:'busy',sessionId:id,busy:true});
+  from(a.id,()=>hub.sendMessage(task.id,'A later'));
+  from(b.id,()=>hub.sendMessage(task.id,'#now B later'));
+  const bQueue=hub.store.queued({taskId:task.id}).find(q=>q.text.includes('B later'))!;
+  assert.throws(()=>from(b.id,()=>hub.sendQueuedNow(task.id,bQueue.id)),/기다려/);
+  assert.equal(hub.store.queued({taskId:task.id}).length,2);
+  // A network disconnect has no authority to revoke the submitting hub.
+  runner.connected=false;
+  assert.equal(hub.store.queued({taskId:task.id}).length,2);
+  assert.equal(runner.last('close'),undefined);
+  runner.connected=true;
+  workspace.revoke(a.id);
+  assert.equal(runner.last('close')?.sessionId,id);
+  assert.deepEqual(hub.store.queued({taskId:task.id}).map(q=>q.id),[bQueue.id]);
+  assert.equal(hub.store.origins.stopping(id),true);
+  runner.say({type:'closed',sessionId:id,reason:'user',busy:true});
+  assert.equal(hub.store.origins.stopping(id),false);
+  assert.equal(hub.store.origins.run(id)?.peerId,b.id);
+  assert.equal(hub.store.queued({taskId:task.id}).length,0);
+  const inputs=hub.store.listEvents(task.id).filter(e=>e.kind==='user');
+  assert.equal((inputs[0].payload as any).author.ownerName,'남무현');
+  assert.equal((inputs.at(-1)!.payload as any).author.peerId,b.id);
+});
+
+test('scheduled inputs keep their original hub despite another hub rearming the timer', async t => {
+  const {SharedWorkspace}=await import('../../hub/src/shared-workspace.ts');
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:new Date('2026-11-20T00:00:00Z')});
+  const {hub,runner,dir,taskId,sessionId}=started();
+  t.after(()=>{hub.dispose();hub.store.database.close();rmSync(dir,{recursive:true,force:true});});
+  const workspace=new SharedWorkspace(hub),a=workspace.grant('A'),b=workspace.grant('B');
+  const from=<T>(peerId:string,fn:()=>T)=>hub.store.origins.with({peerId,ownerId:peerId,ownerName:peerId,fingerprint:'test'},fn);
+  const at=new Date(Date.now()+2000).toISOString();
+  const qa=from(a.id,()=>hub.scheduleReply(taskId,'A scheduled',at));
+  const qb=from(b.id,()=>hub.scheduleReply(taskId,'B scheduled',at));
+  t.mock.timers.tick(2100);
+  assert.equal(hub.store.origins.queued(qa.queued_id)?.peerId,a.id);
+  assert.equal(hub.store.origins.queued(qb.queued_id)?.peerId,b.id);
+  workspace.revoke(a.id);
+  assert.deepEqual(hub.store.queued({taskId}).map(q=>q.id),[qb.queued_id]);
+  runner.say({type:'busy',sessionId,busy:false});
+  assert.equal(hub.store.origins.run(sessionId)?.peerId,b.id);
+});
+
+test('revocation persists while a runner is disconnected and retries close on reconnect', async t => {
+  const {SharedWorkspace}=await import('../../hub/src/shared-workspace.ts');
+  const {hub,runner,dir}=setup();
+  t.after(()=>{hub.dispose();hub.store.database.close();rmSync(dir,{recursive:true,force:true});});
+  const workspace=new SharedWorkspace(hub),peer=workspace.grant('A');
+  const author={peerId:peer.id,ownerId:'owner',ownerName:'A',fingerprint:'test'};
+  const task=hub.store.origins.with(author,()=>hub.compose(`@offline:${dir} work`));
+  const sessionId=hub.store.latestSession(task.id)!.id;
+  runner.say({type:'busy',sessionId,busy:true});runner.connected=false;
+  assert.doesNotThrow(()=>workspace.revoke(peer.id));
+  assert.equal(hub.store.origins.stopping(sessionId),true);
+  assert.equal(runner.last('close'),undefined);
+  runner.connected=true;
+  hub.revokeInputPeer(peer.id);
+  assert.equal(runner.last('close')?.sessionId,sessionId);
+  const closes=runner.sent.filter(c=>c.type==='close').length;
+  runner.hello([{sessionId,busy:true,approvals:[]}]);
+  hub.revokeInputPeer(peer.id);
+  assert.equal(runner.sent.filter(c=>c.type==='close').length,closes+1,'an unacknowledged close is resent after hello');
+});
+
+test('approving another hubs agent request does not change its author',async t=>{
+  const {SharedWorkspace}=await import('../../hub/src/shared-workspace.ts');
+  const {hub,runner,dir}=setup();
+  t.after(()=>{hub.dispose();hub.store.database.close();rmSync(dir,{recursive:true,force:true});});
+  const workspace=new SharedWorkspace(hub),a=workspace.grant('A'),b=workspace.grant('B');
+  const from=<T>(peerId:string,fn:()=>T)=>hub.store.origins.with({peerId,ownerId:peerId,ownerName:peerId,fingerprint:'test'},fn);
+  const target=from(b.id,()=>hub.compose(`@target:${dir} target`));
+  const asker=from(a.id,()=>hub.compose(`@asker:${dir} asker`));
+  const request=hub.requests.request({to:target.id,text:'question',fromTaskId:asker.id});
+  assert.equal(request.status,'approval');
+  from(b.id,()=>hub.resolveApproval(request.approval_id!,true));
+  assert.equal(hub.store.origins.queued(request.id)?.peerId,a.id);
+  const q=hub.store.queued({taskId:target.id})[0];
+  assert.equal(hub.store.origins.queued(q.id)?.peerId,a.id);
+  workspace.revoke(a.id);
+  assert.equal(hub.store.queued({taskId:target.id}).length,0);
+  assert.notEqual(runner.last('close')?.sessionId,hub.store.latestSession(target.id)!.id);
+});

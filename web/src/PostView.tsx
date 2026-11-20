@@ -63,7 +63,7 @@ const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
 function author(post: Post, task: TaskView | undefined) {
   // A question another task's agent asked through the desk (desk_request).
   if (post.kind === 'user' && post.event.payload.request) return `@${post.event.payload.request.from}`;
-  if (post.kind === 'user') return '나';
+  if (post.kind === 'user') return post.event.payload.author?.ownerName ?? '나';
   const engine = task?.engine ?? 'claude';
   return ENGINE_NAME[engine] ?? engine;
 }

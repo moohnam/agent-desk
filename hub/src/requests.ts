@@ -78,6 +78,7 @@ export class AgentRequests {
         { approvalId: approval.id, toolName: REQUEST_TOOL, input: approval.input, decision: 'pending' });
       this.core.transition(from.task_id, from.id, 'approval_pending');
     }
+    this.core.store.origins.with(this.core.store.origins.current() ?? this.core.store.origins.run(r.from_session_id),()=>this.core.store.origins.remember(r.id));
     this.core.store.createRequest(r);
     this.core.store.database.prepare('INSERT INTO request_cross VALUES (?,?,?,?)')
       .run(id, 'origin', JSON.stringify(a.target), label);
@@ -115,6 +116,7 @@ export class AgentRequests {
     const r: AgentRequest = { id, from_task_id: a.from.task_id, from_session_id: a.from.session_id,
       to_task_id: task.id, to_session_id: session.id, text: a.text.trim(), status: 'queued', answer: null,
       approval_id: null, queued_id: null, prompt_event_id: null, created_at: now(), answered_at: null };
+    this.core.store.origins.with(this.core.store.origins.current() ?? this.core.store.origins.run(r.from_session_id),()=>this.core.store.origins.remember(r.id));
     this.core.store.createRequest(r);
     this.core.store.database.prepare('INSERT INTO request_cross VALUES (?,?,?,?)')
       .run(id, 'target', JSON.stringify(a.from), this.core.taskLabel(task));
@@ -166,6 +168,7 @@ export class AgentRequests {
       text: question, status: 'approval', answer: null, approval_id: null, queued_id: null, prompt_event_id: null,
       created_at: now(), answered_at: null,
     };
+    this.core.store.origins.with(this.core.store.origins.current() ?? this.core.store.origins.run(r.from_session_id),()=>this.core.store.origins.remember(r.id));
     if (this.allowedByUser(from.task_id, to.task)) {
       this.core.store.createRequest(r);
       this.core.store.database.prepare('INSERT OR REPLACE INTO request_dedupe VALUES (?,?,?,?,?)')
@@ -268,6 +271,12 @@ export class AgentRequests {
 
   /** Sends an allowed request into a live turn, or keeps it durably queued when steering is unavailable. */
   deliverRequest(r: AgentRequest) {
+    const origins=this.core.store.origins;
+    const author=origins.has(r.id) ? origins.queued(r.id) : origins.current() ?? origins.run(r.from_session_id);
+    origins.assertAllowed(author);
+    return origins.with(author,()=>this.deliverRequestInner(r));
+  }
+  private deliverRequestInner(r: AgentRequest) {
     if (this.cross(r.id)?.role === 'origin') return;
     const session = this.core.store.latestSession(r.to_task_id)!;
     const busy = this.core.runner.has(session.id) && this.core.busy.has(session.id);

@@ -64,6 +64,7 @@ export class Hub extends DeskCore {
   private scheduledExchangeRunner?: string;
   private instructionContext = new AsyncLocalStorage<string>();
   private connectorContext = new AsyncLocalStorage<ConnectorExecutionContext | null | undefined>();
+  private revokedCloseSent = new Set<string>();
   private inputPeer = new AsyncLocalStorage<string>();
   private connectorIdentity = new AsyncLocalStorage<ConnectorIdentity|undefined>();
   connectorBroker?: ConnectorBroker;
@@ -90,6 +91,9 @@ export class Hub extends DeskCore {
   }
   private connectorPending(sessionId: string) {
     return this.busy.has(sessionId) || this.approvalPending(sessionId) || !!this.background.get(sessionId)?.length || !!this.connectorBroker?.busy(sessionId);
+  }
+  private foreignRun(sessionId:string, author=this.store.origins.current()) {
+    return this.connectorPending(sessionId) && this.store.origins.run(sessionId)?.peerId !== author?.peerId;
   }
   private approvalPending(sessionId:string) {return this.store.pendingApprovals().some(a=>a.session_id===sessionId);}
   private connectorSwitchBlocked(sessionId: string, context: ConnectorExecutionContext | null | undefined, textOnly = true) {
@@ -195,7 +199,7 @@ export class Hub extends DeskCore {
     this.requests = new AgentRequests(this, {
       dispatch: (sessionId, body, skills, steer) => this.connectorContext.run(null, () => this.dispatch(sessionId, body, skills, steer)),
       drain: (sessionId) => this.drain(sessionId),
-      ready: (sessionId) => this.remotes.ready(sessionId) && !this.approvalPending(sessionId) && !this.connectorSwitchBlocked(sessionId,null,false),
+      ready: (sessionId) => !this.foreignRun(sessionId) && !this.store.origins.stopping(sessionId) && this.remotes.ready(sessionId) && !this.approvalPending(sessionId) && !this.connectorSwitchBlocked(sessionId,null,false),
       bindApproval: (approvalId, sessionId) => this.connectorBroker?.bindApproval(approvalId, sessionId),
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
@@ -287,6 +291,8 @@ export class Hub extends DeskCore {
   private reconcile(sessions: LiveSession[], presumed = false, runnerId?: string) {
     const owns = (id: string) => runnerId ? id === runnerId : !this.remotes.owns(id);
     const ownedSession = (id: string) => owns(this.store.getSession(id)?.runner_id ?? '');
+    // A local socket write is not an acknowledgement; retry an unconfirmed close after hello.
+    if (!runnerId && !presumed) for (const id of this.revokedCloseSent) if (ownedSession(id)) this.revokedCloseSent.delete(id);
     const approvals = sessions.flatMap((s) => s.approvals.map((a) => ({ ...a, sessionId: s.sessionId })));
     const { lost, touched } = this.store.reconcile(
       new Set(sessions.map((s) => s.sessionId)), new Set(approvals.map((a) => a.approvalId)), owns);
@@ -318,7 +324,10 @@ export class Hub extends DeskCore {
       }
       for (const id of this.presumedLost) if (ownedSession(id)) this.presumedLost.delete(id);
     }
-    for (const r of gone) { this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나'); this.dropQueue(r.id, r.task_id, '세션이 종료되어', true); }
+    for (const r of gone) {
+      this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나');
+      if (!this.store.origins.stopped(r.id)) this.dropQueue(r.id, r.task_id, '세션이 종료되어', true);
+    }
     for (const taskId of touched) this.publishTask(taskId);
     for (const sessionId of new Set(this.store.queued().map((q) => q.session_id))) this.drain(sessionId);
   }
@@ -519,6 +528,7 @@ export class Hub extends DeskCore {
       text: text.trim(), mode: permissionMode, skills: c.skills, delivery: c.delivery === 'new' ? 'new' : undefined,
       ...context,
     });
+    this.store.origins.claim(sessionId);
     this.runner.handle({
       type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: project.root_path, prompt:notePrompt(prompt, context.note_context)+(this.connectorBroker?.inputNote(sessionId)??''), permissionMode,
       ...(createDirectory && { createDirectory: true }),
@@ -575,6 +585,7 @@ export class Hub extends DeskCore {
     else if (context.note_context?.length) throw new HttpError(400, '메모 자료와 함께 보낼 메시지를 입력해 주세요');
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
+    const foreignInput = this.foreignRun(session.id);
     const content = !!(c.body || c.skills.length);
     const waitingQuestions = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
       ? this.store.pendingApprovals().filter(a => a.session_id === session.id && a.tool_name === ASK_USER) : [];
@@ -585,7 +596,7 @@ export class Hub extends DeskCore {
       this.connectorBroker?.assertScopedTools(session.id);
     // Behind messages already waiting too, so they keep their order.
     const offline = !this.remotes.ready(session.id);
-    const wait = !asked && content && (this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
+    const wait = !asked && content && (foreignInput || this.approvalPending(session.id) || this.connectorSwitchBlocked(session.id,this.connectorContext.getStore()) || offline || (c.delivery !== 'now' && (busy || this.store.queued({ sessionId: session.id }).length > 0)));
     // Like the mode, a model or effort tag changes the session at once; a running turn keeps its
     // model and the change applies from the next turn.
     const model = c.model; // An explicit repeat also retries a runner-side model-change failure.
@@ -639,7 +650,7 @@ export class Hub extends DeskCore {
       requireNoteText(text);
       const event = this.store.eventsByIds(taskId, [eventId])[0];
       if (event?.kind !== 'user') throw new HttpError(404, '메모 게시글을 찾을 수 없습니다');
-      const payload = { text, revision: ((event.payload as UserPayload).revision ?? 0) + 1 };
+      const payload = { text, ...((event.payload as UserPayload).author && {author:(event.payload as UserPayload).author}), revision: ((event.payload as UserPayload).revision ?? 0) + 1 };
       this.store.updateUserEvent(taskId, eventId, payload);
       this.store.touchTask(taskId);
       const updated = { ...event, payload };
@@ -696,7 +707,7 @@ export class Hub extends DeskCore {
       for (const q of due) {
         if (!this.remotes.ready(q.session_id)) continue;
         if (!this.store.dropScheduledReply(q.task_id, q.id)) continue;
-        this.store.enqueue(this.queuedScheduledReply(q));
+        this.store.origins.restore(q.id,()=>this.store.enqueue(this.queuedScheduledReply(q)));
         tasks.set(q.session_id, q.task_id);
       }
       for (const taskId of new Set(tasks.values())) this.publishTask(taskId);
@@ -776,6 +787,8 @@ export class Hub extends DeskCore {
   /** Hands a message to the session: to the live one, or by resuming the conversation. */
   private dispatch(sessionId: string, body: string, skills: string[], steer = false, skillSnapshot?: SkillSnapshot) {
     requireAdmission();
+    if (this.store.origins.stopping(sessionId) || this.foreignRun(sessionId)) throw new HttpError(409, '이전 허브의 실행이 끝날 때까지 기다려 주세요');
+    this.store.origins.claim(sessionId);
     const session = this.store.getSession(sessionId)!;
     const supplied = this.connectorContext.getStore();
     const context = this.connectorBroker ? this.connectorBroker.inputContext(supplied) : supplied;
@@ -842,12 +855,12 @@ export class Hub extends DeskCore {
     if (next?.kind === 'scheduled' && this.remotes.canQueue(sessionId)
       && this.store.getSession(sessionId)?.runner_id !== this.scheduledExchangeRunner) return;
     if (next?.skill_snapshot && !this.remotes.canSnapshot(sessionId)) return;
-    if (!next || this.connectorSwitchBlocked(sessionId,next.connector_context,next.kind !== 'reset')) return;
-    this.connectorContext.run(next.connector_context, () => {
+    if (!next || this.store.origins.stopping(sessionId) || this.foreignRun(sessionId,this.store.origins.queued(next.id)) || this.connectorSwitchBlocked(sessionId,next.connector_context,next.kind !== 'reset')) return;
+    this.store.origins.restore(next.id, () => this.connectorContext.run(next.connector_context, () => {
       if (!this.store.dequeue(next.id)) return;
       if (next.kind === 'reset') { this.reset(this.store.getSession(sessionId)!, next.body, next.created_at); return; }
       this.atTime(undefined, () => { this.sendQueued(next, 'later'); this.dispatch(sessionId, next.body, next.skills, false, next.skill_snapshot); });
-    });
+    }));
   }
 
   /** Records a waiting message as sent; one carrying an agent's request starts that request's answer. */
@@ -896,7 +909,7 @@ export class Hub extends DeskCore {
   sendQueuedNow(taskId: string, queuedId: string) { return this.atomic(() => this.sendQueuedNowInner(taskId, queuedId)); }
   private sendQueuedNowInner(taskId: string, queuedId: string) {
     requireAdmission();
-    const scheduled = this.store.dropScheduledReply(taskId, queuedId);
+    const scheduled = this.store.scheduledReplies(taskId).find(q => q.id === queuedId);
     const q = scheduled ? this.queuedScheduledReply(scheduled) : this.store.queued({ taskId }).find((x) => x.id === queuedId);
     if (!q) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     if (q.kind === 'reset') throw new HttpError(409, '컨텍스트 재구성은 지금 턴이 끝난 뒤에 실행됩니다');
@@ -905,10 +918,15 @@ export class Hub extends DeskCore {
     this.requireSkillSnapshotRunner(q.skill_snapshot, q.session_id);
     if (!this.remotes.ready(q.session_id)) throw new HttpError(409, '러너 재연결 후 즉시 전달할 수 있습니다. 메시지는 대기열에 보관됩니다');
     if (this.connectorSwitchBlocked(q.session_id,q.connector_context)) throw new HttpError(409, this.connectorBroker!.switchBlockedMessage(q.session_id,q.connector_context ?? undefined));
+    if (this.store.origins.stopping(q.session_id) || this.foreignRun(q.session_id,this.store.origins.queued(q.id))) throw new HttpError(409, '다른 허브의 실행이 끝날 때까지 기다려 주세요');
+    if (scheduled) this.store.dropScheduledReply(taskId, queuedId);
     if (!scheduled && !this.store.dequeue(q.id)) throw new HttpError(404, '대기 중인 메시지가 없습니다. 이미 보냈을 수 있습니다');
     const steer = this.runner.has(q.session_id) && this.busy.has(q.session_id);
-    this.sendQueued(q, steer ? 'now' : 'later');
-    this.connectorContext.run(q.connector_context, () => this.dispatch(q.session_id, q.body, q.skills, steer, q.skill_snapshot));
+    if (steer && this.store.origins.run(q.session_id)?.peerId !== this.store.origins.queued(q.id)?.peerId) throw new HttpError(409, '다른 허브의 실행이 끝날 때까지 기다려 주세요');
+    this.store.origins.restore(q.id, () => {
+      this.sendQueued(q, steer ? 'now' : 'later');
+      this.connectorContext.run(q.connector_context, () => this.dispatch(q.session_id, q.body, q.skills, steer, q.skill_snapshot));
+    });
     this.publishTask(taskId);
   }
 
@@ -950,6 +968,7 @@ export class Hub extends DeskCore {
       text: text.trim(), mode: permissionMode, skills: c.skills, delivery: 'fork', forked_from: { task_id: parentId, title: parentTask.title, seq: parentTask.seq }, ...context,
     });
     this.addEvent(parent.id, parentId, 'status', { kind: 'status', state: 'forked', detail: { task_id: task.id, title: task.title, seq: task.seq } });
+    this.store.origins.claim(sessionId);
     this.runner.handle({
       type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId), engine, cwd: parent.cwd, prompt: notePrompt(c.body, context.note_context)+(this.connectorBroker?.inputNote(sessionId)??''), resume: parent.engine_session_id, fork: true,
       permissionMode, model: model ?? undefined, effort: effort ?? undefined, skills: c.skills, skillsHome: this.skills.home, skillSnapshot,
@@ -985,7 +1004,7 @@ export class Hub extends DeskCore {
         .map(quoteEvent).filter((q): q is Quoted => !!q);
       text = draftPrompt(picked);
     }
-    if (!this.remotes.ready(session.id) || this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
+    if (!this.remotes.ready(session.id) || this.connectorPending(session.id) || this.store.queued({ sessionId: session.id }).length) {
       this.store.enqueue({
         id: randomUUID(), task_id: taskId, session_id: session.id, text, body: text, skills: [], mode: null, created_at: now(), kind: 'handoff', connector_context: this.connectorContext.getStore(),
       });
@@ -1008,7 +1027,7 @@ export class Hub extends DeskCore {
     const body = text?.trim();
     if (!body) throw new HttpError(400, '새 세션에 넘길 내용을 쓰세요');
     const session = this.appSession(taskId);
-    if (!this.remotes.ready(session.id) || this.busy.has(session.id) || this.store.queued({ sessionId: session.id }).length) {
+    if (!this.remotes.ready(session.id) || this.connectorPending(session.id) || this.store.queued({ sessionId: session.id }).length) {
       this.store.enqueue({
         id: randomUUID(), task_id: taskId, session_id: session.id, text: body, body, skills: [], mode: null, created_at: now(), kind: 'reset', connector_context: this.connectorContext.getStore(),
       });
@@ -1042,12 +1061,34 @@ export class Hub extends DeskCore {
     }
     this.addEvent(old.id, taskId, 'status', { kind: 'status', state: 'context_reset', detail: { session_id: sessionId } });
     this.addEvent(sessionId, taskId, 'user', { text, skills: [], handoff: 'reset', ...(queuedAt && { queued_at: queuedAt }) });
+    this.store.origins.claim(sessionId);
     this.runner.handle({
       type: 'start', sessionId, connectorMcp: this.startConnector(sessionId), instructions: this.startInstructions(sessionId, old.id), engine, cwd: old.cwd ?? '', prompt: text+(this.connectorBroker?.inputNote(sessionId)??''), permissionMode: old.permission_mode,
       model: old.model ?? undefined, effort: old.effort ?? undefined, skills: [], skillsHome: this.skills.home,
     });
     this.busy.add(sessionId);
     this.setStatus(taskId, sessionId, 'running');
+  }
+
+  /** Revocation targets the source of each turn, never the whole shared conversation. */
+  revokeInputPeer(peer: string) { return this.atomic(() => this.revokeInputPeerInner(peer)); }
+  private revokeInputPeerInner(peer: string) {
+    for (const q of this.store.queued()) if (this.store.origins.queued(q.id)?.peerId === peer) this.cancelQueued(q.task_id,q.id);
+    const scheduled = this.store.database.prepare('SELECT id,task_id FROM scheduled_reply').all() as {id:string;task_id:string}[];
+    for (const q of scheduled) if (this.store.origins.queued(q.id)?.peerId === peer) this.cancelQueued(q.task_id,q.id);
+    for (const request of this.store.openRequests()) if(this.store.origins.queued(request.id)?.peerId===peer) this.requests.settleRequest(request,'denied','요청한 허브의 연결 권한이 취소되었습니다.');
+    for (const id of this.store.origins.runs(peer)) {
+      if (this.store.origins.stopping(id) && this.revokedCloseSent.has(id)) continue;
+      const session=this.store.getSession(id);
+      if (!session || !(this.busy.has(id)||this.background.get(id)?.length||this.approvalPending(id))) continue;
+      this.store.origins.stop(id);
+      try {
+        if (!this.remotes.cancelSession(id)) this.runner.handle({type:'close',sessionId:id});
+        this.revokedCloseSent.add(id);
+      } catch { continue; } // The persistent stop intent is retried after reconnect.
+
+      this.addEvent(id,session.task_id,'status',{kind:'status',state:'warning',detail:{message:'요청한 허브의 연결 권한이 취소되어 해당 실행을 중단합니다.'}});
+    }
   }
 
   interrupt(taskId: string) {
@@ -1230,6 +1271,12 @@ export class Hub extends DeskCore {
         if (this.store.latestSession(taskId)?.id !== session.id) { this.publishTask(taskId); break; }
         // Older runners do not report `busy`; then the task still running/waiting means mid-turn.
         const status = this.store.getTask(taskId)?.status;
+        if (this.store.origins.stopped(session.id)) {
+          this.revokedCloseSent.delete(session.id);
+          this.setStatus(taskId, session.id, 'done');
+          this.drain(session.id);
+          break;
+        }
         if (m.reason === 'user') {
           this.dropQueue(session.id, taskId, '세션을 닫아서');
           this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'closed', detail: { busy: !!m.busy } });

@@ -26,6 +26,7 @@ export const ALERT_STATES: readonly StatusState[] = ['warning', 'error', 'interr
 export interface StatusPayload { kind: 'status'; state: StatusState; detail?: Record<string, unknown> }
 
 export interface UserPayload {
+  author?: {peerId:string;ownerId:string;ownerName:string;fingerprint:string};
   text: string;
   channel_context?: ChannelContext;
   note_context?: NoteContext;
