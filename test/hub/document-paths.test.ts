@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http';
 import type { Hub } from '../../hub/src/hub.ts';
 import { Store } from '../../hub/src/db.ts';
 import { filePath } from '../../hub/src/open.ts';
-import { workspaceDocumentPath, DocumentPermissionError } from '../../hub/src/shared-files.ts';
+import { workspaceDocumentPath, workspaceFile, DocumentPermissionError } from '../../hub/src/shared-files.ts';
 import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
 
 const listen = (server: Server) => new Promise<string>(resolve => server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + (server.address() as {port:number}).port)));
@@ -31,8 +31,14 @@ test('metadata resolves the source real path within existing document permission
   const source = join(project, '원본 문서.md'), external = join(outside, 'external.html');
   await Promise.all([writeFile(source, '# original'), writeFile(external, '<h1>outside</h1>'), mkdir(join(project,'directory.md'))]);
   await symlink(source, join(project, 'alias.md'));
-  const hub = {cwdOf:(task:string)=>task === 'remote-task' ? 'user@runner:' + project : undefined} as unknown as Hub;
+  const hub = {store:{getTask:(id:string)=>id==='idle-task'?{project_id:'project'}:undefined,
+    getProject:()=>({root_path:'user@runner:'+project})},cwdOf:(task:string)=>task === 'remote-task' ? 'user@runner:' + project : undefined} as unknown as Hub;
   assert.equal(await workspaceDocumentPath(hub,'remote-task','alias.md:12'), source);
+  await assert.rejects(workspaceDocumentPath(hub,'idle-task','alias.md:50'),{status:409});
+  assert.equal(await workspaceDocumentPath(hub,'idle-task','alias.md:50',undefined,true),source);
+  await assert.rejects(workspaceFile(hub,'idle-task',source,join(project,'directory.md'),undefined,true),{status:403});
+  await assert.rejects(workspaceDocumentPath(hub,'idle-task',external,undefined,true),DocumentPermissionError);
+  assert.equal(await workspaceDocumentPath(hub,'idle-task',external,external,true),external);
   assert.equal(await workspaceDocumentPath(hub,'remote-task',new URL('file://' + source).href), source);
   await assert.rejects(workspaceDocumentPath(hub,'missing-task','alias.md'), {status:404});
   await assert.rejects(workspaceDocumentPath(hub,'remote-task',external), DocumentPermissionError);

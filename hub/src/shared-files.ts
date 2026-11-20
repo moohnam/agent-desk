@@ -36,8 +36,15 @@ export class DocumentPermissionError extends HttpError {
 const isPreviewDocument = (path: string) => ['.md', '.markdown', '.html', '.htm'].includes(extname(path).toLowerCase());
 
 /** Task files, temporary artifacts, task-scoped notes, or one explicitly approved document. */
-async function workspaceFileLocation(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
-  const cwd = hub.cwdOf(taskId);
+async function workspaceFileLocation(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string, sharedRunner = false) {
+  let cwd = hub.cwdOf(taskId);
+  const beforeSession = !cwd;
+  if (beforeSession && isPreviewDocument(filePath(base ?? href, '/'))) {
+    // An idle task or a note may not have started an engine. Its registered project still owns the document.
+    const task = hub.store.getTask(taskId);
+    if (task) cwd = hub.store.getProject(task.project_id)?.root_path;
+    if (cwd && !sharedRunner && remoteLocation(cwd)) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
+  }
   if (!cwd) throw new HttpError(404, '파일의 작업을 찾을 수 없습니다');
   const root = await realpath(expandHome(remoteLocation(cwd)?.path ?? cwd));
   const target = linkTarget(href, root);
@@ -54,23 +61,27 @@ async function workspaceFileLocation(hub: Hub, taskId: string, href: string, bas
   if (base) {
     const document = linkTarget(base, root);
     if (document.kind !== 'file') throw new HttpError(400, '문서 경로가 필요합니다');
-    const directory = dirname(await realpath(document.path));
+    const documentPath = await realpath(document.path);
+    if (beforeSession && (!isPreviewDocument(documentPath) || !(await lstat(documentPath)).isFile() ||
+      !inside(root,documentPath) && !inside(temp,documentPath) && !await isProjectMemoryFile(root,documentPath)))
+      throw new HttpError(403, '허용 범위 안의 실제 문서에 포함된 부속 파일만 볼 수 있습니다');
+    const directory = dirname(documentPath);
     if (!inside(directory, path)) throw new HttpError(403, '문서 폴더 안의 부속 파일만 볼 수 있습니다');
   }
   return { path, target };
 }
 
 /** Metadata only, with the same document boundary as preview reads; never return a temporary copy. */
-export async function workspaceDocumentPath(hub: Hub, taskId: string, href: string, approvedPath?: string) {
+export async function workspaceDocumentPath(hub: Hub, taskId: string, href: string, approvedPath?: string, sharedRunner = false) {
   if (!isPreviewDocument(filePath(href, '/'))) throw new HttpError(400, 'Markdown 또는 HTML 문서 경로만 복사할 수 있습니다');
-  const { path } = await workspaceFileLocation(hub, taskId, href, undefined, approvedPath);
+  const { path } = await workspaceFileLocation(hub, taskId, href, undefined, approvedPath, sharedRunner);
   if (!isPreviewDocument(path)) throw new HttpError(400, 'Markdown 또는 HTML 문서 경로만 복사할 수 있습니다');
   if (!(await lstat(path)).isFile()) throw new HttpError(400, '일반 파일의 경로만 복사할 수 있습니다');
   return path;
 }
 
-export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string) {
-  const { path, target } = await workspaceFileLocation(hub, taskId, href, base, approvedPath);
+export async function workspaceFile(hub: Hub, taskId: string, href: string, base?: string, approvedPath?: string, sharedRunner = false) {
+  const { path, target } = await workspaceFileLocation(hub, taskId, href, base, approvedPath, sharedRunner);
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
@@ -89,8 +100,8 @@ export async function workspaceFile(hub: Hub, taskId: string, href: string, base
   } catch (error) { await file.close(); throw error; }
 }
 
-export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string, approvedPath?: string) {
-  const { file, stat, target, identity } = await workspaceFile(hub, taskId, href, base, approvedPath);
+export async function sendWorkspaceFile(hub: Hub, taskId: string, href: string, res: ServerResponse, base?: string, approvedPath?: string, sharedRunner = false) {
+  const { file, stat, target, identity } = await workspaceFile(hub, taskId, href, base, approvedPath, sharedRunner);
   try {
     res.writeHead(200, {
       'content-type': 'application/octet-stream', 'cache-control': 'no-store',

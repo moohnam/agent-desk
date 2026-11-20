@@ -23,7 +23,7 @@ test('outside document approval matches one canonical file and never grants its 
   t.after(async () => { if (oldTemp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTemp; await rm(dir, {recursive: true, force: true}); });
   await Promise.all([mkdir(project), mkdir(temporary), mkdir(outside)]);
   process.env.TMPDIR = temporary;
-  const hub = {cwdOf: (task: string) => task === 'task' ? project : undefined} as unknown as Hub;
+  const hub = {store:{getTask:()=>undefined},cwdOf: (task: string) => task === 'task' ? project : undefined} as unknown as Hub;
   const first = join(outside, 'first.html'), second = join(outside, 'second.md'), secret = join(outside, 'secret.txt');
   await Promise.all([writeFile(first, '<h1>first</h1>'), writeFile(second, '# second'), writeFile(secret, 'fixture only')]);
   const alias = join(project, 'link.html'); await symlink(first, alias);

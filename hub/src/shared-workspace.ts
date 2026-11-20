@@ -285,7 +285,7 @@ export class SharedWorkspace {
           const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
           if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
           if (this.localAuthority && remoteLocation(this.hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
-          const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined);
+          const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined, !this.localAuthority);
           assertAuthorized();
           return json(res, 200, { path });
         }
@@ -361,7 +361,7 @@ export class SharedWorkspace {
           },5000);
           ping.unref();
           res.on('close',()=>{clearInterval(ping);this.files.delete(res);});
-          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined, approvedPath);
+          return await sendWorkspaceFile(this.hub, url.searchParams.get('task_id') ?? '', url.searchParams.get('href') ?? '', res, url.searchParams.get('base') ?? undefined, approvedPath, !this.localAuthority);
         }
         if (req.method === 'GET' && url.pathname === '/v1/read') {
           const path = url.searchParams.get('path')!;

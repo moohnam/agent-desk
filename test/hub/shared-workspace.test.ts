@@ -149,14 +149,25 @@ test('document previews serve isolated cached HTML and Markdown with bounded rel
   writeFileSync(join(f.project,'docs','note.md'),'# Markdown\n\n**굵게**');
   writeFileSync(join(f.project,'docs','assets','style.css'),'h1{color:red}');writeFileSync(join(f.project,'docs','assets','app.js'),'window.ready=true;');
   writeFileSync(join(f.project,'secret.js'),'secret');symlinkSync(join(f.project,'secret.js'),join(f.project,'docs','escape.js'));
-  const prepare=async(href:string,refresh=false,headers:Record<string,string>={})=>{
-   const r=await fetch(url+'/api/preview',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify({source:source.id,task_id:task.id,href,refresh})});
+  const withoutSession=f.runtime.hub.store.createTask({id:randomUUID(),project_id:task.project_id,
+    title:'실행 전 문서',status:'idle',checkpoint_md:null,created_by:'user',created_at:new Date().toISOString(),updated_at:new Date().toISOString()});
+  assert.equal(f.runtime.hub.cwdOf(withoutSession.id),undefined);
+  const prepare=async(href:string,refresh=false,headers:Record<string,string>={},taskId=task.id)=>{
+   const r=await fetch(url+'/api/preview',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify({source:source.id,task_id:taskId,href,refresh})});
    return {status:r.status,body:await r.json() as any};
   };
+  const unopened=await prepare('docs/note.md:50',false,{},withoutSession.id);
+  assert.equal(unopened.status,200,JSON.stringify(unopened.body));
+  assert.equal(unopened.body.text,'# Markdown\n\n**굵게**');
+  const unopenedHtml=await prepare('docs/index.html',false,{},withoutSession.id);
+  assert.equal(unopenedHtml.status,200);
+  const unopenedBase=unopenedHtml.body.url.replace(/[^/]*$/,'');
+  assert.equal((await fetch(url+unopenedBase+'assets/style.css')).status,200);
+  assert.equal((await fetch(url+unopenedBase+'escape.js')).status,403);
   const html=await prepare('docs/index.html');assert.equal(html.status,200,JSON.stringify(html.body));
   symlinkSync('/etc/hosts',join(f.project,'docs','outside.md'));
   const denied=await prepare('docs/outside.md');assert.equal(denied.status,403);
-  assert.match(denied.body.error,/허용 범위|읽기 권한/);
+  assert.equal((await prepare('docs/outside.md',false,{},withoutSession.id)).status,403);
   assert.equal(html.body.kind,'html');assert.ok(!html.body.text);
   const content=await fetch(url+html.body.url);assert.equal(content.status,200);
   assert.match(content.headers.get('content-security-policy')!,/^sandbox;/);
