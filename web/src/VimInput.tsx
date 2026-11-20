@@ -227,7 +227,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     }}
     onCompositionStartCapture={() => {
       const editor = view.current;
-      if (!settlingEscape.current || !editor || editor.compositionStarted) return;
+      if (!settlingEscape.current || !editor) return;
       // A new composition must see the requested Normal mode, even before the next frame.
       settlingEscape.current = undefined;
       leaveAfterIme(editor);
