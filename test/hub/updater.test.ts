@@ -19,8 +19,10 @@ import type { Connectors } from '../../hub/src/connectors.ts';
 import type { HubToRunner, RunnerToHub } from '../../shared/protocol.ts';
 import { readUpdateConfig, UpdateWorker, validateUpdateConfig, writePrivateJson, type UpdateConfig } from '../../hub/src/updater.ts';
 
-test('maintenance control refuses busy work, checks ownership, blocks admission and expires abandoned leases', async () => {
+test('maintenance control refreshes only an active owned lease and expires abandoned leases', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-control-')), socket = join(dir, 'ctl.sock');
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   let busy = true, stopped = false;
   const server = await registerRuntimeControl({ role: 'shared', socket, commit: 'a'.repeat(40), leaseMs: 150,
     ready: () => true, blockers: () => busy ? ['실행 중인 턴'] : [], stop: () => { stopped = true; } });
@@ -31,17 +33,36 @@ test('maintenance control refuses busy work, checks ownership, blocks admission 
     assert.equal((await controlRequest(socket, { action: 'prepare', instance: 'wrong' })).ok, false);
     const prepared = await controlRequest(socket, { action: 'prepare', instance: state.instance });
     assert.equal(prepared.ok, true); assert.throws(requireAdmission, /업데이트/);
-    assert.equal((await controlRequest(socket, { action: 'stop', instance: state.instance, lease: 'wrong' })).ok, false);
-    await delay(180); assert.doesNotThrow(requireAdmission);
+    assert.equal(state.leaseRenewal, true);
+    assert.equal((await controlRequest(socket, { action: 'renew', instance: 'wrong', lease: prepared.lease })).ok, false);
+    assert.equal((await controlRequest(socket, { action: 'renew', instance: state.instance, lease: 'wrong' })).ok, false);
+    now += 100;
+    const renewal = await controlRequest(socket, { action: 'renew', instance: state.instance, lease: prepared.lease });
+    assert.equal(renewal.ok, true);
+    now += 100;
+    assert.throws(requireAdmission, /업데이트/, 'the original deadline has passed');
+    now += 51;
+    assert.doesNotThrow(requireAdmission, 'an abandoned renewed lease still expires');
+    assert.equal((await controlRequest(socket, { action: 'renew', instance: state.instance, lease: prepared.lease })).ok, false);
     assert.equal((await controlRequest(socket, { action: 'stop', instance: state.instance, lease: prepared.lease })).ok, false);
     assert.equal(stopped, false);
     const second = await controlRequest(socket, { action: 'prepare', instance: state.instance });
     busy = true;
+    assert.equal((await controlRequest(socket, { action: 'renew', instance: state.instance, lease: second.lease })).ok, false);
     assert.equal((await controlRequest(socket, { action: 'stop', instance: state.instance, lease: second.lease })).ok, false);
     await controlRequest(socket, { action: 'cancel', instance: state.instance, lease: second.lease });
     assert.doesNotThrow(requireAdmission);
     assert.deepEqual(sessionBlockers([{ sessionId: 's', busy: false, approvals: [], background: [{ id: 'b', type: 'agent', description: 'running' }] }]), ['백그라운드 작업']);
+    busy = false;
+    const finalHold = await controlRequest(socket, { action: 'prepare', instance: state.instance });
+    const stop = { action: 'stop' as const, instance: state.instance, lease: finalHold.lease };
+    assert.equal((await controlRequest(socket, stop)).ok, true);
+    now += 30_000;
+    assert.equal(stopped, true);
+    assert.throws(requireAdmission, /업데이트/, 'an accepted shutdown holds admission until the runtime closes');
+    assert.equal((await controlRequest(socket, { ...stop, action: 'cancel' })).ok, false);
   } finally { await new Promise<void>(resolve => server!.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); }
+  assert.doesNotThrow(requireAdmission);
 });
 
 test('isolated Git releases build before idle replacement and preserve data across worker and runtime restarts', { timeout: 90_000 }, async () => {
@@ -765,7 +786,7 @@ test('approval is exact, cross-process cancellable and never reused after failur
   } finally {worker.close(); process.env.PATH = previousPath; rmSync(f.dir, {recursive: true, force: true});}
 });
 
-test('cancellation during maintenance preparation prevents the first runtime stop', async () => {
+test('cancellation during the first lease renewal prevents the first runtime stop', async () => {
   const f = prepareGuardFixture(), previousPath = process.env.PATH, previousOwner = process.env.AGENT_DESK_UPDATE_OWNER;
   f.fakeNpm('process.exit(0)'); process.env.PATH = f.bin + ':' + previousPath;
   const worker = new UpdateWorker(f.config); worker.claim();
@@ -774,7 +795,11 @@ test('cancellation during maintenance preparation prevents the first runtime sto
   try {
     await worker.prepare(); worker.approve(f.commit, 'immediate');
     server = await registerRuntimeControl({role: 'shared', socket: worker.socket('shared'), commit: 'a'.repeat(40), ready: () => true,
-      blockers: () => {if (++observations === 3) assert.equal(worker.cancelApproval(f.commit), true); return [];},
+      blockers: () => {
+        // Two status checks, then prepare's blocker and reply checks before the first renewal.
+        if (++observations === 5) assert.equal(worker.cancelApproval(f.commit), true);
+        return [];
+      },
       stop: () => {stops++;}});
     await assert.rejects(worker.cycle(), /승인이 취소/);
     assert.equal(stops, 0); assert.equal(worker.state().approval, undefined);
@@ -783,6 +808,72 @@ test('cancellation during maintenance preparation prevents the first runtime sto
     if (server!) await new Promise<void>(resolve => server!.close(() => resolve()));
     if (previousOwner === undefined) delete process.env.AGENT_DESK_UPDATE_OWNER; else process.env.AGENT_DESK_UPDATE_OWNER = previousOwner;
     worker.close(); process.env.PATH = previousPath; rmSync(f.dir, {recursive: true, force: true});
+  }
+});
+
+test('an expired remaining lease restores only the role already stopped and never starts the candidate', async () => {
+  const f = prepareGuardFixture(), source = f.config.source, previousPath = process.env.PATH;
+  const ports = [createServer(), createServer()];
+  const starts = join(f.data, 'starts.log'), fault = join(f.data, 'expire-after-hub-stop');
+  const git = (...args: string[]) => execFileSync('git', ['-C', source, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  for (const name of ['runtime-control.ts', 'trusted-path.ts', 'errors.ts']) {
+    copyFileSync(new URL(`../../hub/src/${name}`, import.meta.url), join(source, 'hub/src', name));
+  }
+  function commit(version: string) {
+    for (const [role, entry, control] of [
+      ['daemon', 'runner/daemon.ts', '../runtime-control.ts'], ['hub', 'index.ts', './runtime-control.ts'],
+    ]) {
+      writeFileSync(join(source, 'hub/src', entry), `import {registerRuntimeControl} from '${control}';
+import {appendFileSync,existsSync,writeFileSync} from 'node:fs'; import {dirname,join} from 'node:path';
+const role=${JSON.stringify(role)}, data=dirname(process.env.AGENT_DESK_DB);
+const advanced=join(data,'clock-advanced'), now=Date.now;
+if(role==='daemon') Date.now=()=>now()+(existsSync(advanced)?31_000:0);
+appendFileSync(join(data,'starts.log'),${JSON.stringify(version)}+':'+role+'\\n');
+await registerRuntimeControl({role,ready:()=>true,blockers:()=>[],stop:()=>{
+  if(role==='hub'&&existsSync(join(data,'expire-after-hub-stop'))) writeFileSync(advanced,'1');
+  process.exit(0);
+}});`);
+    }
+    git('add', '.'); git('commit', '-m', version);
+    return git('rev-parse', 'HEAD');
+  }
+  let worker: UpdateWorker | undefined;
+  try {
+    await Promise.all(ports.map(port => new Promise<void>(resolve => port.listen(0, '127.0.0.1', resolve))));
+    const [daemonPort, hubPort] = ports.map(port => String((port.address() as { port: number }).port));
+    await Promise.all(ports.map(port => new Promise<void>(resolve => port.close(() => resolve()))));
+    f.fakeNpm('process.exit(0)');
+    process.env.PATH = f.bin + ':' + previousPath;
+    worker = new UpdateWorker({ ...f.config, roles: ['daemon', 'hub'], environment: { HOST: '127.0.0.1', PORT: hubPort, RUNNER_PORT: daemonPort } });
+    worker.claim();
+    const v1 = commit('one');
+    assert.equal(await worker.prepare(), v1);
+    worker.approve(v1, 'immediate');
+    assert.equal(await worker.activate(v1), true);
+    const [daemon, hub] = (await worker.status()).map(item => item.runtime!.pid);
+    const v2 = commit('two');
+    assert.equal(await worker.prepare(), v2);
+    worker.approve(v2, 'immediate');
+    writeFileSync(fault, '1');
+    await assert.rejects(worker.activate(v2), /daemon 교체 준비.*만료/);
+    const [afterDaemon, afterHub] = (await worker.status()).map(item => item.runtime!);
+    assert.equal(afterDaemon.pid, daemon);
+    assert.equal(afterDaemon.prepared, false);
+    assert.notEqual(afterHub.pid, hub);
+    assert.equal(afterHub.commit, v1);
+    assert.equal(worker.state().current, v1);
+    assert.equal(worker.state().recovered, v1);
+    assert.equal(worker.state().approval, undefined);
+    assert.equal(readFileSync(starts, 'utf8'), 'one:daemon\none:hub\none:hub\n');
+  } finally {
+    try {
+      if (worker) for (const { runtime } of await worker.status()) if (runtime) process.kill(runtime.pid, 'SIGTERM');
+    } finally {
+      worker?.close();
+      for (const port of ports) if (port.listening) await new Promise<void>(resolve => port.close(() => resolve()));
+      process.env.PATH = previousPath;
+      rmSync(f.dir, { recursive: true, force: true });
+    }
   }
 });
 

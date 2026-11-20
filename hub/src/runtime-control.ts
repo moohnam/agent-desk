@@ -11,9 +11,9 @@ import type { Hub } from './hub.ts';
 export type RuntimeRole = 'hub' | 'daemon' | 'local' | 'shared' | 'remote';
 export interface RuntimeStatus {
   version: 1; role: RuntimeRole; commit: string; instance: string; pid: number; owner: string;
-  ready: boolean; reasons: string[]; prepared: boolean;
+  ready: boolean; reasons: string[]; prepared: boolean; leaseRenewal?: true;
 }
-export interface ControlRequest { action: 'status' | 'prepare' | 'prepare-failed-candidate' | 'cancel' | 'stop'; instance?: string; lease?: string; owner?: string; commit?: string }
+export interface ControlRequest { action: 'status' | 'prepare' | 'prepare-failed-candidate' | 'renew' | 'cancel' | 'stop'; instance?: string; lease?: string; owner?: string; commit?: string }
 export interface ControlReply { ok: boolean; status: RuntimeStatus; lease?: string; error?: string }
 let heldUntil = 0;
 export const maintenanceActive = () => Date.now() < heldUntil;
@@ -63,7 +63,8 @@ export async function registerRuntimeControl(options: {
   let lease: string | undefined, stopping = false;
   const status = (): RuntimeStatus => ({ version: 1, role: options.role, commit, instance, pid: process.pid,
     owner: process.env.AGENT_DESK_UPDATE_OWNER ?? '',
-    ready: !stopping && options.ready(), reasons: options.blockers(), prepared: maintenanceActive() });
+    ready: !stopping && options.ready(), reasons: options.blockers(), prepared: maintenanceActive(), leaseRenewal: true });
+  const leaseMs = options.leaseMs ?? 30_000;
   const server = createServer(socket => {
     let input = '';
     const deadline = setTimeout(() => socket.destroy(), 3000);
@@ -78,7 +79,7 @@ export async function registerRuntimeControl(options: {
       let reply: ControlReply;
       try {
         const request = JSON.parse(input.split('\n')[0]) as ControlRequest;
-        if (!request || !['status', 'prepare', 'prepare-failed-candidate', 'cancel', 'stop'].includes(request.action)) throw new Error('잘못된 제어 요청입니다');
+        if (!request || !['status', 'prepare', 'prepare-failed-candidate', 'renew', 'cancel', 'stop'].includes(request.action)) throw new Error('잘못된 제어 요청입니다');
         if (request.action !== 'status' && request.instance !== instance) throw new Error('런타임 인스턴스가 바뀌었습니다');
         if (request.action === 'prepare' || request.action === 'prepare-failed-candidate') {
           if (maintenanceActive() || stopping) throw new Error('이미 교체를 준비 중입니다');
@@ -87,12 +88,20 @@ export async function registerRuntimeControl(options: {
           if (failedCandidate && (!state.owner || request.owner !== state.owner || request.commit !== state.commit || state.ready))
             throw new Error('실패 후보의 소유자·커밋·미준비 상태가 일치하지 않습니다');
           if ((!state.ready && !failedCandidate) || state.reasons.length) throw new Error('작업이 유휴 상태가 아닙니다');
-          lease = randomUUID(); heldUntil = Date.now() + (options.leaseMs ?? 30_000);
-        } else if (request.action === 'cancel' || request.action === 'stop') {
-          if (!maintenanceActive() || !lease || request.lease !== lease) throw new Error('교체 준비 시간이 만료되었거나 소유권이 다릅니다');
-          if (request.action === 'stop') {
-            if (status().reasons.length) throw new Error('교체 준비 뒤 작업 상태가 바뀌었습니다');
-            stopping = true; stop = true;
+          lease = randomUUID(); heldUntil = Date.now() + leaseMs;
+        } else if (request.action === 'renew' || request.action === 'cancel' || request.action === 'stop') {
+          if (stopping || !maintenanceActive() || !lease || request.lease !== lease) throw new Error('교체 준비 시간이 만료되었거나 소유권이 다릅니다');
+          if (request.action === 'renew' || request.action === 'stop') {
+            const state = status();
+            if (state.reasons.length || (request.action === 'renew' && !state.ready)) throw new Error('교체 준비 뒤 작업 상태가 바뀌었습니다');
+            const checkedAt = Date.now();
+            if (checkedAt >= heldUntil) throw new Error('교체 준비 시간이 만료되었습니다');
+            if (request.action === 'renew') heldUntil = checkedAt + leaseMs;
+            else {
+              // Once accepted, a graceful shutdown must not resume admitting work.
+              heldUntil = Infinity;
+              stopping = true; stop = true;
+            }
           } else { heldUntil = 0; lease = undefined; }
         }
         reply = { ok: true, status: status(), ...((request.action === 'prepare' || request.action === 'prepare-failed-candidate') && { lease }) };
@@ -102,6 +111,7 @@ export async function registerRuntimeControl(options: {
       });
     });
   });
+  server.once('close', () => { if (stopping) heldUntil = 0; });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { chmodSync(path, 0o600); resolve(); }); });
   return server;
 }

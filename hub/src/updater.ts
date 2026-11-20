@@ -22,6 +22,7 @@ export interface UpdateConfig {
   roles: RuntimeRole[]; environment: Record<string, string>; intervalMs: number;
 }
 type CandidateIdentity = Pick<RuntimeStatus, 'owner' | 'commit' | 'instance' | 'pid'>;
+type PreparedRuntime = { role: RuntimeRole; runtime: RuntimeStatus; lease: string };
 export interface UpdateApproval { commit: string; mode: 'immediate' | 'when-idle'; token: string }
 export interface UpdateState { current?: string; candidate?: string; attempted?: string; restoreCurrent?: string; recovered?: string; blockedPort?: number; spentApproval?: string; approval?: UpdateApproval; started?: Partial<Record<RuntimeRole, CandidateIdentity>>; phase: 'preparing' | 'waiting' | 'switching' | 'active' | 'failed'; error?: string }
 type WorkerLock = { host: string; pid: number; at?: number; token?: string };
@@ -533,10 +534,25 @@ export class UpdateWorker {
       }
     }
   }
+  private async refreshPrepared(items: PreparedRuntime[]) {
+    const checked = await Promise.allSettled(items.map(async ({ role, runtime, lease }) => {
+      // Releases before lease renewal still support the prepared check and validate the token on stop.
+      const request = runtime.leaseRenewal === true ? { action: 'renew' as const, instance: runtime.instance, lease } : { action: 'status' as const };
+      const reply = await controlRequest(this.socket(role), request).catch(error => {
+        throw new Error(`${role} 교체 준비 상태를 확인하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      });
+      const state = reply.status;
+      if (!reply.ok || !state.prepared || !state.ready || state.reasons.length || state.instance !== runtime.instance
+        || state.pid !== runtime.pid || state.role !== role || state.owner !== runtime.owner || state.commit !== runtime.commit)
+        throw new Error(`${role} 교체 준비를 유지할 수 없습니다: ${reply.error ?? '잠금이 만료됐거나 런타임 상태가 바뀌었습니다'}`);
+    }));
+    const failed = checked.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
   private async activateApproved(commit: string, approval: UpdateApproval): Promise<boolean> {
     this.deploymentPaths(commit); this.protectedPaths();
     if (!this.isVerifiedCandidate(commit)) throw new Error('검증하지 않은 후보는 실행할 수 없습니다');
-    const previous = this.state(), prepared: { role: RuntimeRole; runtime: RuntimeStatus; lease: string }[] = [];
+    const previous = this.state(), prepared: PreparedRuntime[] = [];
     const release = join(this.config.deploymentDir, 'releases', commit);
     await this.verifyCheckout(release,commit);
     const anchor = previous.attempted ?? ((previous.phase === 'failed' || previous.phase === 'switching') ? previous.candidate ?? previous.current : previous.current);
@@ -570,7 +586,12 @@ export class UpdateWorker {
       for (const role of [...this.config.roles].reverse()) {
         let runtime = await this.observe(role);
         if (runtime && runtime.commit !== previous.current) beforeCandidate();
-        if (runtime && !runtime.ready) { if (!switching) this.requireApproval(approval); await this.cleanupFailedCandidate(role, runtime, beginSwitch); runtime = undefined; }
+        if (runtime && !runtime.ready) {
+          if (!switching) this.requireApproval(approval);
+          await this.refreshPrepared(prepared);
+          await this.cleanupFailedCandidate(role, runtime, beginSwitch);
+          runtime = undefined;
+        }
         if (!runtime || runtime.commit === commit) continue;
         const reply = await controlRequest(this.socket(role), { action: 'prepare', instance: runtime.instance });
         if (!reply.ok || !reply.lease) {
@@ -579,8 +600,9 @@ export class UpdateWorker {
         }
         prepared.push({ role, runtime, lease: reply.lease });
       }
-      beginSwitch();
-      for (const item of prepared) {
+      for (const [index, item] of prepared.entries()) {
+        await this.refreshPrepared(prepared.slice(index));
+        beginSwitch();
         const reply = await controlRequest(this.socket(item.role), { action: 'stop', instance: item.runtime.instance, lease: item.lease });
         if (!reply.ok) throw new Error(reply.error);
         for (const deadline = Date.now() + 10_000; alive(item.runtime.pid);) {
@@ -588,6 +610,7 @@ export class UpdateWorker {
           await delay(100);
         }
       }
+      beginSwitch();
       for (const role of this.config.roles) await this.start(role, commit, beforeCandidate);
       const completed = this.state();
       this.save({ ...completed, current: commit, attempted: undefined, started: undefined, restoreCurrent: undefined, recovered: undefined, phase: completed.candidate && completed.candidate !== commit ? 'waiting' : 'active', error: undefined });
