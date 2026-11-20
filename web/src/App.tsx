@@ -1089,11 +1089,12 @@ export function App() {
     setFocusCol(def.id);
   };
   useEffect(() => {
-    if (!hub.synced) return;
+    // Remote workspaces can sync while the local channel list is still unavailable.
+    if (!hub.synced || !hub.availableSources.has('')) return;
     setCustom((columns) => columns.some((column) => column.channelId && !hub.channels.has(column.channelId))
       ? columns.filter((column) => !column.channelId || hub.channels.has(column.channelId)) : columns);
     if (phoneChannel && !hub.channels.has(phoneChannel)) setPhoneChannel(null);
-  }, [hub.synced, hub.channels, phoneChannel]);
+  }, [hub.synced, hub.availableSources, hub.channels, phoneChannel]);
   /** Toggles "작업별로 묶기" on a user column. */
   const toggleByTask = (colId: string) => {
     const col = columns.find((c) => c.id === colId);

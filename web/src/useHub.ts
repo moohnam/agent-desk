@@ -116,7 +116,7 @@ export function useHub() {
             const nextProjects = s.projects.filter(p => !deletedProjects.current.has(p.id));
             assignProjectColors(nextProjects);
             setProjects(nextProjects);
-            if (channelRefresh.current === channelUpdates) {
+            if (available.has('') && channelRefresh.current === channelUpdates) {
               const next = new Map((s.channels ?? []).map((channel) => [channel.id, channel]));
               for (const [id, channel] of channelUpdates) { if (channel) next.set(id, channel); else next.delete(id); }
               setChannels(next);

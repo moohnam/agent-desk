@@ -28,8 +28,8 @@ function fixtureServer() {
         const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
         let body = fixture(url);
         if (note && url.pathname === '/api/state') body.tasks = body.tasks.map(task => ({ ...task, kind: 'note' }));
-        if (layout === 'channel') {
-          const channel = { id: 'news', name: '테스트 채널', source: 'push', enabled: true, read_through_id: 0, latest_entry_id: 1, unread_count: 1 };
+        if (layout === 'channel' || layout === 'feed-channel') {
+          const channel = { id: 'news', name: '테스트 채널', source: layout === 'feed-channel' ? 'feed' : 'push', enabled: true, read_through_id: 0, latest_entry_id: 1, unread_count: 1 };
           if (url.pathname === '/api/state') body.channels = [channel];
           if (url.pathname === '/api/channels') body = [channel];
           if (url.pathname === '/api/channels/news/entries') body = { entries: [], more: false, total: 0 };
@@ -166,6 +166,36 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         }
       }));
     }
+
+    await t.test('an unavailable local workspace does not erase a saved RSS column', () => withPage(async page => {
+      const column = 'section[data-col="news-col"]';
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'feed-channel' });
+      await page.evaluateOnNewDocument(() => {
+        if (sessionStorage.getItem('saved-columns')) return;
+        sessionStorage.setItem('saved-columns', '1');
+        localStorage.setItem('agent-desk.columns.v2', JSON.stringify([
+          { id: 'news-col', title: '저장된 RSS', filter: {}, channelId: 'news' },
+        ]));
+      });
+      let state = 'offline';
+      await page.setRequestInterception(true);
+      page.on('request', request => {
+        if (new URL(request.url()).pathname !== '/api/state' || state === 'ready') return void request.continue();
+        if (state === 'offline') return void request.respond({ status: 503, contentType: 'application/json', body: '{}' });
+        return void request.respond({ status: 200, contentType: 'application/json',
+          body: JSON.stringify({ projects: [], tasks: [], approvals: [], questions: [], channels: [] }) });
+      });
+      const saved = () => page.evaluate(() => JSON.parse(localStorage.getItem('agent-desk.columns.v2') ?? '[]'));
+      await page.goto(origin, { waitUntil: 'networkidle2' });
+      assert.equal((await saved())[0]?.id, 'news-col');
+      state = 'ready';
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector(`${column} button[role="tab"]`);
+      assert.equal((await saved())[0]?.id, 'news-col');
+      state = 'deleted';
+      await page.reload({ waitUntil: 'networkidle2' });
+      assert.equal((await saved()).length, 0);
+    }));
 
     for (const editorMode of ['vim', 'emacs']) {
       await t.test(`opening an editor by key accepts the next character (${editorMode})`, () => withPage(async page => {
