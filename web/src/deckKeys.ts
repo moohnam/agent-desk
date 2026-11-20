@@ -154,7 +154,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     const mine = ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey && (ev.code === 'KeyJ' || ev.code === 'KeyK');
     const noteKey = !ev.ctrlKey && !ev.metaKey && !ev.altKey && key === 'd';
     const canDeleteNote = noteKey && !help && !menu && queueFocus == null && !dialogOpen
-      && !(ev.target instanceof Element && ev.target.closest('input, textarea, select'));
+      && !(ev.target instanceof Element && ev.target.closest('input, textarea, select, [data-desk-input]'));
     if (!canDeleteNote) pendingNoteDelete.current = null;
     const references = ev.ctrlKey && !ev.shiftKey && !ev.metaKey && !ev.altKey && ev.code === 'Semicolon';
     // Any open dialog, not a list of them that a new one can be left out of; help handles its own keys below.
@@ -180,7 +180,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     // F1–F4: the deck's views, also while typing.
     const fv = !ev.ctrlKey && !ev.shiftKey && VIEWS.find((x) => x.key === ev.key);
     if (fv) { if (!phone) switchView(fv.id); ev.preventDefault(); return; }
-    if (ev.target instanceof Element && (ev.target.closest('input, textarea, select') || (ev.target as HTMLElement).isContentEditable)) return;
+    if (ev.target instanceof Element && (ev.target.closest('input, textarea, select, [data-desk-input]') || (ev.target as HTMLElement).isContentEditable)) return;
     if (ev.repeat && ['y', 'n', 's', 'Enter', 'D'].includes(key)) { ev.preventDefault(); return; }
     const e = { key, preventDefault: () => ev.preventDefault() };
     if (help && !mine) { if (e.key === '?' || e.key === 'q') setHelp(false); return; }

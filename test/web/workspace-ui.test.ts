@@ -25,6 +25,7 @@ function load(file: string, imports: Record<string, unknown>, globals: Record<st
   } }).outputText;
   const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
     if (name === './keys.ts') return keys;
+    if (name === './EditorInput.tsx' && !(name in imports)) return { EditorInput: () => null, editorText: (text: string) => text, inputElement: (input: any) => input?.element ?? input };
     assert.ok(name in imports, `missing mock: ${name}`);
     return imports[name];
   }, ...globals };
@@ -348,6 +349,38 @@ test('different workspaces neither claim each other’s questions nor suppress b
   assert.equal(new Set(nativeIds).size, 3);
 });
 
+test('note forms keep IME Escape local and close once on the next plain Escape', () => {
+  for (const name of ['NoteReply', 'NoteEditor']) {
+    const h = hooks();
+    const jsx = (type: unknown, props: unknown) => ({ type, props });
+    const { [name]: component } = load('Note.tsx', {
+      react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, './api.ts': { api: {} },
+      './Compose.tsx': { ResizableEditor: () => null },
+      './drafts.ts': { getDraft: () => ({ text: 'draft' }), setDraft() {}, useDraftSync() {} },
+      './workspace.ts': {},
+    });
+    let closed = 0;
+    const close = () => { closed++; };
+    const form = h.render(() => component({
+      task: { id: 'note' }, post: { event: { payload: { text: 'saved note' } } },
+      inputRef: { current: null }, onEscape: close, onClose: close,
+    }));
+    for (const { composing, repeat, metaKey, expected } of [
+      { composing: true, expected: 0 }, { metaKey: true, expected: 0 },
+      { repeat: true, expected: 0 }, { expected: 1 },
+    ]) {
+      let prevented = false, stopped = false;
+      form.props.onKeyDown({
+        key: 'Escape', repeat, metaKey, nativeEvent: { isComposing: composing },
+        preventDefault() { prevented = true; }, stopPropagation() { stopped = true; },
+      });
+      assert.equal(closed, expected, name);
+      assert.equal(prevented, !composing && !metaKey, name);
+      assert.equal(stopped, !composing && !metaKey, name);
+    }
+  }
+});
+
 test('native file drops remain local and explain why shared runner paths must be supplied separately', () => {
   for (const id of ['', 'runner-a']) {
     const h = hooks(), events: Record<string, (event: any) => void> = {};
@@ -364,6 +397,73 @@ test('native file drops remain local and explain why shared runner paths must be
     const result = render();
     if (id) { assert.equal(inserted, ''); assert.match(result.error, /공유 러너에 먼저 옮긴 뒤 원격 경로/); }
     else { assert.equal(inserted, '`/local/report.txt` '); assert.equal(result.error, null); }
+  }
+});
+
+test('a delayed file upload cannot insert into a different composer reusing the old ref', async () => {
+  const h = hooks();
+  let finish!: (value: { path: string }) => void;
+  let inserted = false;
+  const input = { selectionStart: 0, selectionEnd: 0, focus() {}, setSelectionRange() {}, replaceRange() { inserted = true; } };
+  const ref = { current: { ...input } };
+  const files = load('files.ts', { react: h.react,
+    './api.ts': { api: { upload: () => new Promise(resolve => { finish = resolve; }) } },
+  }, {
+    window: { addEventListener() {}, removeEventListener() {} },
+    document: { addEventListener() {}, activeElement: null },
+  });
+  const upload = h.render(() => files.useFileDrop(ref, '첫 작업 초안', () => {})).upload([{ name: 'report.md' }]);
+  h.unmount();
+  ref.current = input;
+  finish({ path: '/uploads/report.md' });
+  await upload;
+  assert.equal(inserted, false);
+});
+
+test('web drops prefer an address, fall back to a file, and explain unavailable addresses', async () => {
+  for (const remote of [false, true]) {
+    const h = hooks(), events: Record<string, (event: unknown) => void> = {};
+    const uploaded: string[] = [];
+    const photo = { name: 'photo.jpg' };
+    let inserted = '';
+    const input = { selectionStart: 0, selectionEnd: 0, focus() {}, setSelectionRange() {} };
+    const files = load('files.ts', { react: h.react, './api.ts': { api: { upload: async (file: { name: string }) => {
+      uploaded.push(file.name);
+      return { path: '/uploads/photo.jpg' };
+    } } } }, {
+      URL,
+      window: { addEventListener: (name: string, fn: (event: unknown) => void) => { events[name] = fn; } },
+      document: {
+        addEventListener() {}, querySelector: () => input, activeElement: input,
+        createElement: (tag: string) => {
+          assert.equal(tag, 'template');
+          return { innerHTML: '', content: { querySelector: () => ({ getAttribute: () => 'https://example.invalid/photo.png' }) } };
+        },
+      },
+      requestAnimationFrame: (fn: () => void) => fn(),
+    });
+    const ref = { current: input };
+    const render = () => h.render(() => files.useFileDrop(ref, '', (value: string) => { inserted = value; }, remote));
+    const drop = render();
+    assert.equal(drop.fromWeb('# Source\nfile:///local/photo.png\nhttps://example.invalid/photo.jpg', null, [photo]), true);
+    assert.equal(inserted, 'https://example.invalid/photo.jpg ');
+    assert.deepEqual(uploaded, []);
+    events['desk-drop']({ detail: { paths: [], html: '<img src="https://example.invalid/photo.png">', url: 'https://example.invalid/article' } });
+    assert.equal(inserted, 'https://example.invalid/photo.png ');
+    assert.equal(drop.fromWeb('data:image/png;base64,AA==', null), true);
+    assert.match(render().error, /파일로 저장한 뒤 첨부하세요/);
+    assert.equal(drop.fromWeb('https://name:password@example.invalid/image.png', null), true);
+    assert.equal(inserted, 'https://example.invalid/photo.png ');
+    assert.equal(drop.fromWeb('file:///local/photo.jpg', null, [photo]), true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (remote) {
+      assert.deepEqual(uploaded, []);
+      assert.match(render().error, /공유 러너에 먼저 옮긴 뒤/);
+    } else {
+      assert.deepEqual(uploaded, ['photo.jpg']);
+      assert.equal(inserted, '`/uploads/photo.jpg` ');
+      assert.equal(render().error, null);
+    }
   }
 });
 

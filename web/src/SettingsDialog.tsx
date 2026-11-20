@@ -9,6 +9,7 @@ import { SessionsPanel } from './Sessions.tsx';
 import { ConnectorsPanel } from './Connectors.tsx';
 import { WorkspaceDeliveries } from './Workspaces.tsx';
 import { SettingsPanelContext, type PanelGuard } from './settingsPanel.tsx';
+import { setEditorMode, useEditorMode } from './editorMode.ts';
 import type { Channel, TaskView } from './types.ts';
 import { Updates } from './Updates.tsx';
 import type { UpdatesState } from './useUpdates.ts';
@@ -52,6 +53,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
   onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState; updateAvailable:boolean; runnerProblem?:RunnerConnectionProblem;
 }) {
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
+  const editorMode = useEditorMode();
   const [notice,setNotice]=useState('');
   const guards=useRef(new Map<string,PanelGuard>());
   const register=useCallback((id:string,state:PanelGuard)=>{guards.current.set(id,state);return()=>{guards.current.delete(id);};},[]);
@@ -76,6 +78,13 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
       <div className="settings-pages">
         {notice&&<p className="muted small" role="status">{notice}</p>}
         <section className="settings-content" hidden={section!=='agent'} aria-label="에이전트">
+          <label className="settings-row">
+            <strong>대화·메모 편집</strong>
+            <select className="input" value={editorMode} onChange={event => setEditorMode(event.target.value === 'vim' ? 'vim' : 'emacs')}>
+              <option value="emacs">Emacs</option>
+              <option value="vim">Vim</option>
+            </select>
+          </label>
           {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close} prefetchUsage/>,true)}
           {panel('agent','기본 지침','이 허브에서 시작하는 실행에 전달할 공통 지침',<InstructionsDialog onClose={close}/>)}
         </section>

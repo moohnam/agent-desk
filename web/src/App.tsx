@@ -23,6 +23,7 @@ import { ChannelsDialog } from './Channels.tsx';
 import { ChannelColumn } from './ChannelColumn.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
+import { deskInputSelector, type DeskInput } from './EditorInput.tsx';
 import { NoteReply } from './Note.tsx';
 import type { NoteContext } from '../../shared/api.ts';
 import { SkillsDialog } from './Skills.tsx';
@@ -139,8 +140,8 @@ export function App() {
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [phoneChannel, setPhoneChannel] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const composeRef = useRef<HTMLTextAreaElement>(null);
-  const replyRef = useRef<HTMLTextAreaElement>(null);
+  const composeRef = useRef<DeskInput>(null);
+  const replyRef = useRef<DeskInput>(null);
   const [noteAttachment, setNoteAttachment] = useState<NoteContext[number]>();
   const pendingDelete = useRef(0);
   const pendingNoteDelete = useRef<{ postId: number; at: number } | null>(null);
@@ -1274,7 +1275,7 @@ export function App() {
       const taskId = (event as CustomEvent).detail?.taskId;
       if (typeof taskId !== 'string') return;
       const box = [...document.querySelectorAll<HTMLElement>('[data-answer-task]')].find(el => el.dataset.answerTask === taskId);
-      if (box) box.querySelector('textarea')?.focus();
+      if (box) box.querySelector<HTMLElement>(deskInputSelector)?.focus();
       else postActions.current.openThread(taskId);
     };
     window.addEventListener(ANSWER_COMPOSE, openAnswer);
@@ -1421,12 +1422,12 @@ export function App() {
           </div>
         </div>
         {threadTaskView && (threadTaskView.kind === 'note' ? (
-          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onBeforeResize={beforeReplyResize} />
+          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={closeThread} onBeforeResize={beforeReplyResize} />
         ) : handoff?.open && threadTaskView.source !== 'external' ? (
           <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
             onError={setToast} onDone={setToast} />
         ) : (
-          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onBeforeResize={beforeReplyResize} />
+          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={closeThread} onBeforeResize={beforeReplyResize} />
         ))}
         <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
       </section>

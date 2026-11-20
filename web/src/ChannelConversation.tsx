@@ -1,3 +1,4 @@
+import type { DeskInput } from './EditorInput.tsx';
 import { AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { api } from './api.ts';
@@ -23,7 +24,7 @@ export interface ChannelConversationProps {
 export function ChannelConversation({ channel, channelId, projects, tasks, approvals, questions, synced, onEvent, onError, onOpenTask, onApproval,
   sources, sourceRevision, onSourcesSent, onRemoveSource, onBrowse, inputRef }: ChannelConversationProps & {
   sources: Map<number, string>; sourceRevision: number; onSourcesSent: (ids: number[]) => void;
-  onRemoveSource: (id: number) => void; onBrowse: () => void; inputRef: RefObject<HTMLTextAreaElement | null>;
+  onRemoveSource: (id: number) => void; onBrowse: () => void; inputRef: RefObject<DeskInput | null>;
 }) {
   const draftKey = `channel-chat:${channelId}`;
   const draft = getDraft<{ text: string; project: string }>(draftKey);

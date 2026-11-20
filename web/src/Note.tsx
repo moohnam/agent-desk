@@ -1,14 +1,35 @@
 import { imeKey } from './keys.ts';
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { api } from './api.ts';
+import { EditorInput, type DeskInput } from './EditorInput.tsx';
 import { ResizableEditor } from './Compose.tsx';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 import type { Post, TaskView } from './types.ts';
 import { SharedPending } from './workspace.ts';
 
-export function NoteReply({ task, inputRef, onError, onSend, onBeforeResize }: {
-  task: TaskView; inputRef: RefObject<HTMLTextAreaElement | null>;
-  onError: (message: string) => void; onSend?: () => void;
+function closeOnEscape(event: KeyboardEvent<HTMLFormElement>, close: () => void) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey
+    || imeKey(event.nativeEvent)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) close();
+}
+
+function noteKey(event: globalThis.KeyboardEvent, leave: boolean, submit: () => Promise<void>, close: () => void) {
+  if (imeKey(event) || event.defaultPrevented) return;
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    if (!event.repeat) void submit();
+  } else if (event.key === 'Escape' && leave && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) close();
+  }
+}
+
+export function NoteReply({ task, inputRef, onError, onSend, onEscape, onBeforeResize }: {
+  task: TaskView; inputRef: RefObject<DeskInput | null>;
+  onError: (message: string) => void; onSend?: () => void; onEscape: () => void;
   onBeforeResize?: () => (() => void) | undefined;
 }) {
   const key = `reply:${task.id}`;
@@ -46,14 +67,11 @@ export function NoteReply({ task, inputRef, onError, onSend, onBeforeResize }: {
     }
   };
 
-  return <form className="reply-box" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+  return <form className="reply-box" onSubmit={(event) => { event.preventDefault(); void submit(); }}
+    onKeyDown={(event) => closeOnEscape(event, onEscape)}>
     <ResizableEditor inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}>{({ id, rows }) => <div className="cmp-field">
-      <textarea id={id} className="input" rows={rows} ref={inputRef} value={text} aria-label="메모 글" placeholder="메모를 작성하세요"
-        onChange={(event) => edit(event.target.value)} onKeyDown={(event) => {
-          if (imeKey(event.nativeEvent) || event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
-          event.preventDefault();
-          if (!event.repeat) void submit();
-        }} />
+      <EditorInput id={id} rows={rows} inputRef={inputRef} value={text} label="메모 글" placeholder="메모를 작성하세요"
+        onChange={edit} onKey={(event, mode) => noteKey(event, mode.leave, submit, onEscape)} />
     </div>}</ResizableEditor>
     <div className="reply-tools">
       <span><kbd>⌘</kbd><kbd>↵</kbd> 게시</span><span className="spacer" />
@@ -65,7 +83,7 @@ export function NoteReply({ task, inputRef, onError, onSend, onBeforeResize }: {
 export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: () => void; onError?: (message: string) => void }) {
   const [text, setText] = useState(() => String(post.event.payload.text ?? ''));
   const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<DeskInput>(null);
   const saving = useRef(false);
   const submit = async () => {
     if (saving.current || !text.trim()) return;
@@ -84,17 +102,11 @@ export function NoteEditor({ post, onClose, onError }: { post: Post; onClose: ()
     }
   };
 
-  return <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+  return <form onSubmit={(event) => { event.preventDefault(); void submit(); }}
+    onKeyDown={(event) => closeOnEscape(event, () => { if (!busy) onClose(); })}>
     <ResizableEditor inputRef={inputRef} rows={4} resizeFrom="bottom">{({ id, rows }) => <div className="cmp-field">
-      <textarea id={id} ref={inputRef} className="input" rows={rows} autoFocus value={text} disabled={busy} aria-label="메모 글 수정"
-        onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
-          if (imeKey(event.nativeEvent)) return;
-          if (event.key === 'Escape') { event.stopPropagation(); if (!busy) onClose(); }
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            if (!event.repeat) void submit();
-          }
-        }} />
+      <EditorInput id={id} rows={rows} inputRef={inputRef} autoFocus value={text} disabled={busy} label="메모 글 수정"
+        onChange={setText} onKey={(event, mode) => noteKey(event, mode.leave, submit, onClose)} />
     </div>}</ResizableEditor>
     <div className="reply-tools">
       <span className="spacer" />

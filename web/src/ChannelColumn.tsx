@@ -1,3 +1,4 @@
+import type { DeskInput } from './EditorInput.tsx';
 import { ArrowDown, CheckCheck, Search, Settings, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { api } from './api.ts';
@@ -34,7 +35,7 @@ export function ChannelColumn({ def, channel, active, keyboardEnabled, width, sy
   const [newer, setNewer] = useState(false);
   const [drawn, setDrawn] = useState(40);
   const [chatOpen, setChatOpen] = useState(false);
-  const reply = useRef<HTMLTextAreaElement>(null);
+  const reply = useRef<DeskInput>(null);
   const sourcesKey = `channel-sources:${id}`;
   const [picked, setPicked] = useState(() => new Map(getDraft<[number, string][]>(sourcesKey) ?? []));
   const [sourceRevision, setSourceRevision] = useState(0);
@@ -138,7 +139,7 @@ export function ChannelColumn({ def, channel, active, keyboardEnabled, width, sy
   useEffect(() => {
     if (!active || !keyboardEnabled) return;
     const key = (event: KeyboardEvent) => {
-      if (modalOpen() || event.metaKey || event.ctrlKey || event.altKey || (event.target as HTMLElement).closest('input,textarea,select')) return;
+      if (modalOpen() || event.metaKey || event.ctrlKey || event.altKey || (event.target as HTMLElement).closest('input,textarea,select,[data-desk-input]')) return;
       if (event.key === 'Escape' && (event.defaultPrevented || event.isComposing || event.repeat || (event.target as HTMLElement).closest('.compose'))) return;
       if (['Enter', ' '].includes(event.key) && (event.target as HTMLElement).closest('button,a,summary')) return;
       const at = entries.findIndex((entry) => entry.id === selected);

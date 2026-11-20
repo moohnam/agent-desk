@@ -1,4 +1,5 @@
 import { imeKey } from './keys.ts';
+import { EditorInput, editorText, inputElement, type DeskInput } from './EditorInput.tsx';
 import {useModelCatalogs} from './modelCatalogs.ts';
 import {catalogModelTags,catalogsForTarget,type RunnerModelCatalog} from '../../shared/model-catalog.ts';
 import { ANSWER_COMPOSE, AnswerDestination, useAnswerTarget, submitAnswer } from './answerComposer.tsx';
@@ -15,7 +16,7 @@ import { SharedPending } from './workspace.ts';
 import type { MessageReceipt, NoteContext } from '../../shared/api.ts';
 import { hasScheduledReply, parseScheduledReply, scheduledReplyDraft, scheduledReplyHint, scheduledReplyPlainText } from '../../shared/scheduled-reply.ts';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
-import { useDeskApp, useFileDrop, webDrop } from './files.ts';
+import { useDeskApp, useFileDrop } from './files.ts';
 import { projectColor, rankProjects } from './projects.ts';
 import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
@@ -82,7 +83,7 @@ function suggest(text: string, caret: number, projects: Project[], tasks: TaskVi
 type Mentions = 'route' | 'refer';
 
 export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top', onBeforeResize, children }: {
-  inputRef: RefObject<HTMLTextAreaElement | null>;
+  inputRef: RefObject<DeskInput | null>;
   rows: number;
   resizeFrom?: 'top' | 'bottom';
   /** Captures any scroll position that needs restoring after the new rows commit. */
@@ -102,8 +103,9 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
     restore?.();
   }, [rows]);
   const measure = () => {
-    const input = inputRef.current;
-    if (!input) return;
+    const element = inputElement(inputRef.current);
+    if (!element) return;
+    const input = element.closest<HTMLElement>('.cm-editor') ?? element;
     const style = getComputedStyle(input), line = parseFloat(style.lineHeight);
     if (!Number.isFinite(line) || line <= 0) return;
     const inset = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth].reduce((total, value) => total + parseFloat(value), 0);
@@ -165,19 +167,21 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top', onBeforeResize }: {
+export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top', onBeforeResize }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; by default it is handled by the containing view. */
   onEscape?: () => void;
   onBlur?: () => void;
-  inputRef: RefObject<HTMLTextAreaElement | null>;
+  inputRef: RefObject<DeskInput | null>;
   projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string; runnerId?:string;
   resizeFrom?: 'top' | 'bottom';
   onBeforeResize?: () => (() => void) | undefined;
 }) {
+  const value = editorText(draft);
   const [caret, setCaret] = useState(0);
   const [index, setIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
+  const [insert, setInsert] = useState(true);
   const list = useRef<HTMLDivElement>(null);
   const skills = useSkills(source);
   const inventory = useModelCatalogs(source);
@@ -187,7 +191,7 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
     return catalogModelTags(catalogsForTarget(inventory.runners,{runnerId,rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
   },[inventory.runners,source,runnerId,value,projects,mentions,skills]);
   const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills,modelTags), [value, caret, projects, tasks, mentions, skills,modelTags]);
-  const open = !dismissed && !!sug?.items.length;
+  const open = insert && !dismissed && !!sug?.items.length;
   const cur = Math.min(index, (sug?.items.length ?? 1) - 1);
   const app = useDeskApp();
   const files = useFileDrop(inputRef, value, onChange, !!source);
@@ -201,49 +205,49 @@ export function ComposeField({ value, onChange, onSubmit, onEscape, onBlur, inpu
     const ins = o.insert + (o.space ? ' ' : '');
     const next = value.slice(0, sug.start) + ins + value.slice(caret);
     const pos = sug.start + ins.length;
-    onChange(next);
-    setCaret(pos);
-    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(pos, pos); });
+    const input = inputRef.current;
+    if (input && 'replaceRange' in input) {
+      input.replaceRange(sug.start, caret, ins);
+      input.focus();
+    } else {
+      onChange(next);
+      setCaret(pos);
+      requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(pos, pos); });
+    }
   };
 
-  // In the app, every drop on the window comes by 'desk-drop' (useFileDrop); in a browser, files
-  // dropped on the field are uploaded, and an image dragged from a web page downloaded by the hub.
+  // The app handles native desk-drop events. In a browser, web addresses go in as text and files are uploaded.
   const browserDrop = app ? {} : {
     onDragOver: (e: DragEvent) => {
       const t = e.dataTransfer.types;
-      if (t.includes('Files') || t.includes('text/uri-list')) { e.preventDefault(); files.setOver(true); }
+      if (t.includes('Files') || t.includes('text/uri-list') || t.includes('text/html')) { e.preventDefault(); files.setOver(true); }
     },
     onDragLeave: (e: DragEvent) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) files.setOver(false); },
-    onDrop: (e: DragEvent) => {
+    onDropCapture: (e: DragEvent) => {
       files.setOver(false);
-      if (e.dataTransfer.files.length) {
-        e.preventDefault();
-        void files.upload([...e.dataTransfer.files]);
-        return;
-      }
       const url = e.dataTransfer.getData('text/uri-list'), html = e.dataTransfer.getData('text/html');
-      if (webDrop(url, html)) { e.preventDefault(); void files.fromWeb(url, html); }
+      if (files.fromWeb(url, html, [...e.dataTransfer.files])) e.preventDefault();
     },
   };
 
   return (
     <ResizableEditor inputRef={inputRef} rows={rows} resizeFrom={resizeFrom} onBeforeResize={onBeforeResize}>{({ id, rows }) => (
     <div className={`cmp-field${files.over ? ' drop-over' : ''}`} {...browserDrop}>
-      <textarea id={id} ref={inputRef} className="input" value={value} rows={rows} placeholder={placeholder}
-        onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); setDismissed(false); }}
-        onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+      <EditorInput id={id} inputRef={inputRef} value={value} rows={rows} placeholder={placeholder}
+        onChange={(text, position) => { onChange(text); setCaret(position); setDismissed(false); }}
+        onSelect={setCaret} onMode={setInsert}
         onBlur={() => { setDismissed(true); onBlur?.(); }} onFocus={() => setDismissed(false)}
-        onKeyDown={(e) => {
-          if (imeKey(e.nativeEvent) || e.defaultPrevented) return;
+        onKey={(e, mode) => {
+          if (imeKey(e) || e.defaultPrevented) return;
           if (e.key === 'Escape' && e.repeat) { e.preventDefault(); e.stopPropagation(); return; }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!e.repeat) onSubmit(); return; }
-          if (open && sug) {
+          if (mode.insert && open && sug) {
             if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
             if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((cur - 1 + sug.items.length) % sug.items.length); return; }
             if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setDismissed(true); return; }
           }
-          if (e.key === 'Escape' && onEscape) { e.preventDefault(); e.stopPropagation(); onEscape(); }
+          if (e.key === 'Escape' && mode.leave && onEscape) { e.preventDefault(); e.stopPropagation(); onEscape(); }
         }} />
       {!app && (
         <>
@@ -401,7 +405,7 @@ function Preview({ ok, rows }: { ok: boolean; rows: Row[] }) {
 
 /** Left drawer for new work: `@project` continues its last task, `@name:/path` starts a project. */
 export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef, onClose, onSent, noteAttachment, onClearNoteAttachment }: {
-  projects: Project[]; tasks: TaskView[]; inputRef: RefObject<HTMLTextAreaElement | null>;
+  projects: Project[]; tasks: TaskView[]; inputRef: RefObject<DeskInput | null>;
   onClose: () => void; onSent: (task: TaskView) => void;
   noteAttachment?: NoteContext[number]; onClearNoteAttachment?: (attachment: NoteContext[number]) => void;
 }) {
@@ -529,12 +533,13 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
  * send it to a new task instead (a tag typed in the text wins). Waiting replies are listed above the
  * box and can be cancelled.
  */
-export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onBeforeResize }: {
-  task: TaskView; inputRef: RefObject<HTMLTextAreaElement | null>; onError: (msg: string) => void;
+export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onEscape, onBeforeResize }: {
+  task: TaskView; inputRef: RefObject<DeskInput | null>; onError: (msg: string) => void;
   /** For @mentions: naming another project or task lets this task's agent ask it (desk_request) without a card. */
   projects: Project[]; tasks: TaskView[];
   /** Right before a message goes out (its event can arrive before the reply); the thread then follows it. */
   onSend?: () => void;
+  onEscape?: () => void;
   onBeforeResize?: () => (() => void) | undefined;
 }) {
   // Mounted per task (keyed by its id): the box restores the task's unsent reply and keeps it as a
@@ -713,7 +718,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onB
       )}
       <AnswerDestination taskId={task.id} />
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
-      <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}
+      <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onEscape={onEscape} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}
         projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]} runnerId={task.runner_id}
         placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
