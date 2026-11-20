@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS request (
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runner (
   id TEXT PRIMARY KEY, host TEXT NOT NULL, capabilities_json TEXT NOT NULL, last_seen TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS local_runner_output (
+  runner_id TEXT PRIMARY KEY, stream TEXT NOT NULL, sequence INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channel (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, feed_url TEXT, enabled INTEGER NOT NULL,
   token_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -461,6 +463,13 @@ export class Store {
       .run(sessionId, taskId, ts, kind, JSON.stringify(payload));
     return { id: Number(r.lastInsertRowid), session_id: sessionId, task_id: taskId, ts, kind, payload };
   }
+  /** Called inside the same transaction as the output event. Only the current daemon stream is kept. */
+  rememberLocalOutput(runnerId: string, stream: string, sequence: number): boolean {
+    return this.db.prepare(`INSERT INTO local_runner_output (runner_id, stream, sequence) VALUES (?, ?, ?)
+      ON CONFLICT (runner_id) DO UPDATE SET stream = excluded.stream, sequence = excluded.sequence
+      WHERE excluded.stream <> local_runner_output.stream OR excluded.sequence > local_runner_output.sequence`)
+      .run(runnerId, stream, sequence).changes !== 0;
+  }
   updateUserEvent(taskId: string, id: number, payload: unknown) {
     this.db.prepare("UPDATE event SET payload_json = ? WHERE task_id = ? AND id = ? AND kind = 'user'")
       .run(JSON.stringify(payload), taskId, id);
@@ -502,6 +511,11 @@ export class Store {
     const rows = this.db.prepare(`SELECT * FROM event WHERE task_id = ? AND id IN (${ids.map(() => '?').join(',')}) ORDER BY id`)
       .all(taskId, ...ids) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
     return rows.map(({ payload_json, ...e }) => ({ ...e, payload: JSON.parse(payload_json) }));
+  }
+  eventsAfter(taskId: string, after: number, limit: number): Event[] {
+    const rows = this.db.prepare('SELECT * FROM event WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?')
+      .all(taskId, after, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
+    return rows.map(({ payload_json, ...event }) => ({ ...event, payload: JSON.parse(payload_json) }));
   }
   /** Whether the task has events below `id` (more history before a page that starts there). */
   hasEventsBefore(taskId: string, id: number): boolean {

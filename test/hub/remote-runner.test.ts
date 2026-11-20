@@ -459,7 +459,7 @@ test('HTTP runner token cannot manage the desk; a real remote process keeps runn
   const { spawn }=await import('node:child_process');
   const { once }=await import('node:events');
   const { writeFileSync,readFileSync,existsSync }=await import('node:fs');
-  const { resolve }=await import('node:path');
+  const { dirname, resolve }=await import('node:path');
   const t=setup();
   let blocked=false;
   const original=t.hub.remotes.exchange.bind(t.hub.remotes);
@@ -491,7 +491,9 @@ for await(const line of createInterface({input:process.stdin})){
 }
 `,{mode:0o755});
   let errors='';
-  const child=spawn(process.execPath,[resolve('hub/src/runner/remote.ts')],{cwd:t.dir,env:{...process.env,
+  const child=spawn(process.execPath,[resolve('hub/src/runner/remote.ts')],{cwd:t.dir,env:{
+    // This standalone fixture must not inherit the calling daemon's managed control socket or credentials.
+    PATH:`${dirname(process.execPath)}:/usr/bin:/bin`,HOME:t.dir,
     AGENT_DESK_HUB_URL:base,AGENT_DESK_RUNNER_ID:peer,AGENT_DESK_REMOTE_TOKEN_FILE:tokenFile,
     AGENT_DESK_REMOTE_DB:join(t.dir,'process.db'),AGENT_DESK_DB:join(t.dir,'unused.db'),
     AGENT_DESK_SKILLS_HOME:join(t.dir,'process-skills'),CODEX_BIN:cli,TEST_CAPTURE:capture,TEST_RELEASE:release},stdio:['ignore','ignore','pipe']});
@@ -521,11 +523,13 @@ for await(const line of createInterface({input:process.stdin})){
     await wait(()=>t.hub.remotes.list()[0].connected);
     assert.equal(readFileSync(capture,'utf8').split('thread/start').length-1,1,'token reload does not restart the CLI');
   }finally{
-    child.kill('SIGTERM');
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([once(child,'exit'),new Promise(r=>{timer=setTimeout(r,11000);})]);
-    clearTimeout(timer);
-    if(child.exitCode===null)child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([once(child,'exit'),new Promise(r=>{timer=setTimeout(r,11000);})]);
+      clearTimeout(timer);
+      if(child.exitCode===null && child.signalCode===null)child.kill('SIGKILL');
+    }
     server.closeAllConnections();server.close();t.cleanup();
   }
 });

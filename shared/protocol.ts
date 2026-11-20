@@ -37,7 +37,7 @@ export type HubToRunner =
    * The first message on a connection. The runner takes the connection as the hub's only with the
    * token (data/runner-token, which only this user can read), so another local process can't.
    */
-  | { type: 'auth'; token: string; protocolVersion: number }
+  | { type: 'auth'; token: string; protocolVersion: number; confirmOutput?: true }
   /**
    * `skills`: desk skills (#tags) to apply to this message only. `skillsHome`: the desk plugin
    * directory (skills.ts) the session loads skills from; both engines read the same files.
@@ -83,7 +83,7 @@ export interface LiveSession {
 
 export type RunnerToHub =
   /** `protocolVersion`: absent from runners before it. */
-  | { type: 'hello'; runnerId: string; host: string; capabilities: Capabilities; sessions: LiveSession[]; protocolVersion?: number }
+  | { type: 'hello'; runnerId: string; host: string; capabilities: Capabilities; sessions: LiveSession[]; protocolVersion?: number; outputStream?: string }
   | { type: 'usage'; sessionId: string; report: UsageReport }
   | { type: 'engine_session'; sessionId: string; engineSessionId: string }
   | { type: 'event'; sessionId: string; event: RunnerEvent }

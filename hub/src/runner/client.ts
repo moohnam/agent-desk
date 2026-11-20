@@ -9,7 +9,7 @@ import { HttpError } from '../errors.ts';
 import { openRuntimeLog } from '../runtime-log.ts';
 import type { RunnerConnectionProblem } from '../../../shared/api.ts';
 import { PROTOCOL_VERSION, checkRunnerToHub, type HubToRunner, type RunnerToHub } from '../../../shared/protocol.ts';
-import { RUNNER_HOST, RUNNER_PORT, readLines, runnerToken, writeLine } from './wire.ts';
+import { RUNNER_HOST, RUNNER_PORT, readLines, readOutput, runnerToken, writeLine } from './wire.ts';
 
 const RETRY_MS = 1000;
 const SPAWN_EVERY_MS = 10_000;
@@ -21,6 +21,8 @@ const connectionLog: Record<RunnerConnectionProblem, string> = {
   disconnected: '로컬 러너 연결이 끊겼습니다. 재연결을 시도합니다.',
 };
 type ConnectionListener = (connected: boolean, problem?: RunnerConnectionProblem) => void;
+export interface LocalOutputReceipt { runnerId: string; stream: string; sequence: number }
+export type RunnerMessageListener = (message: RunnerToHub, receipt?: LocalOutputReceipt) => void;
 
 /** What the hub needs of its runner connection; tests give the hub a fake one. */
 export interface RunnerPort {
@@ -44,7 +46,7 @@ export interface RunnerPort {
 }
 
 /** Makes the hub's runner connection, which reports messages and connection changes back. */
-export type RunnerFactory = (onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener) => RunnerPort;
+export type RunnerFactory = (onMessage: RunnerMessageListener, onConnection: ConnectionListener) => RunnerPort;
 
 export interface RunnerClientOptions {
   spawnIfMissing?: boolean;
@@ -66,13 +68,13 @@ export class RunnerClient implements RunnerPort {
   private supportsSkillSnapshot = false;
   private supportsInstructions = false;
   private supportsConnectorMcp = false;
+  private supportsIpv6Mcp = false;
   private supportsModelCatalogs = false;
   private lastSpawn = 0;
-  private supportsIpv6Mcp = false;
   private retryMs = RETRY_MS;
   private retry?: ReturnType<typeof setTimeout>;
   connectionProblem?: RunnerConnectionProblem;
-  private onMessage: (m: RunnerToHub) => void;
+  private onMessage: RunnerMessageListener;
   private onConnection: ConnectionListener;
   private options: RunnerClientOptions;
   id: string | null = null;
@@ -80,7 +82,7 @@ export class RunnerClient implements RunnerPort {
   engines = new Set<string>();
 
   /** `onConnection` reports a successful handshake or a changed failure reason. */
-  constructor(onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener = () => {}, options: RunnerClientOptions = {}) {
+  constructor(onMessage: RunnerMessageListener, onConnection: ConnectionListener = () => {}, options: RunnerClientOptions = {}) {
     this.onMessage = onMessage;
     this.onConnection = onConnection;
     this.options = options;
@@ -88,7 +90,7 @@ export class RunnerClient implements RunnerPort {
   }
 
   /** Hand the already authenticated socket and its first hello to a fully constructed Hub. */
-  handoff(onMessage: (m: RunnerToHub) => void, onConnection: ConnectionListener,
+  handoff(onMessage: RunnerMessageListener, onConnection: ConnectionListener,
     hello: Extract<RunnerToHub,{type:'hello'}>) {
     if (!this.connected || this.id !== hello.runnerId) throw new Error('기존 로컬 러너 연결이 인계 전에 끊겼습니다');
     this.onMessage = onMessage;
@@ -141,15 +143,30 @@ export class RunnerClient implements RunnerPort {
     if (this.stopped) return;
     const socket = connect(this.options.port ?? RUNNER_PORT, this.options.host ?? RUNNER_HOST);
     this.socket = socket;
+    let outputStream: string | undefined;
     let problem: RunnerConnectionProblem = 'unreachable';
     const handshake = setTimeout(() => socket.destroy(), 6000);
     socket.on('connect', () => {
       if (this.stopped) { socket.destroy(); return; }
       problem = 'authentication';
       // Read now rather than once: a runner started meanwhile may have just written it.
-      try { writeLine(socket, { type: 'auth', token: (this.options.token ?? runnerToken)(), protocolVersion: PROTOCOL_VERSION } satisfies HubToRunner); }
+      try { writeLine(socket, { type: 'auth', token: (this.options.token ?? runnerToken)(), protocolVersion: PROTOCOL_VERSION, confirmOutput: true } satisfies HubToRunner); }
       catch { problem = 'token'; socket.destroy(); return; }
       readLines(socket, (raw) => {
+        if (this.socket !== socket || socket.destroyed) return;
+        if ((raw as { type?: string } | null)?.type === 'output') {
+          const output = readOutput(raw);
+          if (!output || !outputStream || !this.id) { socket.destroy(); return; }
+          try {
+            this.onMessage(output.message, { runnerId: this.id, stream: outputStream, sequence: output.sequence });
+            writeLine(socket, { type: 'output_ack', sequence: output.sequence });
+          } catch {
+            // Reconnect without acknowledging. The runner will send the unconfirmed event again.
+            console.error('로컬 러너 출력을 저장하지 못해 재연결합니다.');
+            socket.destroy();
+          }
+          return;
+        }
         const m = checkRunnerToHub(raw);
         if (typeof m === 'string') { console.error('러너 응답의 형식이 잘못되었습니다.'); return; }
         const hello = m.type === 'hello';
@@ -158,6 +175,7 @@ export class RunnerClient implements RunnerPort {
           this.retryMs = RETRY_MS;
           this.connectionProblem = undefined;
           this.id = m.runnerId;
+          outputStream = typeof m.outputStream === 'string' && m.outputStream.length === 36 ? m.outputStream : undefined;
           this.live = new Set(m.sessions.map((s) => s.sessionId));
           this.engines = new Set(m.capabilities.engines);
           this.supportsSkillSnapshot = !!m.capabilities.skillSnapshot;

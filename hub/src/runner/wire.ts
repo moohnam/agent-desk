@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
 import { dirname } from 'node:path';
 import { config } from '../config.ts';
+import { checkRunnerToHub, type RunnerToHub } from '../../../shared/protocol.ts';
 
 export const { host: RUNNER_HOST, port: RUNNER_PORT, tokenFile: RUNNER_TOKEN_FILE } = config.runner;
 
@@ -41,4 +42,23 @@ export function readLines(socket: Socket, onMessage: (m: unknown) => void) {
 
 export function writeLine(socket: Socket, m: unknown) {
   socket.write(JSON.stringify(m) + '\n');
+}
+
+/** Replay conversation output and the engine ID. Running state comes from the hello snapshot. */
+export function isRunnerOutput(message: RunnerToHub): message is Extract<RunnerToHub, { type: 'event' | 'engine_session' }> {
+  if (message.type === 'engine_session') return true;
+  if (message.type !== 'event') return false;
+  const { kind } = message.event;
+  return kind === 'assistant' || kind === 'tool' || kind === 'tool_result';
+}
+
+export function wireSequence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+export function readOutput(raw: unknown) {
+  const packet = raw as { sequence?: unknown; message?: unknown };
+  if (!wireSequence(packet.sequence)) return null;
+  const message = checkRunnerToHub(packet.message);
+  return typeof message !== 'string' && isRunnerOutput(message) ? { sequence: packet.sequence, message } : null;
 }

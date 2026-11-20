@@ -7,7 +7,7 @@ import { Store } from '../db.ts';
 import { Hub } from '../hub.ts';
 import { SharedWorkspace } from '../shared-workspace.ts';
 import { SkillStore } from '../skills.ts';
-import { RunnerClient, type RunnerClientOptions, type RunnerFactory, type RunnerPort } from './client.ts';
+import { RunnerClient, type RunnerClientOptions, type RunnerFactory, type RunnerMessageListener, type RunnerPort } from './client.ts';
 
 export type LocalTakeover = {runner: RunnerClient; hello: Extract<RunnerToHub,{type:'hello'}>};
 
@@ -44,7 +44,7 @@ export class LocalRuntime {
   private closed = false;
   private activated = false;
   private readonly takeoverRunnerId?:string;
-  private takeoverCallbacks?: {onMessage:(message:RunnerToHub)=>void;onConnection:(connected:boolean)=>void};
+  private takeoverCallbacks?: {onMessage:RunnerMessageListener;onConnection:(connected:boolean)=>void};
 
   constructor(dbPath: string, opts: { runner?: RunnerFactory; skills?: SkillStore; graceMs?: number; takeover?: LocalTakeover } = {}) {
     const store = new Store(dbPath);

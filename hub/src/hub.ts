@@ -207,7 +207,12 @@ export class Hub extends DeskCore {
     const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection, {
       ipv6DeskMcpUrl: () => this.ipv6DeskMcpUrl,
     })))(
-      (m) => this.onRunnerMessage(m),
+      (m, receipt) => {
+        if (!receipt) return this.onRunnerMessage(m);
+        this.atomic(() => {
+          if (this.store.rememberLocalOutput(receipt.runnerId, receipt.stream, receipt.sequence)) this.onRunnerMessage(m);
+        });
+      },
       (connected, problem) => {
         if (!connected) this.remotes?.localUsageDisconnected();
         this.publish({ type: 'runner', connected, problem });
