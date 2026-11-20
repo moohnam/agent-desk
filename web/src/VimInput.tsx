@@ -27,7 +27,10 @@ function sameImeText(stroke: CommandStroke | undefined, text: string | null): st
     (text === stroke.key || koreanLetter(text)?.toLowerCase() === stroke.key.toLowerCase());
 }
 
-export function VimInput(props: EditorProps & { handoff?: { focused: boolean; start: number; end: number }; startInInsert: boolean; startEscapeArmed: boolean }) {
+export function VimInput(props: EditorProps & {
+  handoff?: { focused: boolean; start: number; end: number };
+  startInInsert: boolean; startEscapeArmed: boolean; startImeEscapeDown: boolean;
+}) {
   const { inputRef, disabled = false, label, placeholder: hint } = props;
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView>(null);
@@ -41,6 +44,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
   const exitAfterComposition = useRef(false);
   const settlingEscape = useRef<{ text?: string }>(undefined);
   const escapeArmed = useRef(props.startEscapeArmed);
+  const imeEscapeDown = useRef(props.startImeEscapeDown);
   const resumeInsert = useRef<{ doc: Text; normal: number; insert: number }>(undefined);
   const heldCommands = useRef(new Map<string, CommandStroke>());
   const lastImeCommand = useRef<CommandStroke>(undefined);
@@ -248,6 +252,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         exitAfterComposition.current = false;
         settlingEscape.current = undefined;
         escapeArmed.current = false;
+        imeEscapeDown.current = false;
         resumeInsert.current = undefined;
         heldCommands.current.clear();
         lastImeCommand.current = undefined;
@@ -275,6 +280,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       if (e.key === 'Escape') e.stopPropagation();
     }}
     onKeyUpCapture={e => {
+      if (e.key === 'Escape' || e.code === 'Escape') imeEscapeDown.current = false;
       heldCommands.current.delete(e.code);
       const korean = koreanLetter(e.key);
       if (korean) heldCommands.current.delete(`Key${korean.toUpperCase()}`);
@@ -287,6 +293,13 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       const event = e.nativeEvent;
       const escape = (e.key === 'Escape' || (e.code === 'Escape' && imeKey(event))) &&
         !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+      // A single key press can surface as Process and then Escape after the IME commits.
+      if (escape && imeEscapeDown.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (!escape) imeEscapeDown.current = false;
       const secondEscape = escape && escapeArmed.current;
       if (!escape || !e.repeat) escapeArmed.current = false;
       // WebKit may send the IME confirmation key immediately after compositionend.
@@ -309,19 +322,26 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
       }
       if (e.key !== 'Shift') lastImeCommand.current = undefined;
       const pending = state?.inputState;
+      const resume = resumeInsert.current;
+      const resumesImeInsert = resume && key === 'i' && !e.shiftKey &&
+        editor.state.doc === resume.doc && editor.state.selection.main.empty && editor.state.selection.main.head === resume.normal;
       // A movement from a known physical key can run even while the IME is still
       // finishing a composition that started in command mode. Operators stay guarded.
       const imeMotion = imeLetter && vimMotionLetter.test(key) && !pending?.operator && !pending?.registerName &&
         !pending?.keyBuffer.some(part => !/^\d$/.test(part));
       const command = cm && state && !state.insertMode && !state.exMode && !state.expectLiteralNext && !cm.state.dialog &&
-        bare && (imeMotion || (!event.isComposing && !editor.compositionStarted && (!recentComposition || !imeLetter)));
+        bare && (imeMotion || (!event.isComposing && !editor.compositionStarted && (!recentComposition || !imeLetter || resumesImeInsert)));
       if (command && strokeCode && /^[A-Za-z]$/.test(key)) {
         const stroke = { key, ime: opaqueKey, repeat: e.repeat, at: now };
         heldCommands.current.set(strokeCode, stroke);
         if (imeLetter) lastImeCommand.current = stroke;
       }
       if (escape && state?.insertMode && editor.compositionStarted) {
-        if (!e.repeat) { exitAfterComposition.current = true; escapeArmed.current = true; }
+        if (!e.repeat) {
+          exitAfterComposition.current = true;
+          escapeArmed.current = true;
+          imeEscapeDown.current = true;
+        }
         e.stopPropagation();
         return;
       }
@@ -335,6 +355,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
           props.onKey?.(event, { insert: true, leave: false });
           if (!event.defaultPrevented) {
             escapeArmed.current = true;
+            imeEscapeDown.current = imeKey(event);
             if (recentComposition) leaveAfterComposition(editor);
             else leaveAfterIme(editor);
           }
@@ -343,20 +364,19 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
           return;
         }
       }
-      if (e.key === 'Escape' && (imeKey(event) || editor.compositionStarted ||
-        recentComposition)) { e.stopPropagation(); return; }
       if (secondEscape && state && !state.insertMode && !state.visualMode && !state.exMode && !cm?.state.dialog &&
+          !imeKey(event) && !editor.compositionStarted &&
           !pending?.operator && !pending?.registerName && !pending?.keyBuffer.length && !pending?.prefixRepeat.length) {
         e.preventDefault();
         e.stopPropagation();
         editor.contentDOM.blur();
         return;
       }
-      const resume = resumeInsert.current;
+      if (e.key === 'Escape' && (imeKey(event) || editor.compositionStarted ||
+        recentComposition)) { e.stopPropagation(); return; }
       if (resume && cm && !state?.insertMode && e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
         resumeInsert.current = undefined;
-        if (command && key === 'i' && !e.shiftKey &&
-          editor.state.doc === resume.doc && editor.state.selection.main.empty && editor.state.selection.main.head === resume.normal) {
+        if (command && resumesImeInsert) {
           e.preventDefault();
           e.stopPropagation();
           editor.dispatch({ selection: { anchor: resume.insert }, scrollIntoView: true });

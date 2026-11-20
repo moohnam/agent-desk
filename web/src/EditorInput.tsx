@@ -49,6 +49,7 @@ export function EditorInput(props: EditorProps) {
   const composingNow = useRef(false);
   const [startInInsert, setStartInInsert] = useState(true);
   const escapeArmed = useRef(false);
+  const imeEscapeDown = useRef(false);
   const native = useRef<HTMLTextAreaElement>(null);
   const handoff = useRef<{ focused: boolean; start: number; end: number }>(undefined);
   const attach = useCallback((element: HTMLTextAreaElement | null) => {
@@ -68,7 +69,7 @@ export function EditorInput(props: EditorProps) {
     }
   }, [inputRef]);
   useEffect(() => {
-    if (!vim) { setLoaded(undefined); setFailed(false); setStartInInsert(true); escapeArmed.current = false; handoff.current = undefined; return; }
+    if (!vim) { setLoaded(undefined); setFailed(false); setStartInInsert(true); escapeArmed.current = false; imeEscapeDown.current = false; handoff.current = undefined; return; }
     if (composing || Loaded) return;
     let active = true;
     void loadVim().then(component => {
@@ -83,30 +84,37 @@ export function EditorInput(props: EditorProps) {
   const pending = vim && !failed;
   const readOnly = pending && !startInInsert && !composing;
   useEffect(() => { if (!showVim) onMode?.(!readOnly); }, [showVim, readOnly, onMode]);
-  if (showVim) return <Loaded {...props} handoff={handoff.current} startInInsert={startInInsert} startEscapeArmed={escapeArmed.current} />;
+  if (showVim) return <Loaded {...props} handoff={handoff.current} startInInsert={startInInsert}
+    startEscapeArmed={escapeArmed.current} startImeEscapeDown={imeEscapeDown.current} />;
 
   return <>
     <textarea id={props.id} className="input" ref={attach} rows={props.rows} value={props.value} aria-label={props.label}
       placeholder={props.placeholder} disabled={props.disabled} readOnly={readOnly} autoFocus={props.autoFocus}
       onChange={e => { if (!readOnly) props.onChange(e.target.value, e.target.selectionStart); }}
       onSelect={e => props.onSelect?.(e.currentTarget.selectionStart)}
-      onFocus={props.onFocus} onBlur={() => { escapeArmed.current = false; props.onBlur?.(); }}
+      onFocus={props.onFocus} onBlur={() => { escapeArmed.current = false; imeEscapeDown.current = false; props.onBlur?.(); }}
       onPointerDown={() => { escapeArmed.current = false; }}
       onCompositionStart={() => { composingNow.current = true; setComposing(true); }}
       onCompositionEnd={() => { composingNow.current = false; setComposing(false); }}
+      onKeyUp={e => { if (e.key === 'Escape' || e.code === 'Escape') imeEscapeDown.current = false; }}
       onKeyDown={e => {
         if (!pending) { props.onKey?.(e.nativeEvent, { insert: true, leave: true }); return; }
         const escape = e.key === 'Escape' || (e.code === 'Escape' && imeKey(e.nativeEvent));
         if (escape && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
           const plain = !imeKey(e.nativeEvent) && !composingNow.current;
-          if (!e.repeat) {
+          if (!e.repeat && !imeEscapeDown.current) {
             if (!startInInsert && escapeArmed.current && plain) e.currentTarget.blur();
-            else { escapeArmed.current = true; setStartInInsert(false); }
+            else {
+              imeEscapeDown.current = !plain;
+              escapeArmed.current = true;
+              setStartInInsert(false);
+            }
           }
           if (plain) e.preventDefault();
           e.stopPropagation();
           return;
         }
+        imeEscapeDown.current = false;
         escapeArmed.current = false;
         props.onKey?.(e.nativeEvent, { insert: !readOnly, leave: false });
       }} />

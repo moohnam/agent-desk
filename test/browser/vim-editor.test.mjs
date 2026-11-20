@@ -146,14 +146,21 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       try {
         assert.equal(await page.$eval(textarea, element => element.readOnly), false);
         await page.keyboard.type('initial');
-        await page.keyboard.press('Escape');
+        await page.$eval(textarea, element => element.dispatchEvent(new KeyboardEvent('keydown', {
+          bubbles: true, cancelable: true, code: 'Escape', key: 'Process', isComposing: true,
+        })));
         assert.equal(await page.$eval(textarea, element => element.readOnly), true);
-        await page.keyboard.type('unwanted');
-        assert.equal(await page.$eval(textarea, element => element.value), 'initial');
       } finally { await request.continue(); }
       await expectMode(page, '일반');
+      await page.$eval(input, element => {
+        const init = { bubbles: true, cancelable: true, code: 'Escape', key: 'Escape' };
+        element.dispatchEvent(new KeyboardEvent('keydown', init));
+        element.dispatchEvent(new KeyboardEvent('keyup', init));
+      });
       assert.equal(await page.$eval(input, element => element === document.activeElement), true);
       assert.equal(await text(page), 'initial');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.$eval(input, element => element === document.activeElement), false);
     }));
 
     for (const [layout, opener, area] of [['reply', 'r', '.reply-box'], ['drawer', 'i', '.compose'],
@@ -418,6 +425,32 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }));
 
     for (const emulateWebKit of [false, true]) {
+      await t.test(`one Escape stroke during Korean IME keeps focus for i (${emulateWebKit ? 'delayed branch' : 'Chromium'})`, () => withPage(async page => {
+        await openReply(page, origin);
+        await expectMode(page, '입력');
+        const { insert, compose } = editorEvents(page, await page.createCDPSession());
+        await insert('첫째\n');
+        await compose('한');
+        const key = (type, key, code, isComposing = false) => page.$eval(input, (element, args) =>
+          element.dispatchEvent(new KeyboardEvent(args.type, { bubbles: true, cancelable: true, ...args })),
+        { type, key, code, isComposing });
+        await key('keydown', 'Process', 'Escape', true);
+        await insert('한');
+        await expectMode(page, '일반');
+        await key('keydown', 'Escape', 'Escape');
+        await key('keyup', 'Escape', 'Escape');
+        assert.equal(await page.$eval(input, element => element === document.activeElement), true);
+        await key('keydown', 'ㅑ', 'KeyI');
+        await key('keyup', 'ㅑ', 'KeyI');
+        await expectMode(page, '입력');
+        await insert('글');
+        assert.equal(await text(page), '첫째\n한글');
+        await page.keyboard.press('Escape');
+        await expectMode(page, '일반');
+        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval(input, element => element === document.activeElement), false);
+      }, emulateWebKit));
+
       await t.test(`Escape keeps the IME commit and drops the next composition (${emulateWebKit ? 'delayed branch' : 'Chromium'})`, () => withPage(async page => {
         await openReply(page, origin);
         await expectMode(page, '입력');
