@@ -2,8 +2,8 @@ import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { getDraft, setDraft, useDraftSync } from './drafts.ts';
 
 export const ANSWER_COMPOSE = 'desk-answer-compose';
-interface Target { key: string; taskId: string; title: string; index: number }
-interface Handler { active: boolean; accept: (index: number, text: string) => Promise<void> }
+interface Target { key: string; taskId: string; title: string }
+interface Handler { active: boolean; accept: (text: string) => Promise<void> }
 const handlers = new Map<string, Map<symbol, { current: Handler }>>();
 const targets = new Map<string, Target>();
 const listeners = new Set<() => void>();
@@ -19,7 +19,8 @@ export function useAnswerPending(key: string) {
 }
 const emit = () => listeners.forEach(fn => fn());
 const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
-const draftKey = (taskId: string) => `answer-target:${taskId}`;
+// Old destinations could point to a choice or a member of a question batch.
+const draftKey = (taskId: string) => `open-answer-target:${taskId}`;
 function current(taskId: string) {
   if (!targets.has(taskId)) {
     const saved = getDraft<Target>(draftKey(taskId));
@@ -31,11 +32,6 @@ function clear(target: Target) {
   if (current(target.taskId) !== target || pending.has(target.taskId)) return;
   targets.delete(target.taskId);
   setDraft(draftKey(target.taskId), null, { empty: true }); emit();
-}
-
-export function cancelAnswerTarget(taskId: string, questionId: string, index: number) {
-  const target = current(taskId);
-  if (target?.key === `${taskId}:${questionId}` && target.index === index) clear(target);
 }
 
 /** A persisted destination has no callback; mounted cards register their current handlers separately. */
@@ -50,9 +46,9 @@ export function useAnswerWriter(taskId: string, questionId: string, active: bool
     group.set(owner.current, latest);
     return () => { group.delete(owner.current); if (!group.size) handlers.delete(key); };
   }, [key]);
-  return (title: string, index = 0) => {
+  return (title: string) => {
     if (!latest.current.active || pending.has(taskId)) return;
-    const target = { key, taskId, title, index };
+    const target = { key, taskId, title };
     targets.set(taskId, target);
     setDraft(draftKey(taskId), target, { taskId, empty: false }); emit();
     window.dispatchEvent(new CustomEvent(ANSWER_COMPOSE, { detail: { taskId } }));
@@ -74,7 +70,7 @@ export async function submitAnswer(target: Target, text: string) {
   const handler = [...(handlers.get(target.key)?.values() ?? [])].reverse().find(ref => ref.current.active)?.current;
   if (!handler) throw new Error('이 질문이 종료되었거나 아직 로딩되지 않았습니다. 질문을 확인하고 답변 대상을 다시 선택해 주세요.');
   pending.add(target.taskId);
-  try { await handler.accept(target.index, text.trim()); }
+  try { await handler.accept(text.trim()); }
   catch (error) { pending.delete(target.taskId); throw error; }
   pending.delete(target.taskId); clear(target);
 }

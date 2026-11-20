@@ -1,7 +1,8 @@
 import { imeKey } from './keys.ts';
-import { useAnswerWriter, answerOperation, useAnswerPending, cancelAnswerTarget } from './answerComposer.tsx';
-import { useEffect, useState } from 'react';
+import { useAnswerWriter, answerOperation, useAnswerPending } from './answerComposer.tsx';
+import { useEffect, useRef, useState } from 'react';
 import { ASK_USER, type Answers } from '../../shared/protocol.ts';
+import { usesReplyComposer } from '../../shared/question-input.ts';
 import { api } from './api.ts';
 import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
 import type { Approval, Post } from './types.ts';
@@ -36,8 +37,7 @@ export function askSummary(input: Record<string, any>): string {
 
 /**
  * The question card: pick an option per question (several when multiSelect), or write one's own
- * answer, then send them all at once. "답하지 않기" denies the request so the agent carries on; a
- * reply sent to the task meanwhile answers it in place of the options (Hub.askedReply).
+ * answer, then send them all at once. A single non-secret open question can use the reply box.
  */
 export function AskCard({ post, approval, onError }: {
   post: Post; approval: Approval | undefined; onError?: (msg: string) => void;
@@ -47,6 +47,8 @@ export function AskCard({ post, approval, onError }: {
   const operationKey = `${post.taskId}:${questionId}`;
   const sending = useAnswerPending(operationKey);
   const qs: AskQuestion[] = Array.isArray(p.input?.questions) ? p.input.questions : [];
+  const inReply = usesReplyComposer(qs);
+  const focusOther = useRef<number | undefined>(undefined);
   const r = post.resolution?.payload;
   // Unsent choices are kept as a draft (drafts.ts) while the question waits; a secret answer never is.
   const draftKey = `ask:${p.approvalId}`;
@@ -77,7 +79,6 @@ export function AskCard({ post, approval, onError }: {
     if (qs[i].secret) setPicks(next); else savePicks(next);
   };
   const choose = (i: number, label: string) => {
-    if (!qs[i].multiSelect) cancelAnswerTarget(post.taskId, questionId, i);
     set(i, (x) => qs[i].multiSelect
       ? { ...x, labels: x.labels.includes(label) ? x.labels.filter((l) => l !== label) : [...x.labels, label] }
       : { ...x, labels: [label], otherOn: false });
@@ -92,13 +93,9 @@ export function AskCard({ post, approval, onError }: {
     catch (e) { onError?.(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
-  const write = useAnswerWriter(post.taskId, questionId, !outcome && !!approval && !busy && !sending, async (index, text) => {
-    const next = picks.map((p, i) => i === index ? { ...p, other: text, otherOn: true, labels: qs[i].multiSelect ? p.labels : [] } : p);
-    if (!qs.some(q => q.secret) && answersReady(qs, next)) {
-      const out = Object.fromEntries(qs.map((q, i) => [q.question, answerOf(q, next[i])]));
-      await answerOperation(operationKey, () => api.resolve(approval!.id, true, undefined, out)); setSent(out);
-    }
-    savePicks(next);
+  const write = useAnswerWriter(post.taskId, questionId, inReply && !outcome && !!approval && !busy && !sending, async (text) => {
+    const out = { [qs[0].question]: text };
+    await answerOperation(operationKey, () => api.resolve(approval!.id, true, undefined, out)); setSent(out);
   });
   const skip = async () => {
     if (busy || sending || !approval) return;
@@ -135,6 +132,14 @@ export function AskCard({ post, approval, onError }: {
         const pick = picks[i];
         const opts = q.options ?? [];
         const shown = opts.find((o) => pick.labels.includes(o.label) && o.preview);
+        const inputProps = {
+          className: 'input', value: pick.other, disabled: busy || sending,
+          'aria-label': q.question, 'data-question': i === 0 && opts.length === 0 ? approval!.id : undefined,
+          placeholder: '답 입력…',
+          ref: (element: HTMLInputElement | HTMLTextAreaElement | null) => {
+            if (element && focusOther.current === i) { focusOther.current = undefined; element.focus(); }
+          },
+        };
         return (
           <div key={i} className="ask-q">
             <div className="ask-title">{q.header && <span className="ask-head">{q.header}</span>} {q.question}
@@ -156,13 +161,8 @@ export function AskCard({ post, approval, onError }: {
                 <button type="button" className={`ask-opt${pick.otherOn ? ' on' : ''}`} disabled={busy || sending}
                   role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={pick.otherOn}
                   onClick={() => {
-                    if (q.secret) set(i, (x) => ({ ...x, otherOn: !x.otherOn, labels: q.multiSelect ? x.labels : [] }));
-                    else if (pick.otherOn) {
-                      cancelAnswerTarget(post.taskId, questionId, i);
-                      set(i, x => ({ ...x, otherOn: false, other: '' }));
-                    }
-                    // Shown as chosen (a single pick dropped) right away, while the reply box waits for the text.
-                    else { set(i, (x) => ({ ...x, otherOn: true, labels: q.multiSelect ? x.labels : [] })); write(q.question, i); }
+                    if (pick.otherOn) set(i, x => ({ ...x, otherOn: false, other: '' }));
+                    else { focusOther.current = i; set(i, x => ({ ...x, otherOn: true, labels: q.multiSelect ? x.labels : [] })); }
                   }}>
                   <span className="mark">{q.multiSelect ? (pick.otherOn ? '☑' : '☐') : (pick.otherOn ? '◉' : '○')}</span>
                   <span><b>기타</b><span className="desc">직접 입력</span></span>
@@ -172,18 +172,16 @@ export function AskCard({ post, approval, onError }: {
             {shown?.preview && <pre className="mono ask-preview">{shown.preview}</pre>}
             {(pick.otherOn || opts.length === 0) && (q.secret ? (
               // A secret (a password or token) is typed blind and kept out of autofill.
-              <input className="input" type="password" autoComplete="off" value={pick.other} disabled={busy || sending}
-                autoFocus={opts.length > 0} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
-                placeholder="답 입력…"
+              <input {...inputProps} type="password" autoComplete="off"
                 onChange={(e) => set(i, (x) => ({ ...x, other: e.target.value }))}
                 onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.repeat && e.key === 'Escape') { e.preventDefault(); e.currentTarget.blur(); } }} />
-            ) : (
+            ) : inReply ? (
               <div>
                 <button className="link" disabled={busy || sending} data-question={i === 0 && opts.length === 0 ? approval!.id : undefined}
-                  onClick={() => write(q.question, i)}>대화창에서 답하기</button>
+                  onClick={() => write(q.question)}>답글창에서 답하기</button>
                 {pick.other && <div className="resolution">작성한 답: {pick.other}</div>}
               </div>
-            ))}
+            ) : <textarea {...inputProps} rows={2} onChange={(e) => set(i, x => ({ ...x, other: e.target.value }))} />)}
           </div>
         );
       })}

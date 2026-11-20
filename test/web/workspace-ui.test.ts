@@ -15,6 +15,7 @@ import * as compose from '../../shared/compose.ts';
 import * as modelCatalog from '../../shared/model-catalog.ts';
 import * as scheduledReply from '../../shared/scheduled-reply.ts';
 import * as runnerUsage from '../../shared/runner-usage.ts';
+import * as questionInput from '../../shared/question-input.ts';
 
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
@@ -87,7 +88,8 @@ test('clearing the reference pane closes it, resets the document focus and prese
   assert.equal(render('other').ids[0], 10);
 });
 
-function askCardHarness(multi = false, stored = new Map<string, string>()) {
+const askOptions = [{ label: '표준' }];
+function askCardHarness(questions: { question: string; options?: typeof askOptions; multiSelect?: boolean; secret?: boolean }[], stored = new Map<string, string>()) {
   const h = hooks();
   const react = { ...h.react, useSyncExternalStore<T>(_subscribe: unknown, snapshot: () => T) { return snapshot(); } };
   const jsx = (type: unknown, props: unknown) => ({ type, props });
@@ -104,12 +106,10 @@ function askCardHarness(multi = false, stored = new Map<string, string>()) {
   const answers: Record<string, string>[] = [];
   const module = load('AskCard.tsx', {
     ...imports, './drafts.ts': drafts, './answerComposer.tsx': composer, '../../shared/protocol.ts': {},
+    '../../shared/question-input.ts': questionInput,
     './api.ts': { api: { resolve: async (_id: string, _allow: boolean, _message: string, answer: Record<string, string>) => { answers.push({ ...answer }); } } },
   });
   const taskId = 'task', approval = { id: 'approval' };
-  const options = [{ label: '표준' }];
-  const questions = multi ? [{ question: '첫 질문', options, multiSelect: true }, { question: '둘째 질문', options }]
-    : [{ question: '첫 질문', options }];
   const post = { taskId, event: { payload: { approvalId: approval.id, input: { questions } } } };
   const render = () => h.render(() => ({
     card: module.AskCard({ post, approval }), target: composer.useAnswerTarget(taskId),
@@ -119,54 +119,58 @@ function askCardHarness(multi = false, stored = new Map<string, string>()) {
     option, answers,
     target: () => render().target?.title,
     ready: () => !render().card.props.children[2].props.children.at(-1).props.disabled,
-    write: (index: number) => render().card.props.children[1][index].props.children[3].props.children[0].props.onClick(),
+    field: (index: number) => render().card.props.children[1][index].props.children[3],
+    write: () => render().card.props.children[1][0].props.children[3].props.children[0].props.onClick(),
+    send: async () => { render().card.props.children[2].props.children.at(-1).props.onClick(); await new Promise<void>(resolve => setImmediate(resolve)); },
     submit: (text: string) => composer.submitAnswer(render().target, text),
-    reload() { flush(); h.unmount(); return askCardHarness(multi, stored); },
+    reload() { flush(); h.unmount(); return askCardHarness(questions, stored); },
   };
 }
 
-test('AskCard clears the reply target when Other is unchecked or replaced by a single choice', async () => {
-  const x = askCardHarness();
+test('AskCard keeps Other in the card, restores its draft and sends it explicitly', async () => {
+  const x = askCardHarness([{ question: '첫 질문', options: askOptions }]);
   x.option(0, 0).onClick();
   x.option(0, 1).onClick();
-  assert.equal(x.option(0, 1)['aria-checked'], true);
   assert.equal(x.option(0, 0)['aria-checked'], false);
-  assert.equal(x.target(), '첫 질문');
-  x.option(0, 1).onClick();
-  assert.equal(x.option(0, 1)['aria-checked'], false);
+  assert.equal(x.option(0, 1)['aria-checked'], true);
   assert.equal(x.target(), undefined);
-
-  x.option(0, 1).onClick();
-  x.option(0, 0).onClick();
-  assert.equal(x.target(), undefined);
-  assert.equal(x.ready(), true);
-
-  x.option(0, 1).onClick();
+  assert.equal(x.ready(), false);
+  assert.equal(x.field(0).type, 'textarea');
+  x.field(0).props.onChange({ target: { value: '직접 입력' } });
   const reloaded = x.reload();
-  assert.equal(reloaded.option(0, 1)['aria-checked'], true);
-  assert.equal(reloaded.target(), '첫 질문');
-  assert.equal(reloaded.ready(), false);
-  await reloaded.submit('직접 입력');
+  assert.equal(reloaded.field(0).props.value, '직접 입력');
+  assert.equal(reloaded.target(), undefined);
+  assert.deepEqual(reloaded.answers, []);
+  await reloaded.send();
   assert.deepEqual(reloaded.answers, [{ '첫 질문': '직접 입력' }]);
 });
 
-test('AskCard keeps another question’s reply target and waits for all selected Other answers', async () => {
-  const x = askCardHarness(true);
+test('AskCard keeps a batch in the card and collects every answer', async () => {
+  const x = askCardHarness([{ question: '첫 질문', options: askOptions, multiSelect: true }, { question: '둘째 질문' }]);
   x.option(0, 0).onClick();
   x.option(0, 1).onClick();
-  x.option(1, 1).onClick();
-  x.option(0, 1).onClick();
-  assert.equal(x.target(), '둘째 질문');
-
-  x.option(0, 1).onClick();
-  x.write(1);
-  await x.submit('두 번째 입력');
+  x.field(0).props.onChange({ target: { value: '첫 번째 입력' } });
+  assert.equal(x.option(0, 0)['aria-checked'], true);
+  assert.equal(x.target(), undefined);
   assert.equal(x.ready(), false);
-  assert.deepEqual(x.answers, []);
-
-  x.write(0);
-  await x.submit('첫 번째 입력');
+  x.field(1).props.onChange({ target: { value: '두 번째 입력' } });
+  await x.send();
   assert.deepEqual(x.answers, [{ '첫 질문': '표준, 첫 번째 입력', '둘째 질문': '두 번째 입력' }]);
+});
+
+test('AskCard routes only a single non-secret open question to the reply composer', async () => {
+  const stored = new Map([['agent-desk.drafts.v1', JSON.stringify({
+    'answer-target:task': { taskId: 'task', value: { key: 'task:approval:approval', taskId: 'task', title: '이전 대상', index: 0 }, at: Date.now() },
+  })]]);
+  const x = askCardHarness([{ question: '열린 질문' }], stored);
+  assert.equal(x.target(), undefined);
+  x.write();
+  assert.equal(x.target(), '열린 질문');
+  await x.submit('답변');
+  assert.deepEqual(x.answers, [{ '열린 질문': '답변' }]);
+  const secret = askCardHarness([{ question: '비밀 질문', secret: true }]);
+  assert.equal(secret.field(0).props.type, 'password');
+  assert.equal(secret.target(), undefined);
 });
 
 function threadTitleHarness() {

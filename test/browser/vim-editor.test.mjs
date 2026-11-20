@@ -34,8 +34,13 @@ function fixtureServer() {
           if (url.pathname === '/api/channels') body = [channel];
           if (url.pathname === '/api/channels/news/entries') body = { entries: [], more: false, total: 0 };
         }
-        if (route?.[2] === 'events') body = { events: note ? [{ id: 300, task_id: route[1], kind: 'user',
-          ts: '2026-01-01T00:00:00Z', payload: { text: '저장된 메모' } }] : [], more: false };
+        if (route?.[2] === 'events') {
+          const questions = layout === 'async-batch' ? [{ title: '방향?', options: ['왼쪽', '오른쪽'] }, { title: '이유?', options: [] }]
+            : layout === 'async-open' ? [{ title: '의견은?', options: [] }] : undefined;
+          const payload = note ? { text: '저장된 메모' } : questions ? { text: '에이전트의 질문', questions } : undefined;
+          body = { events: payload ? [{ id: 300, task_id: route[1], kind: note ? 'user' : 'assistant',
+            ts: '2026-01-01T00:00:00Z', payload }] : [], more: false };
+        }
         if (route?.[2] === 'messages' && request.method === 'POST') body = { task_id: route[1] };
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify(body ?? {}));
@@ -262,6 +267,39 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.keyboard.press('u');
       assert.equal(await text(page, field), 'from another tab');
     }));
+
+    await t.test('async batches collect Other and open answers in the card before sending once', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'async-batch' });
+      await openReply(page, origin);
+      const card = '.thread .ask-card.async';
+      const direction = `${card} textarea[aria-label="방향?"]`;
+      const reason = `${card} textarea[aria-label="이유?"]`;
+      await page.waitForSelector(`${card} button.yes`);
+      const sent = [];
+      page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/messages')) sent.push(JSON.parse(request.postData())); });
+      await page.evaluate(selector => [...document.querySelectorAll(`${selector} button`)].find(button => button.textContent.includes('기타')).click(), card);
+      await page.waitForSelector(direction);
+      assert.equal(await page.$eval(direction, element => element === document.activeElement), true);
+      await page.type(direction, '직진');
+      assert.equal(await page.$eval(`${card} button.yes`, element => element.disabled), true);
+      assert.equal(await page.$(`${card} button.link`), null);
+      await page.type(reason, '빠른 경로');
+      assert.deepEqual(sent, []);
+      await page.click(`${card} button.yes`);
+      await page.waitForSelector(`${card}.resolved`);
+      assert.deepEqual(sent, [{ text: '1. 직진\n\n2. 빠른 경로' }]);
+    }, false, 'emacs'));
+
+    await t.test('a single async open question chooses the reply composer', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'async-open' });
+      await openReply(page, origin);
+      const card = '.thread .ask-card.async';
+      await page.waitForSelector(`${card} button.link`);
+      assert.equal(await page.$(`${card} textarea`), null);
+      await page.click(`${card} button.link`);
+      await page.waitForFunction(() => document.querySelector('.thread .reply-note')?.textContent.includes('의견은?'));
+      assert.equal(await page.$eval(textarea, element => element === document.activeElement), true);
+    }, false, 'emacs'));
 
     await t.test('normal, visual and literal argument modes reject unhandled DOM edits', () => withPage(async page => {
       await openReply(page, origin);

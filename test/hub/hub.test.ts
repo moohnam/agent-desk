@@ -429,23 +429,23 @@ test('an approval makes the task wait until the user answers it', () => {
   assert.equal(status(hub, taskId), 'running');
 });
 
-test('a message sent while the agent\'s question waits answers it instead of waiting for the turn', () => {
+test('a message answers a single open question instead of waiting for the turn', () => {
   const { hub, runner, taskId, sessionId } = started();
   runner.say({ type: 'approval_request', sessionId, approvalId: 'q1', toolName: 'AskUserQuestion',
-    input: { questions: [{ question: '어느 쪽?', options: [{ label: 'A' }, { label: 'B' }] }] } });
-  hub.sendMessage(taskId, '둘 다 아니고 C로 해 줘');
+    input: { questions: [{ question: '어떻게 할까요?' }] } });
+  hub.sendMessage(taskId, 'C로 해 줘');
   const r = runner.last('approval_result')!;
   assert.equal(r.allow, false);
   assert.match(r.message!, /직접 답했습니다[\s\S]*C로 해 줘/);
   assert.equal(hub.taskView(hub.store.getTask(taskId)!).queued.length, 0);
   assert.equal(runner.last('send'), undefined);
   const events = hub.store.listEvents(taskId);
-  assert.ok(events.some((e) => e.kind === 'user' && (e.payload as { text: string }).text === '둘 다 아니고 C로 해 줘'));
+  assert.ok(events.some((e) => e.kind === 'user' && (e.payload as { text: string }).text === 'C로 해 줘'));
   assert.equal((events.findLast((e) => e.kind === 'approval')!.payload as { replied?: boolean }).replied, true);
   assert.equal(status(hub, taskId), 'running');
 });
 
-test('in Codex a message during its question becomes every question\'s answer', () => {
+test('in Codex a message answers its single open question', () => {
   const t = setup();
   const view = t.hub.compose(`@web:${t.dir} #codex 고쳐 줘`);
   const sessionId = t.runner.last('start')!.sessionId;
@@ -456,6 +456,23 @@ test('in Codex a message during its question becomes every question\'s answer', 
   const r = t.runner.last('approval_result')!;
   assert.equal(r.allow, true);
   assert.deepEqual(r.answers, { '이름?': '데스크' });
+});
+
+test('replies do not answer choices, question batches, secrets or ambiguous pending questions', () => {
+  const open = { question: '이름?' };
+  const option = { question: '방향?', options: [{ label: '왼쪽' }] };
+  for (const waiting of [[{ questions: [option] }], [{ questions: [option, open] }],
+    [{ questions: [{ ...open, secret: true }] }], [{ questions: [open] }, { questions: [option] }]]) {
+    const { hub, runner, taskId, sessionId } = started();
+    waiting.forEach((input, index) => runner.say({ type: 'approval_request', sessionId,
+      approvalId: `q${index}`, toolName: 'AskUserQuestion', input }));
+    const receipt: { answered?: boolean; queued_id?: string } = {};
+    hub.sendMessage(taskId, '일반 지시 #now', false, receipt);
+    assert.equal(receipt.answered, undefined);
+    assert.ok(receipt.queued_id);
+    assert.equal(runner.last('approval_result'), undefined);
+    assert.equal(hub.state().approvals.length, waiting.length);
+  }
 });
 
 test('a session the runner no longer has after a reconnect is lost, and its queue is dropped', () => {

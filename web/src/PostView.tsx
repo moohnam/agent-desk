@@ -7,6 +7,7 @@ import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, modelLabel, REQUEST_TOOL, engin
 import { api } from './api.ts';
 import { asyncAnswerText } from './asyncAnswers.ts';
 import type { AsyncQuestion } from '../../shared/protocol.ts';
+import { usesReplyComposer } from '../../shared/question-input.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
 import { relTime, toolSummary } from './format.ts';
@@ -257,8 +258,11 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
  */
 function AsyncChoices({ post, running, onError }: { post: Post; running: boolean; onError?: (msg: string) => void }) {
   const questions = post.event.payload.questions as AsyncQuestion[];
+  const inReply = usesReplyComposer(questions);
   const draftKey = `async-answer:${post.taskId}:${post.id}`;
   const [picks, setPicks] = useState<string[]>(() => getDraft<string[]>(draftKey) ?? questions.map(() => ''));
+  const [other, setOther] = useState<ReadonlySet<number>>(() => new Set());
+  const focusOther = useRef<number | undefined>(undefined);
   useDraftSync<string[]>(draftKey, value => setPicks(value ?? questions.map(() => '')));
   const savePicks = (next: string[]) => { setPicks(next); setSharedDraft(draftKey, next, { taskId: post.taskId, empty: false }); };
   const [sent, setSent] = useState<string>();
@@ -272,38 +276,46 @@ function AsyncChoices({ post, running, onError }: { post: Post; running: boolean
     catch (err) { setSent(undefined); throw err; }
     finally { sending.current = false; }
   };
-  const write = useAnswerWriter(post.taskId, `async:${post.id}`, !done, async (index, value) => {
-    const next = picks.map((p, i) => i === index ? value : p);
-    const complete = asyncAnswerText(questions, next);
-    if (complete) await send(complete);
-    if (!complete) savePicks(next);
-  });
+  const write = useAnswerWriter(post.taskId, `async:${post.id}`, inReply && !done, send);
   const deliver = (value: string) => { void send(value).catch(err => onError?.(`답을 보내지 못했습니다: ${err instanceof Error ? err.message : err}`)); };
   const pick = (i: number, text: string) => savePicks(picks.map((p, k) => k === i ? text : p));
+  const usesOther = (q: AsyncQuestion, i: number) => other.has(i) || (!!picks[i] && !q.options.includes(picks[i]));
   const text = asyncAnswerText(questions, picks);
   const submit = () => { if (text) deliver(text); };
   return (
     <div className={`ask-card async${done ? ' resolved' : ''}`} onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => { if (!imeKey(e.nativeEvent) && !e.defaultPrevented && !e.repeat && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }}>
-      {questions.map((q, i) => (
+      {questions.map((q, i) => {
+        const custom = usesOther(q, i);
+        return (
         <div className="ask-q" key={i}>
           {questions.length > 1 && <div className="ask-q">{q.title}</div>}
-          <div className="ask-opts" role="radiogroup" aria-label={q.title}>
+          {!!q.options.length && <div className="ask-opts" role="radiogroup" aria-label={q.title}>
             {q.options.map((o) => (
-              <button key={o} type="button" role="radio" aria-checked={picks[i] === o}
-                className={`ask-opt${picks[i] === o ? ' on' : ''}`} disabled={!!done}
-                onClick={() => { pick(i, o); if (questions.length === 1) deliver(o); }}>
-                <span className="mark">{picks[i] === o ? '●' : '○'}</span><span>{o}</span>
+              <button key={o} type="button" role="radio" aria-checked={!custom && picks[i] === o}
+                className={`ask-opt${!custom && picks[i] === o ? ' on' : ''}`} disabled={!!done}
+                onClick={() => { setOther(prev => new Set([...prev].filter(index => index !== i))); pick(i, o); if (questions.length === 1) deliver(o); }}>
+                <span className="mark">{!custom && picks[i] === o ? '●' : '○'}</span><span>{o}</span>
               </button>
             ))}
-          </div>
-          {!done && <button className="link" onClick={() => write(q.title, i)}>대화창에서 답하기</button>}
-          {!q.options.length && picks[i] && <div className="resolution">작성한 답: {picks[i]}</div>}
+            {!done && <button type="button" role="radio" aria-checked={custom} className={`ask-opt${custom ? ' on' : ''}`}
+              onClick={() => {
+                if (custom) return;
+                focusOther.current = i;
+                setOther(prev => new Set(prev).add(i));
+                pick(i, '');
+              }}><span className="mark">{custom ? '●' : '○'}</span><span>기타</span></button>}
+          </div>}
+          {!done && (inReply ? <button className="link" onClick={() => write(q.title)}>답글창에서 답하기</button>
+            : (!q.options.length || custom) && <textarea className="input" rows={2} aria-label={q.title} placeholder="답 입력…" value={picks[i] ?? ''}
+              ref={element => { if (element && focusOther.current === i) { focusOther.current = undefined; element.focus(); } }}
+              onChange={event => pick(i, event.target.value)} />)}
         </div>
-      ))}
-      {!done && (questions.length > 1 || !questions[0]?.options.length) && (
+        );
+      })}
+      {!done && !inReply && (questions.length > 1 || questions.some(usesOther)) && (
         <div className="approve-actions">
-          <span className="muted small">질문마다 답한 뒤 한 번에 보냅니다</span><span className="spacer" />
+          {questions.length > 1 && <span className="muted small">질문마다 답한 뒤 한 번에 보냅니다</span>}<span className="spacer" />
           <button className="yes" disabled={!text} onClick={submit}>답하기</button>
         </div>
       )}
@@ -323,7 +335,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
   const [sent, setSent] = useState<string | null>(null);
   const answer = r?.kind === 'user' ? String(r.payload.text ?? '') : sent;
   const outcome = answer != null ? 'answered' : r ? 'cancelled' : question ? null : 'closed';
-  const write = useAnswerWriter(post.taskId, `question:${p.questionId}`, !outcome && !!question, async (_, text) => {
+  const write = useAnswerWriter(post.taskId, `question:${p.questionId}`, !outcome && !!question, async (text) => {
     await answerOperation(`${post.taskId}:question:${p.questionId}`, () => api.answer(question!.id, text)); setSent(text);
     setDraft(`question:${p.questionId}`, null, { empty: true });
   });
@@ -340,7 +352,7 @@ function QuestionCard({ post, question, full, onToggle, onError }: {
         </div>
       ) : (
         <div className="answer" onClick={(e) => e.stopPropagation()}>
-          <button className="link" data-question={question!.id} onClick={() => write(String(p.text ?? '에이전트의 질문'))}>대화창에서 답하기</button>
+          <button className="link" data-question={question!.id} onClick={() => write(String(p.text ?? '에이전트의 질문'))}>답글창에서 답하기</button>
         </div>
       )}
     </div>

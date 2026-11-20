@@ -13,6 +13,7 @@ import {
 } from '../../shared/compose.ts';
 import type { Approval, ChannelMessageInput, MessageReceipt, NoteContext, Settings, TaskView } from '../../shared/api.ts';
 import type { UserPayload } from '../../shared/events.ts';
+import { usesReplyComposer } from '../../shared/question-input.ts';
 import { hasScheduledReply, scheduledReplyHint, scheduledReplyInstant, scheduledReplyPlainText } from '../../shared/scheduled-reply.ts';
 import { channelContext, channelPrompt } from './channel-context.ts';
 import { DeskCore, OWNER } from './core.ts';
@@ -532,7 +533,7 @@ export class Hub extends DeskCore {
    * is working, a message waits until the turn ends (#later, the default), joins the running turn
    * (#now). #new and #fork start a new task instead, busy or not: a fresh one in the same project,
    * or one that continues from a copy of this task's conversation. While the agent waits on its
-   * multiple-choice question, a message is the answer to it (askedReply), not a message for later.
+   * single open question, a message can answer it directly (askedReply).
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
   sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context: MessageContext = {}, noteOnly = false): string {
@@ -575,9 +576,10 @@ export class Hub extends DeskCore {
     const live = this.runner.has(session.id);
     const busy = live && this.busy.has(session.id);
     const content = !!(c.body || c.skills.length);
-    // The agent's question waiting for a pick: the message answers it instead of the options.
-    const asked = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
-      ? this.store.pendingApprovals().find((a) => a.session_id === session.id && a.tool_name === ASK_USER) : undefined;
+    const waitingQuestions = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
+      ? this.store.pendingApprovals().filter(a => a.session_id === session.id && a.tool_name === ASK_USER) : [];
+    const asked = waitingQuestions.length === 1 && usesReplyComposer((waitingQuestions[0].input as { questions?: unknown } | null)?.questions)
+      ? waitingQuestions[0] : undefined;
     if (asked) this.assertApprovalReply(asked);
     if (!asked && live && engine !== 'agy' && this.connectorContext.getStore()?.inputScoped)
       this.connectorBroker?.assertScopedTools(session.id);
@@ -1113,7 +1115,7 @@ export class Hub extends DeskCore {
   /**
    * A message sent while the agent's question waits: taken as the answer, as if "답하지 않기" were
    * pressed with it (Claude reads the reason a question is turned down). Codex drops that reason, so
-   * there the text fills in every question's answer instead.
+   * there the text is passed as the answer to the open question.
    */
   private askedReply(approval: Approval, engine: EngineName, text: string) {
     if (engine === 'codex') {
