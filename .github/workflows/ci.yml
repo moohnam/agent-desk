@@ -28,5 +28,7 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Browser regression tests
+        run: npm run test:browser
       - name: Test
         run: npm test

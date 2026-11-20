@@ -8,7 +8,6 @@ import { imeKey, latinKey } from './keys.ts';
 
 type Mode = 'insert' | 'normal' | 'visual' | 'replace';
 const labels: Record<Mode, string> = { insert: '입력', normal: '일반', visual: '선택', replace: '바꾸기' };
-const disabledState = (disabled: boolean) => [EditorState.readOnly.of(disabled), EditorView.editable.of(!disabled)];
 const fromDesk = Annotation.define<boolean>();
 const webkit = /AppleWebKit/.test(navigator.userAgent) && !/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent);
 const delayedImeCommit = webkit || /Android/.test(navigator.userAgent);
@@ -36,6 +35,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
   latest.current = props;
   const sent = useRef(props.value);
   const settings = useRef(new Compartment());
+  const nativeInput = useRef(new Compartment());
   const compositionEnd = useRef(-Infinity);
   const exitAfterComposition = useRef(false);
   const settlingEscape = useRef<{ text?: string }>(undefined);
@@ -45,12 +45,22 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
   const discardedComposition = useRef<{ text: string; at: number }>(undefined);
   const [mode, setMode] = useState<Mode>(props.startInInsert ? 'insert' : 'normal');
   const config = () => [
-    disabledState(latest.current.disabled ?? false),
+    EditorState.readOnly.of(latest.current.disabled ?? false),
     latest.current.placeholder ? placeholder(latest.current.placeholder) : [],
     EditorView.contentAttributes.of({
-      'data-desk-input': '', 'aria-label': latest.current.label ?? latest.current.placeholder ?? '대화 입력',
+      'data-desk-input': '', tabindex: latest.current.disabled ? '-1' : '0',
+      'aria-label': latest.current.label ?? latest.current.placeholder ?? '대화 입력',
     }),
   ];
+
+  const syncNativeInput = (editor: EditorView) => {
+    if (view.current !== editor) return;
+    const state = getCM(editor)?.state.vim;
+    const editable = !latest.current.disabled && !!(state?.insertMode || state?.expectLiteralNext);
+    if (editor.state.facet(EditorView.editable) !== editable) {
+      editor.dispatch({ effects: nativeInput.current.reconfigure(EditorView.editable.of(editable)) });
+    }
+  };
 
   useLayoutEffect(() => {
     if (!host.current) return;
@@ -66,6 +76,9 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         extensions: [
           vim(), drawSelection(), history(), EditorView.lineWrapping, EditorState.allowMultipleSelections.of(true),
           settings.current.of(config()),
+          // The browser must not maintain a composing text input in command mode.
+          // Vim commands can still edit the document through CodeMirror transactions.
+          nativeInput.current.of(EditorView.editable.of(false)),
           Prec.highest(EditorView.inputHandler.of((current, _from, _to, text) => {
             const stroke = lastImeCommand.current;
             const cm = getCM(current);
@@ -137,13 +150,18 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     });
     view.current = editor;
     const cm = getCM(editor)!;
+    const afterVimKey = () => queueMicrotask(() => syncNativeInput(editor));
+    cm.on('vim-keypress', afterVimKey);
+    cm.on('vim-command-done', afterVimKey);
     cm.on('vim-mode-change', ({ mode: next }: { mode: Mode }) => {
       setMode(next);
       latest.current.onMode?.(next === 'insert' || next === 'replace');
       if (next === 'insert' || next === 'replace') latest.current.onSelect?.(editor.state.selection.main.head);
+      afterVimKey();
     });
     if (initial.startInInsert) Vim.handleKey(cm, 'i', 'script');
     else initial.onMode?.(false);
+    syncNativeInput(editor);
     const replaceRange = (from: number, to: number, insert: string) => {
       if (latest.current.disabled) return;
       const length = editor.state.doc.length;
@@ -183,7 +201,10 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
     });
   }, [props.value]);
   useLayoutEffect(() => {
-    view.current?.dispatch({ effects: settings.current.reconfigure(config()) });
+    const editor = view.current;
+    if (!editor) return;
+    editor.dispatch({ effects: settings.current.reconfigure(config()) });
+    syncNativeInput(editor);
   }, [disabled, label, hint]);
 
   const leaveAfterIme = (editor: EditorView) => {
@@ -320,6 +341,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
           e.stopPropagation();
           editor.dispatch({ selection: { anchor: resume.insert }, scrollIntoView: true });
           Vim.multiSelectHandleKey(cm, 'i', 'user');
+          syncNativeInput(editor);
           return;
         }
       }
@@ -329,6 +351,7 @@ export function VimInput(props: EditorProps & { handoff?: { focused: boolean; st
         e.preventDefault();
         e.stopPropagation();
         Vim.multiSelectHandleKey(cm, key, 'user');
+        syncNativeInput(editor);
         return;
       }
       const leave = !!state && !state.insertMode && !state.visualMode && !state.exMode &&

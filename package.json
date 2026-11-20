@@ -12,6 +12,7 @@
     "start": "npm --workspace hub run start",
     "typecheck": "tsc -p shared && npm --workspace hub run typecheck && npm --workspace web run typecheck && tsc -p test",
     "test": "node --test 'test/**/*.test.ts'",
+    "test:browser": "node --test test/browser/*.test.mjs",
     "runner": "node hub/src/runner/daemon.ts",
     "runner:remote": "node hub/src/runner/remote.ts",
     "runner:remote-migrate": "node hub/src/runner/remote-migration.ts",
