@@ -26,15 +26,16 @@ export function sharedRunnerMcp(workspace: SharedWorkspace, dir: string, port: n
     catch { throw new Error('엔진 MCP 인증 파일 형식이 잘못되었습니다'); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    const peer = workspace.grant('agent-desk-runtime');
+    const peer = workspace.grant('agent-desk-runtime',true);
     credential = { workspaceId: peer.workspace_id, peerId: peer.id, token: peer.token };
     try { writeFileSync(path, JSON.stringify(credential), { mode: 0o600, flag: 'wx' }); }
     catch (writeError) { workspace.revoke(peer.id); throw writeError; }
   }
+  if(credential?.workspaceId===workspace.id && typeof credential.peerId==='string' && typeof credential.token==='string') workspace.adoptRuntime(credential.peerId,credential.token);
   if (!credential || typeof credential.workspaceId !== 'string' || typeof credential.peerId !== 'string'
     || typeof credential.token !== 'string' || credential.workspaceId !== workspace.id
     || !/^[A-Za-z0-9_-]{32,256}$/.test(credential.token)
-    || workspace.authenticate(credential.token) !== credential.peerId)
+    || workspace.authenticate(credential.token,true) !== credential.peerId)
     throw new Error('엔진 MCP 인증이 현재 작업공간과 일치하지 않거나 취소되었습니다');
   return { url: `http://127.0.0.1:${port}/v1/mcp`, workspaceId: workspace.id, token: credential.token };
 }

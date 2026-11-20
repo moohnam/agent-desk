@@ -462,6 +462,14 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           if (id === localAuthorityId) throw new HttpError(403,'로컬 작업공간 연결은 서버 설정에서 관리합니다');
           workspaces.remove(id);return send(res,200,{ok:true});
         }
+        if ((parts.length === 4 || parts.length === 5) && parts[3] === 'ssh-peers') {
+          if (!local) throw new HttpError(403,'허브 연결 승인은 허브 머신에서만 할 수 있습니다');
+          if (id === localAuthorityId) throw new HttpError(403,'로컬 작업공간에는 공유 허브를 등록할 수 없습니다');
+          if (!(parts.length===4 && (req.method==='GET'||req.method==='POST') || parts.length===5 && req.method==='DELETE')) throw new HttpError(405,'지원하지 않는 요청입니다');
+          const result=await workspaces.manageSsh(id,req.method!,req.method==='POST'?await readJson(req):undefined,parts[4]);
+          if (!('status' in result)) throw new HttpError(502,'허브 관리 응답이 잘못되었습니다');
+          return send(res,result.status,result.body);
+        }
         if (parts.length >= 4) {
           if (id === localAuthorityId) throw new HttpError(404,'이 연결은 기본 작업공간입니다');
           const path='/'+parts.slice(3).join('/')+url.search;

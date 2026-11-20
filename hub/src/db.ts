@@ -1,3 +1,4 @@
+import { InputOrigin } from './input-origin.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -178,6 +179,7 @@ function readTask(row: unknown): Task | undefined {
 }
 
 export class Store {
+  readonly origins: InputOrigin;
   private db: DatabaseSync;
   /** Remote delivery records share the same transaction as the events they apply. */
   get database() { return this.db; }
@@ -185,6 +187,7 @@ export class Store {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    this.origins = new InputOrigin(this.db);
     // Remote outboxes may temporarily contain answers to secret approval questions.
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -449,6 +452,11 @@ export class Store {
   }
 
   addEvent(sessionId: string, taskId: string, kind: EventKind, payload: unknown, ts = now()): Event {
+    if (kind === 'user' && payload && typeof payload === 'object') {
+      const { author: ignored, ...body } = payload as Record<string, unknown>;
+      const author = this.origins.current();
+      payload = { ...body, ...(author ? { author } : {}) };
+    }
     const r = this.db.prepare('INSERT INTO event (session_id, task_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)')
       .run(sessionId, taskId, ts, kind, JSON.stringify(payload));
     return { id: Number(r.lastInsertRowid), session_id: sessionId, task_id: taskId, ts, kind, payload };
@@ -633,6 +641,7 @@ export class Store {
   }
 
   enqueue(q: Queued) {
+    this.origins.remember(q.id);
     this.db.prepare(`INSERT INTO queued (id, task_id, session_id, text, body, skills_json, mode, created_at, kind, channel_context_json, skill_snapshot_json, connector_context_json, note_context_json, ord)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT coalesce(max(ord), 0) + 1 FROM queued))`)
       .run(q.id, q.task_id, q.session_id, q.text, q.body, JSON.stringify(q.skills), q.mode, q.created_at, q.kind ?? null, q.channel_context ? JSON.stringify(q.channel_context) : null, q.skill_snapshot ? JSON.stringify(q.skill_snapshot) : null, q.connector_context === undefined ? null : JSON.stringify(q.connector_context), q.note_context ? JSON.stringify(q.note_context) : null);
@@ -663,6 +672,7 @@ export class Store {
   }
 
   scheduleReply(q: ScheduledReply) {
+    this.origins.remember(q.id);
     this.db.prepare('INSERT INTO scheduled_reply (id, task_id, session_id, text, created_at, scheduled_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(q.id, q.task_id, q.session_id, q.text, q.created_at, q.scheduled_at);
   }

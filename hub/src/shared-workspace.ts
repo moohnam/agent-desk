@@ -1,3 +1,4 @@
+import { SshAuthority } from './ssh-authority.ts';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
@@ -55,6 +56,7 @@ class ConnectorPermissionError extends HttpError {
 /** One canonical workspace, many separately revocable hub credentials. */
 export class SharedWorkspace {
   readonly id: string;
+  readonly ssh: SshAuthority;
   readonly connectorBroker?: ConnectorBroker;
   private db: DatabaseSync;
   private owner?: Hub;
@@ -72,6 +74,8 @@ export class SharedWorkspace {
       CREATE TABLE IF NOT EXISTS workspace_receipt (id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);`);
     if (!this.db.prepare('SELECT id FROM workspace_identity').get()) this.db.prepare('INSERT INTO workspace_identity VALUES (?)').run(randomUUID());
     this.id = (this.db.prepare('SELECT id FROM workspace_identity').get() as { id: string }).id;
+    this.ssh = new SshAuthority(this.db,this.id);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS workspace_runtime_peer (peer_id TEXT PRIMARY KEY)`);
     if (hub) {
       this.connectorBroker = new ConnectorBroker(this.db, this.id, {
         onIdle: sessionId => hub.connectorIdle(sessionId),
@@ -81,24 +85,46 @@ export class SharedWorkspace {
     }
   }
   peers() { return this.db.prepare('SELECT id,name,revoked FROM workspace_peer').all(); }
-  grant(name: string) {
+  grant(name: string, runtime = false) {
+    if(this.ssh.enabled&&!runtime)throw new HttpError(409,"SSH 공개키로 허브를 등록하세요");
     if (!name?.trim() || name.length > 100) throw new HttpError(400, '허브 이름이 필요합니다');
     const id = randomUUID(), token = randomBytes(32).toString('base64url');
     this.db.prepare('INSERT INTO workspace_peer(id,name,token_hash) VALUES (?,?,?)').run(id,name.trim(),digest(token));
+    if(runtime)this.markRuntime(id);
     return { id, token, workspace_id: this.id };
   }
+  adoptRuntime(id:string,token:string){
+    const p=this.db.prepare("SELECT id FROM workspace_peer WHERE id=? AND name='agent-desk-runtime' AND token_hash=? AND revoked=0").get(id,digest(token));
+    if(!p)throw new HttpError(401,'엔진 MCP 인증이 올바르지 않거나 취소되었습니다');
+    this.markRuntime(id);
+  }
+  private markRuntime(id:string){this.db.prepare("INSERT OR IGNORE INTO workspace_runtime_peer VALUES(?)").run(id);}
+  isRuntime(id:string){return !!this.db.prepare("SELECT 1 FROM workspace_runtime_peer WHERE peer_id=?").get(id);}
   revoke(id: string) {
+    if(this.ssh.peers().some(p=>p.peerId===id&&p.admin))throw new HttpError(409,'관리자 키는 로컬 키 교체 명령으로 복구하세요');
     this.db.prepare('UPDATE workspace_peer SET revoked=1 WHERE id=?').run(id);
+    this.ssh.invalidate(id);
+    this.owner?.revokeInputPeer(id);
     for (const [res, peer] of this.streams) if (peer === id) res.end();
     for (const [res, peer] of this.files) if (peer === id) res.destroy();
   }
-  authenticate(token: string | undefined) {
+  authenticate(token: string | undefined, runtime = false) {
     if (!token || token.length > 256) throw new HttpError(401, '공유 작업공간 연결 토큰이 필요합니다');
+    if(this.ssh.enabled) {
+      try { return this.ssh.authenticate(token); } catch(error) {
+        if(!runtime)throw error;
+      }
+    }
     const supplied = Buffer.from(digest(token));
     const peer = (this.db.prepare('SELECT id,token_hash FROM workspace_peer WHERE revoked=0').all() as {id:string;token_hash:string}[])
       .find(p=>timingSafeEqual(supplied,Buffer.from(p.token_hash)));
-    if (!peer) throw new HttpError(401, '공유 작업공간 연결 권한이 없거나 취소되었습니다');
+    if (!peer || (this.ssh.enabled && !this.isRuntime(peer.id))) throw new HttpError(401, '공유 작업공간 연결 권한이 없거나 취소되었습니다');
     return peer.id;
+  }
+  private author(peer:string) {
+    if(!this.ssh.enabled||this.isRuntime(peer))return undefined;
+    const {peerId,ownerId,ownerName,fingerprint}=this.ssh.identity(peer);
+    return {peerId,ownerId,ownerName,fingerprint};
   }
   private assertPeer(peer:string) {
     if(!this.db.prepare('SELECT 1 FROM workspace_peer WHERE id=? AND revoked=0').get(peer))
@@ -155,10 +181,11 @@ export class SharedWorkspace {
       const stamped = op.body.__desk_schedule_accepted_at;
       const acceptedAt = op.method === 'POST' && /^\/tasks\/[^/]+\/scheduled-replies$/.test(url.pathname)
         && typeof stamped === 'number' && Number.isSafeInteger(stamped) && stamped >= 0 ? stamped : undefined;
-      try { result = this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(literalNote ? undefined : op.body.__desk_instructions, ()=>snapshot
+      const author=this.author(peer);
+      try { result = this.hub.store.origins.with(author,()=>this.hub.atomic(()=>this.hub.withInputPeer(peer, ()=>this.hub.withConnectorIdentity(identity,()=>this.hub.withConnectorContext(connectorContext, ()=>this.hub.withInstructions(literalNote ? undefined : op.body.__desk_instructions, ()=>snapshot
         ? this.hub.withSkillSnapshot(snapshot,
           () => workspaceApi(this.hub,op.method,url,op.body,acceptedAt))
-        : workspaceApi(this.hub,op.method,url,op.body,acceptedAt)))))); }
+        : workspaceApi(this.hub,op.method,url,op.body,acceptedAt))))))); }
       catch (e) {
         if (!(e instanceof HttpError) || e.status >= 500) throw e;
         result = {status:e.status,body:{error:e.message}};
@@ -203,7 +230,16 @@ export class SharedWorkspace {
         const url = new URL(req.url ?? '/', 'http://workspace');
         if (url.pathname === '/v1/connector-mcp' && this.connectorBroker)
           return await handleConnectorMcp(this.connectorBroker, req, res);
-        const peer = this.authenticate(req.headers.authorization?.match(/^Bearer (.+)$/)?.[1]);
+        if (!this.localAuthority && req.method==='POST' && url.pathname==='/v1/ssh/challenge') {
+          const b=await readBody(req,20000) as any;return json(res,200,this.ssh.challenge(b?.fingerprint,b?.workspaceId));
+        }
+        if (!this.localAuthority && req.method==='POST' && url.pathname==='/v1/ssh/session') {
+          const b=await readBody(req,20000) as any;return json(res,200,await this.ssh.authenticateChallenge(b?.id,b?.signature));
+        }
+        const token=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+        const peer = this.authenticate(token,true);
+        const assertAuthorized=()=>{if(this.authenticate(token,true)!==peer)throw new HttpError(401,'인증된 허브가 변경되었습니다');};
+        if(this.ssh.enabled && this.isRuntime(peer) && url.pathname!=='/v1/mcp')throw new HttpError(403,'실행 엔진 전용 인증입니다');
         if (req.method === 'GET' && url.pathname === '/v1/identity') {
           const migrated=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_import'").get()
             ? this.db.prepare("SELECT runner_id,address,fingerprint FROM remote_import WHERE activated_at IS NOT NULL LIMIT 1").get() as
@@ -215,12 +251,22 @@ export class SharedWorkspace {
           return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1,note_cut:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
+        if(url.pathname==='/v1/ssh/peers') {
+          this.ssh.assertAdmin(peer);
+          if(req.method==='GET')return json(res,200,this.ssh.peers());
+          if(req.method==='POST')return json(res,201,await this.ssh.register(await readBody(req,20000) as any,peer,undefined,assertAuthorized));
+        }
+        if(req.method==='DELETE'&&url.pathname.startsWith('/v1/ssh/peers/')) {
+          this.ssh.assertAdmin(peer);const target=url.pathname.slice('/v1/ssh/peers/'.length);
+          if(this.ssh.identity(target).admin)throw new HttpError(409,'관리자 키는 로컬 복구 절차로 교체하세요');
+          this.revoke(target);return json(res,200,{ok:true});
+        }
         if (req.method === 'GET' && url.pathname === '/v1/file-path') {
           const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
           if (!task || !href || href.length > 4096) throw new HttpError(400, '작업과 문서 경로가 필요합니다');
           if (this.localAuthority && remoteLocation(this.hub.cwdOf(task) ?? '')) throw new HttpError(409, '원격 작업공간 연결이 필요합니다');
           const path = await workspaceDocumentPath(this.hub, task, href, url.searchParams.get('approved_path') ?? undefined);
-          this.assertPeer(peer);
+          assertAuthorized();
           return json(res, 200, { path });
         }
         if(req.method==='GET'&&url.pathname.startsWith('/v1/receipts/')) {
@@ -231,7 +277,7 @@ export class SharedWorkspace {
           if (req.method === 'GET' && url.pathname === '/v1/connectors/poll') return json(res, 200, this.connectorBroker.poll(peer));
           if (req.method === 'POST') {
             const body = await readBody(req) as { callId?: string; completion?: ConnectorCompletion; callIds?: string[] };
-            this.assertPeer(peer);
+            assertAuthorized();
             if (url.pathname === '/v1/connectors/complete' && typeof body?.callId === 'string' && body.completion)
               return json(res, 200, this.connectorBroker.complete(peer, body.callId, body.completion));
             if (url.pathname === '/v1/connectors/ack' && Array.isArray(body?.callIds)) {
@@ -244,7 +290,7 @@ export class SharedWorkspace {
           return json(res,200,{hashes:peerSkillManifest(this.db,this.hub.skills,peer)});
         if (req.method === 'POST' && url.pathname === '/v1/skills/sync') {
           const input=await readBody(req,8*1024*1024) as {bundle?:SkillBundle;names?:string[]};
-          this.assertPeer(peer);
+          assertAuthorized();
           if (input?.bundle) syncSkillVersion(this.db,this.hub.skills,peer,input.bundle);
           else if (input?.names) removeAbsentSkills(this.db,this.hub.skills,peer,input.names);
           else throw new HttpError(400,'동기화할 스킬 내용 또는 명단이 없습니다');
@@ -252,7 +298,7 @@ export class SharedWorkspace {
         }
         if (req.method === 'POST' && url.pathname === '/v1/skills/prepare') {
           const input=await readBody(req,8*1024*1024) as {op_id?:string;bundle?:SkillBundle};
-          this.assertPeer(peer);
+          assertAuthorized();
           if(!input?.op_id||!input.bundle)throw new HttpError(400,'스킬 준비 명령 ID와 내용이 필요합니다');
           applySkillBundle(this.db,this.hub.skills,peer,input.op_id,input.bundle);
           return json(res,200,{ok:true});
@@ -261,15 +307,15 @@ export class SharedWorkspace {
           const action=url.pathname.slice('/v1/broker/'.length);
           if(!/^[a-z-]+$/.test(action))throw new HttpError(404,'지원하지 않는 broker 요청입니다');
           const body=await readBody(req);
-          const result=this.hub.atomic(()=>{this.assertPeer(peer);return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {});});
+          const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {});}));
           return json(res,result.status,result.body);
         }
-        if (url.pathname === '/v1/mcp') return await handleMcp(this.hub,req,res,()=>this.assertPeer(peer));
+        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized()));
         if (this.localAuthority && req.method === 'POST' && url.pathname.startsWith('/v1/runner-exchange/')) {
           const runnerId=decodeURIComponent(url.pathname.slice('/v1/runner-exchange/'.length));
           if (!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token'])) throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');
           const body=await readBody(req);
-          return json(res,200,this.hub.atomic(()=>{this.assertPeer(peer);
+          return json(res,200,this.hub.atomic(()=>{assertAuthorized();
             if(!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token']))throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');
             return this.hub.remotes.exchange(runnerId,body as import('../../shared/remote.ts').RemoteExchange); }));
         }
@@ -277,7 +323,7 @@ export class SharedWorkspace {
           const channelId=decodeURIComponent(url.pathname.slice('/v1/channel-ingest/'.length));
           if (!this.hub.channels.acceptsToken(channelId,req.headers['x-channel-token'] as string|undefined)) throw new HttpError(401,'이 채널의 입력 토큰이 필요합니다');
           const body=await readBody(req) as Record<string,unknown>;
-          this.assertPeer(peer);
+          assertAuthorized();
           if(!this.hub.channels.acceptsToken(channelId,req.headers['x-channel-token'] as string|undefined))throw new HttpError(401,'이 채널의 연결 토큰이 필요합니다');
           return json(res,200,this.hub.channels.ingest(channelId,body?.entries===undefined?body:body.entries));
         }
@@ -301,18 +347,20 @@ export class SharedWorkspace {
           const path = url.searchParams.get('path')!;
           if (path?.startsWith('/runner-usage') && /^\/runner-usage(?:\?|$)/.test(path)) {
             const result = await workspaceUsage(this.hub.remotes, this.localAuthority, usageQuery(new URL(path,'http://workspace').searchParams));
-            this.assertPeer(peer);
+            assertAuthorized();
             return json(res,200,result);
           }
           return json(res,200,this.read(path,peer));
         }
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
-          const result = this.execute(peer,await readBody(req,8*1024*1024));
+          const body=await readBody(req,8*1024*1024);
+          assertAuthorized();
+          const result = this.execute(peer,body);
           return json(res,result.status,result.body);
         }
         if (req.method === 'GET' && url.pathname === '/v1/stream') {
           res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});res.write(': connected\n\n');
-          const write = (m:HubMessage)=>{ if (res.writableLength > 1024*1024) res.destroy(); else res.write(`data: ${JSON.stringify(m)}\n\n`); };
+          const write = (m:HubMessage)=>{ try {this.authenticate(req.headers.authorization?.slice(7));}catch{res.end();return;} if (res.writableLength > 1024*1024) res.destroy(); else res.write(`data: ${JSON.stringify(m)}\n\n`); };
           const ping = setInterval(()=>{
             try { this.authenticate(req.headers.authorization?.slice(7)); res.write(': ping\n\n'); }
             catch { res.end(); }
@@ -328,7 +376,8 @@ export class SharedWorkspace {
       const address = server.address();
       if (this.owner && address && typeof address !== 'string') this.owner.connectorMcpUrl = `http://127.0.0.1:${address.port}/v1/connector-mcp`;
     });
-    server.on('close',()=>{for(const res of this.streams.keys())res.end();for(const res of this.files.keys())res.destroy();});
+    const revokeTimer=setInterval(()=>{try {if(this.owner)for(const p of this.ssh.peers())if(p.revoked)this.owner.revokeInputPeer(p.peerId);}catch {console.error('취소된 허브의 실행 중단을 재시도합니다');}},1000);revokeTimer.unref();
+    server.on('close',()=>{clearInterval(revokeTimer);for(const res of this.streams.keys())res.end();for(const res of this.files.keys())res.destroy();});
     return server;
   }
 }

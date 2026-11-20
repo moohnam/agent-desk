@@ -1,3 +1,5 @@
+import { sshLogin } from './ssh-client.ts';
+import { validatePublicKey } from './ssh-signature.ts';
 import { readSse } from './sse-reader.ts';
 import type { EngineUsage, HubMessage } from '../../shared/api.ts';
 import { isNoteInput, needsDefaultInstructions, NOTE_CUT_ROUTE, workspaceRoute } from './workspace-api.ts';
@@ -25,7 +27,7 @@ import { collectSkillBundle, collectSkillVersion, EMPTY_SKILL_BUNDLE, type Skill
 import { parseComposeTarget, RESERVED_TAGS } from '../../shared/compose.ts';
 import { hasScheduledReply, scheduledReplyHint, scheduledReplyInstant } from '../../shared/scheduled-reply.ts';
 
-type Link = { id:string; name:string; url:string; workspace_id:string; token:string };
+type Link = { id:string; name:string; url:string; workspace_id:string; token:string; publicKey?:string };
 const usageAccessDenied = (reply?: { status: number; body: any }) => reply?.status === 401 || reply?.status === 403
   || (reply?.status === 409 && reply.body?.code === 'workspace_mismatch');
 type Delivery = { id:string; link_id:string; digest:string; payload:string; prepared_payload:string|null; result:string|null; status:number|null };
@@ -44,6 +46,8 @@ export class WorkspaceLinks {
   instructions?: () => string;
   connectorAuthority?: ConnectorAuthority;
   private db:DatabaseSync;
+  private sshSessions=new Map<string,{key:string;token:string;expires:number}>();
+  private sshLogins=new Map<string,Promise<{token:string;expires:number}>>();
   private skills?:SkillStore;
   get database() {return this.db;}
   private flushing = new Map<string,Promise<void>>();
@@ -61,6 +65,7 @@ export class WorkspaceLinks {
     this.skills=skills;
     this.db.exec(`PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS workspace_link(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL,workspace_id TEXT NOT NULL UNIQUE,token TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workspace_ssh_link(link_id TEXT PRIMARY KEY,public_key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workspace_delivery(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,link_id TEXT NOT NULL,digest TEXT NOT NULL,payload TEXT NOT NULL,prepared_payload TEXT,result TEXT,status INTEGER);
       CREATE TABLE IF NOT EXISTS workspace_view_index(seq INTEGER PRIMARY KEY AUTOINCREMENT,link_id TEXT NOT NULL UNIQUE);
       CREATE TABLE IF NOT EXISTS remote_legacy(runner_id TEXT PRIMARY KEY,link_id TEXT NOT NULL,address TEXT NOT NULL,fingerprint TEXT NOT NULL,legacy_json TEXT NOT NULL);
@@ -80,8 +85,9 @@ export class WorkspaceLinks {
     }},1500);this.timer.unref();
   }
   async close() { this.stopped=true;clearInterval(this.timer);await closeRequestBroker(this);for(const c of this.requests.keys())c.abort();await Promise.all([...this.flushing.values(),...this.syncing.values(),...this.connectorPolling.values()]);await this.files.close(); }
-  private rows() {return this.db.prepare('SELECT * FROM workspace_link').all() as Link[];}
-  private link(id:string) {const link=this.db.prepare('SELECT * FROM workspace_link WHERE id=?').get(id) as Link|undefined;if(!link)throw new HttpError(404,'공유 작업공간 연결이 없습니다');return link;}
+  private rows() {return (this.db.prepare('SELECT * FROM workspace_link').all() as Link[]).map(l=>this.withSsh(l));}
+  private withSsh(link:Link){const key=this.db.prepare('SELECT public_key FROM workspace_ssh_link WHERE link_id=?').get(link.id) as {public_key:string}|undefined;return {...link,...(key?{publicKey:key.public_key}:{})};}
+  private link(id:string) {const link=this.db.prepare('SELECT * FROM workspace_link WHERE id=?').get(id) as Link|undefined;if(!link)throw new HttpError(404,'공유 작업공간 연결이 없습니다');return this.withSsh(link);}
   private legacy(id:string) {return this.db.prepare('SELECT * FROM remote_legacy WHERE link_id=?').all(id) as Legacy[];}
   legacyOwner(kind:'project'|'task'|'approval'|'question',id:string):string|undefined {
     const field=`legacy_${kind}_ids`;
@@ -118,23 +124,43 @@ export class WorkspaceLinks {
     },{} as Record<string,unknown>),
     view_index:Number((this.db.prepare('SELECT seq FROM workspace_view_index WHERE link_id=?').get(link.id) as {seq:number}).seq),
     pending:Number((this.db.prepare('SELECT count(*) n FROM workspace_delivery WHERE link_id=? AND status IS NULL').get(link.id) as {n:number}).n)}));}
+  private async connectionToken(link:Link, signal:AbortSignal) {
+    if(!link.publicKey)return link.token;
+    const key=JSON.stringify([link.url,link.workspace_id,link.publicKey]);
+    const cached=this.sshSessions.get(link.id);
+    if(cached?.key===key&&cached.expires>Date.now()+60_000)return cached.token;
+    let pending=this.sshLogins.get(key);
+    if(!pending){pending=sshLogin(link.url,link.workspace_id,link.publicKey,signal);this.sshLogins.set(key,pending);}
+    try{const session=await pending;this.sshSessions.set(link.id,{key,...session});return session.token;}
+    finally{if(this.sshLogins.get(key)===pending)this.sshLogins.delete(key);}
+  }
+  async manageSsh(id:string,method:string,body?:unknown,target?:string){
+    const path='/v1/ssh/peers'+(target?'/'+encodeURIComponent(target):'');
+    return this.request(this.link(id),path,{method,...(body?{body:JSON.stringify(body)}:{})},false,20000);
+  }
   private async request(link:Link,path:string,init:RequestInit={},stream=false,timeoutMs=3000,preserveErrorStatus=false):Promise<{status:number;body:any}|{response:Response;release:()=>void;signal:AbortSignal}> {
     if(this.stopped)throw new Error('종료 중입니다');
     const controller=new AbortController();this.requests.set(controller,link.id);
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    const timer=setTimeout(()=>controller.abort(),link.publicKey?Math.max(timeoutMs,20000):timeoutMs);
     try {
-      const response=await fetch(new URL(path,link.url),{...init,redirect:'error',headers:{'content-type':'application/json',...init.headers,authorization:`Bearer ${link.token}`,'x-workspace-id':link.workspace_id},signal:init.signal ? AbortSignal.any([controller.signal,init.signal]) : controller.signal});
+      const response=await fetch(new URL(path,link.url),{...init,redirect:'error',headers:{'content-type':'application/json',...init.headers,authorization:`Bearer ${await this.connectionToken(link,controller.signal)}`,'x-workspace-id':link.workspace_id},signal:init.signal ? AbortSignal.any([controller.signal,init.signal]) : controller.signal});
+      if(response.status===401)this.sshSessions.delete(link.id);
       if(stream){clearTimeout(timer);return {response,signal:controller.signal,release:()=>{controller.abort();this.requests.delete(controller);}};}
       const body=await response.json().catch(error=>{if(!preserveErrorStatus||response.ok)throw error;return null;});
       return {status:response.status,body};
     } catch(e) { controller.abort();this.requests.delete(controller);throw e; }
     finally {clearTimeout(timer);if(!stream)this.requests.delete(controller);}
   }
-  async attach(input:{name?:unknown;url?:unknown;token?:unknown},id?:string) {
-    if(typeof input.name!=='string'||!input.name.trim()||input.name.length>100||typeof input.token!=='string'||!/^[A-Za-z0-9_-]{32,256}$/.test(input.token))throw new HttpError(400,'이름과 공유 허브 연결 토큰을 입력하세요');
-    const link:Link={id:id??randomUUID(),name:input.name.trim(),url:address(input.url),token:input.token,workspace_id:''};
+  async attach(input:{name?:unknown;url?:unknown;token?:unknown;publicKey?:unknown;workspaceId?:unknown},id?:string) {
+    if(typeof input.name!=='string'||!input.name.trim()||input.name.length>100)throw new HttpError(400,'작업공간 이름이 필요합니다');
+    const ssh=input.publicKey!==undefined;
+    if(ssh&&(typeof input.workspaceId!=='string'||!/^[a-f0-9-]{36}$/.test(input.workspaceId)))throw new HttpError(400,'설치 시 확인한 작업공간 ID가 필요합니다');
+    if(!ssh&&(typeof input.token!=='string'||!/^[A-Za-z0-9_-]{32,256}$/.test(input.token)))throw new HttpError(400,'연결 토큰이 필요합니다');
+    const key=ssh?(await validatePublicKey(input.publicKey)).key:undefined;
+    const link:Link={id:id??randomUUID(),name:input.name.trim(),url:address(input.url),token:ssh?'':input.token as string,workspace_id:ssh?input.workspaceId as string:'',...(key?{publicKey:key}:{})};
     const reply=await this.request(link,'/v1/identity');
     if(!('status' in reply)||reply.status!==200||reply.body.version!==1||typeof reply.body.workspace_id!=='string')throw new HttpError(409,'공유 러너 연결을 확인하지 못했습니다');
+    if(key && reply.body.workspace_id!==link.workspace_id)throw new HttpError(409,'설치 시 확인한 작업공간과 다릅니다');
     link.workspace_id=reply.body.workspace_id;
     const legacy=this.legacy(link.id);
     if(legacy.some(row=>!(reply.body.migration?.runner_id===row.runner_id&&reply.body.migration?.address===row.address
@@ -144,9 +170,12 @@ export class WorkspaceLinks {
     if(id&&this.db.prepare('SELECT 1 FROM workspace_link WHERE id=?').get(id)&&this.link(id).workspace_id!==link.workspace_id)throw new HttpError(409,'기존 연결을 다른 작업공간으로 바꿀 수 없습니다');
     if(this.rows().some(l=>l.workspace_id===link.workspace_id&&l.id!==id))throw new HttpError(409,'이미 연결한 공유 작업공간입니다');
     const previous=this.rows().find(row=>row.id===id);
+    if(previous && previous.publicKey!==key && this.db.prepare('SELECT 1 FROM workspace_delivery WHERE link_id=? AND status IS NULL LIMIT 1').get(link.id))throw new HttpError(409,'미전달 입력이 있어 인증 키를 바꿀 수 없습니다. 기존 입력을 먼저 처리하세요');
     this.db.prepare('INSERT INTO workspace_link VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,token=excluded.token').run(link.id,link.name,link.url,link.workspace_id,link.token);
+    if(key)this.db.prepare('INSERT OR REPLACE INTO workspace_ssh_link VALUES(?,?)').run(link.id,key);
+    else this.db.prepare('DELETE FROM workspace_ssh_link WHERE link_id=?').run(link.id);
     this.db.prepare('INSERT INTO workspace_view_index(link_id) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM workspace_view_index WHERE link_id=?)').run(link.id,link.id);
-    if(previous&&(previous.url!==link.url||previous.token!==link.token)) {
+    if(previous&&(previous.url!==link.url||previous.token!==link.token||previous.publicKey!==link.publicKey)) {
       this.usageCache.delete(link.id);
       for(const [controller,source] of this.requests)if(source===id)controller.abort();
     }
@@ -305,6 +334,8 @@ export class WorkspaceLinks {
     if(this.flushing.has(id)||this.list().find(l=>l.id===id)!.pending)throw new HttpError(409,'전달 중이거나 미전달 입력이 있어 연결을 제거할 수 없습니다');
     this.db.prepare('DELETE FROM workspace_delivery WHERE link_id=?').run(id);
     this.db.prepare('DELETE FROM workspace_link WHERE id=?').run(id);
+    this.db.prepare('DELETE FROM workspace_ssh_link WHERE link_id=?').run(id);
+    this.sshSessions.delete(id);
     this.usageCache.delete(id);
     this.connectorAuthority?.revokeWorkspace(link.workspace_id);
     for(const [controller,link] of this.requests)if(link===id)controller.abort();
@@ -365,7 +396,7 @@ export class WorkspaceLinks {
   }
   private sameUsageLink(before: Link) {
     const current = this.rows().find(link => link.id === before.id);
-    return current?.url === before.url && current.token === before.token;
+    return current?.url === before.url && current.token === before.token && current.publicKey === before.publicKey;
   }
   private runnerUsageCache(id: string) {
     let cache = this.usageCache.get(id);
@@ -385,7 +416,7 @@ export class WorkspaceLinks {
     res.on('close',()=>controller.abort());
     try {
       const response=await fetch(new URL('/v1/mcp',link.url),{method:req.method,redirect:'error',
-        headers:{'content-type':'application/json',authorization:`Bearer ${link.token}`,'x-workspace-id':link.workspace_id},
+        headers:{'content-type':'application/json',authorization:`Bearer ${await this.connectionToken(link,controller.signal)}`,'x-workspace-id':link.workspace_id},
         body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(610_000)])});
       res.writeHead(response.status,{'content-type':response.headers.get('content-type')??'application/json'});
       res.end(await response.text());
