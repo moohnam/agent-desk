@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { Store } from '../../hub/src/db.ts';
+import { controlRequest } from '../../hub/src/runtime-control.ts';
 import { SkillStore } from '../../hub/src/skills.ts';
 import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
 import { LocalRuntime } from '../../hub/src/runner/local-runtime.ts';
@@ -22,6 +27,72 @@ const listen = async (server: ReturnType<typeof createServer>, port = 0) => {
 };
 const stop = async (server: ReturnType<typeof createServer>) =>
   await new Promise<void>(resolve => server.close(() => resolve()));
+
+test('SIGTERM drains the local runner control socket before closing its database', { timeout: 12_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'desk-exit-')), socketPath = join(dir, 'ctl.sock');
+  const ports = [createServer(), createServer(), createServer()];
+  const [hubPort, workspacePort, daemonPort] = await Promise.all(ports.map(server => listen(server)));
+  await Promise.all(ports.map(stop));
+  const dbPath = join(dir, 'authority.db');
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../../hub/src/runner/local.ts', import.meta.url))], {
+    env: { ...process.env, PORT: String(hubPort), HOST: '127.0.0.1', RUNNER_PORT: String(daemonPort),
+      AGENT_DESK_SHARED_PORT: String(workspacePort), AGENT_DESK_DB: dbPath, AGENT_DESK_MANAGED_RUNNERS: '1',
+      AGENT_DESK_LOCAL_MODE_FILE: join(dir, 'local-mode.json'), AGENT_DESK_UPDATE_SOCKET: socketPath,
+      AGENT_DESK_SKILLS_HOME: join(dir, 'skills'), RUNNER_TOKEN_FILE: join(dir, 'runner-token') },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const exited = once(child, 'exit');
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  let held: Socket | undefined, stalled: Socket | undefined;
+  let keepSending: ReturnType<typeof setInterval> | undefined;
+  const deadline = Date.now() + 4500;
+  const url = `http://127.0.0.1:${workspacePort}/`;
+  try {
+    while (!existsSync(socketPath) && child.exitCode === null && Date.now() < deadline) await delay(20);
+    assert.equal((await controlRequest(socketPath, { action: 'status' })).status.role, 'local');
+    await fetch(url).then(response => response.body?.cancel());
+    held = createConnection(socketPath);
+    held.on('error', () => {});
+    await once(held, 'connect');
+    stalled = createConnection(socketPath);
+    stalled.on('error', () => {});
+    await once(stalled, 'connect');
+    const sendPartial = () => { if (stalled && !stalled.destroyed) stalled.write(' '); };
+    sendPartial();
+    keepSending = setInterval(sendPartial, 50);
+    child.kill('SIGTERM');
+    for (;;) {
+      try { await fetch(url).then(response => response.body?.cancel()); }
+      catch { break; }
+      assert.ok(Date.now() < deadline, 'The runner HTTP listener must close');
+      await delay(20);
+    }
+    let reply = '';
+    if (!held.destroyed && !held.readableEnded) {
+      held.write('{"action":"status"}\n');
+      try { for await (const chunk of held.setEncoding('utf8')) reply += chunk; }
+      catch (error) {
+        if (!['EPIPE', 'ECONNRESET'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
+    }
+    if (reply) {
+      const { status } = JSON.parse(reply);
+      assert.equal(status.ready, false);
+      assert.deepEqual(status.reasons, ['런타임 종료 중']);
+    }
+    const result = await Promise.race([exited, delay(6000, null, { ref: false })]);
+    assert.deepEqual(result, [0, null], stderr || 'The runner must exit even while an incomplete request keeps sending data');
+    assert.equal(existsSync(socketPath), false);
+  } finally {
+    clearInterval(keepSending);
+    stalled?.destroy();
+    held?.destroy();
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('persistent local settings contain paths and reject malformed files', () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-local-launch-config-'));

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs';
+import type { Server as HttpServer } from 'node:http';
 import { createConnection, createServer, type Server } from 'node:net';
 import { dirname, isAbsolute } from 'node:path';
 import { HttpError } from './errors.ts';
@@ -64,7 +65,8 @@ export async function registerRuntimeControl(options: {
     ready: !stopping && options.ready(), reasons: options.blockers(), prepared: maintenanceActive() });
   const server = createServer(socket => {
     let input = '';
-    socket.setTimeout(3000, () => socket.destroy());
+    const deadline = setTimeout(() => socket.destroy(), 3000);
+    socket.once('close', () => clearTimeout(deadline));
     socket.on('error', () => {});
     socket.on('data', chunk => {
       input += chunk.toString();
@@ -101,6 +103,40 @@ export async function registerRuntimeControl(options: {
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { chmodSync(path, 0o600); resolve(); }); });
   return server;
+}
+
+/** Keep the HTTP and control servers alive only while their runner state can be read. */
+export async function registerHttpRuntimeControl(server: HttpServer, options: Parameters<typeof registerRuntimeControl>[0]) {
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    try {
+      const control = await registration.catch(() => undefined);
+      await Promise.all([
+        control && new Promise<void>(resolve => control.close(() => resolve())),
+        new Promise<void>(resolve => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        }),
+      ]);
+      await options.stop();
+    } finally {
+      process.off('SIGTERM', onSignal);
+      process.off('SIGINT', onSignal);
+    }
+  };
+  const onError = (error: unknown) => { console.error(error); process.exitCode = 1; };
+  const onSignal = () => { void stop().catch(onError); };
+  const registration = registerRuntimeControl({ ...options,
+    ready: () => !stopping && options.ready(),
+    blockers: () => stopping ? ['런타임 종료 중'] : options.blockers(), stop,
+  });
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+  server.once('error', error => { onError(error); onSignal(); });
+  try { await registration; }
+  catch (error) { onError(error); await stop(); }
 }
 
 export function controlRequest(path: string, request: ControlRequest, timeoutMs = 3000): Promise<ControlReply> {

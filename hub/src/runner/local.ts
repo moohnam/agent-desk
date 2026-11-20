@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { Store } from '../db.ts';
 import { config, recordDeskPortDefaults } from '../config.ts';
-import { hubBlockers, registerRuntimeControl } from '../runtime-control.ts';
+import { hubBlockers, registerHttpRuntimeControl } from '../runtime-control.ts';
 import { SharedWorkspace } from '../shared-workspace.ts';
 import { LocalRuntime, connectLocalTakeover } from './local-runtime.ts';
 import { localAuthorityActivated } from './local-ownership.ts';
@@ -49,21 +49,9 @@ if (command === 'grant' || command === 'revoke' || command === 'peers') {
   recordDeskPortDefaults();
   const runtime = liveTakeover ? await connectLocalTakeover(config.dbPath) : new LocalRuntime(config.dbPath);
   const server = runtime.server();
-  server.on('error', error => { runtime.close(); console.error(error); process.exitCode = 1; });
   server.on('listening', () => runtime.hub.channels.start());
   server.listen(config.shared.port, '127.0.0.1', () =>
     console.log(`로컬 작업공간: http://127.0.0.1:${config.shared.port} (workspace ${runtime.workspace.id})`));
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    server.closeAllConnections();
-    server.close(() => runtime.close());
-  };
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
-  await registerRuntimeControl({ role: 'local', ready: () => server.listening && runtime.hub.runner.connected,
-    blockers: () => hubBlockers(runtime.hub), stop: () => {
-      server.closeAllConnections(); server.close(() => { runtime.close(); process.exit(0); });
-    } });
+  await registerHttpRuntimeControl(server, { role: 'local', ready: () => server.listening && runtime.hub.runner.connected,
+    blockers: () => hubBlockers(runtime.hub), stop: () => { runtime.close(); process.exit(process.exitCode ?? 0); } });
 }
