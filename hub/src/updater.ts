@@ -337,7 +337,7 @@ export class UpdateWorker {
       const origin = await exec('git', ['--git-dir', mirror, 'remote', 'get-url', 'origin'], { maxBuffer: 4096 });
       if (origin.stdout.trim() !== this.config.source) throw new Error('설정의 Git 소스가 기존 배포 저장소와 다릅니다');
       // The next ownership check walks the mirror. Do not start maintenance that mutates it concurrently.
-      await this.command('git', ['--git-dir', mirror, 'fetch', '--no-auto-maintenance', '--prune', 'origin'], root);
+      await this.command('git', ['--git-dir', mirror, 'fetch', '--no-auto-gc', '--prune', 'origin'], root);
     }
     assertTrustedTree(mirror);
     const ci = usesUpdateCi(this.config), ref = ci ? 'refs/heads/main' : this.config.ref;
