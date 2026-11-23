@@ -1,4 +1,5 @@
 import { imeKey } from './keys.ts';
+import { standaloneEmoji } from './standaloneEmoji.ts';
 import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, Paperclip, PenLine, Trash2 } from 'lucide-react';
@@ -114,12 +115,6 @@ export const PostView = memo(PostViewInner, samePost);
 function RelTime({ iso }: { iso: string }) {
   return <>{relTime(iso, useNow())}</>;
 }
-
-const standaloneEmoji = new Map([
-  ['b', '👍'], [':+1:', '👍'], [':thumbsup:', '👍'], [':-1:', '👎'], [':thumbsdown:', '👎'],
-  [':smile:', '😄'], [':cry:', '😢'], [':sob:', '😭'], [':rofl:', '🤣'], [':tada:', '🎉'],
-  [':heart:', '❤️'], [':eyes:', '👀'], [':white_check_mark:', '✅'],
-]);
 
 function PostViewInner(props: Props) {
   const { post, task, model, approval, question, selected, expanded, working, flash, inThread, up, down } = props;

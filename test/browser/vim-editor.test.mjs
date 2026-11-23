@@ -193,6 +193,27 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$eval(textarea, el => el.value), '#later ');
     }, false, 'emacs'));
 
+    for (const editorMode of ['vim', 'emacs']) {
+      await t.test(`a colon completes a standalone emoji without trailing space (${editorMode})`, () => withPage(async page => {
+        await openReply(page, origin);
+        const field = editorMode === 'vim' ? input : textarea;
+        await page.waitForSelector(field);
+        await page.keyboard.type(':');
+        const options = '.reply-box [role="option"]';
+        await page.waitForSelector(options);
+        assert.ok((await page.$$(options)).length > 1);
+        await page.keyboard.type('ro');
+        await page.waitForFunction(selector => {
+          const choices = document.querySelectorAll(selector);
+          return choices.length === 1 && choices[0].textContent.includes(':rofl:');
+        }, {}, options);
+        await page.keyboard.press('Tab');
+        const value = editorMode === 'vim' ? await text(page) : await page.$eval(field, el => el.value);
+        assert.equal(value, ':rofl:');
+        assert.equal(await page.$(options), null);
+      }, false, editorMode));
+    }
+
     await t.test('a note thread displays both posts with the edited lower ID last', () => withPage(async page => {
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note-order' });
       await openReply(page, origin);
@@ -557,6 +578,27 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         assert.equal(await text(page), '입');
       }, emulateWebKit));
     }
+
+    await t.test('a Chrome IME keyup between the two Escape events does not lose focus', () => withPage(async page => {
+      await openReply(page, origin);
+      await expectMode(page, '입력');
+      const { compose, insert } = editorEvents(page, await page.createCDPSession());
+      await compose('한');
+      await page.$eval(input, element => element.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true, cancelable: true, code: 'Escape', key: 'Process', isComposing: true,
+      })));
+      await insert('한');
+      await expectMode(page, '일반');
+      await page.$eval(input, element => {
+        const init = { bubbles: true, cancelable: true, code: 'Escape' };
+        element.dispatchEvent(new KeyboardEvent('keyup', { ...init, key: 'Process' }));
+        element.dispatchEvent(new KeyboardEvent('keydown', { ...init, key: 'Escape' }));
+        element.dispatchEvent(new KeyboardEvent('keyup', { ...init, key: 'Escape' }));
+      });
+      assert.equal(await page.$eval(input, el => el === document.activeElement), true);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.$eval(input, el => el === document.activeElement), false);
+    }));
 
     await t.test('command-mode Hangul becomes a Vim key and cannot seed the next insert', () => withPage(async page => {
       await openReply(page, origin);

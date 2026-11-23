@@ -7,6 +7,7 @@ import * as noteEvents from '../../web/src/noteEvents.ts';
 import * as keys from '../../web/src/keys.ts';
 import * as editorIndent from '../../web/src/editorIndent.ts';
 import * as emacsKeys from '../../web/src/emacsKeys.ts';
+import * as standaloneEmoji from '../../web/src/standaloneEmoji.ts';
 import * as documentLinks from '../../web/src/documentLinks.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 import { readFileSync } from 'node:fs';
@@ -28,6 +29,7 @@ function load(file: string, imports: Record<string, unknown>, globals: Record<st
   } }).outputText;
   const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
     if (name === './keys.ts') return keys;
+    if (name === './standaloneEmoji.ts') return standaloneEmoji;
     if (name === './EditorInput.tsx' && !(name in imports)) return { EditorInput: () => null, editorText: (text: string) => text, inputElement: (input: any) => input?.element ?? input };
     assert.ok(name in imports, `missing mock: ${name}`);
     return imports[name];
@@ -387,6 +389,7 @@ test('loading Vim keeps a focused draft intact and carries Escape into normal mo
   });
   assert.equal(blocked, 2);
   assert.equal(exits, 0);
+  textarea.onKeyUp({ nativeEvent: { key: 'Escape', code: 'Escape', timeStamp: 1 } });
   const normal = render().props.children[0].props;
   assert.equal(normal.readOnly, true);
   normal.onChange({ target: { value: 'blocked', selectionStart: 2 } });

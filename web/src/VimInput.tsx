@@ -4,7 +4,7 @@ import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view
 import { history, historyKeymap, isolateHistory, temporarilySetTabFocusMode } from '@codemirror/commands';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 import { editorText, type DeskInput, type EditorProps } from './EditorInput.tsx';
-import { imeKey, latinKey } from './keys.ts';
+import { holdsImeEscape, imeKey, latinKey, releaseImeEscape, type ImeEscapeStroke } from './keys.ts';
 import { breakLine, indentLines } from './editorIndent.ts';
 
 type Mode = 'insert' | 'normal' | 'visual' | 'replace';
@@ -57,7 +57,7 @@ function indentVim(editor: EditorView, key: 'indent' | 'outdent' | 'newline') {
 
 export function VimInput(props: EditorProps & {
   handoff?: { focused: boolean; start: number; end: number };
-  startInInsert: boolean; startEscapeArmed: boolean; startImeEscapeDown: boolean;
+  startInInsert: boolean; startEscapeArmed: boolean; startImeEscapeDown: ImeEscapeStroke;
 }) {
   const { inputRef, disabled = false, label, placeholder: hint } = props;
   const host = useRef<HTMLDivElement>(null);
@@ -285,7 +285,7 @@ export function VimInput(props: EditorProps & {
         exitAfterComposition.current = false;
         settlingEscape.current = undefined;
         escapeArmed.current = false;
-        imeEscapeDown.current = false;
+        imeEscapeDown.current = undefined;
         resumeInsert.current = undefined;
         heldCommands.current.clear();
         lastImeCommand.current = undefined;
@@ -313,7 +313,7 @@ export function VimInput(props: EditorProps & {
       if (e.key === 'Escape') e.stopPropagation();
     }}
     onKeyUpCapture={e => {
-      if (e.key === 'Escape' || e.code === 'Escape') imeEscapeDown.current = false;
+      imeEscapeDown.current = releaseImeEscape(imeEscapeDown.current, e.nativeEvent);
       heldCommands.current.delete(e.code);
       const korean = koreanLetter(e.key);
       if (korean) heldCommands.current.delete(`Key${korean.toUpperCase()}`);
@@ -327,12 +327,12 @@ export function VimInput(props: EditorProps & {
       const escape = (e.key === 'Escape' || (e.code === 'Escape' && imeKey(event))) &&
         !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
       // A single key press can surface as Process and then Escape after the IME commits.
-      if (escape && imeEscapeDown.current) {
+      if (escape && holdsImeEscape(imeEscapeDown.current, event)) {
         e.preventDefault();
         e.stopPropagation();
         return;
       }
-      if (!escape) imeEscapeDown.current = false;
+      imeEscapeDown.current = undefined;
       const secondEscape = escape && escapeArmed.current;
       if (!escape || !e.repeat) escapeArmed.current = false;
       // WebKit may send the IME confirmation key immediately after compositionend.
@@ -388,7 +388,7 @@ export function VimInput(props: EditorProps & {
           props.onKey?.(event, { insert: true, leave: false });
           if (!event.defaultPrevented) {
             escapeArmed.current = true;
-            imeEscapeDown.current = imeKey(event);
+            imeEscapeDown.current = true;
             if (recentComposition) leaveAfterComposition(editor);
             else leaveAfterIme(editor);
           }

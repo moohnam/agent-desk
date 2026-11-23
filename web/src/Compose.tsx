@@ -22,6 +22,7 @@ import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
 import { Modal } from './Modal.tsx';
 import { NotePreview } from './NotePreview.tsx';
+import { standaloneEmoji } from './standaloneEmoji.ts';
 import { QueuedShortcut, type QueuedTarget } from './queuedShortcut.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
@@ -35,6 +36,8 @@ interface Option { key: string; insert: string; label: string; desc?: string; wo
 const MAX_OPTIONS = 50;
 
 const TAG_OPTIONS: Option[] = TAG_HELP.map(({ tag, help }) => ({ key: tag, insert: tag, label: `#${tag}`, desc: help, space: true }));
+const EMOJI_OPTIONS: Option[] = [...standaloneEmoji].filter(([code]) => code.startsWith(':'))
+  .map(([code, emoji]) => ({ key: code, insert: code, label: code, desc: emoji }));
 
 /**
  * Options for the @mention or #tag being typed just before the caret. `mentions`: 'route' where a
@@ -42,6 +45,11 @@ const TAG_OPTIONS: Option[] = TAG_HELP.map(({ tag, help }) => ({ key: tag, inser
  * or task the agent may ask (replies).
  */
 function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[], models: Record<string,ModelName> = {}) {
+  if (caret === text.length && /^:[a-z0-9_+-]*$/i.test(text)) {
+    const prefix = text.toLowerCase();
+    const items = EMOJI_OPTIONS.filter(option => option.insert.startsWith(prefix));
+    return { start: 0, items, total: items.length };
+  }
   const before = text.slice(0, caret);
   const no = mentions ? /(^|\s)@([^\s:@#]+)#(\d*)$/.exec(before) : null;
   const numbered = no && projects.find((p) => p.name.toLowerCase() === no[2].toLowerCase());

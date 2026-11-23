@@ -5,6 +5,18 @@ export function imeKey(e: KeyboardEvent): boolean {
   return e.isComposing || e.keyCode === 229 || e.key === 'Process';
 }
 
+export type ImeEscapeStroke = true | number | undefined;
+export function holdsImeEscape(stroke: ImeEscapeStroke, event: KeyboardEvent) {
+  return stroke === true || (stroke !== undefined && event.timeStamp < stroke);
+}
+
+/** An IME-marked keyup can precede the plain Escape event of the same physical key press. */
+export function releaseImeEscape(stroke: ImeEscapeStroke, event: KeyboardEvent): ImeEscapeStroke {
+  if (stroke === undefined || (event.key !== 'Escape' && event.code !== 'Escape')) return stroke;
+  if (event.key === 'Escape' && !imeKey(event)) return undefined;
+  return stroke === true ? event.timeStamp + 40 : stroke;
+}
+
 /** Without a selected post, reply to the column's task or its newest post (feed order). */
 export function replyTaskId(selected: Post | undefined, threadTask: string | null, columnTaskIds?: string[], newest?: Post): string | null {
   return selected?.taskId ?? threadTask ?? (columnTaskIds?.length === 1 ? columnTaskIds[0] : null) ?? newest?.taskId ?? null;
