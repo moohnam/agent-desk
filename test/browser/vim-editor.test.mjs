@@ -63,9 +63,13 @@ function fixtureServer() {
               payload: { text: '수정한 첫 글', revision: 1 } },
             { id: 301, task_id: route[1], kind: 'user', ts: '2026-01-02T00:00:00Z', payload: { text: '두 번째 글', revision: 0 } },
           ], more: false };
-          if (layout === 'thumbs-up' || layout === 'note-thumbs-up') body = { events: ['b', 'b alone', 'B', 'b'].map((text, index) => ({
-            id: 300 + index, task_id: route[1], kind: !note && index === 3 ? 'assistant' : 'user', ts: '2026-01-01T00:00:00Z',
-            payload: { text },
+          if (layout === 'thumbs-up' || layout === 'note-thumbs-up') body = { events: [
+            'b', 'b alone', 'B', 'b', ':+1:', ':-1:', ':smile:', ':cry:', ':sob:', ':rofl:', ':tada:', ':heart:', ':eyes:', ':white_check_mark:',
+            ':thumbsup:', ':thumbsdown:', '문장 속 :+1:', ':cry:', ':+1:',
+          ].map((text, index) => ({
+            id: 300 + index, task_id: route[1], kind: !note && (index === 3 || index === 17) ? 'assistant' : 'user',
+            ts: '2026-01-01T00:00:00Z',
+            payload: { text, ...(!note && index === 18 && { request: { id: 'example', task_id: 'other', from: 'other#1', title: '질문' } }) },
           })), more: false };
           if (layout==='ssh-author-avatar') body={events:['남무현','👩‍💻 개발',null].map((ownerName,index)=>({
             id:300+index,task_id:route[1],kind:'user',ts:'2026-01-01T00:00:00Z',
@@ -198,18 +202,24 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }, false, 'emacs'));
 
     for (const note of [false, true]) {
-      await t.test(`a standalone b changes only the displayed conversation text (${note ? 'note' : 'reply'})`, () => withPage(async page => {
+      await t.test(`standalone emoji shorthands change only displayed conversation text (${note ? 'note' : 'reply'})`, () => withPage(async page => {
         await page.setExtraHTTPHeaders({ 'x-desk-fixture': note ? 'note-thumbs-up' : 'thumbs-up' });
         await page.evaluateOnNewDocument(() => Object.defineProperty(navigator, 'clipboard', {
           value: { writeText: async text => { window.deskCopied = text; } },
         }));
         await openReply(page, origin);
         const post = id => `.thread-content [data-post="${id}"]`;
-        await page.waitForSelector(post(303));
+        await Promise.all([page.waitForSelector(post(300)), page.waitForSelector(post(318))]);
         const rendered = id => page.$eval(post(id), element => element.querySelector('p').textContent);
-        assert.deepEqual(await Promise.all([300, 301, 302, 303].map(rendered)), [note ? 'b' : '👍', 'b alone', 'B', 'b']);
+        const tail = note
+          ? [':+1:', ':-1:', ':smile:', ':cry:', ':sob:', ':rofl:', ':tada:', ':heart:', ':eyes:', ':white_check_mark:', ':thumbsup:', ':thumbsdown:']
+          : ['👍', '👎', '😄', '😢', '😭', '🤣', '🎉', '❤️', '👀', '✅', '👍', '👎'];
+        assert.deepEqual(await Promise.all(Array.from({ length: 19 }, (_, i) => rendered(300 + i))),
+          [note ? 'b' : '👍', 'b alone', 'B', 'b', ...tail, '문장 속 :+1:', ':cry:', ':+1:']);
         await page.$eval(`${post(300)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
         await page.waitForFunction(() => window.deskCopied === 'b');
+        await page.$eval(`${post(305)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
+        await page.waitForFunction(() => window.deskCopied === ':-1:');
       }, false, 'emacs'));
     }
 

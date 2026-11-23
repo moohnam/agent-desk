@@ -115,11 +115,18 @@ function RelTime({ iso }: { iso: string }) {
   return <>{relTime(iso, useNow())}</>;
 }
 
+const standaloneEmoji = new Map([
+  ['b', '👍'], [':+1:', '👍'], [':thumbsup:', '👍'], [':-1:', '👎'], [':thumbsdown:', '👎'],
+  [':smile:', '😄'], [':cry:', '😢'], [':sob:', '😭'], [':rofl:', '🤣'], [':tada:', '🎉'],
+  [':heart:', '❤️'], [':eyes:', '👀'], [':white_check_mark:', '✅'],
+]);
+
 function PostViewInner(props: Props) {
   const { post, task, model, approval, question, selected, expanded, working, flash, inThread, up, down } = props;
   const p = post.event.payload;
   const isNote = task?.kind === 'note' && post.kind === 'user';
-  const displayText = post.kind === 'user' && !isNote && p.text === 'b' ? '👍' : String(p.text ?? '');
+  const text = String(p.text ?? '');
+  const displayText = post.kind === 'user' && !isNote && !p.request ? standaloneEmoji.get(text) ?? text : text;
   const canEditNote = !!inThread && isNote && !p.clipped;
   const [editing, setEditing] = useState(false);
   const onLocalLink = useMemo(() => openLink(post.taskId, props.onError), [post.taskId, props.onError]);
