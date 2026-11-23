@@ -558,19 +558,20 @@ export function App() {
     const view = deckEl.scrollLeft;
     const target = start < view ? start : right > view + deckEl.clientWidth ? Math.min(right - deckEl.clientWidth, left) : view;
     if (Math.abs(target - view) > 1) glide(deckEl, target);
+    else glideStop.current?.();
   };
   const glideStop = useRef<(() => void) | null>(null);
   /**
-   * Scrolls the deck to `to` with an ease-out. Unlike behavior: 'smooth', each frame advances at most
-   * one frame's worth, so a long render (opening a big thread) pauses the motion instead of jumping.
-   * Wheel or pointer input takes over at once.
+   * Scrolls the deck to `to` with a time-based ease-out. Slow frames must not stretch the
+   * animation and leave keyboard navigation chasing an old target. Wheel or pointer input
+   * takes over at once.
    */
   const glide = (deckEl: HTMLElement, to: number) => {
     glideStop.current?.();
     const from = deckEl.scrollLeft;
     const DURATION = 280;
-    let t = 0;
-    let last = performance.now();
+    const started = performance.now();
+    let firstFrame = true;
     let raf = 0;
     const stop = () => {
       cancelAnimationFrame(raf);
@@ -582,8 +583,10 @@ export function App() {
     // Mandatory snapping (narrow screens) would pull every frame back to a column edge.
     deckEl.style.scrollSnapType = 'none';
     const step = (now: number) => {
-      t = Math.min(DURATION, t + Math.min(now - last, 20));
-      last = now;
+      // Keep the first scroll step small while focus paints, but do not accumulate this
+      // cap on later frames: slow rendering must not prolong the whole animation.
+      const t = Math.min(firstFrame ? 20 : DURATION, Math.max(0, now - started));
+      firstFrame = false;
       const k = 1 - (1 - t / DURATION) ** 3;
       deckEl.scrollLeft = from + (to - from) * k;
       if (t < DURATION) raf = requestAnimationFrame(step);

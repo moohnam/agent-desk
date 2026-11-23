@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir, platform, arch, cpus } from 'node:os';
 import { dirname, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { comparePerformance } from './compare.mts';
+import { compareSummaries } from './compare.mts';
 import { events } from './data.mjs';
 import { interactionData } from './interaction-data.mjs';
 
@@ -30,7 +30,9 @@ function summarizeProfile(profile) {
 const root = dirname(fileURLToPath(import.meta.url));
 const arg = (name, fallback) => Number(process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1] ?? fallback);
 const scenario = process.argv.find(a => a.startsWith('--scenario='))?.split('=')[1] ?? 'thread';
-if (!['thread', 'columns', 'wheel', 'typing'].includes(scenario)) throw new Error('scenario는 thread, columns, wheel 또는 typing입니다.');
+if (!['thread', 'columns', 'repeat', 'wheel', 'typing'].includes(scenario)) throw new Error('scenario는 thread, columns, repeat, wheel 또는 typing입니다.');
+const fault = process.argv.find(a => a.startsWith('--fault='))?.split('=')[1] ?? 'none';
+if (!['none', 'no-scroll'].includes(fault) || (fault !== 'none' && scenario !== 'columns')) throw new Error('--fault=no-scroll은 columns에서만 지원합니다.');
 const text = process.argv.find(a => a.startsWith('--text='))?.split('=')[1] ?? 'long';
 if (!['long', 'short'].includes(text)) throw new Error('text는 long 또는 short입니다.');
 const liveText = process.argv.find(a => a.startsWith('--live-text='))?.split('=')[1] ?? 'repeat';
@@ -110,6 +112,10 @@ try {
           await page.goto(`http://127.0.0.1:${server.address().port}/interactions.html`);
           await page.waitForFunction(() => document.querySelectorAll('.deck section[data-col]').length === 10 && document.querySelectorAll('.deck [data-post]').length >= 80, { timeout: 30000 }).catch(e => { throw new Error(`${e.message}: ${[...errors,...unexpected].join('; ')}`); });
           await new Promise(ok => setTimeout(ok, 700));
+          if (fault === 'no-scroll') await page.$eval('.deck', deck => {
+            const scroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft');
+            Object.defineProperty(deck, 'scrollLeft', { get() { return scroll.get.call(this); }, set() {} });
+          });
           if (profile) { await cdp.send('Profiler.enable'); await cdp.send('Profiler.start'); }
           if (scenario === 'typing') {
             await page.keyboard.press('i');
@@ -129,10 +135,24 @@ try {
           }
           const samples = [];
           // 첫 횡단은 처음 보이는 컬럼, 복귀는 이미 그린 컬럼이다. 순서 변경도 따로 확인한다.
-          const steps = scenario === 'wheel' ? [...Array(6).fill(['wheel', 'right', 'first-pass']), ...Array(6).fill(['wheel', 'left', 'return'])] : [...Array(8).fill(['focus', 'ArrowRight', 'first-pass']), ...Array(4).fill(['focus', 'ArrowLeft', 'return']), ['reorder', 'L', 'reorder'], ['reorder', 'H', 'reorder']];
+          const steps = scenario === 'repeat' ? [30, 60, 100].map(ms => ['repeat', ms, `repeat-${ms}`]) : scenario === 'wheel' ? [...Array(6).fill(['wheel', 'right', 'first-pass']), ...Array(6).fill(['wheel', 'left', 'return'])] : [...Array(8).fill(['focus', 'ArrowRight', 'first-pass']), ...Array(4).fill(['focus', 'ArrowLeft', 'return']), ['reorder', 'L', 'reorder'], ['reorder', 'H', 'reorder']];
           for (const [kind, key, phase] of steps) {
+            if (kind === 'repeat') {
+              await page.click('section[data-col="c0"] .col-head h2');
+              await page.waitForSelector('section[data-col="c0"].focused');
+              await new Promise(ok => setTimeout(ok, 400));
+            }
             await page.evaluate(kind => window.armInteraction(kind), kind);
-            if (kind === 'wheel') {
+            if (kind === 'repeat') {
+              for (const [keyName, presses] of [['ArrowRight', 8], ['ArrowLeft', 4]]) {
+                for (let i = 0; i < presses; i++) {
+                  await page.keyboard.down(keyName);
+                  if (i < presses - 1) await new Promise(ok => setTimeout(ok, key));
+                }
+                await page.keyboard.up(keyName);
+              }
+              await page.evaluate(() => window.endWheelInput());
+            } else if (kind === 'wheel') {
               const box = await page.$eval('.deck', el => { const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + Math.min(150, r.height / 2) }; });
               await page.mouse.move(box.x, box.y);
               // 8개의 작은 수평 입력으로 트랙패드 형태의 연속 입력을 모사한다.
@@ -151,6 +171,21 @@ try {
               if ((key === 'right' ? distance : -distance) < 300) throw new Error(`가로 휠 이동이 충분히 반영되지 않았습니다: ${distance}px`);
               if (sample.before.order !== sample.after.order) throw new Error('휠 입력으로 컬럼 순서가 바뀌었습니다.');
               samples.push({ ...sample, phase, key, distance }); continue;
+            }
+            const arrival = await page.$eval('.deck', deck => {
+              const col = deck.querySelector('section.focused');
+              if (!col) return { visible: false };
+              const d = deck.getBoundingClientRect(), c = col.getBoundingClientRect();
+              const left = d.left + deck.clientLeft, right = left + deck.clientWidth;
+              const overlap = Math.max(0, Math.min(c.right, right) - Math.max(c.left, left));
+              return { visible: overlap >= Math.min(c.width, deck.clientWidth - 16) - 2, overlap, width: c.width, viewport: deck.clientWidth };
+            });
+            if (!arrival.visible) throw new Error(`목적 컬럼이 화면에 도착하지 않았습니다: ${JSON.stringify({ kind, phase, after: sample.after, arrival })}`);
+            sample.arrival = arrival;
+            if (kind === 'repeat') {
+              if (sample.after.focus !== 'c4' || sample.inputs?.length !== 12 || sample.before.order !== sample.after.order)
+                throw new Error('연속 입력의 최종 포커스·입력 수·순서가 예상과 다릅니다.');
+              samples.push({ ...sample, phase, intervalMs: key }); continue;
             }
             const order = sample.before.order.split(',');
             const index = order.indexOf(sample.before.focus);
@@ -211,9 +246,13 @@ try {
     const p95 = xs => xs.toSorted((a,b)=>a-b)[Math.ceil(xs.length * .95)-1];
     const summarize = xs => ({ samples: xs.length, feedbackMs: median(xs.map(s=>s.feedbackMs)),
       p95FeedbackMs: p95(xs.map(s=>s.feedbackMs)), motionMs: median(xs.map(s=>s.motionMs)),
+      movingSamples: xs.filter(s=>s.motionMs > 0).length,
+      p95MotionMs: p95(xs.filter(s=>s.motionMs > 0).map(s=>s.motionMs)) ?? 0,
+      p95FirstMotionMs: p95(xs.filter(s=>s.firstMotionMs != null).map(s=>s.firstMotionMs)) ?? 0,
+      p95TailMotionMs: p95(xs.map(s=>s.tailMotionMs)) ?? 0,
       maxFrameGapMs: Math.max(...xs.map(s=>s.maxFrameGapMs)), framesOver50ms: xs.reduce((a,s)=>a+s.framesOver50ms,0),
-      longTaskMs: xs.reduce((a,s)=>a+s.longTaskMs,0), mountedPosts: xs.reduce((a,s)=>a+s.mountedPosts,0), removedPosts: xs.reduce((a,s)=>a+s.removedPosts,0) });
-    summary = { current: summarize(samples), phases: Object.fromEntries((scenario === 'wheel' ? ['first-pass','return'] : ['first-pass','return','reorder']).map(phase=>[phase,summarize(samples.filter(s=>s.phase===phase))])) };
+      longTaskMs: xs.reduce((a,s)=>a+s.longTaskMs,0), addedPostNodes: xs.reduce((a,s)=>a+s.addedPostNodes,0), removedPostNodes: xs.reduce((a,s)=>a+s.removedPostNodes,0) });
+    summary = { current: summarize(samples), phases: Object.fromEntries([...new Set(samples.map(s=>s.phase))].map(phase=>[phase,summarize(samples.filter(s=>s.phase===phase))])) };
   }
   if (scenario === 'typing') {
     const samples = results.map(r=>r.sample), feedback = samples.flatMap(s=>s.feedback).toSorted((a,b)=>a-b);
@@ -221,15 +260,15 @@ try {
       maxFrameGapMs: Math.max(...samples.flatMap(s=>s.frames)), framesOver50ms: samples.flatMap(s=>s.frames).filter(n=>n>50).length,
       longTaskMs: samples.reduce((n,s)=>n+s.longTaskMs,0) } };
   }
-  const report = { schema: 6, environment: { platform: platform(), arch: arch(), processor: cpus()[0]?.model,
-    node: process.version, browser: await browser.version(), cpuThrottle: cpu, scenario, text, live, liveText, liveTasks, profile, count, runs, build: 'production' },
-    scope: scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
+  const report = { schema: 7, environment: { platform: platform(), arch: arch(), processor: cpus()[0]?.model,
+    node: process.version, browser: await browser.version(), cpuThrottle: cpu, scenario, fault, text, live, liveText, liveTasks, profile, count, runs, build: 'production' },
+    scope: scenario === 'repeat' ? '실제 App에서 30/60/100ms 요청 간격으로 오른쪽 8회·즉시 왼쪽 4회 키 반복. CDP 왕복과 처리 시간 때문에 실제 간격은 inputs.time으로 확인한다. 마지막 입력 이후 최종 스크롤 변경까지 tailMotionMs, 첫 스크롤 변경까지 firstMotionMs. 최종 목적 컬럼 가시성 검증. 물리 입력·실제 네트워크는 미측정.' : scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
     summary, results };
   if (baseline) {
-    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build'];
+    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'fault', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build'];
     if (baseline.schema !== report.schema || keys.some(k => baseline.environment?.[k] !== report.environment[k]))
       throw new Error('기준 결과의 실행 환경·횟수·데이터 조건이 다릅니다. 같은 조건으로 다시 측정하세요.');
-    report.comparison = comparePerformance(scenario, baseline.summary.current, summary.current);
+    report.comparison = compareSummaries(scenario, baseline.summary, summary);
     if (!report.comparison.passed) process.exitCode = 1;
   }
   console.log(JSON.stringify(report, null, 2));

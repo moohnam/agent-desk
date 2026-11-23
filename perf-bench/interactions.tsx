@@ -23,13 +23,18 @@ const longTasks: PerformanceEntry[] = [];
 new PerformanceObserver(list => longTasks.push(...list.getEntries())).observe({ type: 'longtask' });
 (window as any).armInteraction = (kind: string) => {
   const before = state();
-  sample = { kind, before, frames: [], mountedPosts: 0, removedPosts: 0, done: false };
+  sample = { kind, before, frames: [], addedPostNodes: 0, removedPostNodes: 0, done: false };
   (window as any).interaction = sample;
 };
 function begin(e: KeyboardEvent | WheelEvent) {
-  if (!sample || sample.start != null || !e.isTrusted) return;
+  if (!sample || !e.isTrusted) return;
   if (e instanceof WheelEvent ? sample.kind !== 'wheel' : sample.kind === 'wheel' || !['ArrowRight', 'ArrowLeft', 'H', 'L'].includes(e.key)) return;
   const s = sample;
+  s.lastInput = e.timeStamp;
+  if (s.kind === 'repeat' && e instanceof KeyboardEvent) {
+    (s.inputs ??= []).push({ key: e.key, time: e.timeStamp, repeat: e.repeat });
+  }
+  if (s.start != null) return;
   s.start = e.timeStamp; s.dispatchDelayMs = performance.now() - e.timeStamp;
   let previous = performance.now(), lastScroll = s.before.scroll, lastChange = previous, moved = false;
   const tick = (now: number) => {
@@ -37,9 +42,10 @@ function begin(e: KeyboardEvent | WheelEvent) {
     const current = state();
     const changed = s.kind === 'wheel' ? Math.abs(current.scroll - s.before.scroll) > 1 : s.kind === 'reorder' ? current.order !== s.before.order : current.focus !== s.before.focus;
     if (changed && s.feedbackMs == null) requestAnimationFrame(() => { s.feedbackMs ??= performance.now() - s.start; });
-    if (Math.abs(current.scroll - lastScroll) > 0.5) { lastChange = now; lastScroll = current.scroll; moved = true; }
-    if ((s.kind !== 'wheel' || s.inputEnded) && changed && s.feedbackMs != null && now - s.start > 400 && now - lastChange > 120) {
+    if (Math.abs(current.scroll - lastScroll) > 0.5) { lastChange = now; lastScroll = current.scroll; moved = true; s.firstMotionMs ??= now - s.start; }
+    if ((!['wheel', 'repeat'].includes(s.kind) || s.inputEnded) && changed && s.feedbackMs != null && now - s.lastInput > 400 && now - lastChange > 120) {
       s.after = current; s.motionMs = moved ? lastChange - s.start : 0;
+      s.tailMotionMs = moved ? Math.max(0, lastChange - (s.lastInput ?? s.start)) : 0;
       s.maxFrameGapMs = Math.max(...s.frames);
       s.framesOver50ms = s.frames.filter((n: number) => n > 50).length;
       s.longTaskMs = longTasks.filter(t => t.startTime >= s.start && t.startTime < now).reduce((a, t) => a + t.duration, 0);
@@ -49,14 +55,14 @@ function begin(e: KeyboardEvent | WheelEvent) {
   };
   requestAnimationFrame(tick);
 }
-// 실제 글 노드의 추가·제거를 세어 새 컬럼 진입 때의 마운트 증가를 확인한다.
+// DOM 추가·제거 기록에는 기존 노드의 이동도 포함된다. React 마운트 수가 아니다.
 const countPosts = (node: Node) => node instanceof Element
   ? Number(node.matches('[data-post]')) + node.querySelectorAll('[data-post]').length : 0;
 new MutationObserver(records => {
   if (!sample || sample.start == null || sample.done) return;
   for (const record of records) {
-    sample.mountedPosts += [...record.addedNodes].reduce((n, node) => n + countPosts(node), 0);
-    sample.removedPosts += [...record.removedNodes].reduce((n, node) => n + countPosts(node), 0);
+    sample.addedPostNodes += [...record.addedNodes].reduce((n, node) => n + countPosts(node), 0);
+    sample.removedPostNodes += [...record.removedNodes].reduce((n, node) => n + countPosts(node), 0);
   }
 }).observe(document.getElementById('root')!, { childList: true, subtree: true });
 window.addEventListener('keydown', begin, true);
