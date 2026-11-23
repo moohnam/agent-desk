@@ -47,9 +47,10 @@ function SettingSection({title, description, visible, register, children, preloa
 }
 
 /** Editors stay mounted after first expansion so folding or changing sections preserves drafts. */
-export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks, onOpenSession, onChanged, manageChannels=true, updates, updateAvailable, runnerProblem }: {
+export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks, onOpenSession, floatingThread, onThreadLayoutChange, onChanged, manageChannels=true, updates, updateAvailable, runnerProblem }: {
   local:boolean; onClose:()=>void; channels:Channel[]; onOpenChannel:(channel:Channel)=>void;
   tasks:ReadonlyMap<string,TaskView>; onOpenSession:(taskId:string)=>void;
+  floatingThread:boolean; onThreadLayoutChange?:(floating:boolean)=>void;
   onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState; updateAvailable:boolean; runnerProblem?:RunnerConnectionProblem;
 }) {
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
@@ -85,6 +86,13 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
               <option value="vim">Vim</option>
             </select>
           </label>
+          {onThreadLayoutChange && <label className="settings-row">
+            <strong>스레드 보기</strong>
+            <select className="input" value={floatingThread ? 'split' : 'column'} onChange={event => onThreadLayoutChange(event.target.value === 'split')}>
+              <option value="split">오른쪽에 나눠 보기</option>
+              <option value="column">컬럼으로 보기</option>
+            </select>
+          </label>}
           {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close} prefetchUsage/>,true)}
           {panel('agent','기본 지침','이 허브에서 시작하는 실행에 전달할 공통 지침',<InstructionsDialog onClose={close}/>)}
         </section>

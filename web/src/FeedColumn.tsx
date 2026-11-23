@@ -64,6 +64,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   const now = Date.now();
   const id = col.id;
   const placed = col.placed;
+  const byTask = col.def?.byTask;
   // Only the newest posts are drawn: those down to `floor` (a post id), or the first DRAWN while it
   // is unset. Posts arriving above do not push drawn ones out. The rest stay loaded, drawn as the
   // feed nears its bottom or the selection goes there.
@@ -86,26 +87,36 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   // The selection moved past the drawn posts (j, G): they stay drawn when it comes back up.
   useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
   const feedRef = useRef<HTMLDivElement>(null);
+  const previousTop = useRef(0);
   /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
-  const extend = (feed: HTMLElement) => {
+  const extend = (feed: HTMLElement, scrollingDown = false) => {
     if (!seen) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
-    if (count < placed.length) setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
-    if (more && !loading && placed.length - count <= PREFETCH_POSTS) act.current.older(id);
+    if (count < placed.length) {
+      setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
+      if (byTask) return;
+    }
+    // A fetched page can collapse to a few cards. In a grouped feed, only a
+    // downward scroll or the explicit button should read another page.
+    const prefetch = byTask ? scrollingDown : placed.length - count <= PREFETCH_POSTS;
+    if (more && !loading && prefetch) act.current.older(id);
   };
   // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
-  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen]);
+  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen, byTask]);
   // Back at the top for a while: draw only the newest posts again (the rest stay loaded).
   const shrink = useRef(0);
   useEffect(() => () => clearTimeout(shrink.current), []);
   const onScroll = (feed: HTMLElement) => {
+    const top = Math.max(0, feed.scrollTop);
+    const scrollingDown = top > previousTop.current;
+    previousTop.current = top;
     act.current.scroll(id, feed);
     clearTimeout(shrink.current);
     // Preserve the current window before extending it; the opposite order would
     // overwrite the larger window requested by extend() on the first scroll.
-    if (feed.scrollTop >= 40 && floor == null && count) setFloor(placed[count - 1].post.id);
-    extend(feed);
-    if (feed.scrollTop >= 40) return;
+    if (top >= 40 && floor == null && count) setFloor(placed[count - 1].post.id);
+    extend(feed, scrollingDown);
+    if (top >= 40) return;
     if (floor != null) shrink.current = window.setTimeout(() => setFloor(null), SHRINK_MS);
   };
   return (

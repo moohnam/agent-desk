@@ -281,20 +281,22 @@ export function App() {
   }, [split]);
   const readingRequestedPost = () =>
     threadFocus != null && selection[THREAD] === threadFocus && !threadInteracted.current;
-  const toggleFloat = () => {
+  const changeThreadLayout = (floating: boolean) => {
+    if (floating === floatPref) return;
     const id = selection[THREAD];
     const feed = threadFeed();
     const el = id != null ? feed?.querySelector(`[data-post="${id}"]`) : null;
-    floatAnchor.current = feed && !readingRequestedPost() && atThreadBottom(feed, 2) ? 'bottom'
-      : id != null ? { id, top: el && feed ? el.getBoundingClientRect().top - feed.getBoundingClientRect().top : 0 } : null;
+    floatAnchor.current = !feed ? null
+      : !readingRequestedPost() && atThreadBottom(feed, 2) ? 'bottom'
+      : id != null ? { id, top: el ? el.getBoundingClientRect().top - feed.getBoundingClientRect().top : 0 } : null;
     const last = threadPosts.at(-1)?.id;
     if (floatAnchor.current === 'bottom' && last != null && id !== last) {
       readerSelection.current = last;
       select(THREAD, last);
     }
-    try { localStorage.setItem(FLOAT_KEY, floatPref ? '0' : '1'); } catch { /* ignore */ }
-    setToast(floatPref ? '스레드를 컬럼으로 보기' : '스레드를 오른쪽 절반에 보기');
-    setFloatPref(!floatPref);
+    try { localStorage.setItem(FLOAT_KEY, floating ? '1' : '0'); } catch { /* ignore */ }
+    setToast(floating ? '스레드를 오른쪽 절반에 보기' : '스레드를 컬럼으로 보기');
+    setFloatPref(floating);
   };
   const floatThread = floatPref && !phone && !!threadTask;
   const parsedSearch = useMemo(() => parseSearch(searchApplied, hub.projects, hub.tasks.values()),
@@ -1234,6 +1236,11 @@ export function App() {
     if (!references.open) { setDrawer(false); setActive(threadSlot(threadAfter)); }
     references.show(!references.open);
   };
+  const togglePostReference = (post: Post) => {
+    if (!canReference || threadTask !== post.taskId) return;
+    if (!references.ids.includes(post.id)) setDrawer(false);
+    references.toggle(post.id);
+  };
   const cutNote = async (post: Post, control: HTMLButtonElement) => {
     const { text, clipped } = post.event.payload;
     if (cuttingNote.current != null || clipped || typeof text !== 'string' || !text) return;
@@ -1275,9 +1282,10 @@ export function App() {
         return () => button.click();
       },
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
-      moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat, openSearch, closeSearch, setDrawer,
+      moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
       setWidth, widthOf, toggleReferences: canRead ? toggleReferences : undefined,
+      togglePostReference: canReference ? togglePostReference : undefined,
     };
     const onKey = (ev: KeyboardEvent) => onDeckKey(ev, keys);
     window.addEventListener('keydown', onKey);
@@ -1311,11 +1319,7 @@ export function App() {
     toggle: p => toggleExpanded(p.id),
     allow: p => { const a = approvalFor(p); if (a) allow(a); },
     deny: p => { const a = approvalFor(p); if (a) setDenying(a); },
-    reference: p => {
-      if (threadTask !== p.taskId) return;
-      if (!references.ids.includes(p.id)) setDrawer(false);
-      references.toggle(p.id);
-    },
+    reference: togglePostReference,
     pick: p => togglePick(p.taskId, p.event.id),
     cutNote: (p, control) => { void cutNote(p, control); },
     attach: p => {
@@ -1584,7 +1588,7 @@ export function App() {
           addTo={menu.colId === THREAD && threadTask ? custom.filter((c) => c.filter.taskIds?.length && !c.filter.taskIds.includes(threadTask)) : []}
           onAddTo={(colId) => { if (threadTask) addToColumn(colId, threadTask); setMenu(null); }}
           onPin={() => { if (threadTask) pinTask(threadTask); setMenu(null); }}
-          floating={floatThread} onFloat={phone ? undefined : () => { toggleFloat(); setMenu(null); }}
+          floating={floatThread} onFloat={phone ? undefined : () => { changeThreadLayout(!floatPref); setMenu(null); }}
           byTask={menuDef >= 0 && !columns[menuDef].channelId ? !!columns[menuDef].byTask : undefined}
           onByTask={() => { toggleByTask(menu.colId); setMenu(null); }}
           onSplit={() => { splitColumn(menu.colId); setMenu(null); }}
@@ -1622,6 +1626,7 @@ export function App() {
       )}
       {settingsOpen && <SettingsDialog local={hub.local} onClose={() => setSettingsOpen(false)}
         channels={[...hub.channels.values()]} onOpenChannel={openChannel} tasks={hub.tasks} onOpenSession={openThread}
+        floatingThread={floatPref} onThreadLayoutChange={phone ? undefined : changeThreadLayout}
         onChanged={hub.refresh} manageChannels={!workspaceId} updates={updates} updateAvailable={newVersion} runnerProblem={hub.runnerProblem} />}
       {skillsOpen && <SkillsDialog onClose={() => setSkillsOpen(false)} />}
       {accessOpen && <AccessDialog access={hub.access} onError={setToast} onClose={() => setAccessOpen(false)} />}

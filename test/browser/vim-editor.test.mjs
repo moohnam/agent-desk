@@ -14,6 +14,7 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 
 function fixtureServer() {
   const fixture = interactionData(24);
+  const groupedFeed = interactionData(215, 'short');
   let enrollmentPending = true;
   return createServer(async (request, response) => {
     try {
@@ -39,7 +40,8 @@ function fixtureServer() {
           }
         }
         const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
-        let body = fixture(url);
+        let body = (layout === 'grouped-feed' ? groupedFeed : fixture)(url);
+        if (url.pathname === '/api/updates') body = { ...body, targets: [] };
         if (layout === 'queue-reorder' && url.pathname==='/api/state') {
           body.approvals=['first','second'].map((id,index)=>({id,task_id:'t'+index,session_id:'s'+index,
             tool_name:'Bash',input:{command:id},status:'pending',created_at:`2026-01-02T00:00:0${index}Z`}));
@@ -145,6 +147,89 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await callback(page);
       } finally { await context.close(); }
     };
+
+    await t.test('grouped columns reuse cached task cards and do not page older events at the top', () => withPage(async page => {
+      await page.setViewport({ width: 1440, height: 1600 });
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
+      await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2',
+        JSON.stringify([{ id: 'grouped', title: '작업별', filter: {}, byTask: true }])));
+      const older = [];
+      page.on('request', request => {
+        const url = new URL(request.url());
+        if (url.pathname === '/api/feed' && Number(url.searchParams.get('cursor_id')) !== Number.MAX_SAFE_INTEGER) older.push(url.search);
+      });
+      await page.goto(origin, { waitUntil: 'domcontentloaded' });
+      const column = '[data-col="grouped"]';
+      const card = `${column} [data-post]`;
+      const button = `${column} .older-posts button:enabled`;
+      const waitForPaint = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.waitForSelector(card);
+      await waitForPaint();
+      assert.equal(older.length, 0);
+      assert.equal(await page.$$eval(card, cards => cards.length), 1);
+      await page.waitForSelector(button);
+
+      await page.click(button);
+      await page.waitForFunction(selector => document.querySelectorAll(selector).length > 1, {}, card);
+      await page.waitForSelector(button);
+      await waitForPaint();
+      assert.equal(older.length, 1);
+      assert.equal(await page.$eval(`${column} .feed`, feed => feed.scrollTop), 0);
+
+      // A real downward scroll can request the next page even when the feed's
+      // scrollbar has only a few pixels of travel.
+      const feed = `${column} .feed`;
+      await page.$eval(feed, element => {
+        const bottom = element.lastElementChild.getBoundingClientRect().bottom - element.getBoundingClientRect().top;
+        element.style.flex = 'none';
+        element.style.height = `${Math.ceil(bottom) - 4}px`;
+        element.scrollTop = 1;
+      });
+      await page.waitForFunction(selector => document.querySelectorAll(selector).length === 10, {}, card);
+      await page.$eval(feed, element => { element.scrollTop = 0; });
+      await waitForPaint();
+      assert.equal(older.length, 2);
+    }, false, 'emacs'));
+
+    await t.test('f toggles the selected thread pin and the layout is a persistent setting', () => withPage(async page => {
+      await page.setViewport({ width: 1440, height: 900 });
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note' });
+      await openReply(page, origin);
+      const thread = '.thread-split [data-col="thread"]';
+      const pin = `${thread} [data-post="300"] button.reference-button[aria-pressed]`;
+      await page.waitForSelector(`${pin}[aria-pressed="false"]`);
+      await page.focus(textarea);
+      await page.keyboard.press('f');
+      assert.equal(await page.$eval(textarea, field => field.value), 'f');
+      await page.$eval(textarea, field => field.blur());
+      await page.keyboard.press('G');
+      await page.waitForSelector(`${thread} [data-post="300"].selected`);
+      await page.keyboard.down('f');
+      await page.waitForSelector(`${pin}[aria-pressed="true"]`);
+      await page.waitForSelector('.reference-feed .body');
+      await page.keyboard.down('f');
+      await page.keyboard.up('f');
+      assert.equal(await page.$eval(pin, button => button.getAttribute('aria-pressed')), 'true');
+      await page.keyboard.press('f');
+      await page.waitForSelector(`${pin}[aria-pressed="false"]`);
+
+      await page.click('.settings-button');
+      const layout = '.settings-content select:has(option[value="split"])';
+      await page.waitForSelector(layout);
+      await page.select(layout, 'column');
+      await page.waitForSelector('.deck-space [data-col="thread"]');
+      assert.equal(await page.evaluate(() => localStorage.getItem('agent-desk.threadFloat')), '0');
+      await page.setViewport({ width: 525, height: 900 });
+      await page.waitForSelector(layout, { hidden: true });
+      await page.setViewport({ width: 1440, height: 900 });
+      await page.waitForSelector(layout);
+      await page.keyboard.press('Escape');
+      await page.waitForSelector(layout, { hidden: true });
+      await page.keyboard.press('f');
+      assert.ok(await page.$('.deck-space [data-col="thread"]'));
+      await openReply(page, origin);
+      await page.waitForSelector('.deck-space [data-col="thread"]');
+    }, false, 'emacs'));
 
     for (const editorMode of ['vim', 'emacs']) {
       await t.test(`Tab and Enter keep indentation in the reply composer (${editorMode})`, () => withPage(async page => {

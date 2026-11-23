@@ -56,7 +56,7 @@ export function ColumnMenu({ x, y, width, thread, floating, onFloat, fixed, reor
       {thread ? (
         <>
           {onFloat && <button className="item" role="menuitemcheckbox" aria-checked={floating} onClick={onFloat}>
-            {floating ? '✓ ' : ''}오른쪽 절반에 보기 <kbd>f</kbd></button>}
+            {floating ? '✓ ' : ''}오른쪽 절반에 보기</button>}
           <button className="item" onClick={onPin}>새 컬럼으로 고정 <kbd>p</kbd></button>
           {addTo.length > 0 && <div className="lbl"><span>이 작업을 컬럼에 추가</span></div>}
           {addTo.map((c) => <button key={c.id} className="item" onClick={() => onAddTo(c.id)}><Plus /> {c.title}</button>)}

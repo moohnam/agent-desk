@@ -36,7 +36,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['Enter', '선택한 글의 스레드 열기'],
     ['Ctrl ;', '고정 글·문서 창 열기 / 닫기', '스레드에 입력하는 중에도 사용할 수 있습니다.'],
     ['q / Esc', '스레드·검색·작성 서랍 닫기', '검색 패널에 포커스가 있으면 패널을 먼저 닫습니다. Vim 입력창 안에서는 Esc가 모드를 바꿉니다.'],
-    ['f', '스레드를 분할 / 컬럼으로 보기', '분할 화면의 경계선을 끌어 폭을 조절합니다.'],
+    ['f', '선택한 스레드 글 고정 / 해제', '스레드를 오른쪽에 나눠 볼 때 사용합니다. 보기 방식은 설정에서 바꿀 수 있습니다.'],
     ['t', '스레드 / 이전 컬럼으로 이동', '분할 화면에서 h/l은 스레드를 건너뜁니다.'],
   ] },
   { title: '작업·응답', keys: [
@@ -120,7 +120,7 @@ export interface DeckKeyContext {
   openThread: (taskId: string, at?: { from?: string; post?: number }) => void;
   closeThread: () => void;
   toggleThreadFocus: () => void;
-  toggleFloat: () => void;
+  togglePostReference?: (post: Post) => void;
   toggleReferences?: () => void;
   openSearch: () => void;
   closeSearch: () => void;
@@ -145,7 +145,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       help, menu, phone, drawer, editable, queue, queueFocus, activeCol,
       activeIdx, selectedPost, threadTask, tasks, handoff, pendingG, pendingDelete, pendingNoteDelete, noteAction, switchView,
       setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select,
-      goRecent, stepColumn, edgeColumn, moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, toggleFloat,
+      goRecent, stepColumn, edgeColumn, moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus,
       openSearch, closeSearch, setDrawer, openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog,
       pinTask, toggleByTask, setFinder, deleteColumn, setWidth, widthOf,
     } = c;
@@ -307,7 +307,10 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
         }
         break;
       }
-      case 'f': if (threadTask && !phone) toggleFloat(); break;
+      case 'f':
+        if (queueFocus != null || activeCol?.id !== THREAD || !selectedPost || !c.togglePostReference) { handled = false; break; }
+        if (!ev.repeat) c.togglePostReference(selectedPost);
+        break;
       case 't': toggleThreadFocus(); break;
       case 'X':
         if (threadTask && tasks.get(threadTask)?.source === 'app') toggleHandoff(threadTask);
