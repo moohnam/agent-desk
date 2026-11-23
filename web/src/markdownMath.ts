@@ -8,6 +8,7 @@ import rehypeKatex from 'rehype-katex';
 import { remarkKoreanSuffixStrong } from './markdownKoreanStrong.ts';
 import { remarkLineBreaks } from './markdownLineBreaks.ts';
 import { remarkCachedParse } from './markdownParseCache.ts';
+import { remarkSlackEmoji } from './slackEmoji.ts';
 
 const notationParser = unified().use(remarkParse).use(remarkGfm, { singleTilde: false }).use(remarkMath).use(remarkCachedParse);
 const protectedTypes = new Set(['code', 'inlineCode', 'link', 'image', 'linkReference', 'imageReference', 'definition', 'html', 'math', 'inlineMath']);
@@ -72,9 +73,11 @@ function remarkDollarGuard() {
 }
 
 // Single tildes occur in ordinary prose ("1~2개", "~/path"). Keep their existing behavior.
-export const MARKDOWN_REMARK_PLUGINS: PluggableList = [
-  [remarkGfm, { singleTilde: false }], remarkMath, remarkCachedParse, remarkDollarGuard, remarkKoreanSuffixStrong, remarkLineBreaks,
+const remarkPlugins: PluggableList = [
+  [remarkGfm, { singleTilde: false }], remarkMath, remarkCachedParse, remarkDollarGuard, remarkKoreanSuffixStrong,
 ];
+export const MARKDOWN_REMARK_PLUGINS: PluggableList = [...remarkPlugins, remarkLineBreaks];
+export const CONVERSATION_REMARK_PLUGINS: PluggableList = [...remarkPlugins, remarkSlackEmoji, remarkLineBreaks];
 // rehype-katex catches per-formula errors and renders invalid input as escaped source.
 export const MARKDOWN_REHYPE_PLUGINS: PluggableList = [
   [rehypeKatex, { trust: false, strict: 'ignore', maxSize: 20, maxExpand: 1000 }],

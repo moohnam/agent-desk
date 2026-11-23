@@ -24,7 +24,7 @@ const ReferenceCard = memo(function ReferenceCard({ event, task, onError }: {
       {markdown && typeof p.text === 'string' && p.text && <CopyButton text={p.text} label="메시지 Markdown 원문 복사" onNotice={onError} />}
     </div>
     {markdown
-      ? <div className="body md"><Markdown text={String(p.text ?? '')} mentions={event.kind === 'user'} taskId={task.id} onLocalLink={open} onNotice={onError} /></div>
+      ? <div className="body md"><Markdown text={String(p.text ?? '')} emoji={task.kind !== 'note' && !p.request} mentions={event.kind === 'user'} taskId={task.id} onLocalLink={open} onNotice={onError} /></div>
       : event.kind === 'approval'
         ? <><strong>{p.toolName}</strong><pre>{JSON.stringify(p.input, null, 2)}</pre></>
         : <div className="body">{String(p.text ?? p.detail?.message ?? '')}</div>}

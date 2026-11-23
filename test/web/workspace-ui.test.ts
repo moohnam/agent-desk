@@ -7,7 +7,7 @@ import * as noteEvents from '../../web/src/noteEvents.ts';
 import * as keys from '../../web/src/keys.ts';
 import * as editorIndent from '../../web/src/editorIndent.ts';
 import * as emacsKeys from '../../web/src/emacsKeys.ts';
-import * as standaloneEmoji from '../../web/src/standaloneEmoji.ts';
+import * as slackEmoji from '../../web/src/slackEmoji.ts';
 import * as documentLinks from '../../web/src/documentLinks.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 import { readFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ function load(file: string, imports: Record<string, unknown>, globals: Record<st
   } }).outputText;
   const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
     if (name === './keys.ts') return keys;
-    if (name === './standaloneEmoji.ts') return standaloneEmoji;
+    if (name === './slackEmoji.ts') return slackEmoji;
     if (name === './EditorInput.tsx' && !(name in imports)) return { EditorInput: () => null, editorText: (text: string) => text, inputElement: (input: any) => input?.element ?? input };
     assert.ok(name in imports, `missing mock: ${name}`);
     return imports[name];

@@ -8,7 +8,7 @@ import { mermaidSource } from './mermaid.ts';
 import { documentPath, isDocumentLink } from './documentLinks.ts';
 import { DocumentLink } from './DocumentLink.tsx';
 import { CopyButton } from './CopyButton.tsx';
-import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownMath.ts';
+import { CONVERSATION_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownMath.ts';
 import { prepareMarkdown } from './markdownSource.ts';
 import { MarkdownImage } from './MarkdownImage.tsx';
 
@@ -46,8 +46,8 @@ function Table({ node, ...props }: ComponentProps<'table'> & ExtraProps) {
  * Conversation bodies are Markdown. Raw HTML is not rendered. Web links open in a new tab; local links
  * go to `onLocalLink` (the hub opens them, since a web page can't reach local apps or files).
  */
-export const Markdown = memo(function Markdown({ text, onLocalLink, onNotice, resourceBase, taskId, linkBase, mentions = false }: {
-  text: string; mentions?: boolean; onLocalLink?: (href: string) => void; onNotice?: (message: string) => void;
+export const Markdown = memo(function Markdown({ text, onLocalLink, onNotice, resourceBase, taskId, linkBase, mentions = false, emoji = false }: {
+  text: string; mentions?: boolean; emoji?: boolean; onLocalLink?: (href: string) => void; onNotice?: (message: string) => void;
   resourceBase?: string; taskId?: string; linkBase?: string;
 }) {
   const rehypePlugins = useMemo(() => mentions ? [...MARKDOWN_REHYPE_PLUGINS, rehypeMentions] : MARKDOWN_REHYPE_PLUGINS, [mentions]);
@@ -70,7 +70,7 @@ export const Markdown = memo(function Markdown({ text, onLocalLink, onNotice, re
   }), [resourceBase, onLocalLink, taskId, linkBase]);
   return (
     <CopySource.Provider value={copySource}>
-      <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={rehypePlugins}
+      <ReactMarkdown remarkPlugins={emoji && text.includes(':') ? CONVERSATION_REMARK_PLUGINS : MARKDOWN_REMARK_PLUGINS} rehypePlugins={rehypePlugins}
         urlTransform={transformUrl} components={components}>
         {markdown.text}
       </ReactMarkdown>

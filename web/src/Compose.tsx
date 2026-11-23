@@ -22,7 +22,7 @@ import { useSettings } from './settings.ts';
 import { useSkills } from './skills.ts';
 import { Modal } from './Modal.tsx';
 import { NotePreview } from './NotePreview.tsx';
-import { standaloneEmoji } from './standaloneEmoji.ts';
+import { inDraftCode, slackEmoji } from './slackEmoji.ts';
 import { QueuedShortcut, type QueuedTarget } from './queuedShortcut.ts';
 import type { Approval, Project, Settings, Skill, TaskView } from './types.ts';
 
@@ -36,21 +36,22 @@ interface Option { key: string; insert: string; label: string; desc?: string; wo
 const MAX_OPTIONS = 50;
 
 const TAG_OPTIONS: Option[] = TAG_HELP.map(({ tag, help }) => ({ key: tag, insert: tag, label: `#${tag}`, desc: help, space: true }));
-const EMOJI_OPTIONS: Option[] = [...standaloneEmoji].filter(([code]) => code.startsWith(':'))
+const EMOJI_OPTIONS: Option[] = [...slackEmoji]
   .map(([code, emoji]) => ({ key: code, insert: code, label: code, desc: emoji }));
 
 /**
- * Options for the @mention or #tag being typed just before the caret. `mentions`: 'route' where a
+ * Options for the @mention, #tag or emoji being typed just before the caret. `mentions`: 'route' where a
  * mention says where the text goes (and may define a new project), 'refer' where it names a project
  * or task the agent may ask (replies).
  */
-function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[], models: Record<string,ModelName> = {}) {
-  if (caret === text.length && /^:[a-z0-9_+-]*$/i.test(text)) {
-    const prefix = text.toLowerCase();
-    const items = EMOJI_OPTIONS.filter(option => option.insert.startsWith(prefix));
-    return { start: 0, items, total: items.length };
-  }
+function suggest(text: string, caret: number, projects: Project[], tasks: TaskView[], mentions: Mentions, skills: Skill[], models: Record<string,ModelName> = {}, emojiEnabled = true) {
   const before = text.slice(0, caret);
+  const emoji = emojiEnabled ? /(?:^|[\s([{])(:[a-z0-9_+-]*)$/i.exec(before) : null;
+  if (emoji && !/^[a-z0-9_+:-]/i.test(text.slice(caret))) {
+    const prefix = emoji[1].toLowerCase();
+    const items = EMOJI_OPTIONS.filter(option => option.insert.startsWith(prefix));
+    if (items.length && !inDraftCode(before)) return { start: caret - prefix.length, items, total: items.length };
+  }
   const no = mentions ? /(^|\s)@([^\s:@#]+)#(\d*)$/.exec(before) : null;
   const numbered = no && projects.find((p) => p.name.toLowerCase() === no[2].toLowerCase());
   if (no && numbered) {
@@ -175,7 +176,7 @@ export function ResizableEditor({ inputRef, rows: defaultRows, resizeFrom = 'top
  * A textarea with @project / #tag completion. Scales to many projects: the list is filtered by
  * what is typed (name or path), ranked by recent activity, and scrolls.
  */
-export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top', onBeforeResize }: {
+export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlur, inputRef, projects, tasks, mentions, placeholder, rows, source='', runnerId, resizeFrom = 'top', onBeforeResize, emojiEnabled = true }: {
   value: string; onChange: (v: string) => void; onSubmit: () => void;
   /** Esc with no list open; by default it is handled by the containing view. */
   onEscape?: () => void;
@@ -184,6 +185,7 @@ export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlu
   projects: Project[]; tasks: TaskView[]; mentions: Mentions; placeholder: string; rows: number; source?:string; runnerId?:string;
   resizeFrom?: 'top' | 'bottom';
   onBeforeResize?: () => (() => void) | undefined;
+  emojiEnabled?: boolean;
 }) {
   const value = editorText(draft);
   const [caret, setCaret] = useState(0);
@@ -198,7 +200,8 @@ export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlu
     const project = mention && projects.find(p=>p.name.toLowerCase()===mention.name.toLowerCase());
     return catalogModelTags(catalogsForTarget(inventory.runners,{runnerId,rootPath:mention?.path ?? project?.root_path}),skillNames(skills));
   },[inventory.runners,source,runnerId,value,projects,mentions,skills]);
-  const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills,modelTags), [value, caret, projects, tasks, mentions, skills,modelTags]);
+  const sug = useMemo(() => suggest(value, caret, projects, tasks, mentions, skills, modelTags, emojiEnabled),
+    [value, caret, projects, tasks, mentions, skills, modelTags, emojiEnabled]);
   const open = insert && !dismissed && !!sug?.items.length;
   const cur = Math.min(index, (sug?.items.length ?? 1) - 1);
   const app = useDeskApp();
@@ -495,7 +498,7 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
           {sources.map(s=><option key={s.id} value={s.id}>{s.name} · 공유</option>)}
         </select></label>}
         <ComposeField value={text} onChange={editText} onSubmit={submit} onEscape={onClose} inputRef={inputRef} rows={6} resizeFrom="bottom"
-          projects={projects} tasks={tasks} mentions="route" source={selectedSource}
+          projects={projects} tasks={tasks} mentions="route" source={selectedSource} emojiEnabled={!hint.noteOnly && !hint.createsNote}
           placeholder={noteAttachment ? '@프로젝트 지시 또는 @프로젝트#작업번호 지시'
             : '@프로젝트 할 일\n새 프로젝트는 @이름:/경로 · 원격은 @이름:서버:~/경로 할 일'} />
         {noteAttachment && <div className="note-attachment">

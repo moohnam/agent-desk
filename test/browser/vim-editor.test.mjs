@@ -25,7 +25,7 @@ function fixtureServer() {
       }
       if (url.pathname.startsWith('/api/')) {
         const layout = request.headers['x-desk-fixture'];
-        const note = layout === 'note' || layout === 'note-order' || layout === 'note-thumbs-up';
+        const note = layout === 'note' || layout === 'note-order' || layout === 'note-emoji';
         if (layout === 'workspace-request' || layout === 'queue-reorder') {
           const connection={ id:'request-key',linkId:'shared-link',workspaceName:'srv19 공유',name:'oh-mac',
             ownerName:'오 사용자',fingerprint:'SHA256:fixture',created_at:'2026-01-01T00:00:00Z' };
@@ -63,9 +63,11 @@ function fixtureServer() {
               payload: { text: '수정한 첫 글', revision: 1 } },
             { id: 301, task_id: route[1], kind: 'user', ts: '2026-01-02T00:00:00Z', payload: { text: '두 번째 글', revision: 0 } },
           ], more: false };
-          if (layout === 'thumbs-up' || layout === 'note-thumbs-up') body = { events: [
+          if (layout === 'emoji' || layout === 'note-emoji') body = { events: [
             'b', 'b alone', 'B', 'b', ':+1:', ':-1:', ':smile:', ':cry:', ':sob:', ':rofl:', ':tada:', ':heart:', ':eyes:', ':white_check_mark:',
-            ':thumbsup:', ':thumbsdown:', '문장 속 :+1:', ':cry:', ':+1:',
+            ':thumbsup:', ':thumbsdown:', '문장 속 :+1:과 :ROFL:', '답변 속 :cry:', ':+1:',
+            '본문 **:sob:** · `:rofl:` · :unknown:\n\n```text\n:+1:\n```',
+            '이스케이프 \\:cry:와 &#58;s&#111;b: 옆의 :smile:\n다음 줄 :heart:',
           ].map((text, index) => ({
             id: 300 + index, task_id: route[1], kind: !note && (index === 3 || index === 17) ? 'assistant' : 'user',
             ts: '2026-01-01T00:00:00Z',
@@ -194,10 +196,12 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }, false, 'emacs'));
 
     for (const editorMode of ['vim', 'emacs']) {
-      await t.test(`a colon completes a standalone emoji without trailing space (${editorMode})`, () => withPage(async page => {
+      await t.test(`a colon completes an emoji within a sentence (${editorMode})`, () => withPage(async page => {
         await openReply(page, origin);
         const field = editorMode === 'vim' ? input : textarea;
         await page.waitForSelector(field);
+        await page.keyboard.type('nice  work');
+        for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowLeft');
         await page.keyboard.type(':');
         const options = '.reply-box [role="option"]';
         await page.waitForSelector(options);
@@ -209,8 +213,26 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         }, {}, options);
         await page.keyboard.press('Tab');
         const value = editorMode === 'vim' ? await text(page) : await page.$eval(field, el => el.value);
-        assert.equal(value, ':rofl:');
+        assert.equal(value, 'nice :rofl: work');
         assert.equal(await page.$(options), null);
+      }, false, editorMode));
+
+      await t.test(`emoji completion leaves code typing alone (${editorMode})`, () => withPage(async page => {
+        await openReply(page, origin);
+        const field = editorMode === 'vim' ? input : textarea;
+        await page.waitForSelector(field);
+        await page.keyboard.type('```text');
+        await page.keyboard.press('Enter');
+        await page.keyboard.type(':ro');
+        const options = '.reply-box [role="option"]';
+        assert.equal(await page.$(options), null);
+        await page.keyboard.press('Enter');
+        await page.keyboard.type('```');
+        await page.keyboard.press('Enter');
+        await page.keyboard.type('inline `code :ro');
+        assert.equal(await page.$(options), null);
+        await page.keyboard.type('` :ro');
+        await page.waitForSelector(options);
       }, false, editorMode));
     }
 
@@ -223,24 +245,36 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }, false, 'emacs'));
 
     for (const note of [false, true]) {
-      await t.test(`standalone emoji shorthands change only displayed conversation text (${note ? 'note' : 'reply'})`, () => withPage(async page => {
-        await page.setExtraHTTPHeaders({ 'x-desk-fixture': note ? 'note-thumbs-up' : 'thumbs-up' });
+      await t.test(`Slack emoji change only displayed conversation prose (${note ? 'note' : 'reply'})`, () => withPage(async page => {
+        await page.setViewport({ width: 1440, height: 900 });
+        await page.setExtraHTTPHeaders({ 'x-desk-fixture': note ? 'note-emoji' : 'emoji' });
         await page.evaluateOnNewDocument(() => Object.defineProperty(navigator, 'clipboard', {
           value: { writeText: async text => { window.deskCopied = text; } },
         }));
         await openReply(page, origin);
         const post = id => `.thread-content [data-post="${id}"]`;
-        await Promise.all([page.waitForSelector(post(300)), page.waitForSelector(post(318))]);
+        await Promise.all([page.waitForSelector(post(300)), page.waitForSelector(post(320))]);
         const rendered = id => page.$eval(post(id), element => element.querySelector('p').textContent);
         const tail = note
           ? [':+1:', ':-1:', ':smile:', ':cry:', ':sob:', ':rofl:', ':tada:', ':heart:', ':eyes:', ':white_check_mark:', ':thumbsup:', ':thumbsdown:']
           : ['👍', '👎', '😄', '😢', '😭', '🤣', '🎉', '❤️', '👀', '✅', '👍', '👎'];
-        assert.deepEqual(await Promise.all(Array.from({ length: 19 }, (_, i) => rendered(300 + i))),
-          [note ? 'b' : '👍', 'b alone', 'B', 'b', ...tail, '문장 속 :+1:', ':cry:', ':+1:']);
+        assert.deepEqual(await Promise.all(Array.from({ length: 20 }, (_, i) => rendered(300 + i))),
+          ['b', 'b alone', 'B', 'b', ...tail,
+            note ? '문장 속 :+1:과 :ROFL:' : '문장 속 👍과 🤣', note ? '답변 속 :cry:' : '답변 속 😢', ':+1:',
+            note ? '본문 :sob: · :rofl: · :unknown:' : '본문 😭 · :rofl: · :unknown:']);
+        assert.equal(await page.$eval(`${post(319)} pre code`, el => el.textContent.trim()), ':+1:');
         await page.$eval(`${post(300)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
         await page.waitForFunction(() => window.deskCopied === 'b');
         await page.$eval(`${post(305)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
         await page.waitForFunction(() => window.deskCopied === ':-1:');
+        await page.$eval(`${post(316)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
+        await page.waitForFunction(() => window.deskCopied === '문장 속 :+1:과 :ROFL:');
+        assert.equal(await rendered(320), note ? '이스케이프 :cry:와 :sob: 옆의 :smile:\n다음 줄 :heart:'
+          : '이스케이프 :cry:와 :sob: 옆의 😄\n다음 줄 ❤️');
+        if (!note) {
+          await page.$eval(`${post(316)} [aria-label="이 글을 왼쪽에 고정"]`, el => el.click());
+          await page.waitForFunction(() => document.querySelector('.reference-feed .body p')?.textContent === '문장 속 👍과 🤣');
+        }
       }, false, 'emacs'));
     }
 

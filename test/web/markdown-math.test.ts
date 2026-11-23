@@ -8,6 +8,14 @@ import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import type { Root } from 'mdast';
 import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS, normalizeMathNotation } from '../../web/src/markdownMath.ts';
+import { inDraftCode } from '../../web/src/slackEmoji.ts';
+
+test('emoji completion detects Markdown blocks and unfinished inline code at the caret', () => {
+  for (const draft of ['예시:\n\n    :ro', '\t:ro', '>     :ro', '- 예시:\n\n      :ro',
+    '~~~text\n:ro', '인라인 \x60\x60코드 :ro']) assert.equal(inDraftCode(draft), true, draft);
+  for (const draft of ['인라인 \x60코드\\\x60 뒤 :ro', '인라인 \\\x60문자 뒤 :ro', '예시\n    문단의 :ro',
+    '~~~text\n코드\n~~~\n문장 :ro']) assert.equal(inDraftCode(draft), false, draft);
+});
 import { prepareMarkdown } from '../../web/src/markdownSource.ts';
 
 const render = (source: string) => renderToStaticMarkup(React.createElement(ReactMarkdown, {
