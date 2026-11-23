@@ -41,7 +41,10 @@ function fixtureServer() {
         }
         const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
         let body = (layout === 'grouped-feed' ? groupedFeed : fixture)(url);
-        if (url.pathname === '/api/updates') body = { ...body, targets: [] };
+        if (url.pathname === '/api/updates') body = {
+          ...body, targets: [],
+          ...(request.headers['x-desk-settings-update'] && { current: 'old', latest: 'new' }),
+        };
         if (layout === 'queue-reorder' && url.pathname==='/api/state') {
           body.approvals=['first','second'].map((id,index)=>({id,task_id:'t'+index,session_id:'s'+index,
             tool_name:'Bash',input:{command:id},status:'pending',created_at:`2026-01-02T00:00:0${index}Z`}));
@@ -193,7 +196,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
 
     await t.test('f toggles the selected thread pin and the layout is a persistent setting', () => withPage(async page => {
       await page.setViewport({ width: 1440, height: 900 });
-      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note' });
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note', 'x-desk-settings-update': '1' });
       await openReply(page, origin);
       const thread = '.thread-split [data-col="thread"]';
       const pin = `${thread} [data-post="300"] button.reference-button[aria-pressed]`;
@@ -214,7 +217,17 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForSelector(`${pin}[aria-pressed="false"]`);
 
       await page.click('.settings-button');
-      const layout = '.settings-content select:has(option[value="split"])';
+      const categories = ['화면·입력', '에이전트 실행', '연동', '러너·세션', '업데이트'];
+      await page.waitForSelector('.settings-content[aria-label="화면·입력"]:not([hidden])');
+      assert.deepEqual(await page.$$eval('.settings-nav button', buttons => buttons.map(button => button.textContent.trim())), categories);
+      await page.waitForSelector('.settings-nav button[data-update][aria-label="업데이트: 새 버전 있음"]');
+      for (const index of [1, 2, 3, 4, 0]) {
+        const refresh = index === 4 ? page.waitForRequest(request => request.url() === origin + '/api/updates?refresh=1') : undefined;
+        await page.click(`.settings-nav button:nth-child(${index + 1})`);
+        await page.waitForSelector(`.settings-content[aria-label="${categories[index]}"]:not([hidden])`);
+        await refresh;
+      }
+      const layout = '.settings-content[aria-label="화면·입력"] select:has(option[value="split"])';
       await page.waitForSelector(layout);
       await page.select(layout, 'column');
       await page.waitForSelector('.deck-space [data-col="thread"]');

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Bot, ChevronDown, Package, Plug, Server } from 'lucide-react';
+import { Bot, ChevronDown, Monitor, Package, Plug, Server } from 'lucide-react';
 import { Modal } from './Modal.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { InstructionsDialog } from './InstructionsDialog.tsx';
@@ -17,10 +17,11 @@ import type { RunnerConnectionProblem } from '../../shared/api.ts';
 import './settings-dialog.css';
 
 const SECTIONS = [
-  { id: 'agent', label: '에이전트', Icon: Bot },
-  { id: 'connections', label: '연결', Icon: Plug },
-  { id: 'runners', label: '러너', Icon: Server },
-  { id: 'version', label: '버전 정보', Icon: Package },
+  { id: 'appearance', label: '화면·입력', Icon: Monitor },
+  { id: 'agent', label: '에이전트 실행', Icon: Bot },
+  { id: 'connections', label: '연동', Icon: Plug },
+  { id: 'runners', label: '러너·세션', Icon: Server },
+  { id: 'version', label: '업데이트', Icon: Package },
 ] as const;
 const runnerGuidance: Record<RunnerConnectionProblem, string> = {
   unreachable: '로컬 러너에 연결할 수 없습니다. 러너가 실행 중인지 확인하세요.',
@@ -53,7 +54,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
   floatingThread:boolean; onThreadLayoutChange?:(floating:boolean)=>void;
   onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState; updateAvailable:boolean; runnerProblem?:RunnerConnectionProblem;
 }) {
-  const [section,setSection]=useState<typeof SECTIONS[number]['id']>('agent');
+  const [section,setSection]=useState<typeof SECTIONS[number]['id']>('appearance');
   const editorMode = useEditorMode();
   const [notice,setNotice]=useState('');
   const guards=useRef(new Map<string,PanelGuard>());
@@ -78,9 +79,9 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
       </nav>
       <div className="settings-pages">
         {notice&&<p className="muted small" role="status">{notice}</p>}
-        <section className="settings-content" hidden={section!=='agent'} aria-label="에이전트">
+        <section className="settings-content" hidden={section!=='appearance'} aria-label="화면·입력">
           <label className="settings-row">
-            <strong>대화·메모 편집</strong>
+            <strong>대화·메모 편집 키</strong>
             <select className="input" value={editorMode} onChange={event => setEditorMode(event.target.value === 'vim' ? 'vim' : 'emacs')}>
               <option value="emacs">Emacs</option>
               <option value="vim">Vim</option>
@@ -93,20 +94,22 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
               <option value="column">컬럼으로 보기</option>
             </select>
           </label>}
+        </section>
+        <section className="settings-content" hidden={section!=='agent'} aria-label="에이전트 실행">
           {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close} prefetchUsage/>,true)}
           {panel('agent','기본 지침','이 허브에서 시작하는 실행에 전달할 공통 지침',<InstructionsDialog onClose={close}/>)}
         </section>
-        <section className="settings-content" hidden={section!=='connections'} aria-label="연결">
+        <section className="settings-content" hidden={section!=='connections'} aria-label="연동">
           {panel('connections','외부 서비스','Slack · Jira · Confluence 연결',<ConnectorsPanel local={local}/>)}
           {manageChannels&&panel('connections','RSS·Atom / 봇 알림','구독·수신 채널 관리',<ChannelsDialog channels={channels} onClose={close} onChanged={onChanged} onOpen={channel=>{if(canClose())onOpenChannel(channel);}}/>)}
         </section>
-        <section className="settings-content" hidden={section!=='runners'} aria-label="러너">
+        <section className="settings-content" hidden={section!=='runners'} aria-label="러너·세션">
           {runnerProblem && <p className="error small" role="status">{runnerGuidance[runnerProblem]}</p>}
           {panel('runners','열린 세션','현재 실행 중인 엔진과 터미널 세션',<SessionsPanel tasks={tasks} onOpen={id=>{if(canClose()){onOpenSession(id);onClose();}}}/>)}
           {local?panel('runners','러너 연결 관리','원격 머신 등록과 공유 러너 연결',<RunnersDialog onClose={close}/>):<p className="muted small">러너 등록과 연결 관리는 허브가 실행 중인 기기에서 할 수 있습니다.</p>}
           {panel('runners','공유 러너 전달 내역','연결 대기 또는 처리에 실패한 요청',<WorkspaceDeliveries/>)}
         </section>
-        <section className="settings-content" hidden={section!=='version'} aria-label="버전 정보">
+        <section className="settings-content" hidden={section!=='version'} aria-label="업데이트">
           <SettingsPanelContext.Provider value={versionContext}>
             <Updates state={updates} local={local}/>
           </SettingsPanelContext.Provider>

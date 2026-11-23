@@ -4,7 +4,8 @@ import { Settings } from 'lucide-react';
 import type { UpdateRole } from '../../shared/update.ts';
 
 export function UpdateSettingsButton({available, open, onOpen}: {available: boolean; open: boolean; onOpen: () => void}) {
-  return <button className="btn settings-button" title={`설정: 에이전트·연결·러너·버전 정보${available ? ' (새 버전 있음)' : ''}`} aria-label={available ? '설정: 새 버전 있음' : '설정'} aria-haspopup="dialog" aria-expanded={open} onClick={onOpen}>
+  const label = available ? '설정: 새 버전 있음' : '설정';
+  return <button className="btn settings-button" title={label} aria-label={label} aria-haspopup="dialog" aria-expanded={open} onClick={onOpen}>
     <Settings />{available && <span className="settings-update-badge" aria-hidden="true" />}
   </button>;
 }
