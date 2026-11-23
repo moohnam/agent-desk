@@ -600,6 +600,24 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$eval(input, el => el === document.activeElement), false);
     }));
 
+    await t.test('duplicate plain Esc after a canceled composition keeps the editor focused', () => withPage(async page => {
+      await openReply(page, origin);
+      await expectMode(page, '입력');
+      const { compose } = editorEvents(page, await page.createCDPSession());
+      await compose('한');
+      await compose('');
+      await page.$eval(input, element => {
+        const init = { bubbles: true, cancelable: true, code: 'Escape', key: 'Escape' };
+        element.dispatchEvent(new KeyboardEvent('keydown', init));
+        element.dispatchEvent(new KeyboardEvent('keydown', init));
+        element.dispatchEvent(new KeyboardEvent('keyup', init));
+      });
+      await expectMode(page, '일반');
+      assert.equal(await page.$eval(input, el => el === document.activeElement), true);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.$eval(input, el => el === document.activeElement), false);
+    }));
+
     await t.test('command-mode Hangul becomes a Vim key and cannot seed the next insert', () => withPage(async page => {
       await openReply(page, origin);
       await expectMode(page, '입력');

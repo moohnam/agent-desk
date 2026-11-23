@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { useEditorMode } from './editorMode.ts';
-import { holdsImeEscape, imeKey, releaseImeEscape, type ImeEscapeStroke } from './keys.ts';
+import { holdsImeEscape, imeKey, releaseImeEscape, startEscapeStroke } from './keys.ts';
 import { breakLine, indentationKey, indentTextarea } from './editorIndent.ts';
 import { replaceFieldText } from './emacsKeys.ts';
 
@@ -51,7 +51,7 @@ export function EditorInput(props: EditorProps) {
   const composingNow = useRef(false);
   const [startInInsert, setStartInInsert] = useState(true);
   const escapeArmed = useRef(false);
-  const imeEscapeDown = useRef<ImeEscapeStroke>(undefined);
+  const imeEscapeDown = useRef<number>(undefined);
   const tabFocus = useRef(false);
   const native = useRef<HTMLTextAreaElement>(null);
   const handoff = useRef<{ focused: boolean; start: number; end: number }>(undefined);
@@ -110,7 +110,7 @@ export function EditorInput(props: EditorProps) {
           if (!e.repeat && !holdsImeEscape(imeEscapeDown.current, e.nativeEvent)) {
             if (!startInInsert && escapeArmed.current && plain) e.currentTarget.blur();
             else {
-              imeEscapeDown.current = true;
+              imeEscapeDown.current = startEscapeStroke(e.nativeEvent);
               escapeArmed.current = true;
               setStartInInsert(false);
             }

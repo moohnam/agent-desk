@@ -4,7 +4,7 @@ import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view
 import { history, historyKeymap, isolateHistory, temporarilySetTabFocusMode } from '@codemirror/commands';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 import { editorText, type DeskInput, type EditorProps } from './EditorInput.tsx';
-import { holdsImeEscape, imeKey, latinKey, releaseImeEscape, type ImeEscapeStroke } from './keys.ts';
+import { holdsImeEscape, imeKey, latinKey, releaseImeEscape, startEscapeStroke } from './keys.ts';
 import { breakLine, indentLines } from './editorIndent.ts';
 
 type Mode = 'insert' | 'normal' | 'visual' | 'replace';
@@ -57,7 +57,7 @@ function indentVim(editor: EditorView, key: 'indent' | 'outdent' | 'newline') {
 
 export function VimInput(props: EditorProps & {
   handoff?: { focused: boolean; start: number; end: number };
-  startInInsert: boolean; startEscapeArmed: boolean; startImeEscapeDown: ImeEscapeStroke;
+  startInInsert: boolean; startEscapeArmed: boolean; startImeEscapeDown: number | undefined;
 }) {
   const { inputRef, disabled = false, label, placeholder: hint } = props;
   const host = useRef<HTMLDivElement>(null);
@@ -373,7 +373,7 @@ export function VimInput(props: EditorProps & {
         if (!e.repeat) {
           exitAfterComposition.current = true;
           escapeArmed.current = true;
-          imeEscapeDown.current = true;
+          imeEscapeDown.current = startEscapeStroke(event);
         }
         e.stopPropagation();
         return;
@@ -388,7 +388,7 @@ export function VimInput(props: EditorProps & {
           props.onKey?.(event, { insert: true, leave: false });
           if (!event.defaultPrevented) {
             escapeArmed.current = true;
-            imeEscapeDown.current = true;
+            imeEscapeDown.current = startEscapeStroke(event);
             if (recentComposition) leaveAfterComposition(editor);
             else leaveAfterIme(editor);
           }
@@ -433,7 +433,10 @@ export function VimInput(props: EditorProps & {
         e.preventDefault();
         temporarilySetTabFocusMode(editor);
       }
-      if (escape && !e.defaultPrevented) escapeArmed.current = true;
+      if (escape && !e.defaultPrevented) {
+        escapeArmed.current = true;
+        imeEscapeDown.current = startEscapeStroke(event);
+      }
     }}>
     <div className="vim-host" ref={host} />
     <div className="editor-mode muted small" role="status">Vim · {labels[mode] ?? labels.normal} 모드</div>

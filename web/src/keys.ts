@@ -5,16 +5,20 @@ export function imeKey(e: KeyboardEvent): boolean {
   return e.isComposing || e.keyCode === 229 || e.key === 'Process';
 }
 
-export type ImeEscapeStroke = true | number | undefined;
-export function holdsImeEscape(stroke: ImeEscapeStroke, event: KeyboardEvent) {
-  return stroke === true || (stroke !== undefined && event.timeStamp < stroke);
+/** Cap the hold so a lost keyup cannot make Escape stop working. */
+export function startEscapeStroke(event: KeyboardEvent) {
+  return event.timeStamp + 1000;
+}
+
+export function holdsImeEscape(stroke: number | undefined, event: KeyboardEvent) {
+  return stroke !== undefined && event.timeStamp < stroke;
 }
 
 /** An IME-marked keyup can precede the plain Escape event of the same physical key press. */
-export function releaseImeEscape(stroke: ImeEscapeStroke, event: KeyboardEvent): ImeEscapeStroke {
+export function releaseImeEscape(stroke: number | undefined, event: KeyboardEvent): number | undefined {
   if (stroke === undefined || (event.key !== 'Escape' && event.code !== 'Escape')) return stroke;
   if (event.key === 'Escape' && !imeKey(event)) return undefined;
-  return stroke === true ? event.timeStamp + 40 : stroke;
+  return Math.min(stroke, event.timeStamp + 40);
 }
 
 /** Without a selected post, reply to the column's task or its newest post (feed order). */

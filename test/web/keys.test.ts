@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { holdsImeEscape, nextMineIndex, nextTaskIndex, nextUserIndex, releaseImeEscape, replyTaskId } from '../../web/src/keys.ts';
+import { holdsImeEscape, nextMineIndex, nextTaskIndex, nextUserIndex, releaseImeEscape, replyTaskId, startEscapeStroke } from '../../web/src/keys.ts';
 import type { Post } from '../../web/src/types.ts';
 
 /** Posts from a spec like 'a:u a:x b:x b:u': task letter and kind (u: the user's, else the agent's). */
@@ -11,7 +11,10 @@ const posts = (spec: string) => spec.split(' ').map((s, id) => {
 
 test('an IME Escape keyup holds only the immediate duplicate and allows later Escape presses', () => {
   const key = (name: string, timeStamp: number) => ({ key: name, code: 'Escape', timeStamp } as KeyboardEvent);
-  const held = releaseImeEscape(true, key('Process', 10));
+  const first = startEscapeStroke(key('Escape', 0));
+  assert.equal(holdsImeEscape(first, key('Escape', 1)), true);
+  assert.equal(holdsImeEscape(first, key('Escape', 1001)), false);
+  const held = releaseImeEscape(first, key('Process', 10));
   assert.equal(holdsImeEscape(held, key('Escape', 11)), true);
   assert.equal(holdsImeEscape(held, key('Escape', 100)), false);
   assert.equal(holdsImeEscape(releaseImeEscape(held, key('Escape', 12)), key('Escape', 13)), false);
