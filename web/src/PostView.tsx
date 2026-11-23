@@ -128,7 +128,7 @@ function PostViewInner(props: Props) {
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={text} emoji={!isNote && !p.request} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
+  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={text} emoji={!p.request} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
     : richText(text), [post.kind, isNote, p, text, onLocalLink, props.onError]);
   const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
   const postTime = post.event.edited_at ?? post.event.ts;

@@ -245,7 +245,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }, false, 'emacs'));
 
     for (const note of [false, true]) {
-      await t.test(`Slack emoji change only displayed conversation prose (${note ? 'note' : 'reply'})`, () => withPage(async page => {
+      await t.test(`Slack emoji preserve stored Markdown and render in posts and pins (${note ? 'note' : 'reply'})`, () => withPage(async page => {
         await page.setViewport({ width: 1440, height: 900 });
         await page.setExtraHTTPHeaders({ 'x-desk-fixture': note ? 'note-emoji' : 'emoji' });
         await page.evaluateOnNewDocument(() => Object.defineProperty(navigator, 'clipboard', {
@@ -255,13 +255,10 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const post = id => `.thread-content [data-post="${id}"]`;
         await Promise.all([page.waitForSelector(post(300)), page.waitForSelector(post(320))]);
         const rendered = id => page.$eval(post(id), element => element.querySelector('p').textContent);
-        const tail = note
-          ? [':+1:', ':-1:', ':smile:', ':cry:', ':sob:', ':rofl:', ':tada:', ':heart:', ':eyes:', ':white_check_mark:', ':thumbsup:', ':thumbsdown:']
-          : ['👍', '👎', '😄', '😢', '😭', '🤣', '🎉', '❤️', '👀', '✅', '👍', '👎'];
+        const tail = ['👍', '👎', '😄', '😢', '😭', '🤣', '🎉', '❤️', '👀', '✅', '👍', '👎'];
         assert.deepEqual(await Promise.all(Array.from({ length: 20 }, (_, i) => rendered(300 + i))),
           ['b', 'b alone', 'B', 'b', ...tail,
-            note ? '문장 속 :+1:과 :ROFL:' : '문장 속 👍과 🤣', note ? '답변 속 :cry:' : '답변 속 😢', ':+1:',
-            note ? '본문 :sob: · :rofl: · :unknown:' : '본문 😭 · :rofl: · :unknown:']);
+            '문장 속 👍과 🤣', '답변 속 😢', note ? '👍' : ':+1:', '본문 😭 · :rofl: · :unknown:']);
         assert.equal(await page.$eval(`${post(319)} pre code`, el => el.textContent.trim()), ':+1:');
         await page.$eval(`${post(300)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
         await page.waitForFunction(() => window.deskCopied === 'b');
@@ -269,12 +266,9 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await page.waitForFunction(() => window.deskCopied === ':-1:');
         await page.$eval(`${post(316)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
         await page.waitForFunction(() => window.deskCopied === '문장 속 :+1:과 :ROFL:');
-        assert.equal(await rendered(320), note ? '이스케이프 :cry:와 :sob: 옆의 :smile:\n다음 줄 :heart:'
-          : '이스케이프 :cry:와 :sob: 옆의 😄\n다음 줄 ❤️');
-        if (!note) {
-          await page.$eval(`${post(316)} [aria-label="이 글을 왼쪽에 고정"]`, el => el.click());
-          await page.waitForFunction(() => document.querySelector('.reference-feed .body p')?.textContent === '문장 속 👍과 🤣');
-        }
+        assert.equal(await rendered(320), '이스케이프 :cry:와 :sob: 옆의 😄\n다음 줄 ❤️');
+        await page.$eval(`${post(316)} [aria-label="이 글을 왼쪽에 고정"]`, el => el.click());
+        await page.waitForFunction(() => document.querySelector('.reference-feed .body p')?.textContent === '문장 속 👍과 🤣');
       }, false, 'emacs'));
     }
 
