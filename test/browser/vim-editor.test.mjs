@@ -25,7 +25,7 @@ function fixtureServer() {
       }
       if (url.pathname.startsWith('/api/')) {
         const layout = request.headers['x-desk-fixture'];
-        const note = layout === 'note' || layout === 'note-order';
+        const note = layout === 'note' || layout === 'note-order' || layout === 'note-thumbs-up';
         if (layout === 'workspace-request' || layout === 'queue-reorder') {
           const connection={ id:'request-key',linkId:'shared-link',workspaceName:'srv19 공유',name:'oh-mac',
             ownerName:'오 사용자',fingerprint:'SHA256:fixture',created_at:'2026-01-01T00:00:00Z' };
@@ -63,6 +63,10 @@ function fixtureServer() {
               payload: { text: '수정한 첫 글', revision: 1 } },
             { id: 301, task_id: route[1], kind: 'user', ts: '2026-01-02T00:00:00Z', payload: { text: '두 번째 글', revision: 0 } },
           ], more: false };
+          if (layout === 'thumbs-up' || layout === 'note-thumbs-up') body = { events: ['b', 'b alone', 'B', 'b'].map((text, index) => ({
+            id: 300 + index, task_id: route[1], kind: !note && index === 3 ? 'assistant' : 'user', ts: '2026-01-01T00:00:00Z',
+            payload: { text },
+          })), more: false };
           if (layout==='ssh-author-avatar') body={events:['남무현','👩‍💻 개발',null].map((ownerName,index)=>({
             id:300+index,task_id:route[1],kind:'user',ts:'2026-01-01T00:00:00Z',
             payload:{text:`메시지 ${index+1}`,...(ownerName?{author:{ownerName}}:{})},
@@ -192,6 +196,22 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.deepEqual(await page.$$eval('.thread-content [data-post]', posts => posts.map(post => post.dataset.post)),
         ['301', '300']);
     }, false, 'emacs'));
+
+    for (const note of [false, true]) {
+      await t.test(`a standalone b changes only the displayed conversation text (${note ? 'note' : 'reply'})`, () => withPage(async page => {
+        await page.setExtraHTTPHeaders({ 'x-desk-fixture': note ? 'note-thumbs-up' : 'thumbs-up' });
+        await page.evaluateOnNewDocument(() => Object.defineProperty(navigator, 'clipboard', {
+          value: { writeText: async text => { window.deskCopied = text; } },
+        }));
+        await openReply(page, origin);
+        const post = id => `.thread-content [data-post="${id}"]`;
+        await page.waitForSelector(post(303));
+        const rendered = id => page.$eval(post(id), element => element.querySelector('p').textContent);
+        assert.deepEqual(await Promise.all([300, 301, 302, 303].map(rendered)), [note ? 'b' : '👍', 'b alone', 'B', 'b']);
+        await page.$eval(`${post(300)} [aria-label="메시지 Markdown 원문 복사"]`, el => el.click());
+        await page.waitForFunction(() => window.deskCopied === 'b');
+      }, false, 'emacs'));
+    }
 
     await t.test('cold loading retains initial input and remembers Escape', () => withPage(async page => {
       let ready;

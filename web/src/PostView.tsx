@@ -119,6 +119,7 @@ function PostViewInner(props: Props) {
   const { post, task, model, approval, question, selected, expanded, working, flash, inThread, up, down } = props;
   const p = post.event.payload;
   const isNote = task?.kind === 'note' && post.kind === 'user';
+  const displayText = post.kind === 'user' && !isNote && p.text === 'b' ? '👍' : String(p.text ?? '');
   const canEditNote = !!inThread && isNote && !p.clipped;
   const [editing, setEditing] = useState(false);
   const onLocalLink = useMemo(() => openLink(post.taskId, props.onError), [post.taskId, props.onError]);
@@ -127,8 +128,8 @@ function PostViewInner(props: Props) {
   const body = useMemo(() => post.kind === 'alert' ? (
     <>{p.detail?.message ?? '작업이 중단되었습니다.'}
       {Array.isArray(p.detail?.texts) && <ul className="dropped">{p.detail.texts.map((t: string, i: number) => <li key={i}>{t}</li>)}</ul>}</>
-  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
-    : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink, props.onError]);
+  ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={displayText} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
+    : richText(displayText), [post.kind, isNote, p, displayText, onLocalLink, props.onError]);
   const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
   const postTime = post.event.edited_at ?? post.event.ts;
   const engine = task?.engine ?? 'claude';
