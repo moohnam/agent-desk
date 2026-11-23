@@ -25,7 +25,7 @@ function fixtureServer() {
       }
       if (url.pathname.startsWith('/api/')) {
         const layout = request.headers['x-desk-fixture'];
-        const note = layout === 'note';
+        const note = layout === 'note' || layout === 'note-order';
         if (layout === 'workspace-request' || layout === 'queue-reorder') {
           const connection={ id:'request-key',linkId:'shared-link',workspaceName:'srv19 공유',name:'oh-mac',
             ownerName:'오 사용자',fingerprint:'SHA256:fixture',created_at:'2026-01-01T00:00:00Z' };
@@ -58,6 +58,11 @@ function fixtureServer() {
           const payload = note ? { text: '저장된 메모' } : questions ? { text: '에이전트의 질문', questions } : undefined;
           body = { events: payload ? [{ id: 300, task_id: route[1], kind: note ? 'user' : 'assistant',
             ts: '2026-01-01T00:00:00Z', payload }] : [], more: false };
+          if (layout === 'note-order') body = { events: [
+            { id: 300, task_id: route[1], kind: 'user', ts: '2026-01-01T00:00:00Z', edited_at: '2026-01-03T00:00:00Z',
+              payload: { text: '수정한 첫 글', revision: 1 } },
+            { id: 301, task_id: route[1], kind: 'user', ts: '2026-01-02T00:00:00Z', payload: { text: '두 번째 글', revision: 0 } },
+          ], more: false };
           if (layout==='ssh-author-avatar') body={events:['남무현','👩‍💻 개발',null].map((ownerName,index)=>({
             id:300+index,task_id:route[1],kind:'user',ts:'2026-01-01T00:00:00Z',
             payload:{text:`메시지 ${index+1}`,...(ownerName?{author:{ownerName}}:{})},
@@ -130,6 +135,63 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await callback(page);
       } finally { await context.close(); }
     };
+
+    for (const editorMode of ['vim', 'emacs']) {
+      await t.test(`Tab and Enter keep indentation in the reply composer (${editorMode})`, () => withPage(async page => {
+        await openReply(page, origin);
+        const field = editorMode === 'vim' ? input : textarea;
+        await page.waitForSelector(field);
+        const value = () => editorMode === 'vim' ? text(page) : page.$eval(field, el => el.value);
+        const shift = async key => {
+          await page.keyboard.down('Shift');
+          try { await page.keyboard.press(key); } finally { await page.keyboard.up('Shift'); }
+        };
+        const { insert } = editorEvents(page, await page.createCDPSession());
+        await page.keyboard.press('Tab');
+        await insert('첫째');
+        await page.keyboard.press('Enter');
+        await insert('둘째');
+        assert.equal(await value(), '  첫째\n  둘째');
+        await shift('Tab');
+        assert.equal(await value(), '  첫째\n둘째');
+        if (editorMode === 'vim') {
+          await page.keyboard.press('Escape');
+          await page.keyboard.press('V');
+          await page.keyboard.press('k');
+          await expectMode(page, '선택');
+        } else await shift('ArrowUp');
+        await page.keyboard.press('Tab');
+        assert.equal(await value(), '    첫째\n  둘째');
+        await shift('Tab');
+        assert.equal(await value(), '  첫째\n둘째');
+        assert.equal(await page.$eval(field, el => el === document.activeElement), true);
+        await page.keyboard.down('Control');
+        try { await page.keyboard.press('m'); } finally { await page.keyboard.up('Control'); }
+        await page.keyboard.press('Tab');
+        assert.equal(await page.$eval(field, el => el === document.activeElement), false);
+      }, false, editorMode));
+    }
+
+    await t.test('Tab completes an open suggestion and Shift+Tab still outdents', () => withPage(async page => {
+      await openReply(page, origin);
+      await page.waitForSelector(textarea);
+      await page.keyboard.press('Tab');
+      await page.keyboard.type('#lat');
+      await page.waitForSelector('.reply-box [role="option"]');
+      await page.keyboard.down('Shift');
+      try { await page.keyboard.press('Tab'); } finally { await page.keyboard.up('Shift'); }
+      assert.equal(await page.$eval(textarea, el => el.value), '#lat');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.$eval(textarea, el => el.value), '#later ');
+    }, false, 'emacs'));
+
+    await t.test('a note thread displays both posts with the edited lower ID last', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note-order' });
+      await openReply(page, origin);
+      await page.waitForSelector('.thread-content [data-post="300"]');
+      assert.deepEqual(await page.$$eval('.thread-content [data-post]', posts => posts.map(post => post.dataset.post)),
+        ['301', '300']);
+    }, false, 'emacs'));
 
     await t.test('cold loading retains initial input and remembers Escape', () => withPage(async page => {
       let ready;

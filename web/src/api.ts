@@ -70,7 +70,8 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   if(method==='PATCH'&&/^\/tasks\/[^/]+\/notes\/\d+$/.test(route))return mapEvent(source,index,data) as T;
   if(route.endsWith('/events')) {
     if(Array.isArray(data))return data.map(e=>mapEvent(source,index,e)) as T;
-    return {...data,events:data.events.map((e:HubEvent)=>mapEvent(source,index,e))} as T;
+    const mapped = (e: HubEvent) => mapEvent(source, index, e);
+    return {...data,events:data.events.map(mapped), ...(Array.isArray(data.moved) && { moved: data.moved.map(mapped) }) } as T;
   }
   if(data.task_id)data.task_id=scopeId(source,data.task_id);
   if(data.queued_id)data.queued_id=scopeId(source,data.queued_id);
@@ -175,7 +176,8 @@ async function feeds(limit:number,before:HubEvent|undefined,q:FeedQuery,signal?:
     if(!filter) { pages.set(source.id, {events:[],complete:true}); return; }
     const p=feedSearch(filter);p.set('limit',String(limit));
     // A stable timestamp + source index + native ID cursor prevents cross-store gaps/ties.
-    p.set('before_ts',before?.ts??'9999-12-31T23:59:59.999Z');
+    p.set('before_ts',before?.edited_at??before?.ts??'9999-12-31T23:59:59.999Z');
+    p.set('edited_order','1');
     const index=before?eventSourceIndex(before.id):0;
     p.set('cursor_id',String(!before||source.view_index<index?Number.MAX_SAFE_INTEGER:source.view_index>index?0:nativeEventId(before.id)));
     let page: FeedPage;
@@ -274,14 +276,15 @@ export const api = {
       if (change.type === 'event_updated' && change.event.task_id === taskId) edits.set(change.event.id, change.event);
     });
     // A hub not yet restarted answers with the bare array (newest 500, no paging).
-    return call<{ events: HubEvent[]; more: boolean; incremental?: true } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
+    return call<{ events: HubEvent[]; more: boolean; incremental?: true; moved?: HubEvent[] } | HubEvent[]>('GET', `/tasks/${taskId}/events${qs ? `?${qs}` : ''}`, undefined, signal)
       .then((r) => {
         const page = Array.isArray(r) ? { events: r, more: false } : r;
         if (!edits.size) return page;
-        return { ...page, events: page.events.map(event => {
+        const latest = (event: HubEvent) => {
           const edited = edits.get(event.id);
           return edited && (noteRevision(edited) ?? 0) > (noteRevision(event) ?? 0) ? edited : event;
-        }) };
+        };
+        return { ...page, events: page.events.map(latest), ...(page.moved && { moved: page.moved.map(latest) }) };
       }).finally(offNotes);
   },
   /** Saves a file on the hub's machine (for a device without it); returns the saved path. */

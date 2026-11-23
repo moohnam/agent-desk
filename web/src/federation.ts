@@ -19,8 +19,8 @@ export function eventId(index: number, id: number) {
 }
 export const nativeEventId = (id: number) => id % EVENT_BLOCK;
 export const eventSourceIndex = (id: number) => Math.floor(id / EVENT_BLOCK);
-export function compareEvents(a: Pick<HubEvent,'ts'|'id'>, b: Pick<HubEvent,'ts'|'id'>) {
-  return a.ts.localeCompare(b.ts) || a.id - b.id;
+export function compareEvents(a: Pick<HubEvent,'ts'|'id'|'edited_at'>, b: Pick<HubEvent,'ts'|'id'|'edited_at'>) {
+  return (a.edited_at ?? a.ts).localeCompare(b.edited_at ?? b.ts) || a.id - b.id;
 }
 export function mapEvent(source: string, index: number, e: HubEvent): HubEvent {
   if (!source) return e;

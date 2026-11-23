@@ -13,7 +13,8 @@ export function mergeEvents(a: HubEvent[], b: HubEvent[], cap = Infinity, compar
   if (!b.length) return a;
   const last = a[a.length - 1];
   let out: HubEvent[];
-  if ((!last || compare(last, b[0]) < 0) && b.every((e, i) => i === 0 || compare(b[i - 1], e) < 0)) {
+  if ((!last || compare(last, b[0]) < 0) && b.every((e, i) =>
+    !noteRevision(e) && (i === 0 || compare(b[i - 1], e) < 0))) {
     // All newer and in order (a live batch): append without a Map and a sort.
     out = a.concat(b);
   } else {

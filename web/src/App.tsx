@@ -2,7 +2,7 @@ import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
 import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
-import { splitId } from './federation.ts';
+import { compareEvents, splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
@@ -240,10 +240,11 @@ export function App() {
     if (input && 'value' in input) input.setSelectionRange(input.value.length, input.value.length);
   }, [drawer]);
 
-  const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, loadEarlier }
+  const threadIsNote = !!threadTask && hub.tasks.get(threadTask)?.kind === 'note';
+  const { events: threadEvents, loaded: threadLoaded, more: threadMore, loadingEarlier: threadLoadingEarlier, beforeCursor: threadHistoryStart, loadEarlier }
     = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced,
-      threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) : undefined);
-  const threadPosts = useMemo(() => buildPosts(threadEvents), [threadEvents]);
+      threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) : undefined, threadIsNote);
+  const threadPosts = useMemo(() => buildPosts(threadIsNote ? [...threadEvents].sort(compareEvents) : threadEvents), [threadEvents, threadIsNote]);
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
   const phone = useMedia(PHONE);
@@ -869,7 +870,8 @@ export function App() {
     if (!threadPosts.length) return loadEarlier();
     const feedTop = feed.getBoundingClientRect().top;
     const el = firstPostBelow(feed, feedTop);
-    if (el) threadAnchor.current = { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop, first: threadPosts[0].id };
+    if (el) threadAnchor.current = { id: Number(el.dataset.post), top: el.getBoundingClientRect().top - feedTop,
+      first: threadHistoryStart ?? threadPosts[0].id };
     loadEarlier();
   };
   // The newest page can be all tool calls (a long agent turn): go back until there is a post to show.
@@ -891,14 +893,14 @@ export function App() {
     if (!anchor || !feed || !el) return false;
     feed.scrollTop += el.getBoundingClientRect().top - feed.getBoundingClientRect().top - anchor.top;
     // Live posts arriving meanwhile land below; only the earlier page ends the hold.
-    if (threadPosts[0] && threadPosts[0].id < anchor.first) threadAnchor.current = null;
+    if (threadHistoryStart != null && threadHistoryStart < anchor.first) threadAnchor.current = null;
     threadAtBottom.current = atThreadBottom(feed);
     return !threadAtBottom.current;
   };
   useLayoutEffect(() => {
     // Until the open effect has landed, the thread is where that effect puts it.
     if (selection[THREAD] == null) return;
-    const last = threadPosts[threadPosts.length - 1];
+    const last = threadIsNote ? threadEvents.at(-1) : threadPosts.at(-1);
     if (sentFrom.current != null && last && last.id > sentFrom.current && last.kind === 'user') {
       sentFrom.current = null;
       threadAnchor.current = null;
@@ -930,7 +932,7 @@ export function App() {
     threadAtBottom.current = atThreadBottom(feed);
   }, [floatThread]);
   const onThreadSend = () => {
-    sentFrom.current = threadPosts[threadPosts.length - 1]?.id ?? 0;
+    sentFrom.current = (threadIsNote ? threadEvents.at(-1) : threadPosts.at(-1))?.id ?? 0;
     threadAtBottom.current = true;
     stickThread();
   };
@@ -1430,7 +1432,7 @@ export function App() {
               </div>
             )}
             <ThreadPosts key={threadTask} col={col} ctx={columnCtx.get(col.id)!} feed={threadFeedRef} atBottom={threadAtBottom}
-              cuttingNoteId={cuttingNoteId}
+              cuttingNoteId={cuttingNoteId} noteOrder={threadIsNote}
               target={selection[THREAD] ?? threadFocus ?? (!threadInteracted.current ? threadPosts.at(-1)?.id : undefined)}
               onPostsMounted={tryFocusQuestion}
               selected={i === activeIdx ? selection[col.id] : undefined} flash={flash} expanded={expanded}

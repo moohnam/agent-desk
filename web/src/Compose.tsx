@@ -244,7 +244,7 @@ export function ComposeField({ value: draft, onChange, onSubmit, onEscape, onBlu
           if (mode.insert && open && sug) {
             if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((cur + 1) % sug.items.length); return; }
             if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((cur - 1 + sug.items.length) % sug.items.length); return; }
-            if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
+            if ((e.key === 'Tab' && !e.shiftKey) || e.key === 'Enter') { e.preventDefault(); pick(sug.items[cur]); return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setDismissed(true); return; }
           }
           if (e.key === 'Escape' && mode.leave && onEscape) { e.preventDefault(); e.stopPropagation(); onEscape(); }

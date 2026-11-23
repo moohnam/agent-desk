@@ -169,7 +169,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
           const cursorId = url.searchParams.get('cursor_id');
           if (cursorId !== null && (!Number.isSafeInteger(Number(cursorId)) || Number(cursorId) < 0)) throw new HttpError(400,'cursor_id 형식이 잘못되었습니다');
           return reply(200, hub.store.listFeed(intParam(url, 'limit', 1000, 5000)!, intParam(url, 'before', undefined), feedFilter(url),
-            ts ? {ts,id:cursorId === null ? Number.MAX_SAFE_INTEGER : Number(cursorId)} : undefined).map(feedEvent));
+            ts ? {ts,id:cursorId === null ? Number.MAX_SAFE_INTEGER : Number(cursorId),
+              editedOrder: url.searchParams.get('edited_order') === '1'} : undefined).map(feedEvent));
         }
         case 'GET /feed/:id': {
           // `/feed/count`: how many posts the column has in all, for its "loaded / total".
@@ -190,8 +191,16 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
             const events = hub.store.eventsAfter(id, after, 501);
             return reply(200, { events: events.slice(0, 500), more: events.length > 500, incremental: true });
           }
-          const events = hub.store.listEvents(id, 500, intParam(url, 'since', undefined), intParam(url, 'before', undefined));
-          return reply(200, { events, more: events.length > 0 && hub.store.hasEventsBefore(id, events[0].id) });
+          const before = intParam(url, 'before', undefined);
+          const events = hub.store.listEvents(id, 500, intParam(url, 'since', undefined), before);
+          const more = events.length > 0 && hub.store.hasEventsBefore(id, events[0].id);
+          const moved = more && before === undefined && hub.store.getTask(id)?.kind === 'note'
+            ? hub.store.movedNotes(id, events[0].id, events.reduce((oldest, e) => {
+              const ts = e.edited_at ?? e.ts;
+              return ts < oldest ? ts : oldest;
+            }, events[0].edited_at ?? events[0].ts))
+            : [];
+          return reply(200, { events, more, ...(moved.length ? { moved } : {}) });
         }
         case 'PATCH /tasks/:id':
           return reply(200, hub.renameTask(id, body.title));

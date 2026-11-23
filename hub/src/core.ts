@@ -86,7 +86,7 @@ export class DeskCore {
       delivery_pending: session ? (this.runner as RunnerPort & { pendingFor?: (id: string) => number }).pendingFor?.(session.id) ?? 0 : 0,
       live: session ? (session.source === 'external' ? task.status !== 'done' : this.runner.has(session.id)) : false,
       source: session?.source ?? null,
-      last_event: this.store.lastEvent(task.id) ?? null,
+      last_event: this.store.lastEvent(task.id, task.kind === 'note') ?? null,
       pending_approvals: this.store.pendingApprovals().filter((a) => a.task_id === task.id).length,
       pending_questions: this.store.pendingQuestions().filter((q) => q.task_id === task.id).length,
       pending_ask: this.store.openAsyncQuestion(task.id),

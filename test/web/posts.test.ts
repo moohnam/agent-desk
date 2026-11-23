@@ -74,6 +74,13 @@ test('merging notes keeps the latest revision even if an older page arrives whol
   assert.equal(mergeEvents([latest], [whole])[0], whole);
 });
 
+test('moving an older note to its edit time replaces it without duplicating the post', () => {
+  const original = { ...ev('user', { text: 'first', revision: 0 }), ts: '2026-01-01' };
+  const next = { ...ev('user', { text: 'second', revision: 0 }), ts: '2026-01-02' };
+  const edited = { ...original, edited_at: '2026-01-03', payload: { text: 'first revised', revision: 1 } };
+  assert.deepEqual(mergeEvents([original, next], [edited]), [next, edited]);
+});
+
 test('a column filter matches by task, kind, status and text', () => {
   const [post] = buildPosts([ev('assistant', { text: 'Fixed the build' })]);
   const task = { id: 't1', project_id: 'p1', status: 'done', title: 'CI' } as TaskView;

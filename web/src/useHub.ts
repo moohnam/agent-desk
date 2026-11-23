@@ -490,7 +490,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
           const updated = received.get(event.id);
           if (!updated || !matchesNoteQuery(entry.q, updated, task)) return [];
           return [(noteRevision(updated) ?? 0) > (noteRevision(event) ?? 0) ? updated : event];
-        }) }));
+        }).sort(compareEvents) }));
       });
     }
   };
@@ -748,6 +748,8 @@ interface TaskHistory {
   more: boolean;
   /** Last event covered by a history read, excluding later live-only events. */
   cursor: number | null;
+  /** Start of the contiguous ID page, excluding old notes moved into it by edit time. */
+  beforeCursor?: number;
   firstLive: number | null;
   since: number | undefined;
   reload: number;
@@ -774,6 +776,7 @@ function recentHistory(history: TaskHistory, cursor: number): TaskHistory | unde
   }
   if (start === end) return;
   return { ...history, events: events.slice(start, end), more: history.more || start > 0,
+    beforeCursor: start > 0 ? events[start].id : history.beforeCursor,
     firstLive: null, loaded: false, loadingEarlier: false };
 }
 
@@ -782,7 +785,7 @@ function recentHistory(history: TaskHistory, cursor: number): TaskHistory | unde
  * Earlier pages stay available while the task is open. A revisit displays its recent cached page
  * immediately, and every open/reload still reads the authoritative source.
  */
-export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0, sourceReload = 0) {
+export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent) => void) => () => void, since?: number, reload = 0, sourceReload = 0, note = false) {
   const active = useRef<TaskHistory | undefined>(undefined);
   const [history, setHistory] = useState<TaskHistory | undefined>(undefined);
   const cache = useRef(new Map<string, TaskHistory>());
@@ -800,11 +803,11 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
     const held = previous?.taskId === taskId ? previous : cache.current.get(taskId);
     cache.current.delete(taskId);
     const kept = visibleNoteEvents(held?.events ?? EMPTY_TASK_EVENTS);
-    const reconnect = !!held?.loaded && held === previous && held.since === since && held.reload === reload
+    const reconnect = !note && !!held?.loaded && held === previous && held.since === since && held.reload === reload
       && held.sourceReload !== sourceReload && held.cursor != null;
-    const oldestNote = held?.events.find(e => noteRevision(e) !== undefined)?.id;
+    const oldestNote = note ? held?.beforeCursor : held?.events.find(e => noteRevision(e) !== undefined)?.id;
     const oldNotes = reconnect || oldestNote == null ? undefined : new Set(kept);
-    publish({ taskId, events: kept, more: held?.more ?? false, cursor: held?.cursor ?? null,
+    publish({ taskId, events: kept, more: held?.more ?? false, cursor: held?.cursor ?? null, beforeCursor: held?.beforeCursor,
       firstLive: held?.firstLive ?? null, since, reload, sourceReload, loaded: reconnect, loadingEarlier: false });
     const floor = () => historyFloor(active.current, oldestNote == null ? since : Math.min(oldestNote, since ?? Infinity));
     const controller = new AbortController();
@@ -861,9 +864,12 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
         // Revalidate the entire held range of an editable thread. Live edits and newly posted
         // events that arrived after the read began still take precedence.
         const retained = oldNotes ? current.events.filter(event => !oldNotes.has(event)) : current.events;
-        const keepsEarlier = current.events.length > 0 && (!page.events.length || current.events[0].id < page.events[0].id);
-        publish({ ...current, events: mergeTaskEvents(retained, visibleNoteEvents(page.events)),
-          more: !oldNotes && keepsEarlier ? current.more : page.more,
+        const keepsEarlier = current.beforeCursor != null && (!page.events.length || current.beforeCursor < page.events[0].id);
+        const keepHistory = !oldNotes && keepsEarlier;
+        const incoming = mergeTaskEvents(visibleNoteEvents(page.events), visibleNoteEvents(page.moved ?? []));
+        publish({ ...current, events: mergeTaskEvents(retained, incoming),
+          more: keepHistory ? current.more : page.more,
+          beforeCursor: keepHistory ? current.beforeCursor : page.events[0]?.id,
           cursor: latest == null ? current.cursor : Math.max(current.cursor ?? 0, latest), firstLive: null, loaded: true });
       } catch {
         if (!alive) return;
@@ -905,7 +911,7 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
         return;
       }
       const event = change.event;
-      if (event.task_id !== taskId || !current.events.some(held => held.id === event.id)) return;
+      if (event.task_id !== taskId || (!note && !current.events.some(held => held.id === event.id))) return;
       const events = mergeTaskEvents(current.events, [event]);
       if (events !== current.events) publish({ ...current, events });
       if (event.payload.clipped) {
@@ -917,13 +923,14 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
 
     earlier.current = () => {
       const current = active.current!;
-      const oldest = current.events[0];
-      if (!current.more || !oldest || current.loadingEarlier) return;
+      const before = current.beforeCursor ?? current.events[0]?.id;
+      if (!current.more || before == null || current.loadingEarlier) return;
       publish({ ...current, loadingEarlier: true });
-      api.events(taskId, { before: oldest.id }, controller.signal).then(page => {
+      api.events(taskId, { before }, controller.signal).then(page => {
         if (!alive) return;
         const latest = active.current!;
-        publish({ ...latest, events: mergeTaskEvents(latest.events, visibleNoteEvents(page.events)), more: page.more });
+        publish({ ...latest, events: mergeTaskEvents(latest.events, visibleNoteEvents(page.events)),
+          more: page.more, beforeCursor: page.events[0]?.id ?? before });
       }).catch(() => {}).finally(() => {
         if (alive) publish({ ...active.current!, loadingEarlier: false });
       });
@@ -933,10 +940,11 @@ export function useTaskEvents(taskId: string | null, onEvent: (fn: (e: HubEvent)
       clearTimeout(timer); clearTimeout(retry);
       controller.abort();
     };
-  }, [taskId, since, onEvent, reload, sourceReload]);
+  }, [taskId, since, onEvent, reload, sourceReload, note]);
 
   const loadEarlier = useCallback(() => earlier.current?.(), []);
   const shown = taskId == null ? undefined : history?.taskId === taskId ? history : cache.current.get(taskId);
-  return { events: shown?.events ?? EMPTY_TASK_EVENTS, more: shown?.more ?? false, loadingEarlier: shown?.loadingEarlier ?? false,
+  return { events: shown?.events ?? EMPTY_TASK_EVENTS, beforeCursor: shown?.beforeCursor,
+    more: shown?.more ?? false, loadingEarlier: shown?.loadingEarlier ?? false,
     loaded: !!shown?.loaded && shown.since === since && shown.reload === reload, loadEarlier };
 }

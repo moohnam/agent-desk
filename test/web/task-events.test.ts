@@ -6,7 +6,7 @@ import ts from 'typescript';
 import { mergeTaskEvents } from '../../web/src/posts.ts';
 import * as noteEvents from '../../web/src/noteEvents.ts';
 
-type Page = { events: ReturnType<typeof event>[]; more: boolean; incremental?: true };
+type Page = { events: ReturnType<typeof event>[]; more: boolean; incremental?: true; moved?: ReturnType<typeof event>[] };
 
 function event(id: number, task = 'a', clipped = false) {
   return { id, task_id: task, kind: 'assistant', payload: { text: String(id), ...(clipped && { clipped: true }) }, ts: '' };
@@ -57,9 +57,9 @@ function harness() {
   const onEvent = (fn: (value: ReturnType<typeof event>) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
   return {
     requests, timers,
-    render(task: string | null, reload = 0, since?: number, sourceReload = 0) {
+    render(task: string | null, reload = 0, since?: number, sourceReload = 0, note = false) {
       cursor = 0;
-      const result = useTaskEvents(task, onEvent, since, reload, sourceReload);
+      const result = useTaskEvents(task, onEvent, since, reload, sourceReload, note);
       const pending = effects; effects = []; pending.forEach(fn => fn());
       return result as { events: ReturnType<typeof event>[]; loaded: boolean; more: boolean; loadEarlier: () => void };
     },
@@ -70,6 +70,24 @@ function harness() {
 }
 
 const settled = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test('a note moved into a recent thread page does not skip history before that page', async () => {
+  const h = harness();
+  const note = (id: number, revision = 0) => ({ ...event(id), kind: 'user', payload: { text: String(id), revision } });
+  const render = () => h.render('a', 0, undefined, 0, true);
+  try {
+    render();
+    h.requests[0].resolve({ events: [note(3), note(4)], moved: [note(1, 1)], more: true });
+    await settled();
+    assert.equal(render().events.map(e => e.id).join(','), '1,3,4');
+    render().loadEarlier();
+    assert.equal(h.requests[1].at.before, 3);
+    h.requests[1].resolve({ events: [note(1, 1), note(2)], more: false });
+    await settled();
+    assert.equal(render().events.map(e => e.id).join(','), '1,2,3,4');
+    assert.equal(render().more, false);
+  } finally { h.unmount(); }
+});
 
 test('a source reload fills only the open task cursor gap and keeps the existing history visible', async () => {
   const h = harness();

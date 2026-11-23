@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
-import { Annotation, Compartment, EditorState, Prec, Transaction, type Text } from '@codemirror/state';
+import { Annotation, Compartment, EditorSelection, EditorState, Prec, Transaction, type Text } from '@codemirror/state';
 import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
-import { history, historyKeymap, isolateHistory } from '@codemirror/commands';
+import { history, historyKeymap, isolateHistory, temporarilySetTabFocusMode } from '@codemirror/commands';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 import { editorText, type DeskInput, type EditorProps } from './EditorInput.tsx';
 import { imeKey, latinKey } from './keys.ts';
+import { breakLine, indentLines } from './editorIndent.ts';
 
 type Mode = 'insert' | 'normal' | 'visual' | 'replace';
 const labels: Record<Mode, string> = { insert: '입력', normal: '일반', visual: '선택', replace: '바꾸기' };
@@ -25,6 +26,33 @@ type CommandStroke = { key: string; ime: boolean; repeat: boolean; at: number; c
 function sameImeText(stroke: CommandStroke | undefined, text: string | null): stroke is CommandStroke {
   return !!stroke && text != null && performance.now() - stroke.at < imePairMs &&
     (text === stroke.key || koreanLetter(text)?.toLowerCase() === stroke.key.toLowerCase());
+}
+
+function indentVim(editor: EditorView, key: 'indent' | 'outdent' | 'newline') {
+  const cm = getCM(editor);
+  const vim = cm?.state.vim;
+  const { state } = editor;
+  if (state.readOnly || editor.compositionStarted || vim?.exMode || cm?.state.dialog ||
+      !(vim?.insertMode || (vim?.visualMode && key !== 'newline'))) return false;
+  const text = state.doc.toString();
+  if (key === 'newline') {
+    const update = state.changeByRange(range => {
+      const edit = breakLine(text, range.from, range.to);
+      return { range: EditorSelection.cursor(edit.from + edit.insert.length), changes: edit };
+    });
+    editor.dispatch({ ...update, userEvent: 'input', scrollIntoView: true });
+  } else {
+    const { ranges, mainIndex } = state.selection;
+    const edits = new Map(ranges.flatMap(range =>
+      indentLines(key, text, range.from, range.to).map(edit => [edit.from, edit] as const)));
+    const changes = state.changes([...edits.values()]);
+    if (!changes.empty) {
+      const selection = EditorSelection.create(ranges.map(range =>
+        EditorSelection.range(changes.mapPos(range.anchor, 1), changes.mapPos(range.head, 1))), mainIndex);
+      editor.dispatch({ changes, selection, userEvent: 'input.indent', scrollIntoView: true });
+    }
+  }
+  return true;
 }
 
 export function VimInput(props: EditorProps & {
@@ -56,6 +84,7 @@ export function VimInput(props: EditorProps & {
     EditorView.contentAttributes.of({
       'data-desk-input': '', tabindex: latest.current.disabled ? '-1' : '0',
       'aria-label': latest.current.label ?? latest.current.placeholder ?? '대화 입력',
+      'aria-description': 'Tab 들여쓰기, Shift+Tab 내어쓰기. Ctrl+M 뒤 Tab으로 초점 이동.',
     }),
   ];
 
@@ -81,6 +110,10 @@ export function VimInput(props: EditorProps & {
         selection: { anchor: Math.min(start, doc.length), head: Math.min(end, doc.length) },
         extensions: [
           vim(), drawSelection(), editHistory.current.of(history()), keymap.of(historyKeymap),
+          Prec.low(keymap.of([
+            { key: 'Tab', run: view => indentVim(view, 'indent'), shift: view => indentVim(view, 'outdent') },
+            { key: 'Enter', run: view => indentVim(view, 'newline') },
+          ])),
           EditorView.lineWrapping, EditorState.allowMultipleSelections.of(true),
           settings.current.of(config()),
           // The browser must not maintain a composing text input in command mode.
@@ -395,6 +428,11 @@ export function VimInput(props: EditorProps & {
         return;
       }
       props.onKey?.(e.nativeEvent, { insert: !!state?.insertMode, leave: false });
+      if (e.ctrlKey && e.code === 'KeyM' && !e.shiftKey && !e.altKey && !e.metaKey &&
+          !e.defaultPrevented && !imeKey(event) && !editor.compositionStarted) {
+        e.preventDefault();
+        temporarilySetTabFocusMode(editor);
+      }
       if (escape && !e.defaultPrevented) escapeArmed.current = true;
     }}>
     <div className="vim-host" ref={host} />

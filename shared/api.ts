@@ -18,7 +18,9 @@ export interface Task {
   seq: number;
 }
 
-export interface WireEvent<P = unknown> { id: number; session_id: string; task_id: string; ts: string; kind: EventKind; payload: P }
+export interface WireEvent<P = unknown> {
+  id: number; session_id: string; task_id: string; ts: string; kind: EventKind; payload: P; edited_at?: string;
+}
 
 export interface Approval<I = unknown> {
   id: string; session_id: string; task_id: string; tool_name: string; input: I;

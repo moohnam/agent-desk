@@ -676,10 +676,13 @@ export class Hub extends DeskCore {
       requireNoteText(text);
       const event = this.store.eventsByIds(taskId, [eventId])[0];
       if (event?.kind !== 'user') throw new HttpError(404, '메모 게시글을 찾을 수 없습니다');
-      const payload = { text, ...((event.payload as UserPayload).author && {author:(event.payload as UserPayload).author}), revision: ((event.payload as UserPayload).revision ?? 0) + 1 };
-      this.store.updateUserEvent(taskId, eventId, payload);
+      const old = event.payload as UserPayload;
+      const payload: UserPayload = { text, ...(old.author && { author: old.author }),
+        revision: (old.revision ?? 0) + 1 };
+      const edited_at = now();
+      this.store.updateUserEvent(taskId, eventId, edited_at, payload);
       this.store.touchTask(taskId);
-      const updated = { ...event, payload };
+      const updated = { ...event, edited_at, payload };
       this.publish({ type: 'event_updated', event: updated });
       this.publishTask(taskId);
       return updated;

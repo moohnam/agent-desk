@@ -76,7 +76,7 @@ export function applyOrder(cols: ColumnDef[], order: string[] | ViewSort | undef
 const NONE = ['-'];
 const active = (t: TaskView) => t.status === 'running' || t.status === 'waiting' || t.status === 'error' || backgroundCount(t) > 0;
 /** When the task last did something: its newest post, else its last update. */
-const lastActive = (t: TaskView) => t.last_event?.ts ?? t.updated_at;
+const lastActive = (t: TaskView) => t.last_event?.edited_at ?? t.last_event?.ts ?? t.updated_at;
 const recent = (a: TaskView, b: TaskView) => lastActive(b).localeCompare(lastActive(a));
 
 /** First populated column; undefined waits for an earlier feed, null means all are empty. */

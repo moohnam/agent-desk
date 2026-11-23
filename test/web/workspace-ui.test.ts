@@ -5,6 +5,8 @@ import * as posts from '../../web/src/posts.ts';
 import * as feedCache from '../../web/src/feedCache.ts';
 import * as noteEvents from '../../web/src/noteEvents.ts';
 import * as keys from '../../web/src/keys.ts';
+import * as editorIndent from '../../web/src/editorIndent.ts';
+import * as emacsKeys from '../../web/src/emacsKeys.ts';
 import * as documentLinks from '../../web/src/documentLinks.ts';
 import type { HubEvent } from '../../web/src/types.ts';
 import { readFileSync } from 'node:fs';
@@ -362,6 +364,7 @@ test('loading Vim keeps a focused draft intact and carries Escape into normal mo
   const { EditorInput } = load('EditorInput.tsx', {
     react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: Symbol('Fragment') },
     './editorMode.ts': { useEditorMode: () => 'vim' }, './VimInput.tsx': { VimInput },
+    './editorIndent.ts': editorIndent, './emacsKeys.ts': emacsKeys,
   }, { document });
   const inputRef = { current: null };
   let edits = 0, exits = 0, sends = 0, blurs = 0;
@@ -375,7 +378,7 @@ test('loading Vim keeps a focused draft intact and carries Escape into normal mo
   assert.equal(inputRef.current, native);
   textarea.onChange({ target: { value: 'accidental edit', selectionStart: 2 } });
   assert.equal(edits, 1);
-  textarea.onKeyDown({ key: 'Enter', metaKey: true, nativeEvent: { key: 'Enter' } });
+  textarea.onKeyDown({ key: 'Enter', metaKey: true, nativeEvent: { key: 'Enter', metaKey: true } });
   assert.equal(sends, 1);
   let blocked = 0;
   textarea.onKeyDown({

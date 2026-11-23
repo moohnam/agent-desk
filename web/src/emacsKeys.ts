@@ -75,16 +75,20 @@ function revealCaret(el: Field) {
 }
 
 /** Replaces from..to as typing would: undo works and React's onChange sees it. */
-function replace(el: Field, from: number, to: number, text: string) {
+function replace(el: Field, from: number, to: number, text: string, selection?: { start: number; end: number }) {
   if (from === to && !text) return;
+  const direction = el.selectionDirection ?? undefined;
   el.setSelectionRange(from, to);
   const ok = text ? document.execCommand('insertText', false, text) : document.execCommand('delete');
   if (!ok) {
     el.setRangeText(text, from, to, 'end');
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  if (selection) el.setSelectionRange(selection.start, selection.end, direction);
   revealCaret(el);
 }
+
+export { replace as replaceFieldText };
 
 /** Ctrl+N / Ctrl+P: the field's completion list if one is open (or the field is one line), else a line. */
 function upDown(el: Field, down: boolean) {

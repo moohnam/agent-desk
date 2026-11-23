@@ -130,6 +130,7 @@ function PostViewInner(props: Props) {
   ) : post.kind === 'assistant' || post.kind === 'user' ? <Markdown text={String(p.text ?? '')} mentions={post.kind === 'user' && !isNote} taskId={post.taskId} onLocalLink={onLocalLink} onNotice={props.onError} />
     : richText(String(p.text ?? '')), [post.kind, isNote, p, onLocalLink, props.onError]);
   const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
+  const postTime = post.event.edited_at ?? post.event.ts;
   const engine = task?.engine ?? 'claude';
   const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', userAvatar(p.author?.ownerName)] : post.kind === 'alert' ? ['alert', '!']
     : [engine, ENGINE_SHORT[engineOf(engine)]];
@@ -176,8 +177,8 @@ function PostViewInner(props: Props) {
           {tag}
           {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>}
           <span className="spacer" />
-          <time className="time" dateTime={post.event.ts} title={new Date(post.event.ts).toLocaleString('ko-KR')}>
-            <RelTime iso={post.event.ts} />
+          <time className="time" dateTime={postTime} title={`${post.event.edited_at ? '수정 ' : ''}${new Date(postTime).toLocaleString('ko-KR')}`}>
+            <RelTime iso={postTime} />
           </time>
           {copyText && <CopyButton text={copyText} label="메시지 Markdown 원문 복사" className="reference-button" onNotice={props.onError} />}
           {canEditNote && !editing && <>

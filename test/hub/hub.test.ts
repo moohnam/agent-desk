@@ -203,7 +203,8 @@ test('task title updates trim, publish, reject empty or missing tasks, and keep 
   assert.equal(hub.renameTask(task.id, long).title, long);
 });
 
-test('notes use an existing project, accept literal posts without a runner, and publish edits and deletes', () => {
+test('notes use an existing project, accept literal posts without a runner, and publish edits and deletes', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-01') });
   const { hub, runner, dir } = setup({ connect: false });
   const project = hub.createProject('web', dir);
   const api = (method: string, path: string, body?: Record<string, unknown>) =>
@@ -231,8 +232,13 @@ test('notes use an existing project, accept literal posts without a runner, and 
   assert.deepEqual(second.payload, { text: '#note #fork 원문', revision: 0 });
   assert.equal(api('GET', `/feed/count?task=${note.id}`).body.posts, 2);
   const row = `${route}/notes/${first.id}`;
+  t.mock.timers.setTime(Date.parse('2026-01-02'));
   const edited = api('PATCH', row, { text: '#now 수정' }).body;
-  assert.deepEqual(edited, { ...first, payload: { text: '#now 수정', revision: 1 } });
+  assert.deepEqual(edited, { ...first, edited_at: '2026-01-02T00:00:00.000Z', payload: { text: '#now 수정', revision: 1 } });
+  assert.equal(hub.taskView(hub.store.getTask(note.id)!).last_event?.id, first.id);
+  assert.deepEqual(api('GET', `/feed?task=${note.id}&limit=1`).body.map((e: { id: number }) => e.id), [second.id]);
+  assert.deepEqual(api('GET', `/feed?task=${note.id}&limit=1&before_ts=9999-12-31T23:59:59Z&edited_order=1`).body.map((e: { id: number }) => e.id), [edited.id]);
+  assert.deepEqual(api('GET', `/feed?task=${note.id}&before_ts=${edited.edited_at}&cursor_id=${edited.id}&edited_order=1`).body.map((e: { id: number }) => e.id), [second.id]);
   assert.deepEqual(messages.find(m => m.type === 'event_updated'), { type: 'event_updated', event: edited });
   assert.throws(() => api('PATCH', row, { text: '   ' }), { status: 400 });
   assert.throws(() => api('DELETE', `${route}/notes/0`), { status: 400 });
@@ -256,6 +262,23 @@ test('notes use an existing project, accept literal posts without a runner, and 
   assert.throws(() => api('POST', `/tasks/${task.id}/messages`, { text: '#new 실행', note_only: true }), { status: 409 });
   const agentPost = hub.store.listEvents(task.id)[0];
   assert.throws(() => api('PATCH', `/tasks/${task.id}/notes/${agentPost.id}`, { text: '변경 금지' }), { status: 404 });
+});
+
+test('moving an old note into the newest thread page keeps the older history cursor intact', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-01') });
+  const { hub, dir } = setup({ connect: false });
+  hub.createProject('notes', dir);
+  const note = hub.compose('@notes #note 긴 메모');
+  for (let i = 0; i < 502; i++) hub.sendMessage(note.id, `메모 ${i}`);
+  const events = hub.store.listEvents(note.id, 502);
+  t.mock.timers.setTime(Date.parse('2026-01-02'));
+  hub.updateNote(note.id, events[0].id, '맨 앞 글 수정');
+  const read = (query = '') => workspaceApi(hub, 'GET', new URL(`/tasks/${note.id}/events${query}`, 'http://workspace')).body;
+  const newest = read();
+  assert.equal(newest.events[0].id, events[2].id);
+  assert.deepEqual(newest.moved.map((e: { id: number }) => e.id), [events[0].id]);
+  assert.equal(newest.more, true);
+  assert.deepEqual(read(`?before=${newest.events[0].id}`).events.map((e: { id: number }) => e.id), events.slice(0, 2).map(e => e.id));
 });
 
 test('attached notes are immutable across edits and preserve literal tags when queued to an agent', () => {

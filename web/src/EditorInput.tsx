@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { useEditorMode } from './editorMode.ts';
 import { imeKey } from './keys.ts';
+import { breakLine, indentationKey, indentTextarea } from './editorIndent.ts';
+import { replaceFieldText } from './emacsKeys.ts';
 
 export type DeskInput = HTMLTextAreaElement | {
   element: HTMLElement;
@@ -50,6 +52,7 @@ export function EditorInput(props: EditorProps) {
   const [startInInsert, setStartInInsert] = useState(true);
   const escapeArmed = useRef(false);
   const imeEscapeDown = useRef(false);
+  const tabFocus = useRef(false);
   const native = useRef<HTMLTextAreaElement>(null);
   const handoff = useRef<{ focused: boolean; start: number; end: number }>(undefined);
   const attach = useCallback((element: HTMLTextAreaElement | null) => {
@@ -90,17 +93,19 @@ export function EditorInput(props: EditorProps) {
   return <>
     <textarea id={props.id} className="input" ref={attach} rows={props.rows} value={props.value} aria-label={props.label}
       placeholder={props.placeholder} disabled={props.disabled} readOnly={readOnly} autoFocus={props.autoFocus}
+      aria-description="Tab 들여쓰기, Shift+Tab 내어쓰기. Ctrl+M 뒤 Tab으로 초점 이동."
       onChange={e => { if (!readOnly) props.onChange(e.target.value, e.target.selectionStart); }}
       onSelect={e => props.onSelect?.(e.currentTarget.selectionStart)}
-      onFocus={props.onFocus} onBlur={() => { escapeArmed.current = false; imeEscapeDown.current = false; props.onBlur?.(); }}
+      onFocus={props.onFocus} onBlur={() => {
+        escapeArmed.current = false; imeEscapeDown.current = false; tabFocus.current = false; props.onBlur?.();
+      }}
       onPointerDown={() => { escapeArmed.current = false; }}
       onCompositionStart={() => { composingNow.current = true; setComposing(true); }}
       onCompositionEnd={() => { composingNow.current = false; setComposing(false); }}
       onKeyUp={e => { if (e.key === 'Escape' || e.code === 'Escape') imeEscapeDown.current = false; }}
       onKeyDown={e => {
-        if (!pending) { props.onKey?.(e.nativeEvent, { insert: true, leave: true }); return; }
         const escape = e.key === 'Escape' || (e.code === 'Escape' && imeKey(e.nativeEvent));
-        if (escape && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        if (pending && escape && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
           const plain = !imeKey(e.nativeEvent) && !composingNow.current;
           if (!e.repeat && !imeEscapeDown.current) {
             if (!startInInsert && escapeArmed.current && plain) e.currentTarget.blur();
@@ -116,7 +121,29 @@ export function EditorInput(props: EditorProps) {
         }
         imeEscapeDown.current = false;
         escapeArmed.current = false;
-        props.onKey?.(e.nativeEvent, { insert: !readOnly, leave: false });
+        if (!composingNow.current && !imeKey(e.nativeEvent) && e.ctrlKey && e.code === 'KeyM' &&
+          !e.shiftKey && !e.altKey && !e.metaKey && !e.defaultPrevented) {
+          tabFocus.current = true;
+          e.preventDefault();
+          return;
+        }
+        if (tabFocus.current && e.key === 'Tab') { tabFocus.current = false; return; }
+        if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) tabFocus.current = false;
+        props.onKey?.(e.nativeEvent, { insert: !readOnly, leave: !pending });
+        if (readOnly || composingNow.current) return;
+        const key = indentationKey(e.nativeEvent);
+        if (!key) return;
+        const input = e.currentTarget;
+        if (key === 'newline') {
+          const { from, to, insert } = breakLine(input.value, input.selectionStart, input.selectionEnd);
+          if (insert === '\n') return; // Use native editing for a plain newline.
+          e.preventDefault();
+          replaceFieldText(input, from, to, insert);
+          return;
+        }
+        e.preventDefault();
+        const edit = indentTextarea(key, input.value, input.selectionStart, input.selectionEnd);
+        if (edit) replaceFieldText(input, edit.from, edit.to, edit.insert, edit);
       }} />
     {vim && <div className="editor-mode muted small" role="status">{failed ? 'Vim 편집기를 불러오지 못했습니다. 기본 입력창을 사용 중입니다.' : 'Vim 편집기를 불러오는 중입니다.'}</div>}
   </>;

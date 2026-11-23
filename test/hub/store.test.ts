@@ -11,6 +11,27 @@ import type { HubEvent } from '../../web/src/types.ts';
 
 const TS = '2026-10-29T10:00:00.000Z';
 
+test('existing events keep their original time when a note gets an edit time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'desk-note-time-'));
+  const path = join(dir, 'desk.db');
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE event (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
+    ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);`);
+  old.prepare('INSERT INTO event VALUES (1, ?, ?, ?, ?, ?)').run('note', 'note', TS, 'user', '{"text":"원문","revision":0}');
+  old.close();
+  try {
+    const store = new Store(path);
+    try {
+      const [first] = store.eventsByIds('note', [1]);
+      assert.equal(first.ts, TS);
+      assert.equal(first.edited_at, undefined);
+      const editedAt = '2026-11-23T09:00:00.000Z';
+      store.updateUserEvent('note', 1, editedAt, { text: '수정', revision: 1 });
+      assert.deepEqual(store.eventsByIds('note', [1]), [{ ...first, edited_at: editedAt, payload: { text: '수정', revision: 1 } }]);
+    } finally { store.database.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('old task rows gain a persistent title revision with the same column order as fresh stores', () => {
   const dir = mkdtempSync(join(tmpdir(), 'desk-title-migrate-'));
   const path = join(dir, 'desk.db');

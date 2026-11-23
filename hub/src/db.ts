@@ -8,6 +8,10 @@ import { ALERT_STATES, type EventKind } from '../../shared/events.ts';
 
 /** An event as stored; its payload is checked where it is read. */
 export type Event = WireEvent;
+type EventRow = Omit<Event, 'payload' | 'edited_at'> & { payload_json: string; edited_at?: string | null };
+function readEventRow({ payload_json, edited_at, ...event }: EventRow): Event {
+  return { ...event, ...(edited_at && { edited_at }), payload: JSON.parse(payload_json) };
+}
 
 export interface Session {
   id: string; task_id: string; engine: string; engine_session_id: string | null; cwd: string;
@@ -133,7 +137,7 @@ CREATE TABLE IF NOT EXISTS session (
   runner_id TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
-  ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);
+  ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, edited_at TEXT);
 CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
 CREATE INDEX IF NOT EXISTS event_time ON event(ts, id);
 CREATE TABLE IF NOT EXISTS approval (
@@ -195,6 +199,9 @@ export class Store {
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     if (path !== ':memory:') for (const sidecar of [`${path}-wal`, `${path}-shm`]) if (existsSync(sidecar)) chmodSync(sidecar, 0o600);
     this.db.exec(SCHEMA);
+    const eventCols = this.db.prepare('PRAGMA table_info(event)').all();
+    if (!eventCols.some(c => c.name === 'edited_at')) this.db.exec('ALTER TABLE event ADD COLUMN edited_at TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS event_activity_time ON event(COALESCE(edited_at, ts), id)');
     const cols = this.db.prepare('PRAGMA table_info(session)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'permission_mode')) {
       this.db.exec("ALTER TABLE session ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default'");
@@ -470,9 +477,9 @@ export class Store {
       WHERE excluded.stream <> local_runner_output.stream OR excluded.sequence > local_runner_output.sequence`)
       .run(runnerId, stream, sequence).changes !== 0;
   }
-  updateUserEvent(taskId: string, id: number, payload: unknown) {
-    this.db.prepare("UPDATE event SET payload_json = ? WHERE task_id = ? AND id = ? AND kind = 'user'")
-      .run(JSON.stringify(payload), taskId, id);
+  updateUserEvent(taskId: string, id: number, editedAt: string, payload: unknown) {
+    this.db.prepare("UPDATE event SET edited_at = ?, payload_json = ? WHERE task_id = ? AND id = ? AND kind = 'user'")
+      .run(editedAt, JSON.stringify(payload), taskId, id);
   }
   deleteUserEvent(taskId: string, id: number): boolean {
     return this.db.prepare("DELETE FROM event WHERE task_id = ? AND id = ? AND kind = 'user'").run(taskId, id).changes !== 0;
@@ -502,20 +509,26 @@ export class Store {
     const rows = this.db.prepare(
       `SELECT * FROM event WHERE task_id = ? AND id < ? AND (id >= ? OR id IN
          (SELECT id FROM event WHERE task_id = ? AND id < ? ORDER BY id DESC LIMIT ?)) ORDER BY id`,
-    ).all(taskId, before, since ?? Number.MAX_SAFE_INTEGER, taskId, before, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
-    return rows.map(({ payload_json, ...e }) => ({ ...e, payload: JSON.parse(payload_json) }));
+    ).all(taskId, before, since ?? Number.MAX_SAFE_INTEGER, taskId, before, limit) as unknown as EventRow[];
+    return rows.map(readEventRow);
   }
   /** The task's events with these ids, oldest first: whole payloads of events a client got cut. */
   eventsByIds(taskId: string, ids: number[]): Event[] {
     if (!ids.length) return [];
     const rows = this.db.prepare(`SELECT * FROM event WHERE task_id = ? AND id IN (${ids.map(() => '?').join(',')}) ORDER BY id`)
-      .all(taskId, ...ids) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
-    return rows.map(({ payload_json, ...e }) => ({ ...e, payload: JSON.parse(payload_json) }));
+      .all(taskId, ...ids) as unknown as EventRow[];
+    return rows.map(readEventRow);
   }
   eventsAfter(taskId: string, after: number, limit: number): Event[] {
     const rows = this.db.prepare('SELECT * FROM event WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?')
-      .all(taskId, after, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
-    return rows.map(({ payload_json, ...event }) => ({ ...event, payload: JSON.parse(payload_json) }));
+      .all(taskId, after, limit) as unknown as EventRow[];
+    return rows.map(readEventRow);
+  }
+  /** Old IDs moved into a note's newest page by an edit, outside the ID-based paging cursor. */
+  movedNotes(taskId: string, before: number, since: string): Event[] {
+    const rows = this.db.prepare(`SELECT * FROM event WHERE task_id = ? AND id < ? AND edited_at > ? AND kind = 'user'
+      ORDER BY edited_at DESC, id DESC LIMIT 500`).all(taskId, before, since) as unknown as EventRow[];
+    return rows.map(readEventRow);
   }
   /** Whether the task has events below `id` (more history before a page that starts there). */
   hasEventsBefore(taskId: string, id: number): boolean {
@@ -525,19 +538,20 @@ export class Store {
    * Most recent events across all tasks, oldest first; `beforeId` pages further back. `f` narrows
    * them to a feed column's tasks, projects, task statuses, event kinds, and a text search.
    */
-  listFeed(limit = 1000, beforeId = Number.MAX_SAFE_INTEGER, f: FeedFilter = {}, cursor?: { ts: string; id: number }): Event[] {
+  listFeed(limit = 1000, beforeId = Number.MAX_SAFE_INTEGER, f: FeedFilter = {}, cursor?: { ts: string; id: number; editedOrder?: boolean }): Event[] {
     const { where, args } = feedWhere(f);
     if (cursor) {
+      const time = cursor.editedOrder ? 'COALESCE(e.edited_at, e.ts)' : 'e.ts';
       const rows = this.db.prepare(`SELECT e.* FROM event e JOIN task t ON t.id=e.task_id
-        WHERE (e.ts < ? OR (e.ts = ? AND e.id < ?)) AND ${where}
-        ORDER BY e.ts DESC,e.id DESC LIMIT ?`).all(cursor.ts,cursor.ts,cursor.id,...args,limit) as unknown as (Omit<Event,'payload'> & {payload_json:string})[];
-      return rows.reverse().map(({payload_json,...e})=>({...e,payload:JSON.parse(payload_json)}));
+        WHERE (${time} < ? OR (${time} = ? AND e.id < ?)) AND ${where}
+        ORDER BY ${time} DESC,e.id DESC LIMIT ?`).all(cursor.ts,cursor.ts,cursor.id,...args,limit) as unknown as EventRow[];
+      return rows.reverse().map(readEventRow);
     }
     const rows = this.db.prepare(
       `SELECT * FROM (SELECT e.* FROM event e JOIN task t ON t.id = e.task_id WHERE e.id < ? AND ${where}
          ORDER BY e.id DESC LIMIT ?) ORDER BY id`,
-    ).all(beforeId, ...args, limit) as unknown as (Omit<Event, 'payload'> & { payload_json: string })[];
-    return rows.map(({ payload_json, ...e }) => ({ ...e, payload: JSON.parse(payload_json) }));
+    ).all(beforeId, ...args, limit) as unknown as EventRow[];
+    return rows.map(readEventRow);
   }
   /**
    * How many posts (web buildPosts) a feed column has in all, and in how many tasks: the events
@@ -555,14 +569,14 @@ export class Store {
    * tool result can be hundreds of KB, sent again with every task update. A status event keeps its
    * state (`{ state }`), so a page can tell a turn that finished from one that was interrupted.
    */
-  lastEvent(taskId: string): Event | undefined {
+  lastEvent(taskId: string, note = false): Event | undefined {
     const row = this.db.prepare(
-      `SELECT id, session_id, task_id, ts, kind, CASE WHEN kind = 'status' THEN json_extract(payload_json, '$.state') END AS state
-         FROM event WHERE task_id = ? ORDER BY id DESC LIMIT 1`,
-    ).get(taskId) as unknown as (Omit<Event, 'payload'> & { state: string | null }) | undefined;
+      `SELECT id, session_id, task_id, ts, kind, edited_at, CASE WHEN kind = 'status' THEN json_extract(payload_json, '$.state') END AS state
+         FROM event WHERE task_id = ? ORDER BY ${note ? 'COALESCE(edited_at, ts) DESC, ' : ''}id DESC LIMIT 1`,
+    ).get(taskId) as unknown as (Omit<Event, 'payload' | 'edited_at'> & { state: string | null; edited_at: string | null }) | undefined;
     if (!row) return undefined;
-    const { state, ...e } = row;
-    return { ...e, payload: state == null ? null : { state } };
+    const { state, edited_at, ...e } = row;
+    return { ...e, ...(edited_at && { edited_at }), payload: state == null ? null : { state } };
   }
 
   createApproval(a: Approval) {
@@ -620,10 +634,8 @@ export class Store {
   /** The task's newest `user` event, or its newest `assistant` one after event `afterId`. */
   lastEventOf(taskId: string, kind: 'user' | 'assistant', afterId = 0): Event | undefined {
     const row = this.db.prepare('SELECT * FROM event WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id DESC LIMIT 1')
-      .get(taskId, kind, afterId) as unknown as (Omit<Event, 'payload'> & { payload_json: string }) | undefined;
-    if (!row) return undefined;
-    const { payload_json, ...e } = row;
-    return { ...e, payload: JSON.parse(payload_json) };
+      .get(taskId, kind, afterId) as unknown as EventRow | undefined;
+    return row && readEventRow(row);
   }
   /** Latest user-authored prompt, excluding another agent's delivered request. */
   lastUserMessageId(taskId: string): number | null {
