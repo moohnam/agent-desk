@@ -230,6 +230,66 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await openReply(page, origin);
       await page.waitForSelector('.deck-space [data-col="thread"]');
     }, false, 'emacs'));
+    await t.test('column navigation reaches its target even when animation frames are slow', () => withPage(async page => {
+      await page.setViewport({ width: 1000, height: 800 });
+      await page.evaluateOnNewDocument(() => {
+        localStorage.setItem('agent-desk.view', 'custom');
+        localStorage.setItem('agent-desk.composeOpen', '0');
+        localStorage.setItem('agent-desk.columns.v2', JSON.stringify(Array.from({ length: 6 }, (_, i) =>
+          ({ id: `c${i}`, title: `컬럼 ${i}`, filter: { taskIds: [`t${i}`] } }))));
+      });
+      await page.goto(origin);
+      await page.waitForSelector('.deck section[data-col="c0"] [data-post]');
+      // Simulate sparse frames without a CPU busy loop or machine-dependent throttling.
+      await page.evaluate(() => {
+        const raf = window.requestAnimationFrame.bind(window);
+        const cancel = window.cancelAnimationFrame.bind(window);
+        const pending = new Map();
+        let sequence = 0;
+        window.requestAnimationFrame = callback => {
+          const id = ++sequence;
+          const entry = { timer: setTimeout(() => {
+            entry.frame = raf(now => { pending.delete(id); callback(now); });
+          }, 100), frame: null };
+          pending.set(id, entry);
+          return id;
+        };
+        window.cancelAnimationFrame = id => {
+          const entry = pending.get(id);
+          if (!entry) return;
+          clearTimeout(entry.timer);
+          if (entry.frame != null) cancel(entry.frame);
+          pending.delete(id);
+        };
+      });
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await page.waitForSelector('.deck section[data-col="c2"].focused');
+      await page.keyboard.press('ArrowLeft');
+      await page.waitForSelector('.deck section[data-col="c1"].focused');
+      const stoppedAt = await page.$eval('.deck', deck => deck.scrollLeft);
+      await new Promise(resolve => setTimeout(resolve, 400));
+      assert.equal(await page.$eval('.deck', deck => deck.scrollLeft), stoppedAt,
+        'returning to a visible column must cancel the previous scroll target');
+      await page.$eval('.deck', deck => {
+        const scroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft');
+        window.columnScrollSteps = [];
+        Object.defineProperty(deck, 'scrollLeft', {
+          get() { return scroll.get.call(this); },
+          set(value) { window.columnScrollSteps.push(value); scroll.set.call(this, value); },
+        });
+      });
+      await page.keyboard.press('ArrowRight');
+      await page.waitForSelector('.deck section[data-col="c2"].focused');
+      await page.waitForFunction(() => {
+        const deck = document.querySelector('.deck');
+        const column = deck.querySelector('section[data-col="c2"]');
+        const target = Math.min(column.offsetLeft + column.offsetWidth + 8 - deck.clientWidth, column.offsetLeft - 8);
+        return Math.abs(deck.scrollLeft - target) < 2 && deck.style.scrollSnapType === '';
+      }, { timeout: 800 });
+      assert.ok(await page.evaluate(start => window.columnScrollSteps[0] > start, stoppedAt),
+        'the first animation frame must move, even if keyboard repeat replaces the next frame');
+    }));
 
     for (const editorMode of ['vim', 'emacs']) {
       await t.test(`Tab and Enter keep indentation in the reply composer (${editorMode})`, () => withPage(async page => {
