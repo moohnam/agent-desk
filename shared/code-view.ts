@@ -2,6 +2,9 @@ export interface CodeViewFile { path: string; status: 'modified' | 'added' | 'de
 export interface CodeViewResult {
   root: string; head: string | null; files: CodeViewFile[];
   commit?: string; commits?: { id: string; subject: string }[];
+  registeredWorktree?:string|null;
+  branches?: {ref:string;id:string}[]; worktrees?: {path:string;branch?:string}[];
+  base?: string; target?: string; baseId?: string; targetId?: string;
   path?: string; diff?: string; binary?: boolean;
 }
 export interface DiffLine { kind: 'add' | 'delete' | 'context' | 'header'; text: string; old?: number; next?: number }

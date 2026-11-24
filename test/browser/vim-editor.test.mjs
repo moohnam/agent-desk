@@ -57,6 +57,7 @@ function fixtureServer() {
           return;
         }
         let body = (layout === 'grouped-deep' ? deepGroupedFeed : layout?.startsWith('grouped-') ? groupedFeed : fixture)(url);
+        if (url.pathname === '/api/prompt-templates') body = {revision:'initial',items:[]};
         if (url.pathname === '/api/updates') body = {
           ...body, targets: [],
           ...(request.headers['x-desk-settings-update'] && { current: 'old', latest: 'new' }),
@@ -367,12 +368,18 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const thread=document.querySelector('.thread-split').getBoundingClientRect();
         return code.right <= thread.left;
       }),'code is to the left of the conversation');
-      const wrapControl='.code-wrap-option input';
+      const wrapControl='input[aria-label="코드 diff 긴 줄 자동 줄바꿈"]';
+      const toggleWrap=async()=>{
+        await page.$eval('.settings-button',button=>button.click());
+        await page.waitForSelector(wrapControl);
+        await page.click(wrapControl);
+        await page.click('[role="dialog"][aria-label="설정"] button[aria-label="닫기"]');
+      };
       const longLine=()=>page.$eval('.code-diff',pane=>pane.scrollWidth>pane.clientWidth);
       assert.equal(await longLine(),false,'long tokens wrap by default');
-      await page.click(wrapControl);
+      await toggleWrap();
       assert.equal(await longLine(),true,'disabling wrap restores horizontal scroll');
-      await page.click(wrapControl);
+      await toggleWrap();
       assert.equal(await longLine(),false,'restoring wrap removes horizontal scroll again');
       assert.ok(await page.$eval('.code-selectors',row=>{
         const [commit,file]=Array.from(row.querySelectorAll('select'),el=>el.getBoundingClientRect());
@@ -409,14 +416,14 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.select('select[aria-label="변경 기준"]',commit);
       await page.waitForSelector('.code-panel .code-line.add');
       assert.deepEqual(requests.slice(7).map(body=>[body.commit,body.path]),[[commit,undefined],[commit,'src/example.ts']]);
-      await page.click(wrapControl);
+      await toggleWrap();
       await page.click('button[aria-label="코드 창 닫기"]');
       assert.equal(await page.$('.code-panel'),null);
       await page.click('button[aria-label="코드 변경 보기"]');
-      await page.waitForSelector(wrapControl);
-      assert.equal(await page.$eval(wrapControl,node=>node.checked),false,'wrap preference survives reopening');
+      await page.waitForSelector('.code-diff:not(.wrap)');
+      assert.equal(await page.evaluate(()=>localStorage.getItem('agent-desk.diff-wrap')),'off','wrap preference survives reopening');
       await page.waitForSelector('.code-line.delete button.code-sign');
-      await page.click(wrapControl);
+      await toggleWrap();
       await page.click('.code-line.delete button.code-sign');
       await page.keyboard.down('Shift');
       await page.click('.code-line.add:last-child button.code-sign');
@@ -467,6 +474,121 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('button[aria-label="코드 새로고침"]');
       await waitFile('b.ts');
       assert.equal(await page.$('.code-panel [role="alert"]'),null);
+    },false,'emacs'));
+
+    for (const width of [1440,390]) await t.test(`code templates manage, preview, send and preserve drafts (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      let templates={revision:'initial',items:[]},failSend=true;const sends=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        const respond=(body,status=200)=>void request.respond({status,contentType:'application/json',body:JSON.stringify(body)});
+        if(path==='/api/prompt-templates'){
+          if(request.method()==='PUT')templates={...JSON.parse(request.postData()),revision:'saved'};
+          return respond(templates);
+        }
+        if(path==='/api/code-view'){
+          const body=JSON.parse(request.postData());
+          return respond({root:'/test',head:'abcdef',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -1 +1 @@\n-old();\n+newCode();\n'}:{})});
+        }
+        if(path.endsWith('/messages')&&request.method()==='POST'){
+          sends.push(JSON.parse(request.postData()));return failSend?respond({error:'send failed'},500):respond({task_id:'t0'});
+        }
+        void request.continue();
+      });
+      const clickText=(selector,text)=>page.$$eval(selector,(nodes,text)=>{const node=nodes.find(node=>node.textContent===text);if(!node)throw new Error(text);node.click();},text);
+      await openReply(page,origin);await page.type('.reply-box textarea','기존 초안');
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-line.add button');
+      await clickText('.code-actions button','템플릿 관리');
+      await page.waitForFunction(()=>!Array.from(document.querySelectorAll('[role="dialog"] button')).find(b=>b.textContent==='템플릿 추가')?.disabled);
+      await clickText('[role="dialog"] button','템플릿 추가');
+      await page.$eval('[aria-label="템플릿 이름"]',node=>{node.select();});await page.type('[aria-label="템플릿 이름"]','코드 검토');
+      await page.type('[aria-label="템플릿 내용"]','이 코드의 문제와 수정안을 설명해주세요.');
+      await clickText('[role="dialog"] button','템플릿 저장');
+      await page.waitForFunction(()=>document.querySelector('[role="dialog"]')?.textContent.includes('템플릿을 저장했습니다.'));
+      await page.focus('[role="dialog"] button[aria-label="닫기"]');
+      await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
+      assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'최신 목록 다시 불러오기');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('[role="dialog"]',{hidden:true});
+      await page.select('[aria-label="코드 프롬프트 템플릿"]',templates.items[0].id);
+      await page.click('.code-line.delete button');await page.keyboard.down('Shift');await page.click('.code-line.add button');await page.keyboard.up('Shift');
+      await page.click('.code-actions summary');
+      const preview=await page.$eval('[aria-label="코드 전송 내용"]',node=>node.textContent);
+      assert.ok(preview.startsWith('이 코드의 문제와 수정안을 설명해주세요.\n\n'));
+      assert.ok(preview.includes('-old();\n+newCode();'));assert.ok(preview.includes('이전 1 / 이후 1'));
+      await clickText('.code-actions button','바로 전송');
+      await page.waitForFunction(()=>document.querySelector('.code-actions [role="alert"]')?.textContent.includes('send failed'));
+      assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
+      assert.equal(sends[0].text,preview);
+      failSend=false;
+      await clickText('.code-actions button','바로 전송');
+      await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
+      await clickText('.code-actions button','바로 전송');
+      assert.equal(sends.length,2,'same selection cannot be submitted twice after success');
+      assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
+      await page.click('.quote-code');
+      assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안\n\n'+preview+'\n');
+      if(width===390)await page.click('button[aria-label="코드 변경 보기"]');
+      await clickText('.code-actions button','템플릿 관리');
+      await page.waitForSelector('[aria-label="템플릿 내용"]');
+      assert.equal(await page.$eval('[aria-label="템플릿 내용"]',node=>node.value),'이 코드의 문제와 수정안을 설명해주세요.');
+      page.once('dialog',dialog=>dialog.accept());await clickText('[role="dialog"] button','템플릿 삭제');
+      await clickText('[role="dialog"] button','템플릿 저장');
+      await page.waitForFunction(()=>document.querySelector('[role="dialog"]')?.textContent.includes('템플릿을 저장했습니다.'));
+      assert.equal(templates.items.length,0);
+    },false,'emacs'));
+
+    await t.test('branch and worktree comparisons carry the selected source into quoted code',()=>withPage(async page=>{
+      const requests=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());requests.push(body);
+        void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:body.worktree||'/repo',head:'a'.repeat(40),files:[{path:'a.ts',status:'modified'}],
+          branches:[{ref:'refs/heads/main',id:'a'.repeat(40)},{ref:'refs/heads/feature',id:'b'.repeat(40)}],
+          worktrees:[{path:'/repo',branch:'refs/heads/main'},{path:'/repo-feature',branch:'refs/heads/feature'}],
+          ...(body.base&&body.target?{base:body.base,target:body.target,baseId:'a'.repeat(40),targetId:'b'.repeat(40)}:{}),
+          ...(body.path?{path:body.path,diff:'@@ -1 +1 @@\n-before\n+'+(body.base?'committed':body.worktree?'dirty worktree':'session')+'\n'}:{}),
+        })});
+      });
+      await openReply(page,origin);await page.click('[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-line.add');
+      await page.select('[aria-label="코드 worktree"]','/repo-feature');
+      await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='dirty worktree');
+      await page.click('.code-branches summary');
+      await page.select('[aria-label="기준 브랜치"]','refs/heads/main');
+      await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
+      await page.select('[aria-label="대상 브랜치"]','refs/heads/feature');
+      await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='committed');
+      await page.click('.code-line.add button');await page.click('.quote-code');
+      const text=await page.$eval('.reply-box textarea',node=>node.value);
+      assert.ok(text.includes('/repo-feature'));assert.ok(text.includes('refs/heads/main'));assert.ok(text.includes('refs/heads/feature'));assert.ok(text.includes('b'.repeat(40)));assert.ok(text.includes('+committed'));
+      assert.equal(requests.at(-1).worktree,'/repo-feature');assert.equal(requests.at(-1).target,'refs/heads/feature');
+    },false,'emacs'));
+
+    await t.test('code sends survive a panel remount without duplicate requests',()=>withPage(async page=>{
+      let pending;const sends=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/code-view'){
+          const body=JSON.parse(request.postData());return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/repo',head:'abc',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -0,0 +1 @@\n+newCode();\n'}:{})})});
+        }
+        if(path.endsWith('/messages')&&request.method()==='POST'){sends.push(request);pending=request;return;}
+        void request.continue();
+      });
+      const open=async()=>{await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add button');await page.click('.code-line.add button');};
+      const send=()=>page.$$eval('.code-actions button',nodes=>nodes.find(node=>node.textContent==='바로 전송').click());
+      await openReply(page,origin);await open();const sending=page.waitForRequest(request=>request.url().endsWith('/messages'));await send();await sending;
+      assert.equal(sends.length,1);
+      const id=sends[0].headers()['x-desk-operation-id'];assert.ok(id);
+      await page.click('[aria-label="코드 창 닫기"]');await open();await send();
+      await pending.respond({status:200,contentType:'application/json',body:JSON.stringify({task_id:'t0'})});
+      await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
+      assert.equal(sends.length,1);
     },false,'emacs'));
 
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {

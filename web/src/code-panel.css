@@ -19,3 +19,11 @@
 .quote-code{align-self:flex-start;margin:0 8px 6px;padding:4px 8px}
 .code-line.quoted{box-shadow:inset 3px 0 var(--text);background:var(--border)}
 .code-line button.code-sign{padding:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.code-actions{padding:0 8px 8px;font-size:12px;max-height:40%;overflow:auto;flex-shrink:0}
+.code-actions .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.code-actions select{max-width:100%;min-width:0}.code-actions label{min-width:0}
+.code-actions pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto}
+.code-actions .quote-code{margin:4px 0}.code-actions button{padding:4px 6px}.code-actions p{padding:4px 0;margin:0}
+.code-worktree{display:flex;gap:6px;padding:0 8px 8px;font-size:12px}.code-worktree select{min-width:0;flex:1}
+.code-branches{margin:0 8px 8px;font-size:12px}.code-branches .code-selectors{margin:6px 0}
+.code-actions .row[hidden]{display:none}

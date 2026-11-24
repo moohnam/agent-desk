@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -105,4 +105,20 @@ test('commit picker includes locally known upstream history when the task checko
   git('branch','upstream');git('switch','task');git('branch','--set-upstream-to=upstream');
   const commit=(await readCodeView(root)).commits!.find(item=>item.subject==='published')!;
   assert.match((await readCodeView(root,'a','tracked',commit.id)).diff!,/\+published/);
+}));
+
+test('branch endpoints and registered worktrees are independent of the session checkout',async()=>repo(async(root,git)=>{
+ await writeFile(join(root,'a.ts'),'base\n');git('add','.');git('commit','-m','base');git('branch','baseline');
+ let other=join(root,'other-worktree');git('worktree','add','-b','feature',other);other=await realpath(other);
+ execFileSync('git',['-C',other,'config','user.name','Test']);execFileSync('git',['-C',other,'config','user.email','test@example.com']);
+ await writeFile(join(other,'a.ts'),'feature\n');execFileSync('git',['-C',other,'commit','-am','feature']);
+ await writeFile(join(other,'a.ts'),'worktree dirty\n');
+ const overview=await readCodeView(root);assert.ok(overview.worktrees?.some(item=>item.path===other));
+ const options={base:'refs/heads/baseline',target:'refs/heads/feature'};
+ const comparison=await readCodeView(root,'a.ts',undefined,undefined,options);
+ assert.match(comparison.diff!,/\+feature/);assert.doesNotMatch(comparison.diff!,/worktree dirty/);assert.ok(comparison.baseId);assert.ok(comparison.targetId);
+ const dirty=await readCodeView(root,'a.ts',undefined,undefined,{worktree:other});assert.match(dirty.diff!,/\+worktree dirty/);assert.equal(dirty.root,other);
+ await assert.rejects(readCodeView(root,undefined,undefined,undefined,{worktree:tmpdir()}),/登録|등록/);
+ await assert.rejects(readCodeView(root,undefined,undefined,undefined,{base:'--output=oops',target:'refs/heads/feature'}),/브랜치/);
+ await assert.rejects(readCodeView(root,undefined,undefined,undefined,{base:'refs/heads/baseline'}),/기준과 대상/);
 }));

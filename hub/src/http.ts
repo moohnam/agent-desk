@@ -1,3 +1,4 @@
+import { messageReceipt } from './message-receipt.ts';
 import { taskCodeView } from './code-view.ts';
 import { agentPublicKeys } from './ssh-signature.ts';
 import { multiplexStream } from './stream-mux.ts';
@@ -309,6 +310,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         if (url.pathname === '/api/updates/cancel') return send(res, 200, await updates.cancel(body.commit));
         throw new HttpError(404, '업데이트 요청을 찾을 수 없습니다');
       }
+      if(parts[0]==='api'&&url.pathname.endsWith('/prompt-templates'))res.setHeader('cache-control','no-store');
       if (url.pathname === '/api/instructions') {
         res.setHeader('cache-control', 'no-store');
         if (req.method === 'GET') return send(res, 200, { ...instructions.read(), editable: access.isLocal(req) });
@@ -546,7 +548,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           return await workspaces.proxy(owner??localAuthorityId,workspaceUrl.pathname+url.search,req,res,undefined,body);
         }
         const body = req.method === 'GET' ? {} : await readJson(req);
-        const result = (() => {
+        const perform = () => {
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
           if (route === 'POST /tasks/:id/scheduled-replies') {
             const requestId = req.headers['x-desk-operation-id'];
@@ -565,7 +567,10 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
             if (grant && result.status >= 400) connectorAuthority.revoke(grant.capability);
             return result;
           }));
-        })();
+        };
+        const operationId=req.headers['x-desk-operation-id'];
+        const result=route==='POST /tasks/:id/messages'&&typeof operationId==='string'&&directPeer
+          ?messageReceipt(hub,directPeer,operationId,workspaceUrl.pathname,body,perform):perform();
         return send(res, result.status, result.body);
       }
       if (localAuthorityId && req.method === 'GET' && url.pathname === '/api/state') {

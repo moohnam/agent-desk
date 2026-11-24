@@ -230,9 +230,10 @@ async function feedCount(q:FeedQuery,signal?:AbortSignal,scope?:string,details=f
 export const FEED_PAGE = 1000;
 
 export const api = {
-  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked', commit?: string) => {
+  promptTemplates: (source='',input?:import('../../shared/prompt-templates.ts').PromptTemplates,signal?:AbortSignal)=>call<import('../../shared/prompt-templates.ts').PromptTemplates>(input?'PUT':'GET','/prompt-templates',input,signal,source),
+  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked', commit?: string, comparison?: {base?:string;target?:string;worktree?:string}) => {
     const [source, task_id] = splitId(taskId);
-    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind,commit}, signal, '');
+    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind,commit,...comparison}, signal, '');
   },
   remember,
   updates: (signal?: AbortSignal, refreshLatest = false) => call<UpdateView>('GET', refreshLatest ? '/updates?refresh=1' : '/updates', undefined, signal),
@@ -307,7 +308,7 @@ export const api = {
   createTask: (project_id: string, title: string, prompt: string) =>
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
-  send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
+  send: (taskId: string, text: string, operationId?:string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text },undefined,undefined,operationId),
   scheduleReply: (taskId: string, text: string, at: string, operationId: string, sessionId?: string) =>
     call<{ task_id: string; queued_id: string }>('POST', `/tasks/${taskId}/scheduled-replies`, { text, scheduled_at: at, session_id: sessionId }, undefined, undefined, operationId),
   writeNote: (taskId: string, text: string) => call('POST', `/tasks/${taskId}/messages`, { text, note_only: true }),

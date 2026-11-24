@@ -1,0 +1,57 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync,writeFileSync,rmSync,realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { Store } from '../../hub/src/db.ts';
+import { Hub } from '../../hub/src/hub.ts';
+import { SkillStore } from '../../hub/src/skills.ts';
+import { SharedWorkspace } from '../../hub/src/shared-workspace.ts';
+import { WorkspaceLinks } from '../../hub/src/workspace-links.ts';
+import { createHttpServer } from '../../hub/src/http.ts';
+import { Access } from '../../hub/src/access.ts';
+import type { Server } from 'node:http';
+const listen=(server:Server)=>new Promise<string>(resolve=>server.listen(0,'127.0.0.1',()=>resolve(`http://127.0.0.1:${(server.address() as {port:number}).port}`)));
+const stop=(server:Server)=>new Promise<void>(resolve=>{server.closeAllConnections();server.close(()=>resolve());});
+test('gateway MCP settings follow session ownership and share templates and worktree context with the code API',async()=>{
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),'desk-code-mcp-')));
+ const db=new Store(':memory:'),gatewayDb=new Store(':memory:');
+ const make=(store:Store,name:string)=>new Hub(store,{skills:new SkillStore(join(dir,name)),runner:()=>({connected:true,id:name,engines:new Set(['claude']),has:()=>false,handle:()=>{}})});
+ const hub=make(db,'skills'),gateway=make(gatewayDb,'gateway-skills');
+ const workspace=new SharedWorkspace(hub),links=new WorkspaceLinks(gatewayDb);
+ const authority=workspace.server();let server:Server|undefined;
+ try{
+  const root=join(dir,'repo');execFileSync('git',['init',root],{stdio:'pipe'});
+  const git=(...args:string[])=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+  git('config','user.name','Test');git('config','user.email','test@example.com');writeFileSync(join(root,'a.ts'),'base\n');git('add','.');git('commit','-m','base');
+  const other=join(dir,'feature');git('worktree','add','-b','feature',other);writeFileSync(join(other,'a.ts'),'other worktree\n');
+  const project=hub.createProject('test',root),task=hub.createTask(project.id,'test','start','default','claude');
+  const session=db.latestSession(task.id)!;db.updateSession(session.id,{engine_session_id:'engine-code-context'});
+  const authorityUrl=await listen(authority),peer=workspace.grant('gateway');
+  const link=await links.attach({name:'remote',url:authorityUrl,token:peer.token});
+  server=createHttpServer(gateway,new Access(join(dir,'token'),4317),join(dir,'uploads'),{workspaces:links,localAuthorityId:link.id});
+  const origin=await listen(server);
+  const tool=async(args:Record<string,unknown>)=>{
+    const response=await fetch(origin+'/mcp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'desk_settings',arguments:{session_id:'engine-code-context',...args}}})});
+    const rpc=await response.json() as any;assert.equal(response.status,200);return rpc.result;
+  };
+  const initial=JSON.parse((await tool({section:'code_context',action:'read'})).content[0].text);
+  assert.ok(initial.available.some((item:any)=>item.path===other));
+  const changed=await tool({section:'code_context',action:'save',revision:initial.revision,worktree:other});assert.equal(changed.isError,undefined);
+  const saved=JSON.parse(changed.content[0].text);
+  const code=()=>fetch(origin+'/api/code-view',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:link.id,task_id:task.id,path:'a.ts'})});
+  const detail=await (await code()).json() as any;assert.equal(detail.root,other);assert.match(detail.diff,/\+other worktree/);assert.equal(detail.registeredWorktree,other);
+  assert.equal((await tool({section:'code_context',action:'save',revision:initial.revision,worktree:null})).isError,true);
+  assert.equal((await tool({section:'code_context',action:'save',revision:saved.revision,worktree:dir})).isError,true);
+  const template=JSON.parse((await tool({section:'prompt_templates',action:'read'})).content[0].text);
+  assert.equal((await tool({section:'prompt_templates',action:'save',revision:template.revision,items:[{id:'review',name:'검토',text:'검토해주세요'}]})).isError,undefined);
+  const visible=await (await fetch(origin+'/api/prompt-templates')).json() as any;assert.equal(visible.items[0].name,'검토');
+  const updated=await fetch(origin+'/api/prompt-templates',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({...visible,items:[]})});assert.equal(updated.ok,true);
+  assert.deepEqual(JSON.parse((await tool({section:'prompt_templates',action:'read'})).content[0].text).items,[]);
+  assert.equal((await tool({section:'approval_mode',action:'save'})).isError,true);
+  git('worktree','remove','--force',other);
+  assert.equal((await code()).status,403,'missing registered worktree must not silently fall back');
+  assert.equal((await tool({section:'code_context',action:'save',revision:saved.revision,worktree:null})).isError,undefined);
+ }finally{if(server)await stop(server);await stop(authority);await links.close();workspace.connectorBroker?.close();hub.dispose();gateway.dispose();db.database.close();gatewayDb.database.close();rmSync(dir,{recursive:true,force:true});}
+});
