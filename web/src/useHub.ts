@@ -4,7 +4,7 @@ import { api, FEED_PAGE, type FeedQuery, type FeedTotal } from './api.ts';
 import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
 import { mergeEvents, mergeTaskEvents } from './posts.ts';
 import { assignProjectColors, forgetProjectColors } from './projects.ts';
-import { compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
+import { feedCursor, compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
 import { confirmedMissingTask } from './draftRetention.ts';
 import { noteRevision, onNoteChange, reportNoteChange, visibleNoteEvents } from './noteEvents.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
@@ -373,6 +373,7 @@ export interface ColumnFeed {
   /** Identity of this query's request generation; changes when outstanding reads are cancelled. */
   token?: object;
   olderCursor?: HubEvent;
+  gapCursor?: HubEvent;
   /** Only completed historical responses, never live events. */
   olderPage?: ReadonlySet<string>;
 }
@@ -755,7 +756,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     if (!key || !cur || !oldest || !cur.more || cur.loading) return;
     // A retained old post can predate a gap left by a temporarily unavailable source.
     // If compaction trimmed the cache, its oldest retained post is the safer boundary.
-    const before = cur.olderCursor && compareEvents(cur.olderCursor, oldest) > 0 ? cur.olderCursor : oldest;
+    const before = feedCursor(cur)!;
     if (current.current.grouped.has(id)) {
       retained.current.set(id, new Set([...(retained.current.get(id) ?? []), ...cur.events.map(e => e.id)]));
     } else reading.current.add(id);
@@ -766,7 +767,9 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
         if (saved && current.current.grouped.has(id)) for (const event of page) saved.add(event.id);
         set(key, e => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page)), olderCursor: page[0] ?? e.olderCursor,
           olderPage: new Set(visibleNoteEvents(page).map(event => event.task_id)),
-          more: page.length >= FEED_PAGE, loading: false }));
+          // A newer gap can be evicted by SSE while this request is in flight.
+          gapCursor: e.gapCursor === cur.gapCursor ? undefined : e.gapCursor,
+          more: page.length >= FEED_PAGE || !!(e.gapCursor && e.gapCursor !== cur.gapCursor), loading: false }));
       },
       () => set(key, (e) => ({ ...e, loading: false })));
   }, []);

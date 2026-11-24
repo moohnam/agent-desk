@@ -1,3 +1,4 @@
+import { feedCursor } from './feedCache.ts';
 import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
 import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
@@ -1392,8 +1393,7 @@ export function App() {
       onEdge={edgeColumn} onRecent={goRecent} onBack={phone ? () => setPhoneChannel(null) : undefined} />;
     if (!isThread) {
       const f = feeds.get(col.id);
-      const oldest = col.def?.byTask ? f?.events[0] : undefined;
-      const cursor = f?.olderCursor && oldest && compareEvents(f.olderCursor, oldest) > 0 ? f.olderCursor : oldest;
+      const cursor = col.def?.byTask && f ? feedCursor(f) : undefined;
       return (
         <FeedColumn key={col.id} col={col} active={i === activeIdx} selected={i === activeIdx ? selection[col.id] : undefined}
           width={widthOf(col.id)} ctx={columnCtx.get(col.id)!} projects={projectsById} flash={flash} expanded={expanded}

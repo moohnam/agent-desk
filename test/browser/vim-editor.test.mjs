@@ -321,6 +321,26 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       },false,'emacs'));
     }
 
+    await t.test('one scroll does not exhaust history when all task cards are already known', () => withPage(async page => {
+      await page.setViewport({width:1440,height:180});
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'grouped-deep'});
+      await page.evaluateOnNewDocument(()=>localStorage.setItem('agent-desk.columns.v2',JSON.stringify([
+        {id:'grouped',title:'작업별',filter:{taskIds:['t9']},byTask:true},
+      ])));
+      let older=0;
+      page.on('request',request=>{
+        const u=new URL(request.url());
+        if(u.pathname==='/api/feed' && Number(u.searchParams.get('cursor_id'))!==Number.MAX_SAFE_INTEGER) older++;
+      });
+      await page.goto(origin,{waitUntil:'networkidle2'});
+      const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/feed');
+      await page.$eval('[data-col="grouped"] .feed',element=>{element.scrollTop=element.scrollHeight;});
+      await response;
+      await page.waitForSelector('[data-col="grouped"] .older-posts button:enabled');
+      await new Promise(resolve=>setTimeout(resolve,400));
+      assert.equal(older,1,'the known task total at scroll start prevents continuation');
+    },false,'emacs'));
+
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
       await page.setViewport({ width: 1000, height: 700 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });

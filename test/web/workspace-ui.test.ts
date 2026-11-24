@@ -1207,3 +1207,60 @@ test('grouped history stays readable with bounded SSE and releases on same-query
     assert.equal(reads,1);
   } finally {h.unmount();}
 });
+
+for (const edited of [false, true]) test(`retained middle gaps recover through real API cursors (edited=${edited})`, async () => {
+  const {api, FEED_PAGE} = await import('../../web/src/api.ts');
+  const originalFetch = globalThis.fetch;
+  const h = hooks();
+  const event = (id:number): any => ({id,task_id:id===500?'gap-only':'task',session_id:'s',kind:'assistant',
+    ts:String(id).padStart(8,'0'),payload:{text:String(id)}});
+  const make = (id:number) => edited && id===1301 ? {...event(50),edited_at:'00001301'} : event(id);
+  let data = Array.from({length:200},(_,i)=>make(i+101));
+  const requests: {id:number;ts:string}[]=[];
+  let fail=false, receive:(batch:any[])=>void=()=>{};
+  const timers=new Map<number,()=>void>();let timer=0;
+  const setTimer=(fn:()=>void)=>{timers.set(++timer,fn);return timer;};
+  globalThis.fetch=async input=>{
+    const url=new URL(String(input),'http://desk');
+    if(url.pathname==='/api/workspaces') return Response.json([]);
+    if(url.pathname==='/api/feed/count') return Response.json({posts:data.length,tasks:2});
+    assert.equal(url.pathname,'/api/feed');
+    const id=Number(url.searchParams.get('cursor_id')),ts=url.searchParams.get('before_ts')!;
+    if(id!==Number.MAX_SAFE_INTEGER) requests.push({id,ts});
+    if(fail && id!==Number.MAX_SAFE_INTEGER) {fail=false;return new Response('{}',{status:503});}
+    assert.equal(url.searchParams.get('edited_order'),'1');
+    const before={id,ts};
+    return Response.json(data.filter(e=>federation.compareEvents(e,before)<0)
+      .sort(federation.compareEvents).slice(-Number(url.searchParams.get('limit'))));
+  };
+  const defs=[{id:'column',filter:{},byTask:true}];
+  const module=load('useHub.ts',{
+    react:h.react,'./api.ts':{api,FEED_PAGE},'./federation.ts':federation,'./posts.ts':posts,'./feedCache.ts':feedCache,
+    './projects.ts':{},'./draftRetention.ts':draftRetention,
+  },{AbortController,window:{setTimeout:setTimer},setTimeout:setTimer,clearTimeout:(id:number)=>timers.delete(id)});
+  const subscribe=(fn:(batch:any[])=>void)=>{receive=fn;return()=>{};};
+  const render=()=>h.render(()=>module.useColumnFeeds(defs,()=>defs,new Map(),()=>()=>{},0,new Set(),subscribe));
+  const settle=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
+  try {
+    await federation.discoverSources(true);
+    render();await settle();render().loadEarlier('column');await settle();
+    assert.equal(render().feeds.get('column').events.length,200);
+    data=Array.from({length:4200},(_,i)=>make(i+101));
+    receive(data.filter(e=>Number(e.edited_at??e.ts)>300).map(event=>({event})));
+    let feed=render().feeds.get('column');
+    assert.equal(feed.events.length,3200);
+    assert.equal(feed.events.some((e:any)=>e.task_id==='gap-only'),false);
+    assert.equal(feedCache.feedCursor(feed)!.id,edited?50:1301);
+    fail=true;render().loadEarlier('column');await settle();
+    assert.equal(feedCache.feedCursor(render().feeds.get('column'))!.id,edited?50:1301,'failed response preserves recovery cursor');
+    for(let i=0;i<5 && render().feeds.get('column').more;i++) {render().loadEarlier('column');await settle();}
+    feed=render().feeds.get('column');
+    assert.equal(feed.more,false);
+    assert.ok(feed.events.some((e:any)=>e.task_id==='gap-only'),'unique task inside evicted range is reachable');
+    assert.equal(feed.events.length,4200);
+    assert.equal(new Set(feed.events.map((e:any)=>e.id)).size,4200);
+    assert.deepEqual(requests.map(r=>r.id),[101,edited?50:1301,edited?50:1301,301]);
+    assert.equal(requests[1].ts,'00001301','edited_at is the exclusive boundary, not original ts');
+    render().loadEarlier('column');await settle();assert.equal(requests.length,4,'exhaustion cannot repeat the cursor chain');
+  } finally {h.unmount();globalThis.fetch=originalFetch;}
+});

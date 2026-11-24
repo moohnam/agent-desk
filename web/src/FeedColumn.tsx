@@ -107,7 +107,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
       setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
       if (byTask) return;
     }
-    if (scrollingDown && byTask && !requestedCards.current)
+    if (scrollingDown && byTask && !requestedCards.current && (total == null || placed.length < total))
       requestedCards.current = { known: new Set(placed.map(item => item.post.taskId)), page: olderPage };
     // Grouping can collapse a whole page to one card, leaving no way to scroll.
     // Fill that space, but do not prefetch merely because a full column is near its bottom.
