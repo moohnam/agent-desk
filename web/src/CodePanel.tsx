@@ -17,6 +17,10 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   const [reading,setReading]=useState(false);
   const [revision,setRevision]=useState(0);
   const [limit,setLimit]=useState(200);
+  const [wrap,setWrap]=useState(()=>{
+    try { return localStorage.getItem('agent-desk.diff-wrap') !== 'off'; }
+    catch { return true; }
+  });
   const scroll=useRef<HTMLDivElement>(null);
   const keyOf=(file:CodeViewResult['files'][number])=>JSON.stringify([file.status==='untracked'?'untracked':'tracked',file.path]);
   const file=snapshot?.data.files.find(file=>keyOf(file)===selected);
@@ -78,7 +82,12 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
       {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
     </select>
     {loading&&<p role="status">변경을 불러오는 중…</p>}
-    <div className="code-diff" ref={scroll} tabIndex={0} aria-label="파일 diff">
+    <label className="code-wrap-option"><input type="checkbox" checked={wrap} onChange={e=>{
+      const enabled=e.currentTarget.checked;
+      setWrap(enabled);
+      try { localStorage.setItem('agent-desk.diff-wrap',enabled?'on':'off'); } catch { /* Storage is optional. */ }
+    }}/>긴 줄 자동 줄바꿈</label>
+    <div className={wrap?'code-diff wrap':'code-diff'} ref={scroll} tabIndex={0} aria-label="파일 diff">
       {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>{commit?'이 커밋에서 변경된 파일이 없습니다.':'미커밋 변경이 없습니다.'}</p>}
       {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
         const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000

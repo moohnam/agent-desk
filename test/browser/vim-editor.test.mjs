@@ -344,6 +344,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});
       const commit='1'.repeat(40);
+      const longLineText='const token = '+JSON.stringify('x'.repeat(500))+';';
       let removed=false,reads=0;const requests=[];
       await page.setRequestInterception(true);
       page.on('request',request=>{
@@ -352,7 +353,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const body=JSON.parse(request.postData());requests.push(body);
         return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
           root:'/test/worktree',head:'1234567890abcdef',commits:[{id:commit,subject:'첫 커밋'}],commit:body.commit,files:removed?[]:[{path:'src/example.ts',status:'deleted'},{path:'src/example.ts',status:'untracked'},{path:'src/second.ts',status:'modified'}],
-          ...(body.path&&!removed?{path:body.path,diff:'--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1,1 +1,1 @@\n-const old = 1;\n+const value = "hello";\n'}:{}),
+          ...(body.path&&!removed?{path:body.path,diff:'--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1,1 +1,2 @@\n-const old = 1;\n+const value = "hello";\n+'+longLineText+'\n'}:{}),
         })});
       });
       await openReply(page,origin);
@@ -365,6 +366,13 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const thread=document.querySelector('.thread-split').getBoundingClientRect();
         return code.right <= thread.left;
       }),'code is to the left of the conversation');
+      const wrapControl='.code-wrap-option input';
+      const longLine=()=>page.$eval('.code-diff',pane=>pane.scrollWidth>pane.clientWidth);
+      assert.equal(await longLine(),false,'long tokens wrap by default');
+      await page.click(wrapControl);
+      assert.equal(await longLine(),true,'disabling wrap restores horizontal scroll');
+      await page.click(wrapControl);
+      assert.equal(await longLine(),false,'restoring wrap removes horizontal scroll again');
       assert.equal(reads,2,'opening reads the list once and the first file once');
       assert.equal(requests[1].kind,'tracked');
       assert.equal(await page.$eval('.code-line.add .code-number:nth-child(2)',element=>element.textContent),'1');
@@ -392,8 +400,13 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.select('select[aria-label="변경 기준"]',commit);
       await page.waitForSelector('.code-panel .code-line.add');
       assert.deepEqual(requests.slice(7).map(body=>[body.commit,body.path]),[[commit,undefined],[commit,'src/example.ts']]);
+      await page.click(wrapControl);
       await page.click('button[aria-label="코드 창 닫기"]');
       assert.equal(await page.$('.code-panel'),null);
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await page.waitForSelector(wrapControl);
+      assert.equal(await page.$eval(wrapControl,node=>node.checked),false,'wrap preference survives reopening');
+
     },false,'emacs'));
 
     for (const width of [1440,390]) await t.test(`code view recovers file selection after failed list refresh (${width})`, () => withPage(async page => {

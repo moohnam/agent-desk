@@ -10,3 +10,7 @@
 .code-line.add{background:rgba(40,170,90,.13)}.code-line.delete{background:rgba(220,60,60,.13)}.code-line.header{color:var(--muted);background:rgba(100,130,200,.1)}
 .code-more{margin:12px;padding:6px;border:1px solid var(--border)}
 .code-diff .hljs-keyword,.code-diff .hljs-selector-tag,.code-diff .hljs-literal{color:#b86ac7}.code-diff .hljs-string,.code-diff .hljs-attr{color:#449c74}.code-diff .hljs-number,.code-diff .hljs-built_in,.code-diff .hljs-type{color:#c78b44}.code-diff .hljs-comment{color:var(--muted);font-style:italic}.code-diff .hljs-title{color:#5299d3}
+
+.code-wrap-option{display:flex;align-items:center;gap:6px;margin:0 8px 6px;font-size:12px}
+.code-diff.wrap .code-line{min-width:0}
+.code-diff.wrap .code-line code{flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
