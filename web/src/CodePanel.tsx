@@ -1,0 +1,75 @@
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { X, RefreshCw } from 'lucide-react';
+import hljs from 'highlight.js/lib/common';
+import { api } from './api.ts';
+import { diffLines, type CodeViewResult } from '../../shared/code-view.ts';
+import './code-panel.css';
+const language = (path: string) => ({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'} as Record<string,string>)[path.split('.').at(-1)??''];
+export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:string;title:string;onClose:()=>void}) {
+  const [snapshot,setSnapshot]=useState<{data:CodeViewResult;revision:number}>();
+  const [selected,setSelected]=useState<string>();
+  const [content,setContent]=useState<CodeViewResult>();
+  const [error,setError]=useState('');
+  const [listError,setListError]=useState('');
+  const [listing,setListing]=useState(false);
+  const [reading,setReading]=useState(false);
+  const [revision,setRevision]=useState(0);
+  const [limit,setLimit]=useState(200);
+  const scroll=useRef<HTMLDivElement>(null);
+  const keyOf=(file:CodeViewResult['files'][number])=>JSON.stringify([file.status==='untracked'?'untracked':'tracked',file.path]);
+  const file=snapshot?.data.files.find(file=>keyOf(file)===selected);
+  const path=file?.path;
+  const kind=file?.status==='untracked'?'untracked':'tracked';
+  const loading=listing||reading;
+  useEffect(()=>{
+    const controller=new AbortController();
+    setListing(true);setReading(false);setError('');setListError('');
+    void api.codeView(taskId,undefined,controller.signal).then(data=>{
+      if(controller.signal.aborted)return;
+      setReading(data.files.length>0);
+      setSnapshot({data,revision});
+      setSelected(previous=>data.files.some(file=>keyOf(file)===previous)?previous:data.files[0]?keyOf(data.files[0]):undefined);
+    }).catch(e=>{if(!controller.signal.aborted){
+      setListError(e.message);
+      setReading(!!snapshot?.data.files.length);
+      // A failed refresh must not invalidate the last usable file list.
+      setSnapshot(previous=>previous?{...previous,revision}:previous);
+    }})
+      .finally(()=>{if(!controller.signal.aborted)setListing(false);});
+    return()=>controller.abort();
+  },[taskId,revision]);
+  useEffect(()=>{
+    if(snapshot?.revision!==revision)return;
+    const controller=new AbortController();
+    if(!path){setContent(undefined);setReading(false);return;}
+    setReading(true);setError('');setContent(undefined);
+    void api.codeView(taskId,path,controller.signal,kind).then(result=>{
+      if(!controller.signal.aborted)setContent(result);
+    }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})
+      .finally(()=>{if(!controller.signal.aborted)setReading(false);});
+    return()=>controller.abort();
+  },[taskId,path,kind,snapshot,revision]);
+  useEffect(()=>{setLimit(200);setContent(undefined);if(scroll.current)scroll.current.scrollTop=0;},[selected]);
+  const rows=useMemo(()=>diffLines(content?.diff??''),[content]);
+  const lang=path&&language(path);
+  return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>e.stopPropagation()}>
+    <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
+    <div className="code-scope">작업 폴더 전체 · HEAD 대비 미커밋 변경<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>기준 {(content?.head??snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'} · 읽기 전용</small></div>
+    {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
+    {error&&<p role="alert">{error}</p>}
+    <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
+      {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
+      {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
+    </select>
+    {loading&&<p role="status">변경을 불러오는 중…</p>}
+    <div className="code-diff" ref={scroll} tabIndex={0} aria-label="파일 diff">
+      {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>미커밋 변경이 없습니다.</p>}
+      {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
+        const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000
+          ?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined;
+        return <div key={index} className={`code-line ${row.kind}`}><span className="code-number">{row.old??''}</span><span className="code-number">{row.next??''}</span><span className="code-sign">{row.kind==='add'?'+':row.kind==='delete'?'-':''}</span>{html===undefined?<code>{row.text||' '}</code>:<code dangerouslySetInnerHTML={{__html:html||' '}}/>}</div>;
+      })}
+      {rows.length>limit&&<button className="code-more" onClick={()=>setLimit(n=>n+200)}>다음 200줄 표시 ({rows.length-limit}줄 남음)</button>}
+    </div>
+  </aside>;
+});

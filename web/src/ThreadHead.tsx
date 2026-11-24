@@ -1,4 +1,4 @@
-import { ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
+import { Code2, ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, modelMatches, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { modelShort, projectColor } from './projects.ts';
@@ -9,12 +9,13 @@ import { SharedPending } from './workspace.ts';
 
 interface TitleEdit { taskId: string; value: string; error?: string; saving?: boolean }
 
-export function ThreadHead({ task, project, model, events, now, draft, handoff, references, onReferences, onClose, onPin, onHandoff, onMenu, onNotice, onRenamed }: {
+export function ThreadHead({ task, project, model, events, now, draft, handoff, references, onReferences, codeOpen, onCode, onClose, onPin, onHandoff, onMenu, onNotice, onRenamed }: {
   task: TaskView | undefined; project: Project | undefined; model: string | undefined; events: HubEvent[];
   now: number; draft: boolean; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
   onNotice: (message: string) => void; onRenamed: (taskId: string, title: string, revision: number) => void;
   /** Context reset: its panel is open, or closed with work kept; null: none. */
   handoff: 'open' | 'kept' | null; onHandoff: () => void;
+  codeOpen?: boolean; onCode?: () => void;
   references?: { open: boolean; count: number }; onReferences?: () => void;
 }) {
   const isNote = task?.kind === 'note';
@@ -90,6 +91,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         {task?.source === 'external' && <TerminalBadge />}
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
+        {task && onCode && <button className="icon-btn code-view-toggle" aria-label="코드 변경 보기" aria-pressed={!!codeOpen} onClick={onCode}><Code2 /></button>}
         {references && <button className="icon-btn" aria-label="고정한 글 창" aria-pressed={references.open}
           title="고정 글·문서 창 열기 / 닫기 (Ctrl ;) · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
         {task?.source === 'app' && !isNote && (

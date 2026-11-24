@@ -1,3 +1,5 @@
+import { lazy, Suspense } from 'react';
+const CodePanel = lazy(() => import('./CodePanel.tsx').then(module => ({default: module.CodePanel})));
 import { feedCursor } from './feedCache.ts';
 import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
 import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
@@ -85,6 +87,8 @@ const ColumnDeck = memo(function ColumnDeck({ inactive, phone, elementRef, child
 }, (a, b) => a.inactive && b.inactive && a.phone === b.phone);
 
 export function App() {
+  const [codeTask, setCodeTask] = useState<string | null>(null);
+  const closeCode = useCallback(()=>setCodeTask(null),[]);
   const hub = useHub();
   const updates = useUpdates();
   const updateVersion = updates.view?.latest ?? updates.view?.available;
@@ -1423,6 +1427,7 @@ export function App() {
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
           references={canRead ? { open: references.open, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
+          codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
         <div className="feed thread-feed" ref={threadFeedRef}
           onPointerDown={() => { threadInteracted.current = true; }}
@@ -1581,6 +1586,9 @@ export function App() {
             {renderColumn(deck[threadIdx], threadIdx)}
           </div>
         )}
+        {codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
+          <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode} />
+        </Suspense>}
       </div>
 
       {toast && <div className="toast" role="status">{toast}</div>}

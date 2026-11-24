@@ -1,3 +1,4 @@
+import { taskCodeView } from './code-view.ts';
 import { agentPublicKeys } from './ssh-signature.ts';
 import { multiplexStream } from './stream-mux.ts';
 import { InstructionStore } from './instruction-store.ts';
@@ -390,6 +391,14 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           catch(error){if(error instanceof HttpError&&error.status===404)return send(res,409,{error:error.message});throw error;}
         }else await previews.release(b.id);
         return send(res,200,{ok:true});
+      }
+      if (req.method === 'POST' && url.pathname === '/api/code-view') {
+        res.setHeader('cache-control','no-store');
+        const b=await readJson(req);
+        if(typeof b.source!=='string'||typeof b.task_id!=='string'||!b.task_id)throw new HttpError(400,'작업공간과 작업 ID가 필요합니다');
+        const source=b.source||workspaces.legacyOwner('task',b.task_id)||localAuthorityId;
+        if(source){const result=await workspaces.trustedCall(source,'/v1/code-view',b);return send(res,result.status,result.body);}
+        return send(res,200,await taskCodeView(hub,b));
       }
       if (req.method === 'POST' && url.pathname === '/api/preview') {
         const b=await readJson(req);

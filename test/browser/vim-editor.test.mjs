@@ -341,6 +341,87 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(older,1,'the known task total at scroll start prevents continuation');
     },false,'emacs'));
 
+    for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      let removed=false,reads=0;const requests=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        reads++;
+        const body=JSON.parse(request.postData());requests.push(body);
+        return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:'/test/worktree',head:'1234567890abcdef',files:removed?[]:[{path:'src/example.ts',status:'deleted'},{path:'src/example.ts',status:'untracked'},{path:'src/second.ts',status:'modified'}],
+          ...(body.path&&!removed?{path:body.path,diff:'--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1,1 +1,1 @@\n-const old = 1;\n+const value = "hello";\n'}:{}),
+        })});
+      });
+      await openReply(page,origin);
+      assert.equal(reads,0,'do not read code before opening the panel');
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-panel .hljs-keyword');
+      assert.equal(reads,2,'opening reads the list once and the first file once');
+      assert.equal(requests[1].kind,'tracked');
+      assert.equal(await page.$eval('.code-line.add .code-number:nth-child(2)',element=>element.textContent),'1');
+      assert.equal(await page.$eval('.code-line.add code',element=>element.textContent),'const value = "hello";');
+      assert.ok(await page.$('.reply-box'),'conversation remains mounted');
+      assert.ok(await page.$eval('.code-panel',element=>element.getBoundingClientRect().right<=innerWidth),'panel controls stay inside the viewport');
+      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['untracked','src/example.ts']));
+      await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
+      assert.equal(reads,3,'selecting the untracked version reads only that detail');
+      assert.equal(requests[2].kind,'untracked');
+      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','src/second.ts']));
+      await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
+      assert.equal(reads,4,'switching files does not refresh the list');
+      assert.equal(requests[3].path,'src/second.ts');
+      const refreshed=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/code-view'&&JSON.parse(response.request().postData()).path==='src/second.ts');
+      await page.click('button[aria-label="코드 새로고침"]');
+      await refreshed;
+      await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
+      assert.equal(reads,6,'refresh reads one list and the selected detail');
+      removed=true;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await page.waitForFunction(()=>document.querySelector('.code-panel')?.textContent.includes('미커밋 변경이 없습니다.'));
+      assert.equal(reads,7,'an empty refreshed list needs no detail');
+      await page.click('button[aria-label="코드 창 닫기"]');
+      assert.equal(await page.$('.code-panel'),null);
+    },false,'emacs'));
+
+    for (const width of [1440,390]) await t.test(`code view recovers file selection after failed list refresh (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      let failList=false,failDetail=false;const requests=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());requests.push(body);
+        if((!body.path&&failList)||(body.path&&failDetail))return void request.respond({status:500,contentType:'application/json',body:JSON.stringify({error:'temporary failure'})});
+        return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:'/test/worktree',head:'1234567890abcdef',files:['a.ts','b.ts'].map(path=>({path,status:'modified'})),
+          ...(body.path?{path:body.path,diff:`@@ -0,0 +1 @@\n+const file = "${body.path}";\n`}:{}),
+        })});
+      });
+      const waitFile=path=>page.waitForFunction(path=>document.querySelector('.code-panel .code-line.add code')?.textContent.includes(path)&&!document.querySelector('.code-panel [role="status"]'),{},path);
+      await openReply(page,origin);
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await waitFile('a.ts');
+      failList=true;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('목록 갱신 실패')&&!document.querySelector('.code-panel [role="status"]'));
+      const listReads=requests.filter(body=>!body.path).length;
+      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','b.ts']));
+      await waitFile('b.ts');
+      assert.equal(requests.at(-1).path,'b.ts');
+      assert.equal(requests.filter(body=>!body.path).length,listReads,'selection after failure only reads detail');
+      failList=false;failDetail=true;
+      const detailFailure=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/code-view'&&JSON.parse(response.request().postData()).path==='b.ts'&&response.status()===500);
+      await page.click('button[aria-label="코드 새로고침"]');
+      await detailFailure;
+      await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('temporary failure')&&!document.querySelector('.code-panel [role="status"]'));
+      assert.equal(await page.$('.code-panel .code-line'),null,'failed detail refresh must not show stale diff');
+      failDetail=false;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await waitFile('b.ts');
+      assert.equal(await page.$('.code-panel [role="alert"]'),null);
+    },false,'emacs'));
+
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
       await page.setViewport({ width: 1000, height: 700 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
