@@ -72,20 +72,22 @@ for await(const line of createInterface({input:process.stdin})){
 }
 `,{mode:0o755});
     const driver=`
+import assert from 'node:assert/strict';
 import {startCodex} from ${JSON.stringify(moduleUrl('hub/src/runner/codex.ts'))};
 import {runnerModelCatalogs,codexCatalog} from ${JSON.stringify(moduleUrl('hub/src/runner/model-catalog.ts'))};
-let engine;
+let engine; const confirmed=[];
 await new Promise((done,fail)=>{
   let turns=0;const timer=setTimeout(()=>{engine.close();fail(Error('timeout'));},4000);
-  engine=startCodex({sessionId:'fixture',cwd:${JSON.stringify(dir)},prompt:'first',permissionMode:'default',model:'sol',effort:'high',emit(message){
+  engine=startCodex({sessionId:'fixture',cwd:${JSON.stringify(dir)},prompt:'first',requestInputId:'original',onRequestStarted:id=>confirmed.push(id),permissionMode:'default',model:'sol',effort:'high',emit(message){
     if(message.type==='closed'&&message.error){clearTimeout(timer);fail(Error(message.error));}
     if(message.type==='event'&&message.event.kind==='status'&&message.event.state==='turn_done'){
       void(async()=>{
         if(++turns===1){
+          assert.deepEqual(confirmed,['original']);
           await runnerModelCatalogs.read('codex',true,async()=>codexCatalog(['gpt-6-sol','gpt-6.1-sol'].map(id=>({id,supportedReasoningEfforts:[{reasoningEffort:'high'},{reasoningEffort:'xhigh'}]}))));
-          engine.send('second');
+          engine.send('second',[],false,undefined,'followup');
         }else if(turns===2){const changing=engine.setModel(undefined,'xhigh');engine.send('third');await changing;}
-        else{clearTimeout(timer);engine.close();done();}
+        else{assert.deepEqual(confirmed,['original','followup']);clearTimeout(timer);engine.close();done();}
       })().catch(error=>{clearTimeout(timer);engine.close();fail(error);});
     }
   }});
@@ -102,23 +104,27 @@ test('Claude validates before delivering the first prompt and queued follow-up, 
 import assert from 'node:assert/strict';
 import {mock} from 'node:test';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
-const captured=[];let resolveModels,options;
+const captured=[], uuids=[], confirmed=[];let resolveModels,options,publish;
 mock.module('@anthropic-ai/claude-agent-sdk',{namedExports:{query(input){
   if(input.options.model) options=input.options;
   let finishEvents;
-  void(async()=>{for await(const message of input.prompt)captured.push(message.message.content);})();
+  void(async()=>{for await(const message of input.prompt){captured.push(message.message.content);uuids.push(message.uuid);}})();
   return {
     supportedModels:()=>new Promise(resolve=>{resolveModels=resolve;}),
     applyFlagSettings:async()=>{},setModel:async()=>{},setPermissionMode:async()=>{},interrupt:async()=>{},
     close(){finishEvents?.({done:true});},
-    [Symbol.asyncIterator](){return {next:()=>new Promise(resolve=>{finishEvents=resolve;})};},
+    [Symbol.asyncIterator](){return {next:()=>new Promise(resolve=>{finishEvents=resolve;if(input.options.model) publish=value=>resolve({value,done:false});})};},
   };
 }}});
 const {startClaude}=await import(${JSON.stringify(moduleUrl('hub/src/runner/claude.ts'))});
-const engine=startClaude({sessionId:'fixture',cwd:'/private/tmp',prompt:'first',permissionMode:'default',model:'model:claude:claude-fable-5-1',emit(){}});
-engine.send('follow-up');await tick();assert.deepEqual(captured,[]);
+const engine=startClaude({sessionId:'fixture',cwd:'/private/tmp',prompt:'first',permissionMode:'default',model:'model:claude:claude-fable-5-1',requestInputId:'first-id',onRequestStarted:id=>confirmed.push(id),emit(){}});
+engine.send('follow-up',[],false,undefined,'second-id');await tick();assert.deepEqual(captured,[]);
 resolveModels([{value:'fable',resolvedModel:'claude-fable-5-1',displayName:'Fable',supportedEffortLevels:['high']}]);
 await tick();await tick();assert.deepEqual(captured,['first','follow-up']);assert.equal(options.model,'claude-fable-5-1');
+assert.deepEqual(uuids,['first-id','second-id']);assert.deepEqual(confirmed,[]);
+publish({type:'assistant',parent_tool_use_id:'subtask',message:{content:[]},user_message_uuid:'unrelated'});await tick();
+publish({type:'assistant',parent_tool_use_id:null,message:{content:[]},user_message_uuid:'second-id'});await tick();
+assert.deepEqual(confirmed,['second-id']);
 engine.close();`;
   const result=spawnSync(process.execPath,['--experimental-test-module-mocks','--input-type=module','-e',driver],{cwd:resolve(import.meta.dirname,'../..'),env:{...process.env},encoding:'utf8',timeout:6000});
   assert.equal(result.status,0,result.stderr||String(result.error));

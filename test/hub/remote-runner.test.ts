@@ -616,3 +616,30 @@ test('a reply before the pending remote start is received queues behind that fir
     assert.deepEqual(t.sent,['immediate-follow-up']);assert.equal(t.starts.length,1);
   }finally{t.cleanup();}
 });
+
+test('a queued remote follow-up does not become uncertain on an unrelated runner event', async () => {
+  const t=setup();
+  try {
+    t.exchange();
+    const task=t.hub.compose(`@remote:moohnam@ws20:${t.dir} #codex start`);
+    const start=t.exchange().commands[0].value;
+    assert.ok(start.type==='start');
+    t.finish();t.exchange();
+    const project=t.hub.createProject('local',t.dir);
+    const target=t.hub.createTask(project.id,'target','test','default','codex');
+    const {signRequest,toolFields}=await import('../../hub/src/request-proof.ts');
+    const args={session_id:'engine-1',to:target.id,question:'질문'};
+    const r=t.hub.requests.request({sessionId:args.session_id,to:args.to,text:args.question,
+      resumeProof:signRequest(start.requestCredential,toolFields('desk_request',args))});
+    t.hub.resolveApproval(r.approval_id!,false);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(t.hub.requests.resumeState(r.id),'sent');
+    t.journal.emit({type:'event',sessionId:start.sessionId,event:{kind:'assistant',text:'이전 작업의 기록'}});
+    const delivery=t.exchange().commands.filter(c=>c.value.type==='send' && c.value.requestInputId===r.id);
+    assert.equal(delivery.length,1);
+    assert.equal(t.hub.requests.resumeState(r.id),'sent');
+    assert.ok(!t.store.listEvents(task.id).some(e=>(e.payload as StatusPayload).state==='warning'));
+    t.exchange();
+    assert.equal(t.hub.requests.resumeState(r.id),'received');
+  } finally {t.agent.runner.shutdown();t.cleanup();}
+});

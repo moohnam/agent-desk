@@ -18,7 +18,7 @@ export class RemoteAgent {
   private skillsHome: string;
   constructor(journal: RemoteJournal, id: string, skillsHome: string, start?: StartEngine, mcp?: RunnerMcp) {
     this.journal=journal; this.skillsHome=skillsHome;
-    this.runner = new Runner(id, m => journal.emit(m), { start, mcp });
+    this.runner = new Runner(id, m => journal.emit(m), { start, mcp, receiptPath: journal.path === ':memory:' ? journal.path : journal.path + '.receipts' });
     journal.recoverAmbiguous();
   }
   pump() {
@@ -68,7 +68,7 @@ export class RemoteAgent {
         }
         // A restored hub may not yet know that this session survived. Never replace its process.
         if (checked.type === 'start' && live) {
-          this.runner.handle({type:'send',sessionId:checked.sessionId,text:checked.prompt,skills:checked.skills,skillSnapshot:checked.skillSnapshot});
+          this.runner.handle({type:'send',sessionId:checked.sessionId,text:checked.prompt,requestInputId:checked.requestInputId,skills:checked.skills,skillSnapshot:checked.skillSnapshot});
         } else {
           if (checked.type === 'close' && !live) { this.journal.dispatched(item.seq); continue; }
           if (checked.type !== 'start' && !live) throw new Error('대상 세션이 종료되어 명령을 적용하지 못했습니다');

@@ -9,13 +9,13 @@ import type { Answers, AsyncQuestion, RunnerEvent } from './protocol.ts';
 export type EventKind = 'user' | 'assistant' | 'tool' | 'tool_result' | 'approval' | 'status' | 'update' | 'question';
 
 /** Status states an engine reports through the runner (RunnerEvent). */
-export type RunnerStatusState = 'started' | 'model_changed' | 'turn_done' | 'mkdir' | 'warning' | 'error' | 'interrupted';
+export type RunnerStatusState = 'started' | 'model_changed' | 'request_receipt' | 'turn_done' | 'mkdir' | 'warning' | 'error' | 'interrupted';
 /**
  * Every status state in the log: the engine's, and the ones the hub records itself (a new project
  * directory, a model or mode switch, dropped queue, fork, context reset, session end or takeover).
  */
 export type StatusState = RunnerStatusState
-  | 'model' | 'mode' | 'queue_dropped' | 'forked' | 'context_reset' | 'closed' | 'finished' | 'handoff';
+  | 'request_continuation' | 'model' | 'mode' | 'queue_dropped' | 'forked' | 'context_reset' | 'closed' | 'finished' | 'handoff';
 
 /**
  * The status states that make a post of their own (an alert). Every other status event folds into
@@ -76,5 +76,5 @@ export interface EventPayloads {
   question: QuestionPayload;
   status: StatusPayload;
   /** Older hubs' progress notes; nothing records them now. */
-  update: { text: string };
+  update: { text: string; request_result?: string };
 }

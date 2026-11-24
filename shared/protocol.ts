@@ -45,10 +45,11 @@ export type HubToRunner =
    * `createDirectory`: an explicitly named new remote project's first start may create its directory.
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
-  | { type: 'start'; sessionId: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
+  | { type: 'start'; sessionId: string; requestCredential?: string; requestInputId?: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
       permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; ipv6DeskMcpUrl?: string; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
-  | { type: 'send'; sessionId: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
+  | { type: 'send'; sessionId: string; requestInputId?: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
+  | { type: 'request_probe'; sessionId:string;requestInputId:string }
   | { type: 'set_mode'; sessionId: string; permissionMode: PermissionMode }
   /** Changes what is given; takes effect from the next turn. */
   /** Metadata only; sessionId is a control-channel identifier, never an engine session. */
@@ -101,7 +102,7 @@ export type RunnerToHub =
   | { type: 'closed'; sessionId: string; error?: string; busy?: boolean; reason?: 'idle' | 'user' | 'shutdown' };
 
 export interface EngineAdapter {
-  send(text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string): void;
+  send(text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string, requestInputId?:string): void;
   interrupt(): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
   setModel(model?: ModelName, effort?: Effort): Promise<void>;
@@ -138,7 +139,11 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
   if (!isObj(m) || !str(m.type)) return 'not a message';
   if (m.type === 'auth') return str(m.token) && typeof m.protocolVersion === 'number' ? m as HubToRunner : 'bad auth';
   if (!str(m.sessionId) || !m.sessionId) return `${m.type}: no sessionId`;
+  if ((m.type === 'send' || m.type === 'start' || m.type === 'request_probe') && m.requestInputId !== undefined
+    && !(typeof m.requestInputId === 'string' && /^[a-zA-Z0-9-]{16,100}$/.test(m.requestInputId))) return 'bad request input ID';
+  if (m.type === 'start' && m.requestCredential !== undefined && !(typeof m.requestCredential === 'string' && /^[\w-]{43}$/.test(m.requestCredential))) return 'bad session credential';
   switch (m.type) {
+    case 'request_probe': return m.requestInputId ? m as HubToRunner : 'missing request input ID';
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
         && (m.createDirectory === undefined || m.createDirectory === true && m.resume === undefined && (m.fork === undefined || m.fork === false))

@@ -48,6 +48,7 @@ export function writeLine(socket: Socket, m: unknown) {
 export function isRunnerOutput(message: RunnerToHub): message is Extract<RunnerToHub, { type: 'event' | 'engine_session' }> {
   if (message.type === 'engine_session') return true;
   if (message.type !== 'event') return false;
+  if (message.event.kind === 'status' && message.event.state === 'request_receipt') return true;
   const { kind } = message.event;
   return kind === 'assistant' || kind === 'tool' || kind === 'tool_result';
 }

@@ -8,6 +8,10 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
 export function statusLabel(t: TaskView): string {
   if (t.status === 'waiting' && t.pending_questions > 0 && !t.pending_approvals) return '답 대기';
   if(inBackground(t))return t.background.some(b=>b.state==='unknown')?'작업 상태 확인 필요':'백그라운드 실행 중';
+  if (t.status === 'done' || t.status === 'idle') {
+    if (t.request_wait === 'pending') return '문의 후속 작업 대기';
+    if (t.request_wait === 'waiting') return '에이전트 회신 대기';
+  }
   return STATUS_LABEL[t.status];
 }
 

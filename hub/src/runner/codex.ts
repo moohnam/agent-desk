@@ -46,7 +46,7 @@ function mcpText(result: Json): string {
 }
 
 /** A message waiting for its turn: the text and the desk skills it names. */
-interface Turn { text: string; skills?: string[]; skillSnapshotHome?: string }
+interface Turn { text: string; requestInputId?:string; skills?: string[]; skillSnapshotHome?: string }
 
 /** An approval the app answers: the JSON-RPC request to reply to and how to phrase the reply. */
 interface Pending { requestId: Id; reply: (allow: boolean, message?: string, answers?: Answers) => Json }
@@ -328,7 +328,10 @@ export const startCodex: StartEngine = (opts) => {
       threadId, input,
       approvalPolicy: POLICY[mode], approvalsReviewer: REVIEWER, sandboxPolicy: SANDBOX_POLICY,
       ...(model && { model }), ...(effort && { effort }),
-    }).then((r) => noteTurn(r?.turn?.id)).catch((err: Error) => {
+    }).then((r) => {
+      noteTurn(r?.turn?.id);
+      if (turn.requestInputId && r?.turn?.id) opts.onRequestStarted?.(turn.requestInputId);
+    }).catch((err: Error) => {
       if (closing) return;
       stopAsked = false;
       event({ kind: 'status', state: 'error', detail: { message: `Codex 턴 시작 실패: ${err.message}` } });
@@ -359,7 +362,7 @@ export const startCodex: StartEngine = (opts) => {
       const r = !opts.resume ? await request('thread/start', common)
         : opts.fork ? await request('thread/fork', { threadId: opts.resume, ...common, excludeTurns: true })
         : await request('thread/resume', { threadId: opts.resume, ...common, excludeTurns: true }).catch((err: Error) => {
-          if (!WRITER_BUSY.test(err.message)) throw err;
+          if (opts.requestInputId || !WRITER_BUSY.test(err.message)) throw err;
           lockedBy = true;
           return request('thread/fork', { threadId: opts.resume, ...common, excludeTurns: true });
         });
@@ -386,22 +389,22 @@ export const startCodex: StartEngine = (opts) => {
 
   // A model switch looks the id up first; messages sent after it wait so their turn runs on the new model.
   let switching: Promise<unknown> = Promise.resolve();
-  const send = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
+  const send = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string, requestInputId?:string) => {
     emit({ type: 'busy', sessionId, busy: true });
-    void switching.then(() => deliver(text, skills, steer, skillSnapshotHome));
+    void switching.then(() => deliver(text, skills, steer, skillSnapshotHome,requestInputId));
   };
-  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
+  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string, requestInputId?:string) => {
     if (closing) return;
     if (steer && turns.active && threadId && turnId) {
       // Adds the input to the running turn; if that turn ended meanwhile, run it as the next turn.
-      const turn = { text, skills, skillSnapshotHome };
+      const turn = { text, skills, skillSnapshotHome,requestInputId };
       request('turn/steer', { threadId, input: turnInput(turn, true), expectedTurnId: turnId }).catch(() => {
         if (closing) return;
         turns.push(turn);
       });
-    } else turns.push({ text, skills, skillSnapshotHome });
+    } else turns.push({ text, skills, skillSnapshotHome,requestInputId });
   };
-  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
+  send(opts.prompt, opts.skills, false, opts.skillSnapshotHome,opts.requestInputId);
 
   return {
     send,

@@ -168,3 +168,30 @@ test('gate-waiting input stays busy through adapter busy:false and cannot be los
   assert.equal(runner.snapshot().length,1,'pending input protects the idle timer');
   finish();await tick();assert.deepEqual(delivered,['wait for model']);runner.shutdown();
 });
+
+test('a runner receipt survives restart without starting the same follow-up twice', async () => {
+  const {mkdtempSync,rmSync}=await import('node:fs');
+  const {join}=await import('node:path');
+  const {tmpdir}=await import('node:os');
+  const dir=mkdtempSync(join(tmpdir(),'desk-resume-receipt-'));
+  const events:RunnerToHub[]=[];
+  let starts=0;
+  const makeRunner=()=>new Runner('receipt-test',m=>events.push(m),{receiptPath:join(dir,'receipt.db'),start:o=>{
+    starts++;
+    o.emit({type:'busy',sessionId:o.sessionId,busy:true});
+    assert.equal(events.filter(m=>m.type==='event' && m.event.kind==='status' && m.event.detail?.phase==='started').length,0);
+    o.onRequestStarted!(o.requestInputId!);
+    return {send(){},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{},resolveApproval(){},close(){}};
+  }});
+  const cmd={...start('session'),requestInputId:'aaaa-bbbb-cccc-dddd'} as HubToRunner;
+  let runner=makeRunner();
+  try {
+    runner.handle(cmd); runner.shutdown();
+    runner=makeRunner();
+    runner.handle({type:'request_probe',sessionId:'session',requestInputId:'aaaa-bbbb-cccc-dddd'});
+    runner.handle(cmd);
+    assert.equal(starts,1);
+    const phases=events.flatMap(m=>m.type==='event' && m.event.kind==='status' && m.event.state==='request_receipt' ? [m.event.detail?.phase]:[]);
+    assert.deepEqual(phases,['received','started','started','started']);
+  } finally {runner.shutdown();rmSync(dir,{recursive:true,force:true});}
+});

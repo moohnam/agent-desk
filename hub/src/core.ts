@@ -79,6 +79,7 @@ export class DeskCore {
       permission_mode: session?.permission_mode ?? null,
       model: session?.model ?? null,
       effort: session?.effort ?? null,
+      ...(session?.request_wait && {request_wait:session.request_wait}),
       ...(session?.source === 'app' && { reply_session_id: session.id }),
       runner_id: session?.runner_id,
       runner_label: session?.source === 'app' ? session.runner_label ?? undefined : undefined,

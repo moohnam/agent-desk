@@ -421,8 +421,8 @@ test('HTTP gateway sends a cross-source MCP request through authenticated worksp
     gatewayServer = createHttpServer(gatewayHub, new Access(join(gatewayDir, 'access-token'), 4317),
       join(gatewayDir, 'uploads'), { workspaces: links, localAuthorityId: localId });
     const gatewayUrl = await listen(gatewayServer);
-    const tool = (id: number, name: string, args: Record<string, unknown>) => fetch(`${gatewayUrl}/mcp`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+    const tool = (id: number, name: string, args: Record<string, unknown>, credential?:string) => fetch(`${gatewayUrl}/mcp`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(credential && {'x-desk-session':credential}) },
       body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
     }).then(async response => ({ status: response.status, body: await response.json() as any }));
     const asked = await tool(1, 'desk_request', { to: '@http-target#1', question: 'HTTP로 물어봅니다', task_id: from.task.id, timeout_sec: 1 });
@@ -448,6 +448,24 @@ test('HTTP gateway sends a cross-source MCP request through authenticated worksp
     assert.match(answered.body.result.content[0].text, /HTTP 경유 명시 답변/);
     assert.equal(from.store.getRequest(id)?.status, 'answered');
     assert.equal(gatewayStore.listTasks().length, 0, 'gateway never owns a canonical task');
+    from.store.updateSession(from.session.id,{engine_session_id:'http-origin-engine'});
+    from.hub.addEvent(from.session.id,from.task.id,'user',{text:'@http-target#1 문의'});
+    const credential = (from.sent[0] as {requestCredential:string}).requestCredential;
+    const ticket = await tool(4,'desk_request',{to:'@http-target#1',question:'비동기 문의',session_id:'http-origin-engine'},credential);
+    assert.match(ticket.body.result.content[0].text,/턴을 끝내도/);
+    const ticketId = /question_id: "([^"]+)"/.exec(ticket.body.result.content[0].text)![1];
+    for (let i=0;i<100 && to.store.getRequest(ticketId)?.status!=='running';i++) await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(to.store.getRequest(ticketId)?.status,'running');
+    const reply = {question_id:ticketId,session_id:'http-target-engine',answer:'비동기 회신'};
+    assert.equal((await tool(5,'desk_reply',reply,credential)).body.result.isError,true);
+    const recipient = (to.sent.at(-1) as {requestCredential:string}).requestCredential;
+    const response = await tool(6,'desk_reply',reply,recipient);
+    assert.equal(response.body.result.isError,undefined,response.body.result.content[0].text);
+    await tool(7,'desk_wait_answer',{question_id:ticketId,timeout_sec:3});
+    await new Promise(resolve=>setImmediate(resolve));
+    const sent = from.sent.filter(c=>(c as {requestInputId?:string}).requestInputId===ticketId);
+    assert.equal(sent.length,1);
+    assert.equal(from.store.listEvents(from.task.id).filter(e=>(e.payload as any).request_result===ticketId).length,1);
     const offlineUrl = await listen(offlineServer); offlineListening = true;
     await links.attach({ name: 'offline', url: offlineUrl, token: offlineWorkspace.grant('gateway').token });
     await stop(offlineServer); offlineListening = false;

@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS session (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id), engine TEXT NOT NULL,
   engine_session_id TEXT, cwd TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
   runner_id TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS request_resume(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,state TEXT NOT NULL,stream TEXT,proof TEXT UNIQUE);
+      CREATE INDEX IF NOT EXISTS request_resume_state ON request_resume(session_id,state);
 CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
   ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, edited_at TEXT);
@@ -415,12 +417,14 @@ export class Store {
       .get(taskId) as unknown as Session | undefined;
   }
   /** The latest session and its stored runner host/address, including an offline runner. */
-  latestSessionWithRunnerLabel(taskId: string): (Session & { runner_label: string | null }) | undefined {
-    return this.db.prepare(`SELECT s.*, COALESCE(remote.address, local.host) AS runner_label
+  latestSessionWithRunnerLabel(taskId: string): (Session & { runner_label: string | null; request_wait: "waiting" | "pending" | null }) | undefined {
+    return this.db.prepare(`SELECT s.*, COALESCE(remote.address, local.host) AS runner_label,
+      (SELECT rr.state FROM request_resume rr WHERE rr.session_id=s.id AND rr.state IN ('pending','waiting')
+       ORDER BY rr.state LIMIT 1) AS request_wait
       FROM session s LEFT JOIN remote_runner remote ON remote.id = s.runner_id
       LEFT JOIN runner local ON local.id = s.runner_id
       WHERE s.task_id = ? ORDER BY s.created_at DESC LIMIT 1`)
-      .get(taskId) as unknown as (Session & { runner_label: string | null }) | undefined;
+      .get(taskId) as unknown as (Session & { runner_label: string | null; request_wait: "waiting" | "pending" | null }) | undefined;
   }
   updateSession(id: string, fields: Partial<Pick<Session, 'status' | 'engine_session_id' | 'permission_mode' | 'model' | 'effort'>>) {
     for (const [k, v] of Object.entries(fields)) {

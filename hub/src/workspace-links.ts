@@ -1,3 +1,4 @@
+import { signRequest, toolFields } from './request-proof.ts';
 import { enrollmentCall, requestEnrollment, sshLogin } from './ssh-client.ts';
 import { agentPublicKeys, validatePublicKey } from './ssh-signature.ts';
 import { readSse } from './sse-reader.ts';
@@ -521,11 +522,14 @@ export class WorkspaceLinks {
   async proxyMcp(id:string,req:IncomingMessage,res:ServerResponse,suppliedBody?:unknown) {
     const link=this.link(id);
     const body=suppliedBody??await readBody(req);
+    const rpc=body as {params?:{name?:string;arguments?:Record<string,unknown>}};
+    const name=rpc?.params?.name;
+    const proof=(name==='desk_request'||name==='desk_reply') && signRequest(req.headers?.['x-desk-session'],toolFields(name,rpc.params?.arguments??{}));
     const controller=new AbortController();
     res.on('close',()=>controller.abort());
     try {
       const response=await fetch(new URL('/v1/mcp',link.url),{method:req.method,redirect:'error',
-        headers:{'content-type':'application/json',authorization:`Bearer ${await this.connectionToken(link,controller.signal)}`,'x-workspace-id':link.workspace_id},
+        headers:{'content-type':'application/json',authorization:`Bearer ${await this.connectionToken(link,controller.signal)}`,'x-workspace-id':link.workspace_id,...(proof && {'x-desk-request-proof':proof})},
         body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(610_000)])});
       res.writeHead(response.status,{'content-type':response.headers.get('content-type')??'application/json'});
       res.end(await response.text());

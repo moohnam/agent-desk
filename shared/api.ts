@@ -85,6 +85,7 @@ export interface TaskView<E = WireEvent> extends Task {
   live: boolean;
   /** The session a scheduled reply is intended to continue. */
   reply_session_id?: string;
+  request_wait?: 'waiting' | 'pending';
   /** Increases on every manual title save, including a save of the same text. */
   title_revision?: number;
   runner_id?: string; runner_label?: string; runner_connected?: boolean; delivery_pending?: number;

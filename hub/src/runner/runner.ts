@@ -1,3 +1,7 @@
+import { signRequest } from '../request-proof.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { dirname, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { runnerModelCatalogs } from './model-catalog.ts';
 import type { Capabilities, Engine, EngineAdapter, HubToRunner, LiveSession, RunnerToHub } from '../../../shared/protocol.ts';
 import { config } from '../config.ts';
@@ -43,8 +47,9 @@ export class Runner {
   private catalogSignature = '';
   private usage = new Map<Engine, { requestId: string; report?: UsageReport }>();
 
-  constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine; mcp?: RunnerMcp } = {}) {
+  constructor(id: string, emit: (m: RunnerToHub) => void, opts: { idleMs?: number; start?: StartEngine; mcp?: RunnerMcp; receiptPath?: string } = {}) {
     this.id = id;
+    this.receiptPath = opts.receiptPath ?? join(dirname(config.dbPath),'request-receipts.db');
     this.emit = emit;
     this.idleMs = opts.idleMs ?? config.runner.idleMs;
     this.start = opts.start ?? null;
@@ -104,6 +109,8 @@ export class Runner {
       try { entry.adapter?.close(); } catch (e) { error = errorText(e); }
       this.emit({ type: 'closed', sessionId, busy: entry.live.busy, reason: 'shutdown', ...(error && { error }) });
     }
+    this.receipts?.close();
+    this.receipts = undefined;
   }
 
   /**
@@ -143,7 +150,8 @@ export class Runner {
     if (this.sessions.get(m.sessionId) !== entry) return false;
     const s = entry.live;
     switch (m.type) {
-      case 'busy': s.busy = m.busy; m.busy = effectiveBusy(entry); this.schedule(m.sessionId, entry); break;
+      case 'busy':
+        s.busy = m.busy; m.busy = effectiveBusy(entry); this.schedule(m.sessionId, entry); break;
       case 'background': s.background = m.tasks; this.schedule(m.sessionId, entry); break;
       case 'approval_request':
         s.approvals.push({ approvalId: m.approvalId, toolName: m.toolName, input: m.input });
@@ -175,12 +183,38 @@ export class Runner {
     try { call(adapter).catch(report); } catch (err) { report(err); }
   }
 
+  private receipts?: DatabaseSync;
+  private receiptPath: string;
+  private receipt(sessionId:string,id:string,phase:'received'|'started'|'missing') {
+    this.emit({type:'event',sessionId,event:{kind:'status',state:'request_receipt',detail:{id,phase}}});
+  }
+
   handle(cmd: HubToRunner, mcp = this.mcp) {
     if (cmd.type === 'start' || cmd.type === 'send') requireAdmission();
+    if ((cmd.type === 'start' || cmd.type === 'send' || cmd.type === 'request_probe') && cmd.requestInputId) {
+      if (!this.receipts) {
+        mkdirSync(dirname(this.receiptPath),{recursive:true});
+        this.receipts = new DatabaseSync(this.receiptPath);
+        this.receipts.exec('CREATE TABLE IF NOT EXISTS receipt(session TEXT,id TEXT,started INTEGER DEFAULT 0,PRIMARY KEY(session,id))');
+      }
+      const id = cmd.requestInputId;
+      if (cmd.type === 'request_probe') {
+        const row = this.receipts.prepare('SELECT started FROM receipt WHERE session=? AND id=?').get(cmd.sessionId,id);
+        this.receipt(cmd.sessionId,id,row ? (row.started ? 'started':'received') : 'missing');
+        return;
+      }
+      const inserted = this.receipts.prepare('INSERT OR IGNORE INTO receipt(session,id) VALUES (?,?)').run(cmd.sessionId,id);
+      const old = this.receipts.prepare('SELECT started FROM receipt WHERE session=? AND id=?').get(cmd.sessionId,id);
+      this.receipt(cmd.sessionId,id,old?.started ? 'started':'received');
+      if (!inserted.changes) return;
+    }
     switch (cmd.type) {
       case 'refresh_models': this.refreshModels(cmd.force); break;
       case 'refresh_usage': this.refreshUsage(cmd.request, report => this.emit({ type: 'usage', sessionId: cmd.sessionId, report })); break;
       case 'start': {
+        if (mcp && cmd.requestCredential) this.emit({type:'event',sessionId:cmd.sessionId,event:{
+          kind:'status',state:'request_receipt',detail:{phase:'bound',proof:signRequest(cmd.requestCredential,['bound',cmd.sessionId])},
+        }});
         const old = this.sessions.get(cmd.sessionId);
         if (old) { this.drop(cmd.sessionId, old); old.adapter?.close(); }
         const entry: Entry = { adapter: null, live: { sessionId: cmd.sessionId, busy: false, approvals: [] }, idleTimer: null, skillsHome: cmd.skillsHome, snapshotHomes: new Set(), deliveryVersion:0, pendingSends:new Set() };
@@ -193,8 +227,13 @@ export class Runner {
             ? materializeSkillSnapshot(cmd.skillsHome ?? config.skillsHome, cmd.skillSnapshot, this.protectedHomes()) : undefined;
           if (skillSnapshotHome) entry.snapshotHomes.add(skillSnapshotHome);
           entry.adapter = start({
-            sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp,
+            sessionId: cmd.sessionId, cwd: cmd.cwd, prompt: cmd.prompt, requestInputId: cmd.requestInputId,
+            onRequestStarted: id => {
+              if (this.sessions.get(cmd.sessionId) !== entry) return;
+              const changed = this.receipts?.prepare('UPDATE receipt SET started=1 WHERE session=? AND id=? AND started=0').run(cmd.sessionId,id).changes;
+              if (changed) this.receipt(cmd.sessionId,id,'started');
+            }, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
+            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: mcp && cmd.requestCredential ? {...mcp,sessionCredential:cmd.requestCredential} : mcp,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {
@@ -228,7 +267,7 @@ export class Runner {
             this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'error',detail:{message:`모델 변경 실패로 입력을 실행하지 않았습니다: ${entry.modelError}. 모델·effort 태그를 다시 지정해 재시도하세요.`}}});
             return;
           }
-          entry.adapter.send(cmd.text, cmd.skills, cmd.steer, skillSnapshotHome);
+          entry.adapter.send(cmd.text, cmd.skills, cmd.steer, skillSnapshotHome,cmd.requestInputId);
         };
         if (entry.modelChange) {
           const token = Symbol(); entry.pendingSends.add(token); this.reportBusy(cmd.sessionId,entry);

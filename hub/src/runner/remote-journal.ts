@@ -11,8 +11,10 @@ import { checkHubToRunner } from '../../../shared/protocol.ts';
 export class RemoteJournal {
   private db: DatabaseSync;
   readonly id: string;
+  readonly path: string;
   private claimed = false;
   constructor(path: string) {
+    this.path = path;
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     if (path !== ':memory:') chmodSync(path, 0o600);

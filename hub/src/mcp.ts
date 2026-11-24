@@ -1,3 +1,4 @@
+import { signRequest, toolFields } from './request-proof.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
 import { readBody } from './body.ts';
@@ -19,7 +20,7 @@ const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 /** desk_ask / desk_wait_answer hold the request at most this long, then tell the agent to call again. */
 const MAX_WAIT_SEC = 600;
 const DEFAULT_WAIT_SEC = 300;
-const DEFAULT_REQUEST_WAIT_SEC = 15;
+
 /** Most requests one JSON-RPC batch may carry. */
 const MAX_BATCH = 32;
 
@@ -30,7 +31,7 @@ const INSTRUCTIONS = `Agent Desk: 사용자가 여러 에이전트 작업을 한
 3. 사용자 판단이 필요하면 desk_ask로 묻고 답을 기다립니다. "아직 답 없음"이 오면 desk_wait_answer를 다시 호출합니다.
 4. 작업을 마치면 desk_finish를 호출합니다.
 사용자가 이 세션을 데스크로 "넘겨", "옮겨", "가져가"라고 하면 desk_handoff를 씁니다. 세션 ID는 Claude Code면 \`echo $CLAUDE_CODE_SESSION_ID\`, Codex면 \`echo $CODEX_THREAD_ID\`로 얻습니다(비어 있으면 생략). 넘긴 뒤에는 이 터미널 세션을 더 진행하지 말고 종료하라고 사용자에게 알립니다.
-다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. "아직 답 없음"이 오면 같은 문의를 다시 만들지 말고 desk_wait_answer로 계속 기다립니다. 받은 문의에는 desk_reply로 요청 ID를 지정해 답합니다.
+다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. 접수 후 자동 재개가 표시되면 턴을 끝내도 됩니다. 직접 조회는 desk_wait_answer를 씁니다. 받은 문의에는 desk_reply로 요청 ID를 지정해 답합니다.
 데스크에 쓰는 글은 한국어로 씁니다.`;
 
 const str = (description: string) => ({ type: 'string', description });
@@ -87,7 +88,7 @@ const TOOLS = [
   },
   {
     name: 'desk_request',
-    description: '다른 작업의 에이전트에게 질문합니다. 승인된 질문은 연결된 지원 엔진의 실행 중인 턴에 즉시 전달됩니다. 기본 15초 안에 답이 없으면 question_id를 돌려줍니다. 같은 질문을 다시 만들지 말고 desk_wait_answer로 계속 기다리세요. 사용자가 대상을 @로 언급하지 않았으면 먼저 승인받습니다.',
+    description: '다른 작업의 에이전트에게 질문합니다. 승인된 질문은 연결된 지원 엔진의 실행 중인 턴에 즉시 전달됩니다. 기본적으로 즉시 question_id와 재개 방법을 돌려줍니다. 사용자가 대상을 @로 언급하지 않았으면 먼저 승인받습니다.',
     inputSchema: {
       type: 'object', required: ['to', 'question'],
       properties: {
@@ -95,7 +96,7 @@ const TOOLS = [
         question: str('질문 (마크다운). 대상은 이 대화를 모르니 필요한 맥락을 함께 씁니다'),
         task_id: str('묻는 쪽이 데스크에 붙은 작업이면 desk_attach가 준 task_id'),
         session_id: str('묻는 쪽이 데스크가 실행한 작업이면 이 세션의 ID. Claude Code: $CLAUDE_CODE_SESSION_ID, Codex: $CODEX_THREAD_ID'),
-        timeout_sec: { type: 'number', description: `최초 답을 기다릴 최대 초 (기본 ${DEFAULT_REQUEST_WAIT_SEC}, 최대 ${MAX_WAIT_SEC})` },
+        timeout_sec: { type: 'number', description: `직접 기다릴 때만 지정할 초 (최대 ${MAX_WAIT_SEC}). 생략하면 비동기로 접수합니다.` },
       },
     },
   },
@@ -157,7 +158,7 @@ function taskLine(t: TaskView) {
   return `- ${t.id} [${t.status}${t.source === 'external' ? ', 터미널' : ''}] @${t.project_name} › ${t.title} (갱신 ${t.updated_at})`;
 }
 
-async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal) {
+async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal, resumeToken?: unknown) {
   switch (name) {
     case 'desk_attach': {
       const t = hub.external.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
@@ -179,12 +180,13 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
       return answerResult(await hub.external.waitAnswer(a.question_id, ms, signal));
     }
     case 'desk_request': {
-      const r = hub.requests.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id });
-      return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec, DEFAULT_REQUEST_WAIT_SEC) * 1000, signal));
+      const r = hub.atomic(() => hub.requests.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id, resumeProof: a.timeout_sec === undefined ? resumeToken : undefined }));
+      if (a.timeout_sec === undefined) return requestResult(hub,r);
+      return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec) * 1000, signal));
     }
     case 'desk_reply': {
-      hub.requests.replyRequest(a.question_id, a.answer, a.session_id);
-      return text('답변을 저장했습니다. 질문한 작업에 전달됩니다.');
+      hub.requests.replyRequest(a.question_id, a.answer, a.session_id,resumeToken);
+      return text('답변을 저장했습니다.');
     }
     case 'desk_finish':
       hub.external.finishExternal(a.task_id, a.summary);
@@ -215,12 +217,16 @@ const REQUEST_WAITING: Record<string, string> = { approval: '사용자 승인 �
 function requestResult(hub: Hub, r: AgentRequest) {
   const to = hub.store.getTask(r.to_task_id);
   const who = to ? `@${hub.store.getProject(to.project_id)?.name ?? '?'}#${to.seq}` : '대상';
-  if (r.status === 'answered') return text(`${who} 에이전트의 답:\n${r.answer}`);
+  const state = hub.requests.resumeState(r.id);
+  const resume: Record<string,string> = {pending:'후속 작업 전달 대기',sent:'러너 수신 확인 대기',received:'러너 수신 · 실행 확인 대기',
+    uncertain:'실행 여부 미확인',held:'러너 수신 · 실행 여부 미확인',started:'후속 턴 시작',cancelled:'자동 재개 해제'};
+  const suffix = state && resume[state] ? '\n\n' + resume[state] : '';
+  if (r.status === 'answered') return text(`${who} 에이전트의 답:\n${r.answer}${suffix}`);
   if (r.status === 'denied' || r.status === 'failed') return text(r.answer ?? '답을 받지 못했습니다.');
-  return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). 같은 문의를 다시 만들지 말고 desk_wait_answer(question_id: "${r.id}")로 계속 기다리세요.`);
+  return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). question_id: "${r.id}". ${hub.requests.resumeState(r.id) === 'waiting' ? '턴을 끝내도 결과가 오면 이 작업이 이어집니다.' : 'desk_wait_answer로 결과를 조회하세요.'}`);
 }
 
-async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal): Promise<unknown> {
+async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown): Promise<unknown> {
   switch (req.method) {
     case 'initialize': {
       const asked = req.params?.protocolVersion;
@@ -238,7 +244,7 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal): Promise
     case 'tools/call': {
       const { name, arguments: args = {} } = req.params ?? {};
       try {
-        return await callTool(hub, name, args, signal);
+        return await callTool(hub, name, args, signal,resumeToken);
       } catch (err) {
         if (err instanceof RpcError) throw err;
         // Tool failures go back to the model as results it can act on.
@@ -266,12 +272,12 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal): Promise
   }
 }
 
-async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal) {
+async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown) {
   // Notifications (no id) get no response.
   const isNotification = req.id === undefined;
   try {
     if (req?.jsonrpc !== '2.0' || typeof req.method !== 'string') throw new RpcError(-32600, 'invalid request');
-    const result = await dispatch(hub, req, signal);
+    const result = await dispatch(hub, req, signal,resumeToken);
     return isNotification ? null : { jsonrpc: '2.0', id: req.id, result };
   } catch (err) {
     if (isNotification) return null;
@@ -303,7 +309,11 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
   // A client giving up on a long desk_ask releases its waiter.
   const abort = new AbortController();
   res.on('close', () => abort.abort());
-  const replies = (await Promise.all((Array.isArray(body) ? body : [body]).map((r) => handleOne(hub, r, abort.signal))))
+  const replies = (await Promise.all((Array.isArray(body) ? body : [body]).map((r) => {
+    const params = r?.params as {name?:string;arguments?:Record<string,unknown>} | undefined;
+    const proof = signRequest(req.headers?.['x-desk-session'],toolFields(params?.name??'',params?.arguments??{})) ?? req.headers?.['x-desk-request-proof'];
+    return handleOne(hub,r,abort.signal,proof);
+  })))
     .filter((r) => r !== null);
   if (!replies.length) {
     res.writeHead(202).end();

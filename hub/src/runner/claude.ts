@@ -22,9 +22,9 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
    * Mid-turn, the CLI folds a 'next' message into the running turn and runs a 'later' one as its
    * own turn afterwards ('now' would abort the turn); when idle, either starts a turn right away.
    */
-  push(text: string, priority: 'next' | 'later') {
+  push(text: string, priority: 'next' | 'later',uuid?:string) {
     const msg: SDKUserMessage = {
-      type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, priority,
+      type: 'user', ...(uuid && {uuid}), message: { role: 'user', content: text }, parent_tool_use_id: null, priority,
     } as SDKUserMessage;
     if (this.waiter) { this.waiter({ value: msg, done: false }); this.waiter = null; }
     else this.items.push(msg);
@@ -138,6 +138,8 @@ export const startClaude: StartEngine = (opts) => {
     } else if (m.type === 'system' && m.subtype === 'session_state_changed' && m.state === 'running') {
       startBackgroundTurn();
     } else if (m.type === 'assistant' && m.parent_tool_use_id === null) {
+      for (const id of m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []))
+        opts.onRequestStarted?.(id);
       setBusy(true);
       for (const block of m.message.content) {
         if (block.type === 'text' && block.text.trim()) {
@@ -186,11 +188,11 @@ export const startClaude: StartEngine = (opts) => {
     }
   })();
 
-  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string) => {
+  const deliver = (text: string, skills?: string[], steer?: boolean, skillSnapshotHome?: string,requestInputId?:string) => {
     backgroundTurn = awaitingBackgroundTurn = false;
     busy = true;
     emit({ type: 'busy', sessionId, busy: true });
-    prompts.push(skillSnapshotHome ? steeringSkillText(text, skills, skillSnapshotHome) : withSkills(text, skills), steer ? 'next' : 'later');
+    prompts.push(skillSnapshotHome ? steeringSkillText(text, skills, skillSnapshotHome) : withSkills(text, skills), steer ? 'next' : 'later',requestInputId);
   };
   let selectedChoice = opts.model, selectedEffort = opts.effort;
   const validateModel = async (choice?: ModelName, effort?: Effort) => {
@@ -206,15 +208,15 @@ export const startClaude: StartEngine = (opts) => {
     if (closing) return;
     if (effective && effective !== selectedEffort) await q.applyFlagSettings({effortLevel:claudeEffort(effective)});
     initialized = true;
-    if (!closing && deliveryVersion === 0) deliver(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
+    if (!closing && deliveryVersion === 0) deliver(opts.prompt, opts.skills, false, opts.skillSnapshotHome,opts.requestInputId);
   }).catch(error => {
     if (closing) return;
     closing = true; prompts.end(); q.close();
     emit({type:'closed',sessionId,error:error instanceof Error ? error.message : String(error)});
   });
-  const send = (text: string,skills?:string[],steer?:boolean,skillSnapshotHome?:string) => {
+  const send = (text: string,skills?:string[],steer?:boolean,skillSnapshotHome?:string,requestInputId?:string) => {
     const version = deliveryVersion;
-    void ready.then(() => { if (!closing && version === deliveryVersion) deliver(text,skills,steer,skillSnapshotHome); });
+    void ready.then(() => { if (!closing && version === deliveryVersion) deliver(text,skills,steer,skillSnapshotHome,requestInputId); });
   };
 
   return {

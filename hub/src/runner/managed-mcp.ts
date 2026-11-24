@@ -6,11 +6,13 @@ import { DESK_TOOL_NAMES } from '../mcp.ts';
 /** Only the engine child receives this workspace-scoped MCP connection. */
 export interface RunnerMcp {
   url: string;
+  sessionCredential?: string;
   workspaceId?: string;
   token?: string;
 }
 
 const SERVER = 'agent-desk-runtime';
+const SESSION_ENV = 'AGENT_DESK_SESSION_CREDENTIAL';
 const AUTH_ENV = 'AGENT_DESK_RUNNER_MCP_AUTH';
 const CREDENTIAL_FILE = 'engine-mcp-credential.json';
 
@@ -49,16 +51,22 @@ type ConnectorMcp = {url:string;token:string};
 export function codexMcpProcess(mcp?: RunnerMcp, connector?: ConnectorMcp): { args: string[]; env: NodeJS.ProcessEnv } {
   const args = ['app-server'];
   const env = { ...process.env };
-  delete env[AUTH_ENV]; delete env[CONNECTOR_AUTH_ENV];
+  delete env[SESSION_ENV]; delete env[AUTH_ENV]; delete env[CONNECTOR_AUTH_ENV];
   const add = (name:string, url:string, tools:readonly string[], auth?:{name:string;token:string;workspaceId?:string}) => {
     const key = `mcp_servers.${name}`;
     args.push('-c', `${key}.url=${JSON.stringify(url)}`, '-c', `${key}.enabled=true`,
       '-c', `${key}.enabled_tools=${JSON.stringify(tools)}`, '-c', `${key}.disabled_tools=[]`);
+    const headers: string[] = [];
+    if (name === SERVER && mcp?.sessionCredential) {
+      env[SESSION_ENV] = mcp.sessionCredential;
+      headers.push(`"x-desk-session"=${JSON.stringify(SESSION_ENV)}`);
+    }
     if (auth) {
       env[auth.name] = `Bearer ${auth.token}`;
-      args.push('-c', `${key}.env_http_headers={Authorization=${JSON.stringify(auth.name)}}`);
+      headers.push(`Authorization=${JSON.stringify(auth.name)}`);
       if (auth.workspaceId) args.push('-c', `${key}.http_headers={"x-workspace-id"=${JSON.stringify(auth.workspaceId)}}`);
     }
+    if (headers.length) args.push('-c',`${key}.env_http_headers={${headers.join(',')}}`);
   };
   if (mcp) {
     if (mcp.token && !mcp.workspaceId) throw new Error('인증된 엔진 MCP에는 작업공간 ID가 필요합니다');
@@ -73,11 +81,15 @@ export function claudeMcpOptions(mcp?: RunnerMcp, connector?: ConnectorMcp) {
   if (mcp?.token && !mcp.workspaceId) throw new Error('인증된 엔진 MCP에는 작업공간 ID가 필요합니다');
   const mcpServers:Record<string,{type:'http';url:string;headers?:Record<string,string>}> = {};
   const env = {...process.env};
-  delete env[AUTH_ENV]; delete env[CONNECTOR_AUTH_ENV];
+  delete env[SESSION_ENV]; delete env[AUTH_ENV]; delete env[CONNECTOR_AUTH_ENV];
   if (mcp) {
     mcpServers[SERVER] = {type:'http',url:mcp.url,...(mcp.token ? {headers:{
       Authorization:'${' + AUTH_ENV + '}', 'x-workspace-id':mcp.workspaceId!,
     }} : {})};
+    if (mcp.sessionCredential) {
+      env[SESSION_ENV] = mcp.sessionCredential;
+      mcpServers[SERVER].headers = {...mcpServers[SERVER].headers,'x-desk-session':'${'+SESSION_ENV+'}'};
+    }
     if (mcp.token) env[AUTH_ENV] = `Bearer ${mcp.token}`;
   }
   if (connector) {

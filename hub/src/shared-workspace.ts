@@ -327,7 +327,7 @@ export class SharedWorkspace {
           const action=url.pathname.slice('/v1/broker/'.length);
           if(!/^[a-z-]+$/.test(action))throw new HttpError(404,'지원하지 않는 broker 요청입니다');
           const body=await readBody(req);
-          const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {});}));
+          const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {},peer);}));
           return json(res,result.status,result.body);
         }
         if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized()));

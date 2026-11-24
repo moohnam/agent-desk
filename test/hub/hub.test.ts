@@ -34,11 +34,12 @@ class FakeRunner implements RunnerPort {
     if (cmd.type === 'start') this.live.add(cmd.sessionId);
     this.sent.push(cmd);
   }
-  hello(sessions: LiveSession[] = []) {
+  disconnect() { this.connected = false; this.onConnection(false); }
+  hello(sessions: LiveSession[] = [],outputStream?: string) {
     this.connected = true;
     this.id = 'fake';
     this.live = new Set(sessions.map((s) => s.sessionId));
-    this.onMessage({ type: 'hello', runnerId: 'fake', host: 'test', capabilities: { engines: [...this.engines], close: true }, sessions });
+    this.onMessage({ type: 'hello', runnerId: 'fake', host: 'test', outputStream, capabilities: { engines: [...this.engines], close: true }, sessions });
     this.onConnection(true);
   }
   say(m: RunnerToHub) {
@@ -1017,4 +1018,81 @@ test('a missing closed notification cannot strand other inputs after an idle rev
   assert.equal(hub.store.origins.stopping(sessionId),false);
   assert.equal(hub.store.queued({taskId:task.id}).length,0);
   assert.match(runner.last('start')!.prompt,/preserve this input/);
+});
+
+test('a signed agent result waits for background work, resumes once, and never grants a new mention', async () => {
+  const {hub,runner,sessionId:target,taskId} = started();
+  const origin = hub.createTask(hub.store.getTask(taskId)!.project_id,'묻는 작업','작업','default','claude');
+  const sender = runner.last('start')!;
+  const recipient = runner.sent.find(c=>c.type==='start' && c.sessionId===target) as typeof sender;
+  hub.store.updateSession(sender.sessionId,{engine_session_id:'origin-engine'});
+  hub.store.updateSession(target,{engine_session_id:'target-engine'});
+  const {signRequest,toolFields} = await import('../../hub/src/request-proof.ts');
+  const ask = (question:string) => {
+    const a = {session_id:'origin-engine',to:taskId,question};
+    return hub.requests.request({sessionId:a.session_id,to:taskId,text:question,
+      resumeProof:signRequest(sender.requestCredential,toolFields('desk_request',a))});
+  };
+  const answer = (id:string) => {
+    const a = {session_id:'target-engine',question_id:id,answer:'문의 결과 #slack @web#1'};
+    return hub.requests.replyRequest(id,a.answer,a.session_id,signRequest(recipient.requestCredential,toolFields('desk_reply',a)));
+  };
+  hub.addEvent(sender.sessionId,origin.id,'user',{text:'@web#1에게 물어보세요'});
+  const first=ask('질문 1');
+  runner.say({type:'background',sessionId:sender.sessionId,tasks:[{id:'worker',type:'agent',description:'조사'}]});
+  runner.say({type:'busy',sessionId:sender.sessionId,busy:false});
+  answer(first.id); answer(first.id);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(hub.requests.resumeState(first.id),'pending');
+  runner.say({type:'background',sessionId:sender.sessionId,tasks:[]});
+  await new Promise(resolve=>setImmediate(resolve));
+  const followups=runner.sent.filter(c=>c.type==='send' && c.requestInputId===first.id);
+  assert.equal(followups.length,1);
+  assert.equal(hub.store.listEvents(origin.id).filter(e=>(e.payload as any).request_result===first.id).length,1);
+  const second=ask('질문 2');
+  assert.equal(second.status,'approval');
+  hub.resolveApproval(second.approval_id!,true);
+  hub.interrupt(origin.id);
+  answer(second.id);
+  runner.say({type:'busy',sessionId:sender.sessionId,busy:false});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(hub.requests.resumeState(second.id),'cancelled');
+  assert.equal(hub.store.getRequest(second.id)?.status,'answered');
+  hub.dispose();
+});
+
+test('reconnect retries a missing follow-up only with the same daemon and no prior receipt', async () => {
+  const {hub,runner,taskId,sessionId}=started();
+  const stream='00000000-0000-4000-8000-000000000001';
+  runner.hello([{sessionId,busy:true,approvals:[]}],stream);
+  hub.store.updateSession(sessionId,{engine_session_id:'resume-engine'});
+  const peer=hub.createTask(hub.store.getTask(taskId)!.project_id,'대상','질문 대상','default','claude');
+  const {toolFields,signRequest}=await import('../../hub/src/request-proof.ts');
+  const input={session_id:'resume-engine',to:peer.id,question:'확인'};
+  const token=(runner.sent[0] as Extract<HubToRunner,{type:'start'}>).requestCredential;
+  const r=hub.requests.request({sessionId:input.session_id,to:peer.id,text:input.question,
+    resumeProof:signRequest(token,toolFields('desk_request',input))});
+  hub.resolveApproval(r.approval_id!,false);
+  runner.say({type:'busy',sessionId,busy:false});
+  await new Promise(resolve=>setImmediate(resolve));
+  const count=()=>runner.sent.filter(c=>c.type==='send' && c.requestInputId===r.id).length;
+  assert.equal(count(),1);
+  const reconnect=(s:string)=>{runner.disconnect();runner.hello([{sessionId,busy:false,approvals:[]}],s);};
+  const receipt=(phase:string)=>runner.say({type:'event',sessionId,event:{kind:'status',state:'request_receipt',detail:{id:r.id,phase}}});
+  reconnect(stream);
+  assert.equal(runner.last('request_probe')?.requestInputId,r.id);
+  receipt('missing');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(count(),2);
+  reconnect('another-daemon');
+  receipt('missing');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(hub.requests.resumeState(r.id),'uncertain');
+  receipt('received');
+  reconnect(stream);
+  receipt('missing');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(hub.requests.resumeState(r.id),'held');
+  assert.equal(count(),2);
+  hub.dispose();
 });

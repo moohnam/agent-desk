@@ -1,3 +1,4 @@
+import { signRequest } from './request-proof.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -19,7 +20,7 @@ type BrokerRow = { id: string; fingerprint: string; origin: string; target: stri
 const terminal = (s: string) => ['answered', 'denied', 'failed'].includes(s);
 
 /** Runs only in a canonical workspace. Local rows remain the source of truth for approval and delivery. */
-export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<string, any>): Call {
+export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<string, any>, peerId?:string): Call {
   const peerOf = (taskId: string): Lookup | undefined => {
     const task = hub.store.getTask(taskId), session = task && hub.store.latestSession(task.id);
     if (!task || !session) return undefined;
@@ -54,7 +55,7 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
       const taskId = typeof body.task_id === 'string' ? body.task_id.trim() : '';
       const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
       const session = taskId ? hub.store.latestSession(taskId) : sessionId ? hub.store.sessionByEngineId(sessionId) : undefined;
-      const found = session && peerOf(session.task_id);
+      const found = session && (!sessionId || session.engine_session_id === sessionId) && hub.store.latestSession(session.task_id)?.id === session.id && peerOf(session.task_id);
       return { status: found ? 200 : 404, body: found ?? { error: '묻는 작업을 찾지 못했습니다' } };
     }
     if (kind === 'target') {
@@ -75,13 +76,21 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
   }
   const id = String(body.id ?? '');
   if (!/^[a-zA-Z0-9-]{16,100}$/.test(id)) throw new HttpError(400, '요청 ID가 잘못되었습니다');
+  function checkOriginPeer() {
+    const origin = hub.store.database.prepare('SELECT peer FROM request_origin_peer WHERE id=?').get(id);
+    if (origin && origin.peer !== peerId) throw new HttpError(403,'문의를 접수한 허브만 결과를 전달할 수 있습니다');
+  }
   if (action === 'submit') {
     if (!body.target || typeof body.target !== 'object') throw new HttpError(400, '대상 정보가 필요합니다');
     if (body.user_event_id !== null && !Number.isSafeInteger(body.user_event_id))
       throw new HttpError(400, '질문을 시작한 사용자 메시지 ID가 필요합니다');
     const r = hub.requests.requestCross(id, { text: body.text, fromTaskId: body.task_id, sessionId: body.session_id,
-      target: body.target as CrossPeer, explicitMention: true, userEventId: body.user_event_id });
-    return { status: 200, body: r };
+      target: body.target as CrossPeer, originSession:body.origin_session,proof:body.proof,explicitMention: true, userEventId: body.user_event_id });
+    if (peerId) {
+      hub.store.database.prepare('INSERT OR IGNORE INTO request_origin_peer VALUES (?,?)').run(id,peerId);
+      checkOriginPeer();
+    }
+    return { status: 200, body: {...r, armed:hub.requests.resumeState(id) === 'waiting'} };
   }
   if (action === 'receive') {
     if (!body.from || typeof body.from !== 'object' || typeof body.to_task_id !== 'string')
@@ -92,12 +101,13 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
   if (action === 'status' || action === 'answer') {
     const r = hub.store.getRequest(id);
     if (!r) throw new HttpError(404, '질문이 없습니다');
-    return { status: 200, body: r };
+    return { status: 200, body: {...r, verified:!!hub.store.database.prepare('SELECT 1 FROM request_verified WHERE id=?').get(id)} };
   }
   if (action === 'settle') {
+    checkOriginPeer();
     if (!['answered', 'denied', 'failed'].includes(body.status) || typeof body.answer !== 'string')
       throw new HttpError(400, '답변 형식이 잘못되었습니다');
-    return { status: 200, body: hub.requests.settleCrossOrigin(id, body.status, body.answer) };
+    return { status: 200, body: hub.requests.settleCrossOrigin(id, body.status, body.answer,body.verified === true) };
   }
   throw new HttpError(404, '지원하지 않는 중계 요청입니다');
 }
@@ -105,6 +115,7 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
 class RequestBroker {
   private db: DatabaseSync;
   private timer: NodeJS.Timeout;
+  private admitted = new EventEmitter();
   private active = new Map<string, Promise<void>>();
   private waits = new Set<Promise<BrokerRow>>();
   private actions = new Set<Promise<unknown>>();
@@ -145,6 +156,7 @@ class RequestBroker {
   private set(id: string, status: string, answer: string | null = null) {
     this.db.prepare('UPDATE broker_request SET status=?,answer=?,updated_at=? WHERE id=?')
       .run(status, answer, new Date().toISOString(), id);
+    this.admitted.emit(id);
   }
   private async call(source: string, action: string, body: unknown): Promise<any> {
     const r = await this.links.trustedCall(source, `/v1/broker/${action}`, body);
@@ -174,7 +186,7 @@ class RequestBroker {
     }));
     return outcomes.flatMap(x => x ?? []).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 50);
   }
-  async begin(a: Record<string, any>): Promise<BrokerRow | { proxy: string }> {
+  async begin(a: Record<string, any>, resumeToken?: unknown): Promise<BrokerRow | { proxy: string }> {
     if (typeof a.question !== 'string' || !a.question.trim()) throw new HttpError(400, 'question이 필요합니다');
     if (!a.task_id?.trim?.() && !a.session_id?.trim?.())
       throw new HttpError(400, 'task_id 또는 session_id가 필요합니다');
@@ -183,10 +195,10 @@ class RequestBroker {
     if (from.source === to.source) return { proxy: from.source };
     if (to.result.source !== 'app') throw new HttpError(409, '대상은 터미널에서 붙은 작업이라 질문을 넣을 수 없습니다');
     const pending = this.pending().find(row => row.origin === from.source && row.target === to.source
-      && (JSON.parse(row.from_json) as CrossPeer).task_id === from.result.peer.task_id
+      && (JSON.parse(row.from_json) as CrossPeer).session_id === from.result.peer.session_id
       && (JSON.parse(row.to_json) as CrossPeer).task_id === to.result.peer.task_id
       && row.text === a.question.trim());
-    if (pending) { await this.drive(pending.id); return this.row(pending.id)!; }
+    if (pending) return this.accept(pending,a.timeout_sec === undefined);
     const input = [from.source, from.result.peer.task_id, from.result.last_user_message_id,
       to.source, to.result.peer.task_id, String(a.question ?? '').trim()];
     const fingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex');
@@ -195,11 +207,22 @@ class RequestBroker {
       const id = randomUUID(), at = new Date().toISOString();
       this.db.prepare('INSERT INTO broker_request VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, fingerprint, from.source, to.source,
-          JSON.stringify({ ...from.result.peer, user_event_id: from.result.last_user_event_id }), JSON.stringify(to.result.peer),
+          JSON.stringify({ ...from.result.peer, proof:a.session_id && a.timeout_sec === undefined ? signRequest(resumeToken,['cross',id,from.result.peer.session_id,to.result.peer.task_id,a.question.trim()]) : undefined, user_event_id: from.result.last_user_event_id }), JSON.stringify(to.result.peer),
           String(a.question ?? '').trim(), 'new', null, at, at);
       row = this.row(id)!;
     }
-    await this.drive(row.id);
+    return this.accept(row,a.timeout_sec === undefined);
+  }
+
+  private async accept(row: BrokerRow, asynchronous: boolean) {
+    const dispatch = this.drive(row.id);
+    if (!asynchronous) await dispatch;
+    else if (row.status === 'new') {
+      const admission = Promise.withResolvers<void>();
+      this.admitted.once(row.id,admission.resolve);
+      try { await Promise.race([admission.promise,dispatch]); }
+      finally { this.admitted.off(row.id,admission.resolve); }
+    }
     return this.row(row.id)!;
   }
   private async hasCycle(row: BrokerRow) {
@@ -235,11 +258,13 @@ class RequestBroker {
     try {
       let row = this.row(id);
       if (!row || terminal(row.status)) return;
-      const from = JSON.parse(row.from_json) as CrossPeer, to = JSON.parse(row.to_json) as CrossPeer;
+      const {proof,armed:_,user_event_id,...from} = JSON.parse(row.from_json) as CrossPeer & {proof?:string;armed?:boolean;user_event_id?:number};
+      const to = JSON.parse(row.to_json) as CrossPeer;
       if (row.status === 'new') {
-        if (await this.hasCycle(row)) { this.set(id, 'failed', '서로 답을 기다리는 질문이 생겨 전달하지 못했습니다.'); return; }
+        if (await this.hasCycle(row)) { this.set(id,'failed','서로 답을 기다리는 질문이 생겨 전달하지 못했습니다.'); return; }
         const origin = await this.call(row.origin, 'submit', { id, text: row.text, task_id: from.task_id, target: to,
-          user_event_id: (from as CrossPeer & { user_event_id?: number | null }).user_event_id ?? null }) as AgentRequest;
+          origin_session:from.session_id,proof,user_event_id:user_event_id ?? null }) as AgentRequest & {armed?:boolean};
+        this.db.prepare('UPDATE broker_request SET from_json=? WHERE id=?').run(JSON.stringify({...from,user_event_id,armed:!!origin.armed}),id);
         this.set(id, origin.status);
       }
       row = this.row(id)!;
@@ -265,21 +290,22 @@ class RequestBroker {
             return;
           }
         }
-        const target = await this.call(row.target, 'receive', { id, text: row.text, from, to_task_id: to.task_id }) as AgentRequest;
+        const target = await this.call(row.target, 'receive', { id, text: row.text, from:{...from,requireSignedReply:JSON.parse(row.from_json).armed===true}, to_task_id: to.task_id }) as AgentRequest;
         this.set(id, target.status === 'answered' || target.status === 'failed' ? 'settling' : 'running');
       }
       row = this.row(id)!;
       if (row.status === 'running' || row.status === 'settling') {
-        const target = await this.call(row.target, 'answer', { id }) as AgentRequest;
+        const target = await this.call(row.target, 'answer', { id }) as AgentRequest & {verified?:boolean};
         if (!terminal(target.status)) return;
-        await this.call(row.origin, 'settle', { id, status: target.status, answer: target.answer ?? '답을 받지 못했습니다.' });
+        await this.call(row.origin, 'settle', { id, status: target.status,verified:target.verified === true, answer: target.answer ?? '답을 받지 못했습니다.' });
         this.set(id, target.status, target.answer);
       }
     } catch (error) {
       // A disconnected owner leaves the durable row pending for the next timer or wait call.
       if (error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 409) {
         const row = this.row(id);
-        if (row?.status !== 'new' && row?.status !== 'approval') {
+        if (row?.status === 'new' && error.status === 410) this.set(id,'failed',error.message);
+        else if (row && row.status !== 'new' && row.status !== 'approval') {
           try {
             await this.call(row!.origin, 'settle', { id, status: 'failed', answer: error.message });
             this.set(id, 'failed', error.message);
@@ -339,7 +365,7 @@ function result(row: BrokerRow) {
   if (row.status === 'answered') return mcpText(`@${to.project_name}#${to.seq} 에이전트의 답:\n${row.answer}`);
   if (row.status === 'denied' || row.status === 'failed') return mcpText(row.answer ?? '답을 받지 못했습니다.');
   const waiting: Record<string, string> = { new: '전달 대기', approval: '사용자 승인 대기', queued: '대상 작업 대기', running: '대상 에이전트가 답하는 중', settling: '답변 전달 중' };
-  return mcpText(`아직 답이 없습니다 (${waiting[row.status] ?? row.status}). 같은 문의를 다시 만들지 말고 desk_wait_answer(question_id: "${row.id}")로 계속 기다리세요.`);
+  return mcpText(`아직 답이 없습니다 (${waiting[row.status] ?? row.status}). question_id: "${row.id}". ${JSON.parse(row.from_json).armed ? '턴을 끝내도 결과가 오면 이 작업이 이어집니다.' : 'desk_wait_answer로 결과를 조회하세요.'}`);
 }
 
 /** Gateway MCP interception. Unrelated tools keep the existing owner MCP implementation. */
@@ -418,9 +444,10 @@ export async function handleBrokerMcp(links: WorkspaceLinks, localAuthorityId: s
       await links.proxyMcp(source, req, res, body);
       return true;
     }
-    const started = await work.begin(args);
+    const started = await work.begin(args,req.headers?.['x-desk-session']);
     if ('proxy' in started) { await links.proxyMcp(started.proxy, req, res, body); return true; }
     const abort = new AbortController(); res.on('close', () => abort.abort());
+    if (args.timeout_sec === undefined) { mcpReply(res,rpc,result(started)); return true; }
     const ms = Math.min(Math.max(Number(args.timeout_sec) || 15, 1), 600) * 1000;
     mcpReply(res, rpc, result(await work.wait(started.id, ms, abort.signal)));
   } catch (error) { mcpReply(res, rpc, error instanceof Error ? error.message : String(error), true); }
