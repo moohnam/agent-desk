@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, truncateSync, symlinkSync, existsSync, statSync, utimesSync, realpathSync } from 'node:fs';
@@ -738,4 +739,24 @@ test('delivery drains requests accepted during an in-flight operation without th
   await links.flush('test');
   assert.equal(store.database.prepare('SELECT failure FROM workspace_delivery_attempt WHERE id=?').get(third.id)!.failure,'TypeError');
  } finally {release();await links.close();store.database.close();f.close();}
+});
+
+
+test('code view reads on the owning shared runner through the authenticated gateway',async()=>{
+ const f=fixture(),authority=f.runtime.workspace.server();const origin=await listen(authority);
+ const peer=f.runtime.workspace.grant('code-test');
+ const store=new Store(':memory:'),hub=new Hub(store,{skills:new SkillStore(join(f.dir,'code-skills')),
+   runner:()=>({connected:false,id:null,engines:new Set(),has:()=>false,handle:()=>{throw Error('unexpected run');}})});
+ const links=new WorkspaceLinks(store);
+ const server=createHttpServer(hub,new Access(join(f.dir,'code-access'),4317),join(f.dir,'code-uploads'),{workspaces:links});
+ try {
+   execFileSync('git',['-C',f.project,'init'],{stdio:'pipe'});writeFileSync(join(f.project,'hello.ts'),'const greeting = "hello";\n');
+   const link=await links.attach({name:'runner',url:origin,token:peer.token});
+   const task=f.runtime.workspace.execute(peer.id,{id:randomUUID(),method:'POST',path:'/compose',body:{text:`@file:shared@worker:${f.project} #claude read code`}}).body;
+   const gateway=await listen(server);
+   const result=await fetch(gateway+'/api/code-view',{method:'POST',headers:{'content-type':'application/json'},
+     body:JSON.stringify({source:link.id,task_id:task.id,path:'hello.ts'})});
+   assert.equal(result.status,200);assert.match((await result.json() as any).diff,/const greeting/);
+   assert.equal((await fetch(origin+'/v1/code-view',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({task_id:task.id})})).status,401);
+ }finally{await stop(server);await stop(authority);await links.close();hub.dispose();store.database.close();f.close();}
 });

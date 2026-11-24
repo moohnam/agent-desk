@@ -771,3 +771,5 @@ textarea.input { resize: none; }
 @supports (max-height: round(down, 10px, 1lh)) {
   .vim-host > .cm-editor { max-height: calc(16px + max(2lh, round(down, calc(min(620px, 50dvh) - 16px), 1lh))); }
 }
+
+.deck.phone .thread-head .code-view-toggle { display: inline-flex; }

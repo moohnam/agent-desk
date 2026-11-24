@@ -341,6 +341,35 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(older,1,'the known task total at scroll start prevents continuation');
     },false,'emacs'));
 
+    for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      let removed=false,reads=0;
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        reads++;
+        const body=JSON.parse(request.postData());
+        return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:'/test/worktree',head:'1234567890abcdef',files:removed?[]:[{path:'src/example.ts',status:'modified'}],
+          ...(body.path&&!removed?{path:body.path,diff:'--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1,1 +1,1 @@\n-const old = 1;\n+const value = "hello";\n'}:{}),
+        })});
+      });
+      await openReply(page,origin);
+      assert.equal(reads,0,'do not read code before opening the panel');
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-panel .hljs-keyword');
+      assert.equal(await page.$eval('.code-line.add .code-number:nth-child(2)',element=>element.textContent),'1');
+      assert.equal(await page.$eval('.code-line.add code',element=>element.textContent),'const value = "hello";');
+      assert.ok(await page.$('.reply-box'),'conversation remains mounted');
+      assert.ok(await page.$eval('.code-panel',element=>element.getBoundingClientRect().right<=innerWidth),'panel controls stay inside the viewport');
+      await page.screenshot({path:`/private/tmp/desk-code-panel-${width}.png`});
+      removed=true;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await page.waitForFunction(()=>document.querySelector('.code-panel')?.textContent.includes('미커밋 변경이 없습니다.'));
+      await page.click('button[aria-label="코드 창 닫기"]');
+      assert.equal(await page.$('.code-panel'),null);
+    },false,'emacs'));
+
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
       await page.setViewport({ width: 1000, height: 700 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });

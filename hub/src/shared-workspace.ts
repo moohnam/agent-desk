@@ -1,3 +1,4 @@
+import { taskCodeView } from './code-view.ts';
 import { SshEnrollment } from './ssh-enrollment.ts';
 import { SshAuthority } from './ssh-authority.ts';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -280,6 +281,11 @@ export class SharedWorkspace {
           this.ssh.assertAdmin(peer);const target=url.pathname.slice('/v1/ssh/peers/'.length);
           if(this.ssh.identity(target).admin)throw new HttpError(409,'관리자 키는 로컬 복구 절차로 교체하세요');
           this.revoke(target);return json(res,200,{ok:true});
+        }
+        if(req.method==='POST'&&url.pathname==='/v1/code-view') {
+          const body=await readBody(req,20000) as Record<string,unknown>;
+          const result=await taskCodeView(this.hub,body,!this.localAuthority);
+          assertAuthorized();return json(res,200,result);
         }
         if (req.method === 'GET' && url.pathname === '/v1/file-path') {
           const task = url.searchParams.get('task_id'), href = url.searchParams.get('href');
