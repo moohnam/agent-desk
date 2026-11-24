@@ -236,6 +236,48 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       }, false, 'emacs'));
     }
 
+    for (const scenario of ['bottom', 'top-cache']) {
+      await t.test(`grouped scroll retains progress (${scenario})`, () => withPage(async page => {
+        await page.setViewport({ width: 1440, height: 180 });
+        await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-deep' });
+        await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2',
+          JSON.stringify([{ id: 'grouped', title: '작업별', filter: {}, byTask: true }])));
+        let older = 0;
+        page.on('request', request => {
+          const u = new URL(request.url());
+          if (u.pathname === '/api/feed' && Number(u.searchParams.get('cursor_id')) !== Number.MAX_SAFE_INTEGER) older++;
+        });
+        await page.goto(origin, { waitUntil: 'networkidle2' });
+        const column = '[data-col="grouped"]';
+        const card = `${column} [data-post]`;
+        const feed = `${column} .feed`;
+        if (scenario === 'bottom') {
+          await page.$eval(feed, element => { element.scrollTop = element.scrollHeight; });
+          await page.waitForFunction(selector => document.querySelectorAll(selector).length > 1, {}, card);
+          assert.ok(older >= 2, 'continue across pages collapsed into the existing task');
+        } else {
+          for (let i = 0; i < 12 && await page.$$eval(card, nodes => nodes.length) < 5; i++) {
+            await page.waitForSelector(`${column} .older-posts button:enabled`);
+            await page.click(`${column} .older-posts button`);
+            await page.waitForSelector(`${column} .older-posts button:enabled`);
+          }
+          const before = await page.$$eval(card, nodes => nodes.map(node => node.dataset.post));
+          assert.ok(before.length >= 5);
+          await page.$eval(feed, element => { element.scrollTop = element.scrollHeight; });
+          await new Promise(resolve => setTimeout(resolve, 250));
+          await page.waitForSelector(`${column} .older-posts button:enabled`);
+          const loaded = await page.$$eval(card, nodes => nodes.map(node => node.dataset.post));
+          await page.$eval(feed, element => { element.scrollTop = 0; });
+          await new Promise(resolve => setTimeout(resolve, 400));
+          assert.deepEqual(await page.$$eval(card, nodes => nodes.map(node => node.dataset.post)), loaded,
+            'returning to the top must retain already loaded grouped task cards');
+          const requests = older;
+          await new Promise(resolve => setTimeout(resolve, 400));
+          assert.equal(older, requests, 'returning to the top does not reload history');
+        }
+      }, false, 'emacs'));
+    }
+
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
       await page.setViewport({ width: 1000, height: 700 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
