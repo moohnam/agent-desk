@@ -94,11 +94,14 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
   const feedRef = useRef<HTMLDivElement>(null);
   const previousTop = useRef(0);
+  const requestedCards = useRef<number | undefined>(undefined);
   const autoPage = useRef<{ cursor: string; generation?: object } | undefined>(undefined);
   /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
   const extend = (feed: HTMLElement, scrollingDown = false) => {
     if (!seen || (byTask && !inView)) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
+    if (scrollingDown && byTask) requestedCards.current = placed.length;
+    if (requestedCards.current != null && placed.length > requestedCards.current) requestedCards.current = undefined;
     if (count < placed.length) {
       setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
       if (byTask) return;
@@ -107,12 +110,13 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
     // Fill that space, but do not prefetch merely because a full column is near its bottom.
     const underfilled = feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight + 1;
     const fill = byTask && underfilled && (total == null || placed.length < total);
-    const prefetch = byTask ? scrollingDown || fill : placed.length - count <= PREFETCH_POSTS;
+    const continuing = requestedCards.current != null && (total == null || placed.length < total);
+    const prefetch = byTask ? scrollingDown || fill || continuing : placed.length - count <= PREFETCH_POSTS;
     if (more && !loading && prefetch) {
-      if (byTask && !scrollingDown) {
+      if (byTask) {
         // A failed request leaves the page unchanged: allow an explicit retry,
         // rather than retrying on every loading-state or resize notification.
-        if (!pageCursor || (autoPage.current?.cursor === pageCursor && autoPage.current.generation === pageGeneration)) return;
+        if (!pageCursor || (!scrollingDown && autoPage.current?.cursor === pageCursor && autoPage.current.generation === pageGeneration)) return;
         autoPage.current = { cursor: pageCursor, generation: pageGeneration };
       }
       act.current.older(id);
@@ -135,6 +139,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   const onScroll = (feed: HTMLElement) => {
     const top = Math.max(0, feed.scrollTop);
     const scrollingDown = top > previousTop.current;
+    if (top < previousTop.current) requestedCards.current = undefined;
     previousTop.current = top;
     act.current.scroll(id, feed);
     clearTimeout(shrink.current);

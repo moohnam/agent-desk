@@ -423,7 +423,9 @@ export function App() {
   // Older posts (drawn or loaded as a feed nears its bottom) are FeedColumn's.
   const onFeedScroll = (colId: string, feed: HTMLElement) => {
     const top = feed.scrollTop < 40;
-    keepColumnHistory(colId, !top);
+    // Grouped cards may each represent thousands of events. Keep the active reading
+    // window at the top too; inactive columns still use the bounded idle cache.
+    keepColumnHistory(colId, !top || !!deck.find(col => col.id === colId)?.def?.byTask);
     atTop.current.set(colId, top);
     if (!top) { markAnchor(colId, feed); return; }
     feedAnchor.current.delete(colId);
