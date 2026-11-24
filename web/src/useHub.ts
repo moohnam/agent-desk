@@ -752,11 +752,10 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const loadEarlier = useCallback((id: string) => {
     const key = shown.current.get(id);
     const cur = key ? cache.current.get(key) : undefined;
-    const oldest = cur?.events[0];
-    if (!key || !cur || !oldest || !cur.more || cur.loading) return;
-    // A retained old post can predate a gap left by a temporarily unavailable source.
-    // If compaction trimmed the cache, its oldest retained post is the safer boundary.
-    const before = feedCursor(cur)!;
+    if (!key || !cur || !cur.more || cur.loading) return;
+    // Deleting every cached task can leave a valid history/gap boundary behind.
+    const before = feedCursor(cur);
+    if (!before) return;
     if (current.current.grouped.has(id)) {
       retained.current.set(id, new Set([...(retained.current.get(id) ?? []), ...cur.events.map(e => e.id)]));
     } else reading.current.add(id);

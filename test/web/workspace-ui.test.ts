@@ -1264,3 +1264,57 @@ for (const edited of [false, true]) test(`retained middle gaps recover through r
     render().loadEarlier('column');await settle();assert.equal(requests.length,4,'exhaustion cannot repeat the cursor chain');
   } finally {h.unmount();globalThis.fetch=originalFetch;}
 });
+
+for (const boundary of ['gap', 'history']) for (const failure of [false, true]) test(`an empty cache recovers the surviving task (${boundary}, failure=${failure})`, async () => {
+  const {api,FEED_PAGE}=await import('../../web/src/api.ts');
+  const originalFetch=globalThis.fetch,h=hooks();
+  const survivor=boundary==='gap'?301:100, cursor=boundary==='gap'?302:101;
+  const event=(id:number):any=>({id,task_id:id===survivor?'B':'A',session_id:'s',kind:'assistant',
+    ts:String(id).padStart(8,'0'),payload:{text:String(id)}});
+  let data=Array.from({length:200},(_,i)=>event(i+101));
+  let receive:(batch:any[])=>void=()=>{},fail=false;
+  const cursors:number[]=[],timers=new Map<number,()=>void>();let timer=0;
+  const setTimer=(fn:()=>void)=>{timers.set(++timer,fn);return timer;};
+  globalThis.fetch=async input=>{
+    const url=new URL(String(input),'http://desk');
+    if(url.pathname==='/api/workspaces')return Response.json([]);
+    if(url.pathname==='/api/feed/count')return Response.json({posts:data.length,tasks:2});
+    assert.equal(url.pathname,'/api/feed');
+    const id=Number(url.searchParams.get('cursor_id')),ts=url.searchParams.get('before_ts')!;
+    if(id!==Number.MAX_SAFE_INTEGER)cursors.push(id);
+    if(fail){fail=false;return new Response('{}',{status:503});}
+    return Response.json(data.filter(e=>federation.compareEvents(e,{id,ts})<0)
+      .sort(federation.compareEvents).slice(-Number(url.searchParams.get('limit'))));
+  };
+  const defs=[{id:'column',filter:{},byTask:true}];let gone=new Set<string>();
+  const module=load('useHub.ts',{
+    react:h.react,'./api.ts':{api,FEED_PAGE},'./federation.ts':federation,'./posts.ts':posts,'./feedCache.ts':feedCache,
+    './projects.ts':{},'./draftRetention.ts':draftRetention,
+  },{AbortController,window:{setTimeout:setTimer},setTimeout:setTimer,clearTimeout:(id:number)=>timers.delete(id)});
+  const subscribe=(fn:(batch:any[])=>void)=>{receive=fn;return()=>{};};
+  const render=()=>h.render(()=>module.useColumnFeeds(defs,()=>defs,new Map(),()=>()=>{},0,gone,subscribe));
+  const settle=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
+  try {
+    await federation.discoverSources(true);render();await settle();
+    if(boundary==='gap'){
+      render().loadEarlier('column');await settle();
+      receive(Array.from({length:3001},(_,i)=>({event:event(i+301)})));
+    }
+    gone=new Set(['A']);data=[event(survivor)];render();
+    let feed=render().feeds.get('column');
+    assert.equal(feed.events.length,0);assert.equal(feed.more,true);
+    assert.equal(feedCache.feedCursor(feed)!.id,cursor);
+    cursors.length=0;
+    if(failure){fail=true;render().loadEarlier('column');await settle();
+      assert.deepEqual(cursors,[cursor]);
+      assert.equal(feedCache.feedCursor(render().feeds.get('column'))!.id,cursor);
+      assert.equal(render().feeds.get('column').more,true);
+    }
+    render().loadEarlier('column');await settle();feed=render().feeds.get('column');
+    assert.deepEqual(cursors,failure?[cursor,cursor]:[cursor]);
+    assert.equal(feed.events.length,1);assert.equal(feed.events[0].task_id,'B');
+    assert.equal(posts.buildPosts(feed.events)[0].taskId,'B');
+    assert.equal(feed.more,false);
+    const count=cursors.length;render().loadEarlier('column');await settle();assert.equal(cursors.length,count);
+  }finally{h.unmount();globalThis.fetch=originalFetch;}
+});
