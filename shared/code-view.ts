@@ -1,6 +1,7 @@
 export interface CodeViewFile { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }
 export interface CodeViewResult {
   root: string; head: string | null; files: CodeViewFile[];
+  commit?: string; commits?: { id: string; subject: string }[];
   path?: string; diff?: string; binary?: boolean;
 }
 export interface DiffLine { kind: 'add' | 'delete' | 'context' | 'header'; text: string; old?: number; next?: number }

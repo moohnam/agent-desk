@@ -80,3 +80,29 @@ test('file detail inspects only the selected path and does not enumerate the ful
  const selected=await readCodeView(root,'file-3.ts','untracked');
  assert.equal(selected.files.length,1);assert.match(selected.diff!,/const value/);
 }));
+
+test('commit diff uses the first parent and ignores the current worktree',async()=>repo(async(root,git)=>{
+  await writeFile(join(root,'a.txt'),'first\n');git('add','.');git('commit','-m','first');
+  const first=(await readCodeView(root)).commits![0];
+  await writeFile(join(root,'a.txt'),'second\n');git('commit','-am','second');
+  await writeFile(join(root,'a.txt'),'uncommitted\n');
+  await writeFile(join(root,'other'),'new');
+  const list=await readCodeView(root);
+  const second=list.commits![0];
+  assert.equal(second.subject,'second');
+  const history=await readCodeView(root,undefined,undefined,second.id);
+  assert.deepEqual(history.files,[{path:'a.txt',status:'modified'}]);
+  const detail=await readCodeView(root,'a.txt','tracked',second.id);
+  assert.match(detail.diff!,/-first\n\+second/);
+  assert.doesNotMatch(detail.diff!,/uncommitted/);
+  assert.match((await readCodeView(root,'a.txt','tracked',first.id)).diff!,/\+first/);
+  await assert.rejects(readCodeView(root,undefined,undefined,'HEAD~1'),/커밋 ID/);
+}));
+
+test('commit picker includes locally known upstream history when the task checkout lags',async()=>repo(async(root,git)=>{
+  await writeFile(join(root,'a'),'first');git('add','.');git('commit','-m','first');
+  git('branch','task');await writeFile(join(root,'a'),'published');git('commit','-am','published');
+  git('branch','upstream');git('switch','task');git('branch','--set-upstream-to=upstream');
+  const commit=(await readCodeView(root)).commits!.find(item=>item.subject==='published')!;
+  assert.match((await readCodeView(root,'a','tracked',commit.id)).diff!,/\+published/);
+}));

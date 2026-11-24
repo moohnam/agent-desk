@@ -7,6 +7,8 @@ import './code-panel.css';
 const language = (path: string) => ({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'} as Record<string,string>)[path.split('.').at(-1)??''];
 export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:string;title:string;onClose:()=>void}) {
   const [snapshot,setSnapshot]=useState<{data:CodeViewResult;revision:number}>();
+  const [commit,setCommit]=useState('');
+  const [history,setHistory]=useState<NonNullable<CodeViewResult['commits']>>([]);
   const [selected,setSelected]=useState<string>();
   const [content,setContent]=useState<CodeViewResult>();
   const [error,setError]=useState('');
@@ -24,8 +26,15 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   useEffect(()=>{
     const controller=new AbortController();
     setListing(true);setReading(false);setError('');setListError('');
-    void api.codeView(taskId,undefined,controller.signal).then(data=>{
+    void api.codeView(taskId,undefined,controller.signal,undefined,commit||undefined).then(data=>{
       if(controller.signal.aborted)return;
+      if(commit && data.commit!==commit)throw new Error('이 러너를 업데이트하면 커밋별 변경을 볼 수 있습니다');
+      const page=data.commits??[];
+      setHistory(previous=>{
+        if(!commit)return page;
+        const seen=new Set(previous.map(item=>item.id));
+        return [...previous,...page.filter(item=>!seen.has(item.id))];
+      });
       setReading(data.files.length>0);
       setSnapshot({data,revision});
       setSelected(previous=>data.files.some(file=>keyOf(file)===previous)?previous:data.files[0]?keyOf(data.files[0]):undefined);
@@ -37,33 +46,40 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
     }})
       .finally(()=>{if(!controller.signal.aborted)setListing(false);});
     return()=>controller.abort();
-  },[taskId,revision]);
+  },[taskId,revision,commit]);
   useEffect(()=>{
     if(snapshot?.revision!==revision)return;
     const controller=new AbortController();
     if(!path){setContent(undefined);setReading(false);return;}
     setReading(true);setError('');setContent(undefined);
-    void api.codeView(taskId,path,controller.signal,kind).then(result=>{
+    void api.codeView(taskId,path,controller.signal,kind,commit||undefined).then(result=>{
       if(!controller.signal.aborted)setContent(result);
     }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})
       .finally(()=>{if(!controller.signal.aborted)setReading(false);});
     return()=>controller.abort();
-  },[taskId,path,kind,snapshot,revision]);
+  },[taskId,path,kind,snapshot,revision,commit]);
   useEffect(()=>{setLimit(200);setContent(undefined);if(scroll.current)scroll.current.scrollTop=0;},[selected]);
   const rows=useMemo(()=>diffLines(content?.diff??''),[content]);
   const lang=path&&language(path);
   return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>e.stopPropagation()}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
-    <div className="code-scope">작업 폴더 전체 · HEAD 대비 미커밋 변경<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>기준 {(content?.head??snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'} · 읽기 전용</small></div>
+    <div className="code-scope">작업 폴더 전체 · {commit?'첫 번째 부모 대비 커밋 변경':'HEAD 대비 미커밋 변경'}<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>{commit?'선택한 커밋':'기준'} {(commit||content?.head||snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'} · 읽기 전용</small></div>
     {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
     {error&&<p role="alert">{error}</p>}
+    <select aria-label="변경 기준" value={commit} onChange={e=>{
+      setCommit(e.target.value);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);
+    }}>
+      <option value="">미커밋 변경</option>
+      {commit&&!history.some(item=>item.id===commit)&&<option value={commit}>{commit.slice(0,12)}</option>}
+      {history.map(item=><option key={item.id} value={item.id}>{item.id.slice(0,8)} · {item.subject}</option>)}
+    </select>
     <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
       {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
       {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
     </select>
     {loading&&<p role="status">변경을 불러오는 중…</p>}
     <div className="code-diff" ref={scroll} tabIndex={0} aria-label="파일 diff">
-      {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>미커밋 변경이 없습니다.</p>}
+      {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>{commit?'이 커밋에서 변경된 파일이 없습니다.':'미커밋 변경이 없습니다.'}</p>}
       {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
         const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000
           ?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined;

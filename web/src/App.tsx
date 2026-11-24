@@ -532,10 +532,11 @@ export function App() {
   const paneWidth = Math.max(Math.round(workspaceWidth * split / 100), PANE_MIN_PX);
   const paneCover = workspaceWidth - paneWidth < DECK_MIN_PX;
   const canReference = floatThread && !paneCover;
-  const documentOverlay = !canReference && !!references.files?.length;
+  const codeVisible = !!codeTask && codeTask === threadTask && hub.tasks.has(codeTask);
+  const documentOverlay = !canReference && (!!references.files?.length || codeVisible);
   const canRead = canReference || documentOverlay;
-  const referencesVisible = canRead && references.open && !!threadTask && hub.tasks.has(threadTask);
-  useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible]);
+  const referencesVisible = !codeVisible && canRead && references.open && !!threadTask && hub.tasks.has(threadTask);
+  useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible,codeVisible]);
   useEffect(() => {
     setReferenceTask(previous => referencesVisible ? threadTask : canRead && previous === threadTask ? previous : null);
   }, [threadTask, referencesVisible, canRead]);
@@ -696,7 +697,10 @@ export function App() {
   const select = (colId: string, postId: number) => setSelection((s) => ({ ...s, [colId]: postId }));
   const focusColumn = (i: number) => {
     const next = Math.max(0, Math.min(i, deck.length - 1));
-    if (referencesVisible && deck[next]?.id !== THREAD) references.show(false);
+    if (deck[next]?.id !== THREAD && (referencesVisible || codeVisible)) {
+      closeCode();
+      references.show(false);
+    }
     setActive(next);
   };
   /** The deck column focused last, for t and h/l to come back to from the thread. */
@@ -763,7 +767,7 @@ export function App() {
     const searchFrom = deckDefs.find((c) => c.id === searchOrigin.current && c.id !== SEARCH)?.id;
     const after = at.from === SEARCH ? searchFrom ?? threadAfter
       : at.from && at.from !== THREAD ? at.from : threadAfter;
-    if (threadTask !== taskId) { references.enter(taskId); setThreadTask(taskId); }
+    if (threadTask !== taskId) { setCodeTask(null); references.enter(taskId); setThreadTask(taskId); }
     setThreadAfter(after);
     setThreadFocus(at.post ?? null);
     setSelection((s) => { const { [THREAD]: _, ...rest } = s; return rest; });
@@ -777,7 +781,7 @@ export function App() {
       if(!hub.tasks.has(taskId))return;
       setDrawer(false);
       if(threadTask!==taskId)openThread(taskId);
-      references.addFile(taskId,href);
+      setCodeTask(null); references.addFile(taskId,href);
     };
     window.addEventListener(DOCUMENT_OPEN,receive);
     return()=>window.removeEventListener(DOCUMENT_OPEN,receive);
@@ -787,9 +791,10 @@ export function App() {
     if(!taskId||!href||!hub.tasks.has(taskId)||!isDocumentLink(href))return;
     url.searchParams.delete('documentTask');url.searchParams.delete('documentPath');
     history.replaceState(history.state,'',url);
-    setDrawer(false);openThread(taskId);references.addFile(taskId,href);
+    setDrawer(false);openThread(taskId);setCodeTask(null); references.addFile(taskId,href);
   },[hub.tasks]);
   const dropThread = () => {
+    setCodeTask(null);
     setThreadTask(null);
     if (activeCol?.id === THREAD) setActive(Math.max(threadSlot(threadAfter) - 1, 0));
   };
@@ -1185,7 +1190,7 @@ export function App() {
     if (phone) { setToast('검색은 PC 화면에서 쓸 수 있습니다.'); return; }
     if (activeCol?.id !== SEARCH) searchOrigin.current = activeCol?.id;
     glideStop.current?.();
-    if (referencesVisible) references.show(false);
+    if (referencesVisible || codeVisible) { closeCode(); references.show(false); }
     const task = activeCol?.id === THREAD && threadTask ? hub.tasks.get(threadTask) : undefined;
     if (task) {
       const query = taskSearchQuery(task);
@@ -1240,6 +1245,7 @@ export function App() {
   };
 
   const toggleReferences = () => {
+    if (codeVisible) { closeCode(); references.show(true); return; }
     if (!canRead || !threadTask) return;
     if (!references.open) { setDrawer(false); setActive(threadSlot(threadAfter)); }
     references.show(!references.open);
@@ -1247,7 +1253,7 @@ export function App() {
   const togglePostReference = (post: Post) => {
     if (!canReference || threadTask !== post.taskId) return;
     if (!references.ids.includes(post.id)) setDrawer(false);
-    references.toggle(post.id);
+    setCodeTask(null); references.toggle(post.id);
   };
   const cutNote = async (post: Post, control: HTMLButtonElement) => {
     const { text, clipped } = post.event.payload;
@@ -1292,7 +1298,7 @@ export function App() {
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
-      setWidth, widthOf, toggleReferences: canRead ? toggleReferences : undefined,
+      setWidth, widthOf, toggleReferences: codeVisible ? closeCode : canRead ? toggleReferences : undefined,
       togglePostReference: canReference ? togglePostReference : undefined,
     };
     const onKey = (ev: KeyboardEvent) => onDeckKey(ev, keys);
@@ -1384,7 +1390,7 @@ export function App() {
 
   const threadIdx = deck.findIndex((c) => c.id === THREAD);
   const searchIdx = deck.findIndex((c) => c.id === SEARCH);
-  const searchCovered = referencesVisible || (activeCol?.id === THREAD && (!floatThread || paneCover));
+  const searchCovered = codeVisible || referencesVisible || (activeCol?.id === THREAD && (!floatThread || paneCover));
   /** One deck column; the thread is drawn outside the deck when it floats. */
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
@@ -1425,7 +1431,7 @@ export function App() {
           model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
           onClose={closeThread} onPin={() => threadTask && pinTask(threadTask)}
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
-          references={canRead ? { open: references.open, count: references.ids.length+(references.files?.length??0) } : undefined}
+          references={canRead ? { open: referencesVisible, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
@@ -1542,7 +1548,7 @@ export function App() {
       <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
-      <div className={`workspace${documentOverlay&&referencesVisible?' document-overlay':''}`} ref={workspaceRef}>
+      <div className={`workspace${documentOverlay&&(referencesVisible||codeVisible)?' document-overlay':''}`} ref={workspaceRef}>
         {drawer && (
           <ComposeDrawer projects={hub.projects} tasks={taskList} inputRef={composeRef}
             noteAttachment={noteAttachment}
@@ -1562,7 +1568,10 @@ export function App() {
           ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onMove={references.move} onResolveFile={references.resolveFile}
           onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
-        <ColumnDeck inactive={referencesVisible} phone={phone} elementRef={deckRef}>
+        {codeVisible && codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
+          <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode} />
+        </Suspense>}
+        <ColumnDeck inactive={referencesVisible || codeVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>
@@ -1580,15 +1589,13 @@ export function App() {
         </div>
         {floatThread && threadIdx >= 0 && (
           // Covering the whole workspace, the thread steps aside (keeping its place) while the focus is in the deck.
-          <div inert={drawerOverlays || documentOverlay && referencesVisible} className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
+          <div inert={drawerOverlays || documentOverlay && (referencesVisible || codeVisible)} className={`thread-split${paneCover ? ` cover${activeCol?.id === THREAD ? '' : ' away'}` : ''}`}
             style={paneCover ? undefined : { flexBasis: paneWidth }}>
             {!paneCover && <SplitHandle split={split} onResize={resizeSplit} />}
             {renderColumn(deck[threadIdx], threadIdx)}
           </div>
         )}
-        {codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
-          <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode} />
-        </Suspense>}
+
       </div>
 
       {toast && <div className="toast" role="status">{toast}</div>}

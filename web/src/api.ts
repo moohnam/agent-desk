@@ -230,9 +230,9 @@ async function feedCount(q:FeedQuery,signal?:AbortSignal,scope?:string,details=f
 export const FEED_PAGE = 1000;
 
 export const api = {
-  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked') => {
+  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked', commit?: string) => {
     const [source, task_id] = splitId(taskId);
-    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind}, signal, '');
+    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind,commit}, signal, '');
   },
   remember,
   updates: (signal?: AbortSignal, refreshLatest = false) => call<UpdateView>('GET', refreshLatest ? '/updates?refresh=1' : '/updates', undefined, signal),
