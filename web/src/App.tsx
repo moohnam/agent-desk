@@ -1,3 +1,4 @@
+import { feedCursor } from './feedCache.ts';
 import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
 import { createFeedLayout, createModelLookup } from './feedDerivations.ts';
 import { ANSWER_COMPOSE } from './answerComposer.tsx';
@@ -1392,8 +1393,7 @@ export function App() {
       onEdge={edgeColumn} onRecent={goRecent} onBack={phone ? () => setPhoneChannel(null) : undefined} />;
     if (!isThread) {
       const f = feeds.get(col.id);
-      const oldest = col.def?.byTask ? f?.events[0] : undefined;
-      const cursor = f?.olderCursor && oldest && compareEvents(f.olderCursor, oldest) > 0 ? f.olderCursor : oldest;
+      const cursor = col.def?.byTask && f ? feedCursor(f) : undefined;
       return (
         <FeedColumn key={col.id} col={col} active={i === activeIdx} selected={i === activeIdx ? selection[col.id] : undefined}
           width={widthOf(col.id)} ctx={columnCtx.get(col.id)!} projects={projectsById} flash={flash} expanded={expanded}
@@ -1401,6 +1401,7 @@ export function App() {
           total={f?.total && (col.def?.byTask ? f.total.tasks : f.total.posts)}
           pageCursor={col.def?.byTask && cursor ? `${cursor.id}:${cursor.edited_at ?? cursor.ts}` : undefined}
           pageGeneration={col.def?.byTask ? f?.token : undefined}
+          olderPage={col.def?.byTask ? f?.olderPage : undefined}
           empty={col.posts.length ? '' : col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : hub.events.length === 0
             ? 'i를 눌러 첫 작업을 시작하세요.' : f?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}
           head={col.id === SEARCH ? (

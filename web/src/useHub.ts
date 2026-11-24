@@ -4,7 +4,7 @@ import { api, FEED_PAGE, type FeedQuery, type FeedTotal } from './api.ts';
 import { compareEvents, discoverSources, getSources, mapMessage, sourceBase, sourceConnected, splitId, subscribeSources } from './federation.ts';
 import { mergeEvents, mergeTaskEvents } from './posts.ts';
 import { assignProjectColors, forgetProjectColors } from './projects.ts';
-import { compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
+import { feedCursor, compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
 import { confirmedMissingTask } from './draftRetention.ts';
 import { noteRevision, onNoteChange, reportNoteChange, visibleNoteEvents } from './noteEvents.ts';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
@@ -373,6 +373,9 @@ export interface ColumnFeed {
   /** Identity of this query's request generation; changes when outstanding reads are cancelled. */
   token?: object;
   olderCursor?: HubEvent;
+  gapCursor?: HubEvent;
+  /** Only completed historical responses, never live events. */
+  olderPage?: ReadonlySet<string>;
 }
 
 /** A query's total is counted again at most this often (ms) while its events arrive. */
@@ -406,7 +409,8 @@ function retryPause(ms: number, signal: AbortSignal) {
  * older pages on request (`loadEarlier`), kept live. Events are kept per query, not per column:
  * a view switch shows the queries it had at once and only fetches their newest page quietly.
  * Hidden queries keep a bounded recent-page LRU. A shown column being read keeps its older
- * pages until it returns to the top; trimmed records can always be paged from the hub again.
+ * pages until it returns to the top. Grouped columns retain a fixed history snapshot instead:
+ * subsequent live events still use the recent-page limit. Hidden/ungrouped columns release it.
  */
 export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks: Map<string, TaskView>,
   onEvent: (fn: (e: HubEvent, task?: TaskView) => void) => () => void, synced: number, gone: Set<string> = new Set(), onEventBatch?: SubscribeEventBatch,
@@ -415,21 +419,31 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const [version, bump] = useReducer((n: number) => n + 1, 0);
   const queries = new Map(defs.filter((d) => !d.channelId).map((d) => [d.id, feedQuery(d.filter, tasks)]));
   const sig = JSON.stringify([...queries]);
-  const current = useRef({ tasks, kept, gone });
-  current.current = { tasks, kept, gone };
+  const grouped = new Set(defs.filter(d => d.byTask && !d.channelId).map(d => d.id));
+  const groupedSig = JSON.stringify([...grouped]);
+  const current = useRef({ tasks, kept, gone, grouped });
+  current.current = { tasks, kept, gone, grouped };
   // The query each column showed last: a column whose query changes starts from those events.
   const shown = useRef(new Map<string, string>());
   const reading = useRef(new Set<string>());
+  // Fixed IDs from explicit history reads: future SSE does not enlarge this snapshot.
+  const retained = useRef(new Map<string, Set<number>>());
   const requests = useRef(new Map<string, Set<AbortController>>());
   const retries = useRef(new Map<string, number>());
   const retryAttempts = useRef(new Map<string, number>());
   const sourceEpochs = useRef(sourceSynced);
-  const protectedQuery = (key: string) => [...reading.current].some(id => shown.current.get(id) === key);
+  const protectedQuery = (key: string) => [...reading.current].some(id => !current.current.grouped.has(id) && shown.current.get(id) === key);
+  const retainedQuery = (key: string) => {
+    let ids: ReadonlySet<number> | undefined;
+    for (const [id, saved] of retained.current) if (current.current.grouped.has(id) && shown.current.get(id) === key)
+      ids = ids ? new Set([...ids, ...saved]) : saved;
+    return ids;
+  };
 
   const set = (key: string, f: (e: FeedEntry) => FeedEntry) => {
     const e = cache.current.get(key);
     if (e) {
-      cache.current.set(key, compactFeed(f(e), e.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+      cache.current.set(key, compactFeed(f(e), e.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone, e.live ? retainedQuery(key) : undefined));
       bump();
     }
   };
@@ -560,7 +574,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
     for (const pending of requests.current.values()) for (const controller of pending) controller.abort();
     requests.current.clear();
     // The StrictMode remount must reload requests cancelled by cleanup.
-    cache.current.clear(); shown.current.clear(); reading.current.clear();
+    cache.current.clear(); shown.current.clear(); reading.current.clear(); retained.current.clear();
   }, []);
 
   useEffect(() => {
@@ -576,7 +590,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       const key = JSON.stringify(q);
       const cur = c.get(key);
       const prev = shown.current.get(id);
-      if (prev !== key) reading.current.delete(id);
+      if (prev !== key) { reading.current.delete(id); retained.current.delete(id); }
       shown.current.set(id, key);
       if (started.has(key)) continue;
       started.add(key);
@@ -591,16 +605,29 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
       count(key);
       loadNewest(key, synced);
     }
-    for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) { shown.current.delete(id); reading.current.delete(id); }
+    for (const id of shown.current.keys()) if (!want.some(([w]) => w === id)) { shown.current.delete(id); reading.current.delete(id); retained.current.delete(id); }
     const used = new Set(current.current.kept().filter((d) => !d.channelId).map((d) => JSON.stringify(feedQuery(d.filter, current.current.tasks))));
     for (const [k, e] of c) {
       if (!e.live && !used.has(k)) drop(k);
-      else c.set(k, compactFeed(e, e.live ? protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+      else c.set(k, compactFeed(e, e.live ? protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone, e.live ? retainedQuery(k) : undefined));
     }
     const idle = [...c].filter(([, e]) => !e.live);
     for (const [key] of idle.slice(0, Math.max(0, idle.length - IDLE_QUERY_LIMIT))) drop(key);
     bump();
   }, [sig, synced]);
+
+  useEffect(() => {
+    for (const id of retained.current.keys()) if (!current.current.grouped.has(id)) retained.current.delete(id);
+    // A display-mode change can leave the query key and column ID unchanged.
+    for (const id of current.current.grouped) reading.current.delete(id);
+    let changed = false;
+    for (const [key, entry] of cache.current) {
+      const next = compactFeed(entry, entry.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT,
+        current.current.gone, entry.live ? retainedQuery(key) : undefined);
+      if (next !== entry) { cache.current.set(key, next); changed = true; }
+    }
+    if (changed) bump();
+  }, [groupedSig]);
 
   useEffect(() => {
     const previous = sourceEpochs.current;
@@ -654,7 +681,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
         if (!incoming.length) continue;
         // Keep the existing 50ms delivery boundary: merge each query once, before note edits/removals.
         cache.current.set(k, compactFeed({ ...f, events: mergeEvents(f.events, incoming) },
-          protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT, current.current.gone));
+          protectedQuery(k) ? Infinity : LIVE_FEED_LIMIT, current.current.gone, retainedQuery(k)));
         count(k, COUNT_EVERY);
         any = true;
       }
@@ -677,7 +704,7 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
         } else if (held) events = events.filter(e => e.id !== event.id);
       }
       if (events !== entry.events) {
-        cache.current.set(key, compactFeed({ ...entry, events }, entry.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone));
+        cache.current.set(key, compactFeed({ ...entry, events }, entry.live ? protectedQuery(key) ? Infinity : LIVE_FEED_LIMIT : IDLE_FEED_LIMIT, current.current.gone, entry.live ? retainedQuery(key) : undefined));
         if (entry.live) count(key, COUNT_EVERY);
         changed = true;
       }
@@ -696,12 +723,12 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   }, [gone]);
 
   const setReading = useCallback((id: string, keep: boolean) => {
-    if (keep) reading.current.add(id);
+    if (keep && !current.current.grouped.has(id)) reading.current.add(id);
     else if (reading.current.delete(id)) {
       const key = shown.current.get(id);
       const entry = key ? cache.current.get(key) : undefined;
       if (key && entry && !protectedQuery(key)) {
-        const next = compactFeed(entry, LIVE_FEED_LIMIT, current.current.gone);
+        const next = compactFeed(entry, LIVE_FEED_LIMIT, current.current.gone, retainedQuery(key));
         if (next !== entry) { cache.current.set(key, next); bump(); }
       }
     }
@@ -725,16 +752,24 @@ export function useColumnFeeds(defs: ColumnDef[], kept: () => ColumnDef[], tasks
   const loadEarlier = useCallback((id: string) => {
     const key = shown.current.get(id);
     const cur = key ? cache.current.get(key) : undefined;
-    const oldest = cur?.events[0];
-    if (!key || !cur || !oldest || !cur.more || cur.loading) return;
-    // A retained old post can predate a gap left by a temporarily unavailable source.
-    // If compaction trimmed the cache, its oldest retained post is the safer boundary.
-    const before = cur.olderCursor && compareEvents(cur.olderCursor, oldest) > 0 ? cur.olderCursor : oldest;
-    reading.current.add(id);
+    if (!key || !cur || !cur.more || cur.loading) return;
+    // Deleting every cached task can leave a valid history/gap boundary behind.
+    const before = feedCursor(cur);
+    if (!before) return;
+    if (current.current.grouped.has(id)) {
+      retained.current.set(id, new Set([...(retained.current.get(id) ?? []), ...cur.events.map(e => e.id)]));
+    } else reading.current.add(id);
     set(key, (e) => ({ ...e, loading: true }));
     request(key, signal => api.feed(FEED_PAGE, before, cur.q, signal),
-      (page) => set(key, (e) => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page)), olderCursor: page[0] ?? e.olderCursor,
-        more: page.length >= FEED_PAGE, loading: false })),
+      (page) => {
+        const saved = retained.current.get(id);
+        if (saved && current.current.grouped.has(id)) for (const event of page) saved.add(event.id);
+        set(key, e => ({ ...e, events: mergeEvents(e.events, visibleNoteEvents(page)), olderCursor: page[0] ?? e.olderCursor,
+          olderPage: new Set(visibleNoteEvents(page).map(event => event.task_id)),
+          // A newer gap can be evicted by SSE while this request is in flight.
+          gapCursor: e.gapCursor === cur.gapCursor ? undefined : e.gapCursor,
+          more: page.length >= FEED_PAGE || !!(e.gapCursor && e.gapCursor !== cur.gapCursor), loading: false }));
+      },
       () => set(key, (e) => ({ ...e, loading: false })));
   }, []);
 

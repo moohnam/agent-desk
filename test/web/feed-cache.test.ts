@@ -37,3 +37,19 @@ test('deleted task bodies are removed even when reading history is protected or 
   const stale = compactFeed({ events: mergeEvents(clean.events, [event(1, 'deleted'), event(4)]), more: false }, LIVE_FEED_LIMIT, deleted);
   assert.deepEqual(stale.events.map(e => e.id), [2, 4]);
 });
+
+
+test('a fixed history snapshot survives while future live events stay bounded', () => {
+  const history = Array.from({ length: 12000 }, (_, i) => event(i + 1));
+  const retained = new Set(history.map(e => e.id));
+  assert.equal(compactFeed({events: history, more:false}, LIVE_FEED_LIMIT, gone).events.length, 3000);
+  let entry = {events: history, more:false};
+  for (let batch = 0; batch < 4; batch++) {
+    const live = Array.from({length: 12000}, (_, i) => event(12001 + batch * 12000 + i));
+    entry = compactFeed({...entry, events: mergeEvents(entry.events, live)}, LIVE_FEED_LIMIT, gone, retained);
+    assert.equal(entry.events.length, 15000);
+    assert.equal(entry.events[0].id, 1);
+    assert.equal(retained.size, 12000, 'SSE must not extend the pinned history');
+  }
+  assert.equal(compactFeed(entry, LIVE_FEED_LIMIT, gone).events.length, 3000);
+});

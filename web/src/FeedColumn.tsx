@@ -56,10 +56,10 @@ export interface ColumnActions {
  * the column is active. `head`: a header in place of the column's own (the search column's).
  */
 export const FeedColumn = memo(function FeedColumn({ col, active, selected, width, ctx, projects, flash, expanded, tick, unseen, more,
-  loading, total, pageCursor, pageGeneration, renaming, empty, head, onError, act }: {
+  loading, total, pageCursor, pageGeneration, olderPage, renaming, empty, head, onError, act }: {
   col: DeckColumn; active: boolean; selected?: number; width: number; ctx: ColumnCtx; projects: Map<string, Project>;
   flash: number | null; expanded: Set<number>; tick: number; unseen: number; more: boolean; loading: boolean; total?: number;
-  pageCursor?: string; pageGeneration?: object;
+  pageCursor?: string; pageGeneration?: object; olderPage?: ReadonlySet<string>;
   renaming: boolean; empty: string; head?: ReactNode; onError: (msg: string) => void; act: RefObject<ColumnActions>;
 }) {
   const now = Date.now();
@@ -94,32 +94,39 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
   const feedRef = useRef<HTMLDivElement>(null);
   const previousTop = useRef(0);
+  const requestedCards = useRef<{ known: Set<string>; page?: ReadonlySet<string> } | undefined>(undefined);
+  useEffect(() => { requestedCards.current = undefined; }, [pageGeneration, byTask, JSON.stringify(col.def?.filter)]);
   const autoPage = useRef<{ cursor: string; generation?: object } | undefined>(undefined);
   /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
   const extend = (feed: HTMLElement, scrollingDown = false) => {
     if (!seen || (byTask && !inView)) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
+    const pending = requestedCards.current;
+    if (pending && olderPage !== pending.page && olderPage && placed.some(item => olderPage.has(item.post.taskId) && !pending.known.has(item.post.taskId))) requestedCards.current = undefined;
     if (count < placed.length) {
       setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
       if (byTask) return;
     }
+    if (scrollingDown && byTask && !requestedCards.current && (total == null || placed.length < total))
+      requestedCards.current = { known: new Set(placed.map(item => item.post.taskId)), page: olderPage };
     // Grouping can collapse a whole page to one card, leaving no way to scroll.
     // Fill that space, but do not prefetch merely because a full column is near its bottom.
     const underfilled = feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight + 1;
     const fill = byTask && underfilled && (total == null || placed.length < total);
-    const prefetch = byTask ? scrollingDown || fill : placed.length - count <= PREFETCH_POSTS;
+    const continuing = requestedCards.current != null;
+    const prefetch = byTask ? scrollingDown || fill || continuing : placed.length - count <= PREFETCH_POSTS;
     if (more && !loading && prefetch) {
-      if (byTask && !scrollingDown) {
+      if (byTask) {
         // A failed request leaves the page unchanged: allow an explicit retry,
         // rather than retrying on every loading-state or resize notification.
-        if (!pageCursor || (autoPage.current?.cursor === pageCursor && autoPage.current.generation === pageGeneration)) return;
+        if (!pageCursor || (!scrollingDown && autoPage.current?.cursor === pageCursor && autoPage.current.generation === pageGeneration)) return;
         autoPage.current = { cursor: pageCursor, generation: pageGeneration };
       }
       act.current.older(id);
     }
   };
   // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
-  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen, inView, byTask, total, pageCursor, pageGeneration]);
+  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen, inView, byTask, total, pageCursor, pageGeneration, olderPage]);
   const extendRef = useRef(extend);
   extendRef.current = extend;
   useEffect(() => {
@@ -135,6 +142,7 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   const onScroll = (feed: HTMLElement) => {
     const top = Math.max(0, feed.scrollTop);
     const scrollingDown = top > previousTop.current;
+    if (top < previousTop.current) requestedCards.current = undefined;
     previousTop.current = top;
     act.current.scroll(id, feed);
     clearTimeout(shrink.current);
