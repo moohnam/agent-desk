@@ -374,6 +374,11 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await longLine(),true,'disabling wrap restores horizontal scroll');
       await page.click(wrapControl);
       assert.equal(await longLine(),false,'restoring wrap removes horizontal scroll again');
+      assert.ok(await page.$eval('.code-selectors',row=>{
+        const [commit,file]=Array.from(row.querySelectorAll('select'),el=>el.getBoundingClientRect());
+        return commit.width>0 && file.width>0 && commit.top===file.top &&
+          commit.right<=file.left && file.right<=row.getBoundingClientRect().right+1;
+      }),'commit and file selectors share one row within the panel');
       assert.equal(reads,2,'opening reads the list once and the first file once');
       assert.equal(requests[1].kind,'tracked');
       assert.equal(await page.$eval('.code-line.add .code-number:nth-child(2)',element=>element.textContent),'1');
