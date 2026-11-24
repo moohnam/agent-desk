@@ -14,3 +14,7 @@
 .code-wrap-option{display:flex;align-items:center;gap:6px;margin:0 8px 6px;font-size:12px}
 .code-diff.wrap .code-line{min-width:0}
 .code-diff.wrap .code-line code{flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+
+.quote-code{align-self:flex-start;margin:0 8px 6px;padding:4px 8px}
+.code-line.quoted{box-shadow:inset 3px 0 var(--text);background:var(--border)}
+.code-line button.code-sign{padding:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}

@@ -50,3 +50,20 @@ test('a leading exact note tag selects note creation and leaves ordinary mention
   assert.deepEqual(parseCompose('@웹 기존 #note', ['note']).skills, ['note']);
   assert.deepEqual(parseCompose('#note 기존', ['note'], false).skills, ['note']);
 });
+
+test('diff quotes preserve literal control tags, connectors and mentions',()=>{
+  const block=['````diff','"file.ts"','+ // #auto #now #review #slack @other#3 ```','````'].join('\n');
+  const draft=block+'\n\n@real#2 #ask';
+  assert.deepEqual(parse(draft),{skills:[],mode:'default',body:block+'\n\n@real#2'});
+  assert.deepEqual(mentionsIn(draft),[{name:'real',no:2}]);
+});
+
+test('diff quotes stay literal after a delivery tag or unfinished draft markup',()=>{
+  const block=['```diff','+ #auto #slack @other#3','```'].join('\n');
+  for(const prefix of ['#later\n','<!-- 작성 중\n\n']){
+    const text=prefix+block;
+    assert.equal(parse(text).mode,undefined);
+    assert.equal(parse(text).body.includes(block),true);
+    assert.deepEqual(mentionsIn(text),[]);
+  }
+});

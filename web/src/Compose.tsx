@@ -651,7 +651,7 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onE
     const submittedDraft = getDraft(draftKey);
     if (!reservation) onSend?.();
     const attempt = reservation ? scheduledAttempt.current ??= { at: reservation.at, operation: workspaceOperationId(), session: task.reply_session_id } : undefined;
-    const r = reservation ? await send(reservation.text, attempt) : await send(!c.delivery && pick ? `#${pick} ${text}` : text);
+    const r = reservation ? await send(reservation.text, attempt) : await send(!c.delivery && pick ? `#${pick}\n${text}` : text);
     if (!r) { if (request !== null) shortcut.current.finish(request); return; }
     // A closed box can clear its own draft, but must not erase one written after re-entering it.
     if (revision.current === unchanged && (mounted.current || getDraft(draftKey) === submittedDraft)) {

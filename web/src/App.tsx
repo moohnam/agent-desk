@@ -33,7 +33,7 @@ import type { NoteContext } from '../../shared/api.ts';
 import { SkillsDialog } from './Skills.tsx';
 import { stalledMinutes, taskRunning } from './format.ts';
 import { HandoffPanel, toggleHandoff, togglePick, useHandoff } from './Handoff.tsx';
-import { pruneDrafts, useDraftTasks } from './drafts.ts';
+import { getDraft, setSharedDraft, pruneDrafts, useDraftTasks } from './drafts.ts';
 import { keepTaskDraft } from './draftRetention.ts';
 import { DEFAULT_WIDTH, SAVE_DELAY, useColumnWidths, useColumns } from './columns.ts';
 import { buildPosts, placeThread } from './posts.ts';
@@ -1569,7 +1569,15 @@ export function App() {
           onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         {codeVisible && codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
-          <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode} />
+          <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode}
+            onQuote={threadTaskView && threadTaskView.source!=='external' && threadTaskView.kind!=='note' && !handoff?.open ? quote=>{
+              const key='reply:'+codeTask;
+              const draft=getDraft<{text:string;pick?:string|null}>(key);
+              const text=(draft?.text ? draft.text+'\n\n' : '')+quote+'\n';
+              setSharedDraft(key,{text,pick:draft?.pick??null},{taskId:codeTask,empty:false});
+              if(documentOverlay)closeCode();
+              requestAnimationFrame(()=>{const input=replyRef.current;input?.focus();input?.setSelectionRange(text.length,text.length);});
+            }:undefined} />
         </Suspense>}
         <ColumnDeck inactive={referencesVisible || codeVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}

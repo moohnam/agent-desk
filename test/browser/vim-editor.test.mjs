@@ -357,6 +357,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         })});
       });
       await openReply(page,origin);
+      await page.type('.reply-box textarea','검토 부탁');
       assert.equal(reads,0,'do not read code before opening the panel');
       await page.click('button[aria-label="코드 변경 보기"]');
       await page.waitForSelector('.code-panel .hljs-keyword');
@@ -379,10 +380,13 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$eval('.code-line.add code',element=>element.textContent),'const value = "hello";');
       assert.ok(await page.$('.reply-box'),'conversation remains mounted');
       assert.ok(await page.$eval('.code-panel',element=>element.getBoundingClientRect().right<=innerWidth),'panel controls stay inside the viewport');
+      await page.click('.code-line.delete button.code-sign');
+      assert.equal(await page.$eval('.quote-code',b=>b.disabled),false);
       await page.select('select[aria-label="변경 파일"]',JSON.stringify(['untracked','src/example.ts']));
       await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
       assert.equal(reads,3,'selecting the untracked version reads only that detail');
       assert.equal(requests[2].kind,'untracked');
+      assert.equal(await page.$eval('.quote-code',b=>b.disabled),true,'selection does not cross files');
       await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','src/second.ts']));
       await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
       assert.equal(reads,4,'switching files does not refresh the list');
@@ -406,6 +410,20 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('button[aria-label="코드 변경 보기"]');
       await page.waitForSelector(wrapControl);
       assert.equal(await page.$eval(wrapControl,node=>node.checked),false,'wrap preference survives reopening');
+      await page.waitForSelector('.code-line.delete button.code-sign');
+      await page.click(wrapControl);
+      await page.click('.code-line.delete button.code-sign');
+      await page.keyboard.down('Shift');
+      await page.click('.code-line.add:last-child button.code-sign');
+      await page.keyboard.up('Shift');
+      await page.click('.quote-code');
+      const quote=await page.$eval('.reply-box textarea',node=>node.value);
+      assert.ok(quote.startsWith('검토 부탁\n\n'));
+      assert.ok(quote.includes('이전 1 / 이후 1–2'));
+      assert.ok(quote.includes('-const old = 1;\n+const value = "hello";\n+'+longLineText));
+      assert.ok(quote.includes('src/example.ts'));
+      if(width===390)assert.equal(await page.$('.code-panel'),null);
+
 
     },false,'emacs'));
 

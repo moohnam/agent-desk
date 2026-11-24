@@ -5,7 +5,7 @@ import { api } from './api.ts';
 import { diffLines, type CodeViewResult } from '../../shared/code-view.ts';
 import './code-panel.css';
 const language = (path: string) => ({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'} as Record<string,string>)[path.split('.').at(-1)??''];
-export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:string;title:string;onClose:()=>void}) {
+export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote}:{taskId:string;title:string;onClose:()=>void;onQuote?:(text:string)=>void}) {
   const [snapshot,setSnapshot]=useState<{data:CodeViewResult;revision:number}>();
   const [commit,setCommit]=useState('');
   const [history,setHistory]=useState<NonNullable<CodeViewResult['commits']>>([]);
@@ -64,6 +64,39 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   },[taskId,path,kind,snapshot,revision,commit]);
   useEffect(()=>{setLimit(200);setContent(undefined);if(scroll.current)scroll.current.scrollTop=0;},[selected]);
   const rows=useMemo(()=>diffLines(content?.diff??''),[content]);
+  const [range,setRange]=useState<{source:CodeViewResult;anchor:number;end:number}>();
+  const active=range && range.source===content && !loading ? range : undefined;
+  const start=active?Math.min(active.anchor,active.end):-1;
+  const end=active?Math.max(active.anchor,active.end):-1;
+  const selectLine=(index:number,extend:boolean)=>{
+    if(content)setRange({source:content,anchor:extend && active?active.anchor:index,end:index});
+  };
+  const captureSelection=()=>{
+    const selection=window.getSelection();
+    if(!selection || selection.isCollapsed || !content)return;
+    const indexOf=(node:Node|null)=>{
+      const el=node instanceof Element?node:node?.parentElement;
+      const row=el?.closest<HTMLElement>('[data-diff-row]');
+      return row && scroll.current?.contains(row)?Number(row.dataset.diffRow):-1;
+    };
+    const anchor=indexOf(selection.anchorNode),end=indexOf(selection.focusNode);
+    if(anchor>=0 && end>=0)setRange({source:content,anchor,end});
+  };
+  const quoteSelection=()=>{
+    if(!active || !path || !onQuote)return;
+    const picked=rows.slice(start,end+1);
+    const positions=(side:'old'|'next')=>{
+      const numbers=picked.flatMap(row=>row[side]===undefined?[]:[row[side]!]);
+      return numbers.length ? numbers[0]===numbers.at(-1)?String(numbers[0]):numbers[0]+'–'+numbers.at(-1) : '없음';
+    };
+    const snippet=picked.map(row=>(row.kind==='add'?'+':row.kind==='delete'?'-':row.kind==='context'?' ':'')+row.text).join('\n');
+    const metadata=JSON.stringify(path)+' · '+(commit||'미커밋 (HEAD '+(content?.head??'없음')+')')+
+      ' · 이전 '+positions('old')+' / 이후 '+positions('next');
+    const body=metadata+'\n'+snippet;
+    const fence='`'.repeat(Array.from(body.matchAll(/`+/g)).reduce((n,m)=>Math.max(n,m[0].length+1),3));
+    onQuote(fence+'diff\n'+body+'\n'+fence);
+    setRange(undefined);
+  };
   const lang=path&&language(path);
   return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>e.stopPropagation()}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
@@ -81,18 +114,19 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
       {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
       {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
     </select>
+    {onQuote&&<button className="quote-code" disabled={!active} onClick={quoteSelection}>선택한 줄 답글에 넣기</button>}
     {loading&&<p role="status">변경을 불러오는 중…</p>}
     <label className="code-wrap-option"><input type="checkbox" checked={wrap} onChange={e=>{
       const enabled=e.currentTarget.checked;
       setWrap(enabled);
       try { localStorage.setItem('agent-desk.diff-wrap',enabled?'on':'off'); } catch { /* Storage is optional. */ }
     }}/>긴 줄 자동 줄바꿈</label>
-    <div className={wrap?'code-diff wrap':'code-diff'} ref={scroll} tabIndex={0} aria-label="파일 diff">
+    <div className={wrap?'code-diff wrap':'code-diff'} onPointerUp={captureSelection} onKeyUp={captureSelection} ref={scroll} tabIndex={0} aria-label="파일 diff">
       {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>{commit?'이 커밋에서 변경된 파일이 없습니다.':'미커밋 변경이 없습니다.'}</p>}
       {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
         const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000
           ?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined;
-        return <div key={index} className={`code-line ${row.kind}`}><span className="code-number">{row.old??''}</span><span className="code-number">{row.next??''}</span><span className="code-sign">{row.kind==='add'?'+':row.kind==='delete'?'-':''}</span>{html===undefined?<code>{row.text||' '}</code>:<code dangerouslySetInnerHTML={{__html:html||' '}}/>}</div>;
+        return <div key={index} data-diff-row={index} className={`code-line ${row.kind}${index>=start && index<=end?' quoted':''}`}><span className="code-number">{row.old??''}</span><span className="code-number">{row.next??''}</span>{onQuote&&row.kind!=='header'?<button type="button" className="code-sign" aria-label={`diff ${index+1}번째 줄 선택`} title="줄 선택 · Shift+클릭으로 범위 선택" onClick={e=>selectLine(index,e.shiftKey)}>{row.kind==='add'?'+':row.kind==='delete'?'-':'·'}</button>:<span className="code-sign">{row.kind==='add'?'+':row.kind==='delete'?'-':''}</span>}{html===undefined?<code>{row.text||' '}</code>:<code dangerouslySetInnerHTML={{__html:html||' '}}/>}</div>;
       })}
       {rows.length>limit&&<button className="code-more" onClick={()=>setLimit(n=>n+200)}>다음 200줄 표시 ({rows.length-limit}줄 남음)</button>}
     </div>

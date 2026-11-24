@@ -11,12 +11,48 @@ const parser=unified().use(remarkParse).use(remarkGfm,{singleTilde:false}).use(r
 const excluded=new Set(['blockquote','code','inlineCode','html','link','linkReference','definition','image','imageReference','math','inlineMath','delete']);
 type Node={type:string;children?:Node[];position?:{start:{offset?:number};end:{offset?:number}}};
 
+// A generated diff may follow unfinished Markdown in a draft. Its literal extent
+// must be independent of how that earlier Markdown parses.
+function diffQuoteRanges(text: string) {
+  const ranges:{start:number;end:number}[]=[];
+  let opening:{start:number;fence:string}|undefined;
+  for(const match of text.matchAll(/^(`{3,})(diff)?[ \t]*\r?$/gm)){
+    if(opening){
+      if(!match[2] && match[1]===opening.fence){
+        ranges.push({start:opening.start,end:match.index+match[0].length});
+        opening=undefined;
+      }
+    }else if(match[2])opening={start:match.index,fence:match[1]};
+  }
+  return ranges;
+}
+
+/** Preserve offsets while preventing Desk controls in literal code from being interpreted. */
+export function maskCodeBlocks(text: string): string {
+  if (!text.includes('`') && !text.includes('~~~') && !/^(?: {4}|\t)/m.test(text)) return text;
+  // Keep character positions stable for tags outside the quoted ranges.
+  for(const {start,end} of diffQuoteRanges(text).reverse())
+    text=text.slice(0,start)+'\0'.repeat(end-start)+text.slice(end);
+  let result='',offset=0;
+  const visit=(node: Node)=>{
+    if ((node.type==='code'||node.type==='inlineCode') && node.position) {
+      const start=node.position.start.offset,end=node.position.end.offset;
+      if(start!==undefined && end!==undefined){
+        result+=text.slice(offset,start)+'\0'.repeat(end-start);
+        offset=end;
+      }
+    } else node.children?.forEach(visit);
+  };
+  visit(parser.parse(text));
+  return result+text.slice(offset);
+}
+
 /** Use the same Markdown grammar as the renderer; only literal body text grants access. */
 export function connectorTags(text: string): { scopes: ConnectorScope[]; body: string } {
   if (!/#(?:slack|jira|confluence)\b/i.test(text)) return {scopes:[],body:text};
   const scopes:ConnectorScope[]=[],edits:{start:number;end:number;scope:ConnectorScope}[]=[];
   type Range={start:number;end:number};
-  const spans:Range[]=[],ignored:Range[]=[],htmlSpans:Range[]=[],html:{tag:string;start:number}[]=[];
+  const spans:Range[]=[],ignored:Range[]=diffQuoteRanges(text),htmlSpans:Range[]=[],html:{tag:string;start:number}[]=[];
   const visit=(node:Node)=>{
     const start=node.position?.start.offset,end=node.position?.end.offset;
     if(start===undefined||end===undefined)return;

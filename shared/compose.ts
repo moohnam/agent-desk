@@ -1,4 +1,4 @@
-import { CONNECTOR_SCOPES, connectorTags } from './connector-tags.ts';
+import { CONNECTOR_SCOPES, connectorTags, maskCodeBlocks } from './connector-tags.ts';
 // Parses the compose box syntax shared by the hub and the web UI (no Node imports here).
 //   @name          continue the latest task of an existing project
 //   @name#N        continue task N of the project (tasks are numbered 1, 2, … per project)
@@ -198,7 +198,7 @@ export function parseNoteCompose(text: string): { mention?: ComposeMention; titl
 
 /** Every `@name` or `@name#N` in `text`, in order (paths dropped). */
 export function mentionsIn(text: string): { name: string; no?: number }[] {
-  return [...text.matchAll(new RegExp(MENTION.source, 'g'))].map((m) => ({ name: m[2], no: m[3] ? Number(m[3]) : undefined }));
+  return [...(text.includes('@')?maskCodeBlocks(text):text).matchAll(new RegExp(MENTION.source, 'g'))].map((m) => ({ name: m[2], no: m[3] ? Number(m[3]) : undefined }));
 }
 
 /**
@@ -217,7 +217,9 @@ export function parseCompose(text: string, skills: Iterable<string> = [], route 
   let delivery: Delivery | undefined;
   const used: string[] = [];
   body = connectorTags(body).body;
-  body = body.replace(TAG, (all, pre: string, tag: string) => {
+  const literalMask=body.includes('#')?maskCodeBlocks(body):body;
+  body = body.replace(TAG, (all, pre: string, tag: string, offset: number) => {
+    if(literalMask[offset+pre.length]!=='#')return all;
     const t = tag.toLowerCase();
     if ((ENGINES as string[]).includes(t)) { engine ??= t as EngineName; return pre; }
     if (MODE_TAGS[t]) { mode ??= MODE_TAGS[t]; return pre; }
