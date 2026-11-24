@@ -385,6 +385,43 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$('.code-panel'),null);
     },false,'emacs'));
 
+    for (const width of [1440,390]) await t.test(`code view recovers file selection after failed list refresh (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      let failList=false,failDetail=false;const requests=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());requests.push(body);
+        if((!body.path&&failList)||(body.path&&failDetail))return void request.respond({status:500,contentType:'application/json',body:JSON.stringify({error:'temporary failure'})});
+        return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:'/test/worktree',head:'1234567890abcdef',files:['a.ts','b.ts'].map(path=>({path,status:'modified'})),
+          ...(body.path?{path:body.path,diff:`@@ -0,0 +1 @@\n+const file = "${body.path}";\n`}:{}),
+        })});
+      });
+      const waitFile=path=>page.waitForFunction(path=>document.querySelector('.code-panel .code-line.add code')?.textContent.includes(path)&&!document.querySelector('.code-panel [role="status"]'),{},path);
+      await openReply(page,origin);
+      await page.click('button[aria-label="코드 변경 보기"]');
+      await waitFile('a.ts');
+      failList=true;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('목록 갱신 실패')&&!document.querySelector('.code-panel [role="status"]'));
+      const listReads=requests.filter(body=>!body.path).length;
+      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','b.ts']));
+      await waitFile('b.ts');
+      assert.equal(requests.at(-1).path,'b.ts');
+      assert.equal(requests.filter(body=>!body.path).length,listReads,'selection after failure only reads detail');
+      failList=false;failDetail=true;
+      const detailFailure=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/code-view'&&JSON.parse(response.request().postData()).path==='b.ts'&&response.status()===500);
+      await page.click('button[aria-label="코드 새로고침"]');
+      await detailFailure;
+      await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('temporary failure')&&!document.querySelector('.code-panel [role="status"]'));
+      assert.equal(await page.$('.code-panel .code-line'),null,'failed detail refresh must not show stale diff');
+      failDetail=false;
+      await page.click('button[aria-label="코드 새로고침"]');
+      await waitFile('b.ts');
+      assert.equal(await page.$('.code-panel [role="alert"]'),null);
+    },false,'emacs'));
+
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
       await page.setViewport({ width: 1000, height: 700 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });

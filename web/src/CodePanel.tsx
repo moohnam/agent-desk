@@ -10,6 +10,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   const [selected,setSelected]=useState<string>();
   const [content,setContent]=useState<CodeViewResult>();
   const [error,setError]=useState('');
+  const [listError,setListError]=useState('');
   const [listing,setListing]=useState(false);
   const [reading,setReading]=useState(false);
   const [revision,setRevision]=useState(0);
@@ -22,13 +23,18 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   const loading=listing||reading;
   useEffect(()=>{
     const controller=new AbortController();
-    setListing(true);setReading(false);setError('');
+    setListing(true);setReading(false);setError('');setListError('');
     void api.codeView(taskId,undefined,controller.signal).then(data=>{
       if(controller.signal.aborted)return;
       setReading(data.files.length>0);
       setSnapshot({data,revision});
       setSelected(previous=>data.files.some(file=>keyOf(file)===previous)?previous:data.files[0]?keyOf(data.files[0]):undefined);
-    }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})
+    }).catch(e=>{if(!controller.signal.aborted){
+      setListError(e.message);
+      setReading(!!snapshot?.data.files.length);
+      // A failed refresh must not invalidate the last usable file list.
+      setSnapshot(previous=>previous?{...previous,revision}:previous);
+    }})
       .finally(()=>{if(!controller.signal.aborted)setListing(false);});
     return()=>controller.abort();
   },[taskId,revision]);
@@ -36,7 +42,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
     if(snapshot?.revision!==revision)return;
     const controller=new AbortController();
     if(!path){setContent(undefined);setReading(false);return;}
-    setReading(true);setError('');
+    setReading(true);setError('');setContent(undefined);
     void api.codeView(taskId,path,controller.signal,kind).then(result=>{
       if(!controller.signal.aborted)setContent(result);
     }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})
@@ -49,6 +55,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
   return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>e.stopPropagation()}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
     <div className="code-scope">작업 폴더 전체 · HEAD 대비 미커밋 변경<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>기준 {(content?.head??snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'} · 읽기 전용</small></div>
+    {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
     {error&&<p role="alert">{error}</p>}
     <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
       {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
@@ -56,7 +63,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose}:{taskId:
     </select>
     {loading&&<p role="status">변경을 불러오는 중…</p>}
     <div className="code-diff" ref={scroll} tabIndex={0} aria-label="파일 diff">
-      {!loading&&!error&&!snapshot?.data.files.length&&<p>미커밋 변경이 없습니다.</p>}
+      {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>미커밋 변경이 없습니다.</p>}
       {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
         const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000
           ?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined;
