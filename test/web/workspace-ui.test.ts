@@ -1164,3 +1164,46 @@ for (const remoteAt of ['1900-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z']) 
   assert.equal(state.loading,false,'a changed snapshot completes even if its timestamp is behind the browser clock');
   assert.deepEqual(calls,[false,true,false]);h.unmount();
 });
+
+
+test('grouped history stays readable with bounded SSE and releases on same-query ungrouping', async () => {
+  const h = hooks();
+  const event = (id: number) => ({id, task_id: `task-${Math.floor(id / 1000)}`, session_id:'s', kind:'assistant',
+    ts: String(id).padStart(8, '0'), payload:{text:String(id)}});
+  const timers = new Map<number, () => void>();
+  let timer = 0, receive: (batch: any[]) => void = () => {}, reads = 0;
+  const setTimer = (fn: () => void) => {timers.set(++timer, fn); return timer;};
+  const defs: any[] = [{id:'column', filter:{}, byTask:true}];
+  const module = load('useHub.ts', {
+    react:h.react, './api.ts':{api:{
+      feedPage:async()=>({events:Array.from({length:200}, (_,i)=>event(11801+i)),complete:true}),
+      feed:async()=>{ reads++; return Array.from({length:11800}, (_,i)=>event(i+1)); },
+      feedCount:async()=>({posts:60000,tasks:60}),
+    }, FEED_PAGE:1000},
+    './federation.ts':federation, './posts.ts':posts, './feedCache.ts':feedCache,
+    './projects.ts':{}, './draftRetention.ts':draftRetention,
+  }, {AbortController, window:{setTimeout:setTimer},setTimeout:setTimer,clearTimeout:(id:number)=>timers.delete(id)});
+  const subscribe = (fn: (batch:any[])=>void) => {receive=fn; return ()=>{};};
+  const render = () => h.render(()=>module.useColumnFeeds(defs,()=>defs,new Map(),()=>()=>{},0,new Set(),subscribe));
+  const settle = async () => {await Promise.resolve();await Promise.resolve();};
+  try {
+    render(); await settle();
+    render().loadEarlier('column'); await settle();
+    assert.equal(render().feeds.get('column').events.length,12000);
+    render().setReading('column',true);
+    render().setReading('column',false);
+    for(let batch=0;batch<3;batch++) {
+      receive(Array.from({length:12000},(_,i)=>({event:event(12001+batch*12000+i)})));
+      const result=render();
+      assert.equal(result.feeds.get('column').events.length,15000);
+      assert.equal(result.feeds.get('column').events[0].id,1);
+      result.setReading('column',true); result.setReading('column',false);
+      assert.equal(reads,1,'revisiting retained cards does not refetch history');
+    }
+    defs[0]={...defs[0],byTask:false}; render();
+    assert.equal(render().feeds.get('column').events.length,3000,'same ID and filter must not preserve grouping protection');
+    receive(Array.from({length:12000},(_,i)=>({event:event(48001+i)})));
+    assert.equal(render().feeds.get('column').events.length,3000);
+    assert.equal(reads,1);
+  } finally {h.unmount();}
+});
