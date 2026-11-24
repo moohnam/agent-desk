@@ -12,7 +12,7 @@ export async function sendCode(taskId:string,text:string) {
     if(attempts.length>=30){const oldest=attempts.findIndex(item=>item.result&&!item.pending);if(oldest>=0)attempts.splice(oldest,1);else throw new Error('미확인 코드 전송이 너무 많습니다. 전달 내역을 확인하세요');}
     attempt={taskId,text,id:workspaceOperationId()};attempts.push(attempt);save();
   }
-  if(attempt.result)return attempt.result;
+  if(attempt.result&&!attempt.result.shared_pending)return attempt.result;
   if(attempt.pending)return attempt.pending;
   const held=attempt;
   held.pending = api.sendCode(taskId,text,held.id).catch(error => {
@@ -22,8 +22,9 @@ export async function sendCode(taskId:string,text:string) {
       save();
     }
     throw error;
-  }).then(result => {
-    held.result=result;save();return result;
+  }).then((result: CodeSendResult) => {
+    if (!result.shared_pending) held.result=result;
+    save();return result;
   }).finally(() => {held.pending=undefined;});
   return held.pending;
 }

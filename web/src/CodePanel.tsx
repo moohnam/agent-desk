@@ -70,7 +70,9 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     const selectedWorktree = worktree || (worktree === '' && listing.registeredWorktree ? listing.root : null);
     void api.codeView(taskId,path,controller.signal,kind,commit||undefined,{...comparison,worktree:selectedWorktree}).then(result=>{
       if(controller.signal.aborted)return;
-      if(result.root!==listing.root || result.commit!==listing.commit || result.baseId!==listing.baseId || result.targetId!==listing.targetId)
+      const uncommitted = !listing.commit && !listing.baseId;
+      if(result.root!==listing.root || result.commit!==listing.commit || result.baseId!==listing.baseId || result.targetId!==listing.targetId
+        || (uncommitted && result.head!==listing.head))
         throw new Error('코드 비교 기준이 바뀌었습니다. 코드 목록을 새로고침해 주세요');
       setContent(result);
     }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})

@@ -478,7 +478,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
 
     for (const width of [1440,390]) await t.test(`code templates manage, preview, send and preserve drafts (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});
-      let templates={revision:'initial',items:[]},sendStatus=409,pendingTemplate=width===390;
+      let templates={revision:'initial',items:[]},sendStatus=width===390?202:409,pendingTemplate=width===390;
       const sends=[],templateOperations=[];
       await page.setRequestInterception(true);
       page.on('request',request=>{
@@ -498,6 +498,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         }
         if(path.endsWith('/messages')&&request.method()==='POST'){
           sends.push({...JSON.parse(request.postData()),operation:request.headers()['x-desk-operation-id']});
+          if(sendStatus===202)return respond({shared_pending:true},202);
           return sendStatus===200?respond({task_id:'t0'}):respond({error:'send failed'},sendStatus);
         }
         void request.continue();
@@ -530,20 +531,28 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.ok(preview.startsWith('이 코드의 문제와 수정안을 설명해주세요.\n\n'));
       assert.ok(preview.includes('-old();\n+newCode();'));assert.ok(preview.includes('이전 1 / 이후 1'));
       await clickText('.code-actions button','바로 전송');
+      if(width===390){
+        await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전달 대기열'));
+        sendStatus=409;
+        await clickText('.code-actions button','전송 결과 확인');
+      }
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="alert"]')?.textContent.includes('send failed'));
+      if(width===390)assert.equal(sends[0].operation,sends[1].operation,'check the receipt using the accepted operation ID');
+      const rejected=sends.at(-1);
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
       assert.equal(sends[0].text,preview);
       assert.equal(sends[0].code_review,true);
       sendStatus=500;
       await clickText('.code-actions button','바로 전송');
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="alert"]')?.textContent.includes('send failed'));
-      assert.notEqual(sends[0].operation,sends[1].operation,'a final rejection gets a new operation ID');
+      const uncertain=sends.at(-1);
+      assert.notEqual(rejected.operation,uncertain.operation,'a final rejection gets a new operation ID');
       sendStatus=200;
       await clickText('.code-actions button','바로 전송');
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
       await clickText('.code-actions button','바로 전송');
-      assert.equal(sends.length,3,'same selection cannot be submitted twice after success');
-      assert.equal(sends[1].operation,sends[2].operation,'an uncertain result keeps its operation ID');
+      assert.equal(sends.length,width===390?4:3,'same selection cannot be submitted twice after success');
+      assert.equal(uncertain.operation,sends.at(-1).operation,'an uncertain result keeps its operation ID');
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
       await page.click('.quote-code');
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안\n\n'+preview+'\n');
@@ -587,7 +596,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     },false,'emacs'));
 
     await t.test('the file detail uses the listed worktree and a stale registration requires an explicit fallback',()=>withPage(async page=>{
-      let registered='/feature';
+      let registered='/feature',headChanged=false;
       const requests=[];
       await page.setRequestInterception(true);
       page.on('request',request=>{
@@ -598,7 +607,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
           return respond({error:'등록된 작업 폴더를 사용할 수 없습니다. 작업 폴더 등록을 확인해 주세요'},403);
         const root=body.worktree===null?'/session':body.worktree??registered;
         if(body.worktree===undefined)registered='/different';
-        return respond({root,head:'abc',registeredWorktree:registered==='/different'&&!body.path?'/feature':registered,
+        return respond({root,head:headChanged&&body.path?'def':'abc',registeredWorktree:registered==='/different'&&!body.path?'/feature':registered,
           files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:`@@ -0,0 +1 @@\n+${root}\n`}:{})});
       });
       await openReply(page,origin);await page.click('[aria-label="코드 변경 보기"]');
@@ -611,6 +620,10 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.$$eval('.code-panel button',buttons=>buttons.find(button=>button.textContent==='세션 작업 폴더 보기').click());
       await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='/session');
       assert.equal(requests.at(-1).worktree,null);
+      headChanged=true;
+      await page.click('[aria-label="코드 새로고침"]');
+      await page.waitForFunction(()=>[...document.querySelectorAll('.code-panel [role="alert"]')].some(el=>el.textContent.includes('코드 비교 기준이 바뀌었습니다')));
+      assert.equal(await page.$('.code-panel .code-line'),null);
     },false,'emacs'));
 
     await t.test('code sends survive a panel remount without duplicate requests',()=>withPage(async page=>{
