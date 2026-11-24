@@ -19,7 +19,10 @@ if(process.argv[2]==='models'){console.log('gemini-4-hydrogen-medium\\tHydrogen 
 appendFileSync(process.env.MODEL_CAPTURE,JSON.stringify({args:process.argv.slice(2)})+'\\n');
 for await(const line of createInterface({input:process.stdin})){
   appendFileSync(process.env.MODEL_CAPTURE,line+'\\n');
-  console.log(JSON.stringify({event:'result',result:{status:'SUCCESS'}}));
+  const r=JSON.parse(line);
+  const result=r.method==='initialize'?{protocolVersion:1,agentCapabilities:{loadSession:true}}:
+    r.method==='session/new'?{sessionId:'fixture-acp'}:r.method==='session/prompt'?{stopReason:'end_turn'}:{};
+  console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
 }
 `,{mode:0o755});
     const driver=`
@@ -50,7 +53,7 @@ await new Promise((done,fail)=>{
 });`;
     const result=spawnSync(process.execPath,['--input-type=module','-e',driver],{cwd:dir,env:{...process.env,AGY_BIN:cli,MODEL_CAPTURE:capture},encoding:'utf8',timeout:6000});
     assert.equal(result.status,0,result.stderr||String(result.error));
-    const starts=readFileSync(capture,'utf8').trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.args).map(row=>row.args[row.args.indexOf('--model')+1]);
+    const starts=readFileSync(capture,'utf8').trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.method==='session/set_model').map(row=>row.params.modelId);
     assert.deepEqual(starts,['gemini-4-hydrogen-medium','gemini-4-hydrogen-xhigh']);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

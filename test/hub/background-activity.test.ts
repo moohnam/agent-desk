@@ -95,18 +95,11 @@ test('last child completion keeps the restart guard until its terminal inventory
   }finally{m.stop();}
 });
 
-test('AGY spawn step completion is not child completion and unfinished tools remain unknown after a parent result',()=>{
-  let tasks:BackgroundTask[]=[];const m=new AgyActivity(t=>{tasks=t;});
-  m.step({conversation_id:'root',step_index:1,state:'DONE',subagent_info:{subagents:[{conversation_id:'child',type_name:'worker'}]}});
-  m.parentResult();assert.equal(tasks[0].state,'unknown');assert.equal(m.childResult('root'),false);
-  assert.equal(m.childResult('child'),true);assert.equal(tasks.length,0);
-  m.step({conversation_id:'root',step_index:3,state:'DONE',subagent_info:{subagents:[{conversation_id:'child2',type_name:'worker'}]}});
-  m.step({conversation_id:'child2',step_index:1,step_type:'tool',state:'ACTIVE',tool_name:'run_command'});
-  m.childResult('child2');assert.equal(tasks.length,1);assert.equal(tasks[0].state,'unknown');
-  m.step({conversation_id:'child2',step_index:1,step_type:'tool',state:'DONE'});assert.equal(tasks.length,0);
-  m.step({conversation_id:'root',step_index:2,step_type:'tool',state:'ACTIVE',tool_name:'run_command'});
-  m.parentResult();assert.equal(tasks[0].state,'unknown');
-  m.step({conversation_id:'root',step_index:2,step_type:'tool',state:'DONE'});assert.equal(tasks.length,0);
+test('AGY unfinished tools remain unknown after a parent result until their terminal update',()=>{
+  let tasks:BackgroundTask[]=[];const activity=new AgyActivity(t=>{tasks=t;});
+  activity.acpTool({toolCallId:'cmd',name:'run_command',status:'in_progress'});
+  activity.parentResult();assert.equal(tasks[0].state,'unknown');
+  activity.acpTool({toolCallId:'cmd',status:'completed'});assert.equal(tasks.length,0);
 });
 
 test('polling can resume for late activity after a previous polling cycle became idle',async()=>{

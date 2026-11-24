@@ -113,7 +113,8 @@ if (process.argv[2] === 'models') { console.log('gemini-3.8-flash-medium'); proc
 appendFileSync(process.env.REF_CAPTURE, JSON.stringify({ args: process.argv.slice(2) }) + '\\n');
 for await (const line of createInterface({ input: process.stdin })) {
   appendFileSync(process.env.REF_CAPTURE, line + '\\n');
-  console.log(JSON.stringify({ event: 'result', result: { status: 'SUCCESS' } }));
+  const r=JSON.parse(line);
+  console.log(JSON.stringify({jsonrpc:'2.0', id:r.id, result:r.method==='initialize'?{protocolVersion:1,agentCapabilities:{loadSession:true}}:{stopReason:'end_turn'}}));
 }
 `, { mode: 0o755 });
     const adapter = pathToFileURL(resolve(import.meta.dirname, '../../hub/src/runner/agy.ts')).href;
@@ -139,13 +140,13 @@ await new Promise((done, fail) => {
     });
     assert.equal(result.status, 0, result.stderr || String(result.error));
     const requests = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-    assert.ok(requests[0].args.includes('existing-conversation'));
-    const turns = requests.filter((r) => r.event === 'user');
+    assert.ok(requests.some(r=>r.method==='session/load' && r.params.sessionId==='existing-conversation'));
+    const turns = requests.filter((r) => r.method === 'session/prompt').map(r=>r.params.prompt[0].text);
     assert.equal(turns.length, 2);
-    assert.ok(turns[0].message.content.startsWith('[데스크 지침]\n' + deskInstructions(home, instructions)));
-    if (instructions !== undefined) assert.ok(!turns[0].message.content.includes(DESK_INSTRUCTIONS));
-    assert.ok(turns[0].message.content.includes(JSON.stringify(join(home, 'skills'))));
-    assert.equal(turns[1].message.content, '계속');
+    assert.ok(turns[0].startsWith('[데스크 지침]\n' + deskInstructions(home, instructions)));
+    if (instructions !== undefined) assert.ok(!turns[0].includes(DESK_INSTRUCTIONS));
+    assert.ok(turns[0].includes(JSON.stringify(join(home, 'skills'))));
+    assert.equal(turns[1], '계속');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

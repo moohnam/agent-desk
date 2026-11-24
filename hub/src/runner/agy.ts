@@ -1,21 +1,8 @@
-// Antigravity CLI (agy) engine adapter: drives `agy` in stream-json mode (one NDJSON message per
-// line on stdin, one turn each; events on stdout), one process per session. Checked against agy 1.4.8.
-//
-// Headless agy can't ask anyone, so it denies whatever needs approval. Approvals come through a
-// PreToolUse hook instead: ~/.gemini/config/hooks.json runs agy-hook.sh before every tool call, and
-// the hook posts the call to the small HTTP server this adapter opens (its address and token reach
-// the hook through the environment agy passes on). The reply, `auto_approve` or `deny`, is held
-// until the user decides on the desk, for up to APPROVAL_TIMEOUT_MS. agy processes not started by
-// the desk lack the address, and the hook leaves them to agy's default.
-//
-// agy has no interrupt message: interrupting kills the process, and the next message starts a new
-// one that resumes the conversation (`--conversation`). A model change does the same between turns.
-
+// Antigravity CLI sessions use ACP so native permission prompts can await a Desk decision.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { createServer, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { AgyAcp } from './agy-acp.ts';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
 import type { ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
@@ -23,23 +10,14 @@ import { steeringSkillText } from './skill-input.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { latestOfFamily, catalogModel, catalogProblem } from '../../../shared/model-catalog.ts';
 import { runnerModelCatalogs } from './model-catalog.ts';
+import { AgyChildren } from './agy-children.ts';
+import type { BackgroundTask } from '../../../shared/protocol.ts';
 import { AgyActivity } from './agy-activity.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
 
 const AGY_BIN = config.agyBin;
-/** How long an approval may wait for the user; the hook's own timeout in hooks.json is a little longer. */
 const APPROVAL_TIMEOUT_MS = 60 * 60_000;
-/** Default model family when the task names none. */
 const DEFAULT_FAMILY: ModelName = 'flash';
-
-/**
- * Tools #ask lets through without asking: they only read the workspace or wait. Edits, commands,
- * the browser, web access and everything else come to the desk.
- */
-const READ_ONLY = new Set([
-  'view_file', 'read_file', 'list_dir', 'find_by_name', 'grep_search', 'command_status', 'wait', 'wait_5_seconds',
-  'list_permissions', 'list_resources', 'read_resource', 'manage_task', 'finish',
-]);
 
 type Json = any;
 
@@ -48,7 +26,10 @@ export function toolView(name: string, args: Json): { name: string; input: Json 
   const a = args && typeof args === 'object' ? { ...args } : {};
   const description = typeof a.toolSummary === 'string' ? a.toolSummary : undefined;
   delete a.toolSummary;
-  if (name === 'run_command') return { name: 'Bash', input: { command: a.CommandLine ?? '', cwd: a.Cwd, description } };
+  if (name === 'run_command') {
+    const {CommandLine: command, Cwd: cwd, ...extra} = a;
+    return { name: 'Bash', input: { ...extra, command: command ?? '', cwd, description } };
+  }
   const file = a.TargetFile ?? a.AbsolutePath ?? a.FilePath ?? a.File ?? a.Path;
   return { name, input: typeof file === 'string' ? { file_path: file, ...a } : { ...a, ...(description && { description }) } };
 }
@@ -91,13 +72,15 @@ function stopTree(proc: ChildProcess, signal: NodeJS.Signals) {
 /** A message waiting for its turn. */
 interface Turn { text: string; skills?: string[]; skillSnapshotHome?: string }
 
-/** An approval the user answers: the hook's held HTTP response. */
-interface Pending { res: ServerResponse; timer: NodeJS.Timeout }
+interface Pending { answer(allow: boolean): void; timer: NodeJS.Timeout }
 
 export const startAgy: StartEngine = (opts) => {
   const { sessionId, emit } = opts;
   const event = (e: RunnerEvent) => emit({ type: 'event', sessionId, event: e });
-  const activity = new AgyActivity(tasks=>emit({type:'background',sessionId,tasks}));
+  let activeTools:BackgroundTask[] = [], activeChildren:BackgroundTask[] = [];
+  const reportWork = () => emit({type:'background',sessionId,tasks:[...activeTools,...activeChildren]});
+  const activity = new AgyActivity(tasks=>{activeTools=tasks;reportWork();});
+  const children = new AgyChildren(tasks=>{activeChildren=tasks;reportWork();});
   let mode = opts.permissionMode;
   let family: ModelName = opts.model ?? DEFAULT_FAMILY;
   let effort = opts.effort;
@@ -120,176 +103,151 @@ export const startAgy: StartEngine = (opts) => {
   const stderrTail = new StderrTail();
   /** The last stderr lines, to add to a message about the process ending. */
   const tail = () => stderrTail.last(3).map((l) => `\n${l}`).join('');
-  /** Text of the agent message being streamed, by step. */
-  const texts = new Map<number, string>();
-  /** Tool steps already shown, by step index (a step reports ACTIVE and then DONE). */
-  const toolIds = new Map<number, string>();
-  // A resumed conversation also needs the current runner instructions, once per adapter.
+  let acp: AgyAcp | undefined;
+  let readySession: string | undefined;
+  let appliedMode: typeof mode | undefined;
+  let modeChange = Promise.resolve();
   let first = true;
-
-  // --- Approvals: the hook's requests ---
-  const token = randomBytes(24).toString('hex');
-  const server = createServer((req, res) => {
-    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { res.writeHead(403).end(); return; }
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (c: string) => { body += c; });
-    req.on('end', () => {
-      let call: Json;
-      try { call = JSON.parse(body)?.toolCall ?? {}; } catch { call = {}; }
-      const name = String(call.name ?? '');
-      if (mode === 'auto' || READ_ONLY.has(name)) { decide(res, true, mode === 'auto' ? '#auto' : '읽기 전용 도구'); return; }
-      const approvalId = randomUUID();
-      const timer = setTimeout(() => {
-        if (!pending.delete(approvalId)) return;
-        emit({ type: 'approval_cancelled', sessionId, approvalId });
-        decide(res, false, '데스크에서 1시간 동안 결정이 없어 거부했습니다');
-      }, APPROVAL_TIMEOUT_MS);
-      timer.unref?.();
-      pending.set(approvalId, { res, timer });
-      // The hook was killed (agy interrupted or timed out): the card goes away.
-      res.on('close', () => {
-        const p = pending.get(approvalId);
-        if (!p) return;
-        clearTimeout(p.timer);
-        pending.delete(approvalId);
-        emit({ type: 'approval_cancelled', sessionId, approvalId });
-      });
-      const view = toolView(name, call.args);
-      emit({ type: 'approval_request', sessionId, approvalId, toolName: view.name, input: view.input });
-    });
-  });
-  server.requestTimeout = 0;
-  server.headersTimeout = 0;
-  const listening = new Promise<number>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port));
-  });
-
-  const decide = (res: ServerResponse, allow: boolean, reason: string) => {
-    if (res.writableEnded) return;
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ decision: allow ? 'auto_approve' : 'deny', reason }));
+  let prompting = false;
+  let assistantText = '';
+  const tools = new Map<string, string>();
+  const flushText = () => {
+    if (assistantText.trim()) event({ kind: 'assistant', text: assistantText });
+    assistantText = '';
   };
   const cancelApprovals = () => {
-    for (const [approvalId, p] of pending) {
-      clearTimeout(p.timer);
-      emit({ type: 'approval_cancelled', sessionId, approvalId });
-      decide(p.res, false, '작업이 중단되었습니다');
+    for (const [approvalId, request] of pending) {
+      clearTimeout(request.timer);
+      request.answer(false);
+      emit({ type:'approval_cancelled', sessionId, approvalId });
     }
     pending.clear();
   };
-
-  // --- Turn events ---
-  const toolStart = (s: Json) => {
-    if (toolIds.has(s.step_index)) return;
-    const id = randomUUID();
-    toolIds.set(s.step_index, id);
-    const view = toolView(s.tool_info?.name ?? s.tool_name ?? 'tool', s.tool_info?.parameters);
-    event({ kind: 'tool', toolUseId: id, name: view.name, input: view.input });
-  };
-
-  const onStep = (s: Json) => {
-    if (s.step_type === 'agent_response') {
-      if (s.text_delta) texts.set(s.step_index, (texts.get(s.step_index) ?? '') + s.text_delta);
-      if (s.state !== 'ACTIVE') {
-        const text = texts.get(s.step_index)?.trim();
-        texts.delete(s.step_index);
-        if (text) event({ kind: 'assistant', text });
-      }
-    } else if (s.step_type === 'tool') {
-      toolStart(s);
-      if (s.state !== 'ACTIVE') {
-        const info = s.tool_info ?? {};
-        const isError = s.state === 'ERROR' || !!info.error;
-        event({ kind: 'tool_result', toolUseId: toolIds.get(s.step_index)!, isError,
-          text: clipResult(String(info.error?.message ?? info.output ?? '')) });
-        toolIds.delete(s.step_index);
-      }
-    }
-  };
-
   const turnEnded = (state: 'turn_done' | 'error' | 'interrupted', detail: Record<string, unknown>) => {
     if (!turns.active) return;
-    // Text cut off mid-stream still reaches the feed.
-    for (const text of texts.values()) if (text.trim()) event({ kind: 'assistant', text: text.trim() });
-    texts.clear();
-    for (const id of toolIds.values()) event({ kind: 'tool_result', toolUseId: id, isError: true, text: state === 'interrupted' ? '중단됨' : '끝나지 않음' });
-    toolIds.clear();
-    event({ kind: 'status', state, detail });
+    prompting = false;
+    flushText();
+    if(state !== 'turn_done') {
+      for (const id of tools.values()) event({kind:'tool_result',toolUseId:id,isError:true,text:'끝나지 않음'});
+      tools.clear();
+    }
+    // Background requests can outlive the prompt that started them.
+    activity.parentResult();
+    event({ kind:'status', state, detail });
     turns.ended();
   };
 
-  const onLine = (line: string) => {
-    let msg: Json;
-    try { msg = JSON.parse(line); } catch { return; }
-    switch (msg.event) {
-      case 'init': {
-        const id = msg.conversation_id as string;
-        const resumed = !!conversationId;
-        if (id && id !== conversationId) { conversationId = id; emit({ type: 'engine_session', sessionId, engineSessionId: id }); }
-        if (msg.init?.model && msg.init.model !== reported) {
-          const firstReport = reported === undefined;
-          reported = msg.init.model;
-          event({ kind: 'status', state: firstReport ? 'started' : 'model_changed', detail: {
-            model: msg.init.model, cwd: msg.init.cwd, ...(firstReport && resumed ? { resumed: true } : {}),
-          } });
-        }
-        break;
-      }
-      case 'step_update': {
-        const step=msg.step_update??{};
-        activity.step(step);
-        if(!step.conversation_id||!conversationId||step.conversation_id===conversationId)onStep(step);
-        break;
-      }
-      case 'result': {
-        const r = msg.result ?? {};
-        const resultId=msg.conversation_id??r.conversation_id;
-        if(resultId&&conversationId&&resultId!==conversationId){activity.childResult(resultId);break;}
-        activity.parentResult();
-        const denied = (r.denied_actions ?? []).map((d: Json) => d.display_name ?? d.action);
-        turnEnded(r.status === 'SUCCESS' ? 'turn_done' : 'error', {
-          subtype: String(r.status ?? '').toLowerCase(), duration_ms: r.duration_seconds != null ? Math.round(r.duration_seconds * 1000) : undefined,
-          ...(r.error ? { message: typeof r.error === 'string' ? r.error : r.error.message ?? JSON.stringify(r.error) } : {}),
-          ...(denied.length ? { denied } : {}),
-        });
-        break;
-      }
-    }
+  const permission = (rpc: AgyAcp, id: string | number, params: Json) => {
+    const options: Json[] = Array.isArray(params.options) ? params.options : [];
+    const once = (kind: string) => {
+      const option = options.find(o => o?.kind === kind && typeof o.optionId === 'string' && o.optionId);
+      return option && options.filter(o=>o?.optionId===option.optionId).length===1 ? option.optionId : undefined;
+    };
+    const allow = once('allow_once'), deny = once('reject_once');
+    const answer = (approved: boolean) => {
+      const choice = approved ? allow : deny;
+      rpc.reply(id, {outcome: choice ? {outcome:'selected',optionId:choice} : {outcome:'cancelled'}});
+    };
+    const call = params.toolCall;
+    if (!readySession || (params.sessionId !== readySession && !children.owns(params.sessionId)) || !call || !allow) { answer(false); return; }
+    const approvalId = randomUUID();
+    const timer = setTimeout(() => {
+      if (!pending.delete(approvalId)) return;
+      answer(false);
+      emit({type:'approval_cancelled',sessionId,approvalId});
+    }, APPROVAL_TIMEOUT_MS);
+    timer.unref();
+    pending.set(approvalId,{timer,answer});
+    const view = toolView(call.name ?? call.kind ?? 'tool', call.rawInput ?? call.args);
+    emit({type:'approval_request',sessionId,approvalId,toolName:view.name,input:{...view.input,title:call.title}});
   };
 
-  /** The process for `model`, started (resuming the conversation) or restarted if it runs another model. */
-  const processFor = async (model: string): Promise<ChildProcess> => {
-    if (child && running === model) return child;
-    if (child) {
-      if(activity.hasWork())throw new Error('백그라운드 작업의 종료를 확인한 뒤 모델을 변경하세요');
-      const old = child; child = null; old.stdin?.end(); stopTree(old, 'SIGTERM');
+  const update = (u: Json) => {
+    if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') {
+      assistantText += u.content.text;
+      return;
     }
-    const port = await listening;
-    const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model,
-      ...(conversationId ? ['--conversation', conversationId] : [])];
-    const proc = spawn(AGY_BIN, args, {
-      cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, AGENT_DESK_AGY_URL: `http://127.0.0.1:${port}/approve`, AGENT_DESK_AGY_TOKEN: token },
-    });
-    child = proc;
-    running = model;
+    if (!['tool_call','tool_call_update'].includes(u?.sessionUpdate) || typeof u.toolCallId !== 'string') return;
+    flushText();
+    const key = u.toolCallId;
+    let useId = tools.get(key);
+    if (!useId) {
+      useId = randomUUID();
+      tools.set(key,useId);
+      const view = toolView(u.name ?? u.title ?? 'tool',u.rawInput ?? u.args);
+      event({kind:'tool',toolUseId:useId,name:view.name,input:view.input});
+    }
+    children.observe(u);
+    activity.acpTool(u);
+    if (u.status !== 'completed' && u.status !== 'failed') return;
+    const output = u.rawOutput ?? u.content?.map((c: Json) => c.content?.text ?? '').join('\n') ?? '';
+    event({kind:'tool_result',toolUseId:useId,isError:u.status==='failed',text:clipResult(typeof output==='string'?output:JSON.stringify(output))});
+    tools.delete(key);
+  };
+
+  const processFor = async (model: string) => {
+    if (acp && running === model && readySession) return acp;
+    if (child) {
+      if (activity.hasWork() || activeChildren.length || pending.size)
+        throw new Error('백그라운드 작업과 승인 요청이 끝난 뒤 모델을 변경하세요');
+      const old=child; child=null; acp?.close(); old.stdin?.end(); stopTree(old,'SIGTERM');
+    }
+    readySession=undefined;
+    const env = {...process.env};
+    delete env.AGENT_DESK_AGY_URL;
+    delete env.AGENT_DESK_AGY_TOKEN;
+    const proc = spawn(AGY_BIN,['acp'],{cwd:opts.cwd,stdio:'pipe',env});
+    child=proc;
+    running=model;
     stderrTail.clear();
-    proc.stdin!.on('error', () => {}); // EPIPE after the process went; 'exit' reports it
-    proc.stderr!.on('data', (chunk: Buffer) => stderrTail.push(chunk));
-    createInterface({ input: proc.stdout! }).on('line', (line) => { if (child === proc) onLine(line); });
-    const gone = (message?: string) => {
+    proc.stderr.on('data',(chunk:Buffer)=>stderrTail.push(chunk));
+    const rpc = new AgyAcp(proc,(method,params,id)=>{
       if (child !== proc) return;
-      child = null;
-      running = null;
-      if (closing) return;
-      cancelApprovals();
-      turnEnded('error', { message: message ?? `agy 종료${tail()}` });
+      if (id != null) {
+        if (method==='session/request_permission') permission(rpc,id,params);
+        else rpc.unsupported(id);
+      } else if (method==='session/update' && readySession && params.sessionId===readySession) update(params.update);
+    });
+    acp=rpc;
+    const gone = (message:string) => {
+      if (child!==proc) return;
+      child=null; acp=undefined; readySession=undefined; running=null;
+      if (!closing) { cancelApprovals(); turnEnded('error',{message}); }
     };
-    proc.on('error', (err) => gone(`agy 실행 실패 (${AGY_BIN}): ${err.message}`));
-    proc.on('exit', (code, signal) => gone(code === 0 && !turns.active ? undefined : `agy 종료 (code ${code ?? signal})${tail()}`));
-    return proc;
+    proc.once('error',e=>gone(e.message));
+    proc.once('exit',(code,signal)=>gone(`agy 종료 (code ${code ?? signal})${tail()}`));
+    try {
+      const init = await rpc.call('initialize',{protocolVersion:1,clientCapabilities:{}});
+      if (init?.protocolVersion!==1) throw new Error('호환되는 agy ACP v1이 필요합니다');
+      const params={cwd:opts.cwd,mcpServers:[]};
+      const resumed=!!conversationId;
+      if (conversationId) {
+        if (!init.agentCapabilities?.sessionCapabilities?.resume && !init.agentCapabilities?.loadSession)
+          throw new Error('이 agy 버전에서는 기존 세션을 재개할 수 없습니다');
+        const method=init.agentCapabilities?.sessionCapabilities?.resume ? 'session/resume' : 'session/load';
+        await rpc.call(method,{...params,sessionId:conversationId});
+      } else {
+        const created=await rpc.call('session/new',params);
+        if (typeof created?.sessionId!=='string' || !created.sessionId) throw new Error('agy 세션 ID가 없습니다');
+        conversationId=created.sessionId;
+        emit({type:'engine_session',sessionId,engineSessionId:created.sessionId});
+      }
+      await rpc.call('session/set_model',{sessionId:conversationId,modelId:model});
+      let applied: typeof mode;
+      do {
+        applied=mode;
+        await rpc.call('session/set_mode',{sessionId:conversationId,modeId:applied});
+      } while(applied!==mode);
+      appliedMode=applied;
+      readySession=conversationId!;
+      event({kind:'status',state:reported?'model_changed':'started',detail:{model,cwd:opts.cwd,resumed}});
+      reported=model;
+      return rpc;
+    } catch(error) {
+      if (child===proc) {child=null;acp=undefined;readySession=undefined;stopTree(proc,'SIGTERM');}
+      rpc.close();
+      throw error;
+    }
   };
 
   const turnText = (turn: Turn) => {
@@ -324,10 +282,16 @@ export const startAgy: StartEngine = (opts) => {
       if (!current()) return;
       const proc = await processFor(model);
       if (!current()) return;
-      proc.stdin!.write(JSON.stringify({ event: 'user', message: { content: turnText(turn) } }) + '\n');
+      await modeChange.catch(() => {});
+      if (!current()) return;
+      if (appliedMode !== mode) throw new Error('agy 승인 모드가 적용되지 않았습니다');
+      children.beforePrompt(readySession!);
+      prompting = true;
+      const result = await proc.call('session/prompt',{sessionId:readySession,prompt:[{type:'text',text:turnText(turn)}]});
+      if (current()) turnEnded(result?.stopReason==='cancelled'?'interrupted':'turn_done',{subtype:result?.stopReason});
     } catch (err) {
       if (!current()) return;
-      turnEnded('error', { message: `agy 턴 시작 실패: ${err instanceof Error ? err.message : String(err)}` });
+      turnEnded('error', { message: `agy 요청 실패: ${err instanceof Error ? err.message : String(err)}` });
     }
   };
 
@@ -352,24 +316,17 @@ export const startAgy: StartEngine = (opts) => {
       turns.push({ text, skills, skillSnapshotHome });
     });
   };
-  listening.catch((err: Error) => {
-    if (closing) return;
-    closing = true;
-    emit({ type: 'busy', sessionId, busy: false });
-    emit({ type: 'closed', sessionId, error: `agy 승인 서버를 열지 못했습니다: ${err.message}` });
-  });
   send(opts.prompt, opts.skills, false, opts.skillSnapshotHome);
 
-  return {
-    send,
-    interrupt: async () => {
+  const interrupt = async () => {
       deliveryVersion++;
       const deferred = deferredSends.size > 0;
       deferredSends.clear();
       turns.clear();
+      const hadApprovals = pending.size > 0;
       cancelApprovals();
       // The process goes (its later output is dropped); the next message resumes the conversation.
-      if (!turns.active && !activity.hasWork()) {
+      if (!turns.active && !activity.hasWork() && !activeChildren.length && !hadApprovals) {
         if (deferred) {
           event({kind:'status',state:'interrupted',detail:{subtype:'interrupted'}});
           emit({type:'busy',sessionId,busy:false});
@@ -379,23 +336,32 @@ export const startAgy: StartEngine = (opts) => {
       if (child) {
         const proc = child;
         child = null;
-        running = null;
+        running = null; acp?.close(); acp=undefined; readySession=undefined;
         stopTree(proc, 'SIGINT');
       }
-      activity.reset();
+      activity.reset(); children.reset();
       // Without a process the turn was still starting; startTurn sees it ended and stops there.
       turnEnded('interrupted', { subtype: 'interrupted' });
-    },
-    // #auto also answers the approvals waiting now.
-    setMode: async (m) => {
+  };
+
+  return {
+    send,
+    interrupt,
+    setMode: (m) => {
       mode = m;
-      if (m !== 'auto') return;
-      for (const [approvalId, p] of pending) {
-        clearTimeout(p.timer);
-        emit({ type: 'approval_cancelled', sessionId, approvalId });
-        decide(p.res, true, '#auto');
-      }
-      pending.clear();
+      const rpc = acp, session = readySession;
+      modeChange = modeChange.catch(()=>{}).then(async () => {
+        if (!rpc || !session || rpc !== acp || session !== readySession) return;
+        try {
+          await rpc.call('session/set_mode',{sessionId:session,modeId:m});
+          if (acp === rpc) appliedMode = m;
+        } catch (error) {
+          if (m === 'default' && rpc === acp && (prompting || activity.hasWork() || activeChildren.length))
+            await interrupt();
+          throw error;
+        }
+      });
+      return modeChange;
     },
     // Takes effect from the next turn, which restarts the process on the new model.
     setModel: (m, e) => {
@@ -413,18 +379,18 @@ export const startAgy: StartEngine = (opts) => {
       switching = pending.catch(error => { selectionError = error instanceof Error ? error : new Error(String(error)); });
       return pending;
     },
-    resolveApproval: (approvalId, allow, message) => {
+    resolveApproval: (approvalId, allow) => {
       const p = pending.get(approvalId);
       if (!p) return;
       clearTimeout(p.timer);
       pending.delete(approvalId);
-      decide(p.res, allow, allow ? '데스크에서 승인' : message || '데스크에서 거절');
+      p.answer(allow);
     },
     close: () => {
       if (closing) return;
       closing = true; deliveryVersion++; deferredSends.clear();
       cancelApprovals();
-      server.close();
+      acp?.close(); children.reset();
       if (child) { child.stdin?.end(); stopTree(child, 'SIGTERM'); }
       child = null;
     },
