@@ -423,9 +423,7 @@ export function App() {
   // Older posts (drawn or loaded as a feed nears its bottom) are FeedColumn's.
   const onFeedScroll = (colId: string, feed: HTMLElement) => {
     const top = feed.scrollTop < 40;
-    // Grouped cards may each represent thousands of events. Keep the active reading
-    // window at the top too; inactive columns still use the bounded idle cache.
-    keepColumnHistory(colId, !top || !!deck.find(col => col.id === colId)?.def?.byTask);
+    keepColumnHistory(colId, !top);
     atTop.current.set(colId, top);
     if (!top) { markAnchor(colId, feed); return; }
     feedAnchor.current.delete(colId);
@@ -1403,6 +1401,7 @@ export function App() {
           total={f?.total && (col.def?.byTask ? f.total.tasks : f.total.posts)}
           pageCursor={col.def?.byTask && cursor ? `${cursor.id}:${cursor.edited_at ?? cursor.ts}` : undefined}
           pageGeneration={col.def?.byTask ? f?.token : undefined}
+          olderPage={col.def?.byTask ? f?.olderPage : undefined}
           empty={col.posts.length ? '' : col.id === SEARCH && !searching ? '검색어나 #project: 같은 필터를 입력하세요.' : hub.events.length === 0
             ? 'i를 눌러 첫 작업을 시작하세요.' : f?.loading ? '불러오는 중…' : '조건에 맞는 글이 없습니다.'}
           head={col.id === SEARCH ? (

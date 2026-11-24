@@ -24,14 +24,14 @@ function fixtureServer() {
       const url = new URL(request.url, 'http://localhost');
       if (url.pathname === '/__fixture/grouped-live') {
         for (let i = 0; i < 3; i++) for (const stream of groupedStreams) stream.write(`data: ${JSON.stringify({ source: '', message: {
-          type: 'event', event: {id: 100001+i, task_id:'t9', kind:'assistant', ts:'2026-01-02T00:00:00.000Z', payload:{text:`재시도 보호 ${i}`}},
+          type: 'event', event: {id: 100001+i, task_id:url.searchParams.get('task') ?? 't9', kind:'assistant', ts:'2026-01-02T00:00:00.000Z', payload:{text:`재시도 보호 ${i}`}},
         } })}\n\n`);
         response.writeHead(204).end(); return;
       }
       if (url.pathname === '/api/streams') {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.write('data: {"source":"","connected":true}\n\n');
-        if (request.headers['x-desk-fixture'] === 'grouped-failure') { groupedStreams.add(response); response.on('close', () => groupedStreams.delete(response)); }
+        if (['grouped-failure', 'grouped-deep'].includes(request.headers['x-desk-fixture'])) { groupedStreams.add(response); response.on('close', () => groupedStreams.delete(response)); }
         return;
       }
       if (url.pathname.startsWith('/api/')) {
@@ -276,6 +276,49 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
           assert.equal(older, requests, 'returning to the top does not reload history');
         }
       }, false, 'emacs'));
+    }
+
+    for (const scenario of ['live-race', 'upward', 'failure']) {
+      await t.test(`historical task discovery ignores live cards (${scenario})`, () => withPage(async page => {
+        await page.setViewport({width:1440,height:180});
+        await page.setExtraHTTPHeaders({'x-desk-fixture':'grouped-deep'});
+        await page.evaluateOnNewDocument(()=>localStorage.setItem('agent-desk.columns.v2',
+          JSON.stringify([{id:'grouped',title:'작업별',filter:{},byTask:true}])));
+        let held, older=0;
+        await page.setRequestInterception(true);
+        page.on('request', request => {
+          const u=new URL(request.url());
+          if(u.pathname==='/api/feed' && Number(u.searchParams.get('cursor_id'))!==Number.MAX_SAFE_INTEGER) {
+            older++;
+            if(older===1) {held=request;return;}
+          }
+          void request.continue();
+        });
+        await page.goto(origin,{waitUntil:'networkidle2'});
+        const feed='[data-col="grouped"] .feed';
+        await page.$eval(feed,element=>{element.scrollTop=element.scrollHeight;});
+        const deadline=Date.now()+5000;
+        while(!held && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,10));
+        assert.ok(held,'first historical page is in flight');
+        await page.evaluate(()=>fetch('/__fixture/grouped-live?task=t0',{method:'POST'}));
+        await page.waitForFunction(()=>document.querySelector('[data-col="grouped"]')?.textContent.includes('재시도 보호 2'));
+        if(scenario==='upward') {
+          await page.$eval(feed,element=>{element.scrollTop=0;});
+          await new Promise(resolve=>setTimeout(resolve,100));
+        }
+        if(scenario==='failure') await held.respond({status:500,contentType:'application/json',body:'{}'});
+        else await held.continue();
+        if(scenario!=='live-race') {
+          await page.waitForSelector('[data-col="grouped"] .older-posts button:enabled');
+          await new Promise(resolve=>setTimeout(resolve,400));
+          assert.equal(older,1,'upward movement or failure stops automatic continuation');
+          if(scenario==='upward') return;
+          await page.click('[data-col="grouped"] .older-posts button');
+        }
+        await page.waitForFunction(()=>Array.from(document.querySelectorAll('[data-col="grouped"] .ctx .ttl'))
+          .some(node=>node.textContent.includes('측정 작업 8')));
+        assert.ok(older>=2,'live t0 must not finish historical discovery of t8');
+      },false,'emacs'));
     }
 
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
