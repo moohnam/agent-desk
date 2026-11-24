@@ -1,4 +1,4 @@
-import { registeredWorktrees, storedCodeContext, taskCodeRoot } from './code-context.ts';
+import { registeredWorktrees, resolveRegisteredWorktree, storedCodeContext, taskCodeRoot } from './code-context.ts';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { constants } from 'node:fs';
@@ -6,7 +6,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { resolve, relative, sep } from 'node:path';
 import type { Hub } from './hub.ts';
 import { HttpError } from './errors.ts';
-import type { CodeViewResult } from '../../shared/code-view.ts';
+import { REGISTERED_WORKTREE_UNAVAILABLE, type CodeViewResult } from '../../shared/code-view.ts';
 const exec = promisify(execFile);
 const MAX = 512 * 1024;
 export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' | 'untracked', commit?: string, options: {base?:string;target?:string;worktree?:string} = {}): Promise<CodeViewResult> {
@@ -25,7 +25,7 @@ export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' 
   const worktrees=await registeredWorktrees(root);
   if(options.worktree!==undefined){
     if(typeof options.worktree!=='string'||!worktrees.some(item=>item.path===options.worktree))throw new HttpError(403,'이 저장소에 등록된 worktree만 선택할 수 있습니다');
-    root=await realpath(options.worktree);target=resolve(root,path??'.');rel=relative(root,target);
+    root=await resolveRegisteredWorktree(root,options.worktree);target=resolve(root,path??'.');rel=relative(root,target);
     if(path!==undefined&&(!rel||rel==='..'||rel.startsWith(`..${sep}`)))throw new HttpError(400,'작업 폴더 밖의 파일은 볼 수 없습니다');
   }
   // Repository-configured clean/process filters can execute even during git diff.
@@ -111,6 +111,10 @@ export async function taskCodeView(hub: Hub, input: Record<string,unknown>, shar
   const cwd=taskCodeRoot(hub,input.task_id,shared);
   const context=storedCodeContext(hub,input.task_id);
   const chosen=input.worktree===undefined?context.worktree:input.worktree;
-  const result=await readCodeView(cwd,input.path as string|undefined,input.kind as 'tracked'|'untracked'|undefined,input.commit as string|undefined,{base:input.base as string|undefined,target:input.target as string|undefined,worktree:chosen===null||chosen===''?undefined:chosen as string});
+  const result=await readCodeView(cwd,input.path as string|undefined,input.kind as 'tracked'|'untracked'|undefined,input.commit as string|undefined,{base:input.base as string|undefined,target:input.target as string|undefined,worktree:chosen===null||chosen===''?undefined:chosen as string}).catch(error => {
+    if (input.worktree === undefined && context.worktree && error instanceof HttpError && error.status === 403)
+      throw new HttpError(403,REGISTERED_WORKTREE_UNAVAILABLE);
+    throw error;
+  });
   return {...result,registeredWorktree:context.worktree};
 }

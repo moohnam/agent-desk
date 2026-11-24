@@ -1,9 +1,9 @@
 import { codeContext } from './code-context.ts';
-import { readPromptTemplates, savePromptTemplates } from './prompt-templates.ts';
+import { MAX_PROMPT_TEMPLATES_BODY, readPromptTemplates, savePromptTemplates } from './prompt-templates.ts';
 import { signRequest, toolFields } from './request-proof.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
-import { readBody } from './body.ts';
+import { MAX_BODY, readBody } from './body.ts';
 import type { AgentRequest } from './db.ts';
 import type { TaskView } from '../../shared/api.ts';
 import { ENGINES, HANDOFF_ENGINES } from '../../shared/compose.ts';
@@ -157,6 +157,12 @@ const PROMPTS = [{
 }];
 
 interface RpcRequest { jsonrpc: '2.0'; id?: string | number | null; method: string; params?: any }
+export const readMcpBody = (req: IncomingMessage) => readBody(req,MAX_PROMPT_TEMPLATES_BODY,body => {
+  const rpc = body as RpcRequest | null;
+  return rpc?.method === 'tools/call' && rpc.params?.name === 'desk_settings'
+    && rpc.params.arguments?.section === 'prompt_templates' && rpc.params.arguments?.action === 'save'
+    ? MAX_PROMPT_TEMPLATES_BODY : MAX_BODY;
+});
 
 class RpcError extends Error {
   readonly code: number;
@@ -178,12 +184,26 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
         authorize?.();return text(JSON.stringify(a.action==='read'?readPromptTemplates(hub.store):savePromptTemplates(hub.store,{revision:a.revision,items:a.items})));
       }
       if(a.section!=='code_context')throw new HttpError(400,'지원하지 않는 설정입니다');
-      const session=typeof a.session_id==='string'?hub.store.sessionByEngineId(a.session_id):undefined;
-      const taskId=session?.task_id??(typeof a.task_id==='string'?a.task_id:undefined);
-      if(!taskId)throw new HttpError(404,'현재 작업의 session_id 또는 task_id가 필요합니다');
-      if(a.session_id&&!session||session&&a.task_id&&session.task_id!==a.task_id)throw new HttpError(403,'작업과 엔진 세션이 일치하지 않습니다');
-      if(!session&&hub.store.latestSession(taskId)?.source!=='external')throw new HttpError(403,'데스크가 실행한 작업은 session_id를 사용하세요');
-      return text(JSON.stringify(await codeContext(hub,taskId,a.action==='save'?{revision:a.revision,worktree:a.worktree}:undefined,authorize)));
+      const session = typeof a.session_id === 'string' ? hub.store.sessionByEngineId(a.session_id) : undefined;
+      const taskId = session?.task_id ?? (typeof a.task_id === 'string' ? a.task_id : undefined);
+      if (!taskId) throw new HttpError(404,'현재 작업의 session_id 또는 task_id가 필요합니다');
+      if ((a.session_id !== undefined && !session) || (session && a.task_id !== undefined && session.task_id !== a.task_id)) {
+        throw new HttpError(403,'작업과 엔진 세션이 일치하지 않습니다');
+      }
+      const fields = toolFields(name,a);
+      const authorizeContext = () => {
+        authorize?.();
+        const current = hub.store.latestSession(taskId);
+        if (session) {
+          if (current?.id !== session.id || !hub.requests.proven(session,fields,resumeToken)) {
+            throw new HttpError(403,'현재 엔진 세션을 확인할 수 없습니다');
+          }
+        } else if (current?.source !== 'external') {
+          throw new HttpError(403,'데스크가 실행한 작업은 session_id를 사용하세요');
+        }
+      };
+      authorizeContext();
+      return text(JSON.stringify(await codeContext(hub,taskId,a.action==='save'?{revision:a.revision,worktree:a.worktree}:undefined,authorizeContext)));
     }
     case 'desk_attach': {
       const t = hub.external.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
@@ -322,7 +342,7 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } }));
   };
-  try { body = await readBody(req) as RpcRequest | RpcRequest[]; }
+  try { body = await readMcpBody(req) as RpcRequest | RpcRequest[]; }
   catch (err) {
     if (err instanceof HttpError && err.status !== 400) return fail(err.status, -32600, err.message);
     return fail(400, -32700, 'parse error');

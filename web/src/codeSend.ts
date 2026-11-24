@@ -1,6 +1,7 @@
-import { api, workspaceOperationId } from './api.ts';
+import { api, CodeSendRejected, workspaceOperationId } from './api.ts';
 import { SharedPending } from './workspace.ts';
-interface Attempt {taskId:string;text:string;id:string;result?:{task_id?:string;shared_pending?:boolean};pending?:Promise<Attempt['result']>}
+export interface CodeSendResult { task_id?:string; queued_id?:string; shared_pending?:boolean }
+interface Attempt {taskId:string;text:string;id:string;result?:CodeSendResult;pending?:Promise<Attempt['result']>}
 const attempts:Attempt[]=[];
 try{const stored=JSON.parse(sessionStorage.getItem('agent-desk.code-sends')??'[]');if(Array.isArray(stored))for(const item of stored)if(typeof item.taskId==='string'&&typeof item.text==='string'&&typeof item.id==='string')attempts.push(item);}catch{}
 function save(){try{sessionStorage.setItem('agent-desk.code-sends',JSON.stringify(attempts.map(({pending,...item})=>item)));}catch{}}
@@ -14,6 +15,15 @@ export async function sendCode(taskId:string,text:string) {
   if(attempt.result)return attempt.result;
   if(attempt.pending)return attempt.pending;
   const held=attempt;
-  held.pending=api.send(taskId,text,held.id).catch(error=>{if(error instanceof SharedPending)return {task_id:taskId,shared_pending:true};throw error;}).then(result=>{held.result=result;save();return result;}).finally(()=>{held.pending=undefined;});
+  held.pending = api.sendCode(taskId,text,held.id).catch(error => {
+    if (error instanceof SharedPending) return {task_id:taskId,shared_pending:true};
+    if (error instanceof CodeSendRejected) {
+      attempts.splice(attempts.indexOf(held),1);
+      save();
+    }
+    throw error;
+  }).then(result => {
+    held.result=result;save();return result;
+  }).finally(() => {held.pending=undefined;});
   return held.pending;
 }

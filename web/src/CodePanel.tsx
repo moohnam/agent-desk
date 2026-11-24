@@ -4,18 +4,22 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { X, RefreshCw } from 'lucide-react';
 import hljs from 'highlight.js/lib/common';
 import { api } from './api.ts';
-import { diffLines, type CodeViewResult } from '../../shared/code-view.ts';
+import type { CodeSendResult } from './codeSend.ts';
+import { diffLines, REGISTERED_WORKTREE_UNAVAILABLE, type CodeViewResult } from '../../shared/code-view.ts';
 import './code-panel.css';
 const language = (path: string) => ({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'} as Record<string,string>)[path.split('.').at(-1)??''];
-export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,onSend}:{taskId:string;title:string;onClose:()=>void;onQuote?:(text:string)=>void;onSend?:(text:string)=>Promise<{task_id?:string;shared_pending?:boolean}|undefined>}) {
+const branchLabel = (ref:string) => ref.startsWith('refs/remotes/')
+  ? `${ref.slice('refs/remotes/'.length)} (원격 추적)`
+  : `${ref.slice('refs/heads/'.length)} (로컬)`;
+export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,onSend}:{taskId:string;title:string;onClose:()=>void;onQuote?:(text:string)=>void;onSend?:(text:string)=>Promise<CodeSendResult|undefined>}) {
   const [snapshot,setSnapshot]=useState<{data:CodeViewResult;revision:number}>();
   const [commit,setCommit]=useState('');
-  const [worktree,setWorktree]=useState('');
+  const [worktree,setWorktree]=useState<string|null>('');
   const [base,setBase]=useState('');
   const [target,setTarget]=useState('');
   const [branches,setBranches]=useState<NonNullable<CodeViewResult['branches']>>([]);
   const [worktrees,setWorktrees]=useState<NonNullable<CodeViewResult['worktrees']>>([]);
-  const comparison={...(base&&target?{base,target}:{}),...(worktree?{worktree}:{})};
+  const comparison={...(base&&target?{base,target}:{}),...(worktree===''?{}:{worktree})};
   const [history,setHistory]=useState<NonNullable<CodeViewResult['commits']>>([]);
   const [selected,setSelected]=useState<string>();
   const [content,setContent]=useState<CodeViewResult>();
@@ -62,8 +66,13 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     const controller=new AbortController();
     if(!path){setContent(undefined);setReading(false);return;}
     setReading(true);setError('');setContent(undefined);
-    void api.codeView(taskId,path,controller.signal,kind,commit||undefined,comparison).then(result=>{
-      if(!controller.signal.aborted)setContent(result);
+    const listing = snapshot.data;
+    const selectedWorktree = worktree || (worktree === '' && listing.registeredWorktree ? listing.root : null);
+    void api.codeView(taskId,path,controller.signal,kind,commit||undefined,{...comparison,worktree:selectedWorktree}).then(result=>{
+      if(controller.signal.aborted)return;
+      if(result.root!==listing.root || result.commit!==listing.commit || result.baseId!==listing.baseId || result.targetId!==listing.targetId)
+        throw new Error('코드 비교 기준이 바뀌었습니다. 코드 목록을 새로고침해 주세요');
+      setContent(result);
     }).catch(e=>{if(!controller.signal.aborted)setError(e.message);})
       .finally(()=>{if(!controller.signal.aborted)setReading(false);});
     return()=>controller.abort();
@@ -103,15 +112,18 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     return fence+'diff\n'+body+'\n'+fence;
   };
   const lang=path&&language(path);
+  const changeWorktree=(path:string|null)=>{setWorktree(path);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);};
+  const sessionWorktree = 'session-worktree';
   return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>{if(e.currentTarget.contains(e.target as Node))e.stopPropagation();}}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
     <div className="code-scope">작업 폴더 전체 · {base&&target?'두 브랜치 끝 커밋의 차이':commit?'첫 번째 부모 대비 커밋 변경':'HEAD 대비 미커밋 변경'}<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>{base&&target?`${base.replace(/^refs\/(heads|remotes)\//,'')} (${(content?.baseId??snapshot?.data.baseId??'').slice(0,12)}) → ${target.replace(/^refs\/(heads|remotes)\//,'')} (${(content?.targetId??snapshot?.data.targetId??'').slice(0,12)})`:`${commit?'선택한 커밋':'기준'} ${(commit||content?.head||snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'}`} · 읽기 전용</small></div>
     {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
+    {listError===REGISTERED_WORKTREE_UNAVAILABLE&&<button onClick={()=>changeWorktree(null)}>세션 작업 폴더 보기</button>}
     {error&&<p role="alert">{error}</p>}
-    {!!worktrees.length&&<label className="code-worktree">작업 폴더<select aria-label="코드 worktree" value={worktree} onChange={e=>{setWorktree(e.target.value);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);}}><option value="">{snapshot?.data.registeredWorktree?`등록된 작업 폴더 · ${snapshot.data.registeredWorktree}`:'작업 세션 폴더'}</option>{worktrees.map(item=><option key={item.path} value={item.path}>{item.path} {item.branch?'· '+item.branch.replace('refs/heads/',''):''}</option>)}</select></label>}
+    {!!worktrees.length&&<label className="code-worktree">작업 폴더<select aria-label="코드 worktree" value={worktree??sessionWorktree} onChange={e=>changeWorktree(e.target.value===sessionWorktree?null:e.target.value)}><option value="">{snapshot?.data.registeredWorktree?`등록된 작업 폴더 · ${snapshot.data.registeredWorktree}`:'작업 세션 폴더'}</option>{(worktree===null||snapshot?.data.registeredWorktree)&&<option value={sessionWorktree}>세션 작업 폴더</option>}{worktrees.map(item=><option key={item.path} value={item.path}>{item.path} {item.branch?'· '+item.branch.replace('refs/heads/',''):''}</option>)}</select></label>}
     {!!branches.length&&<details className="code-branches"><summary>브랜치 간 비교</summary><div className="code-selectors">
-      <select aria-label="기준 브랜치" value={base} onChange={e=>{setBase(e.target.value);setCommit('');setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);}}><option value="">기준 선택</option>{branches.map(item=><option key={item.ref} value={item.ref}>{item.ref.replace(/^refs\/(heads|remotes)\//,'')}</option>)}</select>
-      <select aria-label="대상 브랜치" value={target} onChange={e=>{setTarget(e.target.value);setCommit('');setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);}}><option value="">대상 선택</option>{branches.map(item=><option key={item.ref} value={item.ref}>{item.ref.replace(/^refs\/(heads|remotes)\//,'')}</option>)}</select>
+      <select aria-label="기준 브랜치" value={base} onChange={e=>{setBase(e.target.value);setCommit('');setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);}}><option value="">기준 선택</option>{branches.map(item=><option key={item.ref} value={item.ref}>{branchLabel(item.ref)}</option>)}</select>
+      <select aria-label="대상 브랜치" value={target} onChange={e=>{setTarget(e.target.value);setCommit('');setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);}}><option value="">대상 선택</option>{branches.map(item=><option key={item.ref} value={item.ref}>{branchLabel(item.ref)}</option>)}</select>
     </div><small>기준 → 대상의 파일 차이입니다. 원격 브랜치는 마지막으로 받아온 상태이며 자동 fetch하지 않습니다.</small></details>}
     <div className="code-selectors">
       <select aria-label="변경 기준" value={base&&target?'__branches':commit} onChange={e=>{

@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { promptTemplates } from './promptTemplates.ts';
 import { PromptTemplates } from './PromptTemplates.tsx';
 import { codePrompt, type PromptTemplate } from '../../shared/prompt-templates.ts';
-import { SharedPending } from './workspace.ts';
-export function CodeActions({taskId,quote,onQuote,onSend}:{taskId:string;quote?:string;onQuote:(text:string)=>void;onSend:(text:string)=>Promise<{task_id?:string;shared_pending?:boolean}|undefined>}) {
+import type { CodeSendResult } from './codeSend.ts';
+export function CodeActions({taskId,quote,onQuote,onSend}:{taskId:string;quote?:string;onQuote:(text:string)=>void;onSend:(text:string)=>Promise<CodeSendResult|undefined>}) {
   const [source]=splitId(taskId);
   const [items,setItems]=useState<PromptTemplate[]>([]);
   const [selected,setSelected]=useState('');
@@ -30,8 +30,13 @@ export function CodeActions({taskId,quote,onQuote,onSend}:{taskId:string;quote?:
   const send=async()=>{
     if(disabled||lock.current||delivered===message)return;
     const submitted=message;lock.current=true;setBusy(true);setError('');setNotice('');
-    try{const result=await onSend(submitted);setDelivered(submitted);setNotice(result?.shared_pending?'공유 러너 전달 대기열에 접수했습니다. 연결되면 전달합니다.':'전송했습니다. 기존 답글 초안은 유지됩니다.');}
-    catch(e){if(e instanceof SharedPending){setDelivered(submitted);setNotice('공유 러너 전달 대기열에 접수했습니다. 연결되면 전달합니다.');}else setError(e instanceof Error?e.message:String(e));}
+    try {
+      const result = await onSend(submitted);
+      setDelivered(submitted);
+      setNotice(result?.shared_pending ? '공유 러너 전달 대기열에 접수했습니다. 연결되면 전달합니다.'
+        : result?.queued_id ? '메시지 대기열에 넣었습니다. 보낼 수 있을 때 전달합니다.'
+        : '전송했습니다. 기존 답글 초안은 유지됩니다.');
+    } catch (e) {setError(e instanceof Error?e.message:String(e));}
     finally{lock.current=false;setBusy(false);}
   };
   return <div className="code-actions">

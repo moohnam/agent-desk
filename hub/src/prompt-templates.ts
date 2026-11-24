@@ -3,6 +3,8 @@ import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
 import type { PromptTemplates } from '../../shared/prompt-templates.ts';
 const KEY = 'prompt_templates';
+// A full list can contain 1.6 million UTF-16 code units, each up to six JSON bytes.
+export const MAX_PROMPT_TEMPLATES_BODY = 10 * 1024 * 1024;
 export function readPromptTemplates(store: Store): PromptTemplates {
   const raw = store.setting(KEY);
   return raw ? JSON.parse(raw) : {revision:'initial',items:[]};

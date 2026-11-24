@@ -1,5 +1,6 @@
 import { messageReceipt } from './message-receipt.ts';
 import { taskCodeView } from './code-view.ts';
+import { MAX_PROMPT_TEMPLATES_BODY } from './prompt-templates.ts';
 import { agentPublicKeys } from './ssh-signature.ts';
 import { multiplexStream } from './stream-mux.ts';
 import { InstructionStore } from './instruction-store.ts';
@@ -24,7 +25,7 @@ import type { HubMessage } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Hub } from './hub.ts';
-import { handleMcp } from './mcp.ts';
+import { handleMcp, readMcpBody } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
@@ -55,8 +56,8 @@ async function serveStatic(pathname: string, res: ServerResponse) {
   }
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
-  const b = await readBody(req);
+async function readJson(req: IncomingMessage, limit?:number): Promise<Record<string, any>> {
+  const b = await readBody(req,limit);
   if (b === undefined) return {};
   if (!b || typeof b !== 'object' || Array.isArray(b)) throw new HttpError(400, 'JSON 객체가 필요합니다');
   return b as Record<string, any>;
@@ -323,7 +324,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       }
       if (url.pathname === '/mcp') {
         if(!localAuthorityId)return await handleMcp(hub,req,res);
-        const body=await readBody(req);
+        const body=await readMcpBody(req);
         if(await handleBrokerMcp(workspaces,localAuthorityId,body,req,res))return;
         return await workspaces.proxyMcp(localAuthorityId,req,res,body);
       }
@@ -547,7 +548,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           }
           return await workspaces.proxy(owner??localAuthorityId,workspaceUrl.pathname+url.search,req,res,undefined,body);
         }
-        const body = req.method === 'GET' ? {} : await readJson(req);
+        const body = req.method === 'GET' ? {} : await readJson(req,route === 'PUT /prompt-templates' ? MAX_PROMPT_TEMPLATES_BODY : undefined);
         const perform = () => {
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
           if (route === 'POST /tasks/:id/scheduled-replies') {

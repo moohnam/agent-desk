@@ -121,4 +121,7 @@ test('branch endpoints and registered worktrees are independent of the session c
  await assert.rejects(readCodeView(root,undefined,undefined,undefined,{worktree:tmpdir()}),/登録|등록/);
  await assert.rejects(readCodeView(root,undefined,undefined,undefined,{base:'--output=oops',target:'refs/heads/feature'}),/브랜치/);
  await assert.rejects(readCodeView(root,undefined,undefined,undefined,{base:'refs/heads/baseline'}),/기준과 대상/);
+ await rm(other,{recursive:true});
+ execFileSync('git',['init',other],{stdio:'pipe'});
+ await assert.rejects(readCodeView(root,undefined,undefined,undefined,{worktree:other}),/저장소가 변경/);
 }));

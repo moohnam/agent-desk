@@ -36,6 +36,7 @@ import { ASK_USER, type Answers, type LiveSession, type RunnerToHub, type SkillS
 /** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
 const RUNNER_GRACE_MS = 5000;
 type MessageContext = Pick<UserPayload, 'channel_context' | 'note_context'>;
+type MessageOptions = { noteOnly?: boolean; codeReview?: boolean };
 
 function notePrompt(prompt: string, context?: NoteContext): string {
   if (!context?.length) return prompt;
@@ -453,7 +454,7 @@ export class Hub extends DeskCore {
   }
   private composeInner(text: string, context: MessageContext, noteOnly: boolean): TaskView {
     const target = this.noteReplyTarget(text);
-    if (target) return this.taskView(this.store.getTask(this.sendMessage(target.task.id, target.text, false, undefined, context, noteOnly))!);
+    if (target) return this.taskView(this.store.getTask(this.sendMessage(target.task.id, target.text, false, undefined, context, {noteOnly}))!);
     if (noteOnly) throw new HttpError(409, '메모 작업을 선택해 주세요');
     const note = parseNoteCompose(text);
     if (note) {
@@ -589,10 +590,10 @@ export class Hub extends DeskCore {
    * single open question, a message can answer it directly (askedReply).
    * Returns the id of the task that got the message. `routed`: the compose box's text.
    */
-  sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context: MessageContext = {}, noteOnly = false): string {
-    return this.atomic(() => this.sendMessageInner(taskId, text, routed, receipt, context, noteOnly));
+  sendMessage(taskId: string, text: string, routed = false, receipt?: MessageReceipt, context: MessageContext = {}, options: MessageOptions = {}): string {
+    return this.atomic(() => this.sendMessageInner(taskId, text, routed, receipt, context, options));
   }
-  private sendMessageInner(taskId: string, text: string, routed: boolean, receipt: MessageReceipt | undefined, context: MessageContext, noteOnly: boolean): string {
+  private sendMessageInner(taskId: string, text: string, routed: boolean, receipt: MessageReceipt | undefined, context: MessageContext, {noteOnly,codeReview}: MessageOptions): string {
     requireAdmission();
     if (this.store.getTask(taskId)?.kind === 'note') {
       if (context.note_context?.length || context.channel_context)
@@ -630,7 +631,7 @@ export class Hub extends DeskCore {
     const busy = live && this.busy.has(session.id);
     const foreignInput = this.foreignRun(session.id);
     const content = !!(c.body || c.skills.length);
-    const waitingQuestions = (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
+    const waitingQuestions = !codeReview && (live || this.remotes.canQueue(session.id)) && c.body && !c.skills.length
       ? this.store.pendingApprovals().filter(a => a.session_id === session.id && a.tool_name === ASK_USER) : [];
     const asked = waitingQuestions.length === 1 && usesReplyComposer((waitingQuestions[0].input as { questions?: unknown } | null)?.questions)
       ? waitingQuestions[0] : undefined;

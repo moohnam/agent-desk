@@ -212,7 +212,9 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         case 'POST /tasks/:id/messages': {
           const b = body;
           const receipt: MessageReceipt = {};
-          const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), b.note_only === true);
+          const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), {
+            noteOnly: b.note_only === true, codeReview: b.code_review === true,
+          });
           return reply(202, { ok: true, task_id, ...receipt });
         }
         case 'POST /tasks/:id/scheduled-replies':

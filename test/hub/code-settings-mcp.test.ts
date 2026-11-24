@@ -20,38 +20,67 @@ test('gateway MCP settings follow session ownership and share templates and work
  const make=(store:Store,name:string)=>new Hub(store,{skills:new SkillStore(join(dir,name)),runner:()=>({connected:true,id:name,engines:new Set(['claude']),has:()=>false,handle:()=>{}})});
  const hub=make(db,'skills'),gateway=make(gatewayDb,'gateway-skills');
  const workspace=new SharedWorkspace(hub),links=new WorkspaceLinks(gatewayDb);
- const authority=workspace.server();let server:Server|undefined;
+ const localWorkspace=new SharedWorkspace(gateway,undefined,{localAuthority:true});
+ const authority=workspace.server(),localAuthority=localWorkspace.server();let server:Server|undefined;
  try{
   const root=join(dir,'repo');execFileSync('git',['init',root],{stdio:'pipe'});
   const git=(...args:string[])=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
   git('config','user.name','Test');git('config','user.email','test@example.com');writeFileSync(join(root,'a.ts'),'base\n');git('add','.');git('commit','-m','base');
-  const other=join(dir,'feature');git('worktree','add','-b','feature',other);writeFileSync(join(other,'a.ts'),'other worktree\n');
+  const other=join(dir,'feature with space\nworktree');git('worktree','add','-b','feature',other);writeFileSync(join(other,'a.ts'),'other worktree\n');
   const project=hub.createProject('test',root),task=hub.createTask(project.id,'test','start','default','claude');
   const session=db.latestSession(task.id)!;db.updateSession(session.id,{engine_session_id:'engine-code-context'});
+  const credential=hub.requests.sessionCredential(session.id);
+  const unrelated=hub.createTask(project.id,'unrelated','start','default','claude');
+  const unrelatedSession=db.latestSession(unrelated.id)!;
+  db.updateSession(unrelatedSession.id,{engine_session_id:'engine-unrelated'});
+  const unrelatedCredential=hub.requests.sessionCredential(unrelatedSession.id);
+  const external=hub.external.attachExternal({title:'external',summary:'attached',cwd:root});
   const authorityUrl=await listen(authority),peer=workspace.grant('gateway');
+  const localId=await links.configureLocal(await listen(localAuthority),localWorkspace.grant('gateway').token);
   const link=await links.attach({name:'remote',url:authorityUrl,token:peer.token});
-  server=createHttpServer(gateway,new Access(join(dir,'token'),4317),join(dir,'uploads'),{workspaces:links,localAuthorityId:link.id});
+  server=createHttpServer(gateway,new Access(join(dir,'token'),4317),join(dir,'uploads'),{workspaces:links,localAuthorityId:localId});
   const origin=await listen(server);
-  const tool=async(args:Record<string,unknown>)=>{
-    const response=await fetch(origin+'/mcp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'desk_settings',arguments:{session_id:'engine-code-context',...args}}})});
+  const tool=async(args:Record<string,unknown>,token:string|null=credential)=>{
+    const response=await fetch(origin+'/mcp',{method:'POST',headers:{'content-type':'application/json',...(token?{'x-desk-session':token}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'desk_settings',arguments:{session_id:'engine-code-context',...args}}})});
     const rpc=await response.json() as any;assert.equal(response.status,200);return rpc.result;
   };
   const initial=JSON.parse((await tool({section:'code_context',action:'read'})).content[0].text);
   assert.ok(initial.available.some((item:any)=>item.path===other));
-  const changed=await tool({section:'code_context',action:'save',revision:initial.revision,worktree:other});assert.equal(changed.isError,undefined);
+  const register={section:'code_context',action:'save',revision:initial.revision,worktree:other};
+  for(const token of [null,unrelatedCredential]) {
+    assert.equal((await tool({section:'code_context',action:'read'},token)).isError,true);
+    assert.equal((await tool(register,token)).isError,true);
+  }
+  assert.equal((await tool({...register,task_id:unrelated.id})).isError,true);
+  assert.equal((await tool({...register,session_id:undefined,task_id:task.id},null)).isError,true);
+  const changed=await tool(register);assert.equal(changed.isError,undefined);
   const saved=JSON.parse(changed.content[0].text);
+  const attached={section:'code_context',session_id:undefined,task_id:external.id};
+  const attachedContext=JSON.parse((await tool({...attached,action:'read'},null)).content[0].text);
+  assert.equal((await tool({...attached,action:'save',revision:attachedContext.revision,worktree:other},null)).isError,undefined);
   const code=()=>fetch(origin+'/api/code-view',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:link.id,task_id:task.id,path:'a.ts'})});
   const detail=await (await code()).json() as any;assert.equal(detail.root,other);assert.match(detail.diff,/\+other worktree/);assert.equal(detail.registeredWorktree,other);
   assert.equal((await tool({section:'code_context',action:'save',revision:initial.revision,worktree:null})).isError,true);
   assert.equal((await tool({section:'code_context',action:'save',revision:saved.revision,worktree:dir})).isError,true);
   const template=JSON.parse((await tool({section:'prompt_templates',action:'read'})).content[0].text);
   assert.equal((await tool({section:'prompt_templates',action:'save',revision:template.revision,items:[{id:'review',name:'검토',text:'검토해주세요'}]})).isError,undefined);
-  const visible=await (await fetch(origin+'/api/prompt-templates')).json() as any;assert.equal(visible.items[0].name,'검토');
-  const updated=await fetch(origin+'/api/prompt-templates',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({...visible,items:[]})});assert.equal(updated.ok,true);
-  assert.deepEqual(JSON.parse((await tool({section:'prompt_templates',action:'read'})).content[0].text).items,[]);
+  const templateUrl=`${origin}/api/workspaces/${link.id}/prompt-templates`;
+  const visible=await (await fetch(templateUrl)).json() as any;assert.equal(visible.items[0].name,'검토');
+  assert.deepEqual((await (await fetch(origin+'/api/prompt-templates')).json() as any).items,[]);
+  const updated=await fetch(templateUrl,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({...visible,items:[]})});assert.equal(updated.ok,true);
+  const empty=JSON.parse((await tool({section:'prompt_templates',action:'read'})).content[0].text);
+  assert.deepEqual(empty.items,[]);
+  const full=Array.from({length:100},(_,index)=>({id:`template-${index}`,name:`검토 ${index}`,text:'\u0001'.repeat(16000)}));
+  const bulk=await fetch(templateUrl,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({revision:empty.revision,items:full})});
+  assert.equal(bulk.ok,true);
+  const bulkResult=await bulk.json() as typeof empty;
+  assert.deepEqual(bulkResult.items,full);
+  const fullMcp=await tool({section:'prompt_templates',action:'save',revision:bulkResult.revision,items:full});
+  assert.equal(fullMcp.isError,undefined);
+  assert.equal(JSON.parse(fullMcp.content[0].text).items.length,100);
   assert.equal((await tool({section:'approval_mode',action:'save'})).isError,true);
   git('worktree','remove','--force',other);
   assert.equal((await code()).status,403,'missing registered worktree must not silently fall back');
   assert.equal((await tool({section:'code_context',action:'save',revision:saved.revision,worktree:null})).isError,undefined);
- }finally{if(server)await stop(server);await stop(authority);await links.close();workspace.connectorBroker?.close();hub.dispose();gateway.dispose();db.database.close();gatewayDb.database.close();rmSync(dir,{recursive:true,force:true});}
+ }finally{if(server)await stop(server);await stop(authority);await stop(localAuthority);await links.close();workspace.connectorBroker?.close();localWorkspace.connectorBroker?.close();hub.dispose();gateway.dispose();db.database.close();gatewayDb.database.close();rmSync(dir,{recursive:true,force:true});}
 });

@@ -478,13 +478,18 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
 
     for (const width of [1440,390]) await t.test(`code templates manage, preview, send and preserve drafts (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});
-      let templates={revision:'initial',items:[]},failSend=true;const sends=[];
+      let templates={revision:'initial',items:[]},sendStatus=409,pendingTemplate=width===390;
+      const sends=[],templateOperations=[];
       await page.setRequestInterception(true);
       page.on('request',request=>{
         const path=new URL(request.url()).pathname;
         const respond=(body,status=200)=>void request.respond({status,contentType:'application/json',body:JSON.stringify(body)});
         if(path==='/api/prompt-templates'){
-          if(request.method()==='PUT')templates={...JSON.parse(request.postData()),revision:'saved'};
+          if(request.method()==='PUT'){
+            templateOperations.push(request.headers()['x-desk-operation-id']);
+            if(pendingTemplate){pendingTemplate=false;return respond({shared_pending:true},202);}
+            templates={...JSON.parse(request.postData()),revision:'saved'};
+          }
           return respond(templates);
         }
         if(path==='/api/code-view'){
@@ -492,7 +497,8 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
           return respond({root:'/test',head:'abcdef',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -1 +1 @@\n-old();\n+newCode();\n'}:{})});
         }
         if(path.endsWith('/messages')&&request.method()==='POST'){
-          sends.push(JSON.parse(request.postData()));return failSend?respond({error:'send failed'},500):respond({task_id:'t0'});
+          sends.push({...JSON.parse(request.postData()),operation:request.headers()['x-desk-operation-id']});
+          return sendStatus===200?respond({task_id:'t0'}):respond({error:'send failed'},sendStatus);
         }
         void request.continue();
       });
@@ -506,7 +512,12 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.$eval('[aria-label="템플릿 이름"]',node=>{node.select();});await page.type('[aria-label="템플릿 이름"]','코드 검토');
       await page.type('[aria-label="템플릿 내용"]','이 코드의 문제와 수정안을 설명해주세요.');
       await clickText('[role="dialog"] button','템플릿 저장');
+      if(width===390){
+        await page.waitForFunction(()=>document.querySelector('[role="dialog"] [role="status"]')?.textContent.includes('템플릿 저장을 접수'));
+        await clickText('[role="dialog"] button','저장 결과 확인');
+      }
       await page.waitForFunction(()=>document.querySelector('[role="dialog"]')?.textContent.includes('템플릿을 저장했습니다.'));
+      if(width===390)assert.equal(templateOperations[0],templateOperations[1]);
       await page.focus('[role="dialog"] button[aria-label="닫기"]');
       await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
       assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'최신 목록 다시 불러오기');
@@ -522,11 +533,17 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="alert"]')?.textContent.includes('send failed'));
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
       assert.equal(sends[0].text,preview);
-      failSend=false;
+      assert.equal(sends[0].code_review,true);
+      sendStatus=500;
+      await clickText('.code-actions button','바로 전송');
+      await page.waitForFunction(()=>document.querySelector('.code-actions [role="alert"]')?.textContent.includes('send failed'));
+      assert.notEqual(sends[0].operation,sends[1].operation,'a final rejection gets a new operation ID');
+      sendStatus=200;
       await clickText('.code-actions button','바로 전송');
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
       await clickText('.code-actions button','바로 전송');
-      assert.equal(sends.length,2,'same selection cannot be submitted twice after success');
+      assert.equal(sends.length,3,'same selection cannot be submitted twice after success');
+      assert.equal(sends[1].operation,sends[2].operation,'an uncertain result keeps its operation ID');
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안');
       await page.click('.quote-code');
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안\n\n'+preview+'\n');
@@ -567,6 +584,33 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       const text=await page.$eval('.reply-box textarea',node=>node.value);
       assert.ok(text.includes('/repo-feature'));assert.ok(text.includes('refs/heads/main'));assert.ok(text.includes('refs/heads/feature'));assert.ok(text.includes('b'.repeat(40)));assert.ok(text.includes('+committed'));
       assert.equal(requests.at(-1).worktree,'/repo-feature');assert.equal(requests.at(-1).target,'refs/heads/feature');
+    },false,'emacs'));
+
+    await t.test('the file detail uses the listed worktree and a stale registration requires an explicit fallback',()=>withPage(async page=>{
+      let registered='/feature';
+      const requests=[];
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());requests.push(body);
+        const respond=(data,status=200)=>void request.respond({status,contentType:'application/json',body:JSON.stringify(data)});
+        if(registered==='/missing'&&body.worktree===undefined)
+          return respond({error:'등록된 작업 폴더를 사용할 수 없습니다. 작업 폴더 등록을 확인해 주세요'},403);
+        const root=body.worktree===null?'/session':body.worktree??registered;
+        if(body.worktree===undefined)registered='/different';
+        return respond({root,head:'abc',registeredWorktree:registered==='/different'&&!body.path?'/feature':registered,
+          files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:`@@ -0,0 +1 @@\n+${root}\n`}:{})});
+      });
+      await openReply(page,origin);await page.click('[aria-label="코드 변경 보기"]');
+      await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='/feature');
+      assert.equal(requests.at(-1).worktree,'/feature');
+      registered='/missing';
+      await page.click('[aria-label="코드 창 닫기"]');await page.click('[aria-label="코드 변경 보기"]');
+      await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('등록된 작업 폴더'));
+      assert.equal(await page.$('.code-panel .code-line'),null);
+      await page.$$eval('.code-panel button',buttons=>buttons.find(button=>button.textContent==='세션 작업 폴더 보기').click());
+      await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='/session');
+      assert.equal(requests.at(-1).worktree,null);
     },false,'emacs'));
 
     await t.test('code sends survive a panel remount without duplicate requests',()=>withPage(async page=>{
