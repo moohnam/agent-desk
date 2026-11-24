@@ -368,7 +368,12 @@ function matchesNoteQuery(q: FeedQuery, event: HubEvent, task: TaskView | undefi
 }
 
 /** `total`: the column's posts in the hub's database, and their tasks; unknown until counted. */
-export interface ColumnFeed { events: HubEvent[]; more: boolean; loading: boolean; total?: { posts: number; tasks: number } }
+export interface ColumnFeed {
+  events: HubEvent[]; more: boolean; loading: boolean; total?: { posts: number; tasks: number };
+  /** Identity of this query's request generation; changes when outstanding reads are cancelled. */
+  token?: object;
+  olderCursor?: HubEvent;
+}
 
 /** A query's total is counted again at most this often (ms) while its events arrive. */
 const COUNT_EVERY = 3000;

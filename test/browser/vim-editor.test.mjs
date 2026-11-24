@@ -15,13 +15,23 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 function fixtureServer() {
   const fixture = interactionData(24);
   const groupedFeed = interactionData(215, 'short');
+  const deepGroupedFeed = interactionData(1500, 'short');
+  let groupedFailure = true;
+  const groupedStreams = new Set();
   let enrollmentPending = true;
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
+      if (url.pathname === '/__fixture/grouped-live') {
+        for (let i = 0; i < 3; i++) for (const stream of groupedStreams) stream.write(`data: ${JSON.stringify({ source: '', message: {
+          type: 'event', event: {id: 100001+i, task_id:'t9', kind:'assistant', ts:'2026-01-02T00:00:00.000Z', payload:{text:`재시도 보호 ${i}`}},
+        } })}\n\n`);
+        response.writeHead(204).end(); return;
+      }
       if (url.pathname === '/api/streams') {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.write('data: {"source":"","connected":true}\n\n');
+        if (request.headers['x-desk-fixture'] === 'grouped-failure') { groupedStreams.add(response); response.on('close', () => groupedStreams.delete(response)); }
         return;
       }
       if (url.pathname.startsWith('/api/')) {
@@ -40,7 +50,13 @@ function fixtureServer() {
           }
         }
         const route = /^\/api\/tasks\/([^/]+)\/(events|messages)$/.exec(url.pathname);
-        let body = (layout === 'grouped-feed' ? groupedFeed : fixture)(url);
+        if (layout === 'grouped-failure' && url.pathname === '/api/feed'
+            && Number(url.searchParams.get('cursor_id')) !== Number.MAX_SAFE_INTEGER && groupedFailure) {
+          groupedFailure = false;
+          response.writeHead(500, {'content-type':'application/json'}).end('{"error":"fixture failure"}');
+          return;
+        }
+        let body = (layout === 'grouped-deep' ? deepGroupedFeed : layout?.startsWith('grouped-') ? groupedFeed : fixture)(url);
         if (url.pathname === '/api/updates') body = {
           ...body, targets: [],
           ...(request.headers['x-desk-settings-update'] && { current: 'old', latest: 'new' }),
@@ -151,8 +167,8 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       } finally { await context.close(); }
     };
 
-    await t.test('grouped columns reuse cached task cards and do not page older events at the top', () => withPage(async page => {
-      await page.setViewport({ width: 1440, height: 1600 });
+    await t.test('grouped columns fill empty space after resize without paging a full viewport', () => withPage(async page => {
+      await page.setViewport({ width: 1440, height: 180 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
       await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2',
         JSON.stringify([{ id: 'grouped', title: '작업별', filter: {}, byTask: true }])));
@@ -164,34 +180,81 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.goto(origin, { waitUntil: 'domcontentloaded' });
       const column = '[data-col="grouped"]';
       const card = `${column} [data-post]`;
-      const button = `${column} .older-posts button:enabled`;
-      const waitForPaint = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await page.waitForSelector(card);
-      await waitForPaint();
+      await new Promise(resolve => setTimeout(resolve, 300));
       assert.equal(older.length, 0);
       assert.equal(await page.$$eval(card, cards => cards.length), 1);
-      await page.waitForSelector(button);
-
-      await page.click(button);
+      await page.$eval(`${column} .feed`, feed => { feed.scrollTop = 1; });
       await page.waitForFunction(selector => document.querySelectorAll(selector).length > 1, {}, card);
-      await page.waitForSelector(button);
-      await waitForPaint();
-      assert.equal(older.length, 1);
-      assert.equal(await page.$eval(`${column} .feed`, feed => feed.scrollTop), 0);
-
-      // A real downward scroll can request the next page even when the feed's
-      // scrollbar has only a few pixels of travel.
-      const feed = `${column} .feed`;
-      await page.$eval(feed, element => {
-        const bottom = element.lastElementChild.getBoundingClientRect().bottom - element.getBoundingClientRect().top;
-        element.style.flex = 'none';
-        element.style.height = `${Math.ceil(bottom) - 4}px`;
-        element.scrollTop = 1;
-      });
+      assert.equal(older.length, 1, 'a real downward scroll still requests the next page');
+      await page.setViewport({ width: 1440, height: 2400 });
       await page.waitForFunction(selector => document.querySelectorAll(selector).length === 10, {}, card);
-      await page.$eval(feed, element => { element.scrollTop = 0; });
-      await waitForPaint();
       assert.equal(older.length, 2);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert.equal(older.length, 2, 'stop after exhausting the available tasks');
+    }, false, 'emacs'));
+
+    for (const layout of ['grouped-deep', 'grouped-failure']) {
+      await t.test(`grouped fill continues through collapsed pages and permits a manual retry (${layout})`, () => withPage(async page => {
+        await page.setViewport({ width: 1440, height: layout === 'grouped-failure' ? 180 : 700 });
+        await page.setExtraHTTPHeaders({ 'x-desk-fixture': layout });
+        await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2',
+          JSON.stringify([{ id: 'grouped', title: '작업별', filter: {}, byTask: true }])));
+        let older = 0;
+        page.on('request', request => {
+          const u = new URL(request.url());
+          if (u.pathname === '/api/feed' && Number(u.searchParams.get('cursor_id')) !== Number.MAX_SAFE_INTEGER) older++;
+        });
+        const failure = layout === 'grouped-failure' ? page.waitForResponse(r => r.status() === 500) : null;
+        await page.goto(origin, {waitUntil: layout === 'grouped-failure' ? 'networkidle2' : 'load'});
+        const column = '[data-col="grouped"]';
+        if (layout === 'grouped-failure') {
+          // Let initial source synchronization finish before injecting a read failure.
+          await page.setViewport({ width: 1440, height: 700 });
+          await failure;
+          await page.waitForSelector(`${column} .older-posts button:enabled`);
+          await page.evaluate(() => fetch('/__fixture/grouped-live', {method:'POST'}));
+          await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('재시도 보호 2'), {}, column);
+          await new Promise(resolve => setTimeout(resolve, 400));
+          assert.equal(older, 1, 'do not automatically retry the same failed page');
+          await page.click(`${column} .older-posts button`);
+        }
+        await page.waitForFunction(selector => document.querySelectorAll(`${selector} [data-post]`).length > 1, {}, column).catch(async error => {
+          const state = await page.$eval(`${column} .feed`, feed => ({ height: feed.clientHeight, scrollHeight: feed.scrollHeight,
+            top: feed.scrollTop, cards: feed.querySelectorAll('[data-post]').length, text: feed.innerText }));
+          throw new Error(`${error.message}; older=${older}; ${JSON.stringify(state)}`);
+        });
+        assert.ok(older >= 2);
+        await page.waitForFunction(selector => {
+          const feed = document.querySelector(`${selector} .feed`);
+          return feed.scrollHeight > feed.clientHeight || !feed.querySelector('.older-posts');
+        }, {}, column).catch(async error => {
+          const state = await page.$eval(`${column} .feed`, feed => ({ height: feed.clientHeight, scrollHeight: feed.scrollHeight,
+            top: feed.scrollTop, cards: feed.querySelectorAll('[data-post]').length, text: feed.innerText }));
+          throw new Error(`${error.message}; older=${older}; ${JSON.stringify(state)}`);
+        });
+      }, false, 'emacs'));
+    }
+
+    await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {
+      await page.setViewport({ width: 1000, height: 700 });
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
+      await page.evaluateOnNewDocument(() => localStorage.setItem('agent-desk.columns.v2', JSON.stringify([
+        ...Array.from({length:4}, (_,i) => ({id:`pad${i}`,title:'작업',filter:{taskIds:[`t${i}`]},byTask:true})),
+        {id:'grouped',title:'작업별',filter:{},byTask:true},
+      ])));
+      let older = 0;
+      page.on('request', r => {
+        const u = new URL(r.url());
+        if (u.pathname === '/api/feed' && !u.searchParams.has('task') && Number(u.searchParams.get('cursor_id')) !== Number.MAX_SAFE_INTEGER) older++;
+      });
+      await page.goto(origin);
+      await page.waitForSelector('[data-col="grouped"] [data-post]');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert.equal(older, 0);
+      await page.$eval('.deck', deck => { deck.scrollLeft = deck.scrollWidth; });
+      await page.waitForFunction(() => document.querySelectorAll('[data-col="grouped"] [data-post]').length > 1);
+      assert.ok(older > 0);
     }, false, 'emacs'));
 
     await t.test('f toggles the selected thread pin and the layout is a persistent setting', () => withPage(async page => {

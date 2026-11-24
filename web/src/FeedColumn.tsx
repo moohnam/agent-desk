@@ -56,9 +56,10 @@ export interface ColumnActions {
  * the column is active. `head`: a header in place of the column's own (the search column's).
  */
 export const FeedColumn = memo(function FeedColumn({ col, active, selected, width, ctx, projects, flash, expanded, tick, unseen, more,
-  loading, total, renaming, empty, head, onError, act }: {
+  loading, total, pageCursor, pageGeneration, renaming, empty, head, onError, act }: {
   col: DeckColumn; active: boolean; selected?: number; width: number; ctx: ColumnCtx; projects: Map<string, Project>;
   flash: number | null; expanded: Set<number>; tick: number; unseen: number; more: boolean; loading: boolean; total?: number;
+  pageCursor?: string; pageGeneration?: object;
   renaming: boolean; empty: string; head?: ReactNode; onError: (msg: string) => void; act: RefObject<ColumnActions>;
 }) {
   const now = Date.now();
@@ -71,13 +72,18 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   const [floor, setFloor] = useState<number | null>(null);
   const sectionRef = useRef<HTMLElement>(null);
   const [seen, setSeen] = useState(typeof IntersectionObserver === 'undefined');
+  const [inView, setInView] = useState(typeof IntersectionObserver === 'undefined');
   useEffect(() => {
-    if (seen || !sectionRef.current) return;
+    if ((seen && !byTask) || !sectionRef.current || typeof IntersectionObserver === 'undefined') return;
     // A floor set while hidden (a selection restored below the first posts) would hold the column short.
-    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setSeen(true); setFloor(null); } });
+    const io = new IntersectionObserver((es) => {
+      const visible = es.some(e => e.isIntersecting);
+      if (byTask) setInView(visible);
+      if (visible && !seen) { setSeen(true); setFloor(null); }
+    });
     io.observe(sectionRef.current);
     return () => io.disconnect();
-  }, [seen]);
+  }, [seen, byTask]);
   const base = floor == null ? Math.min(DRAWN, placed.length) : (() => {
     const k = placed.findIndex((x) => x.post.id === floor);
     return k < 0 ? placed.length : k + 1;
@@ -88,21 +94,41 @@ export const FeedColumn = memo(function FeedColumn({ col, active, selected, widt
   useEffect(() => { if (count > base) setFloor(placed[count - 1].post.id); }, [count > base]);
   const feedRef = useRef<HTMLDivElement>(null);
   const previousTop = useRef(0);
+  const autoPage = useRef<{ cursor: string; generation?: object } | undefined>(undefined);
   /** Near the bottom: draw more of the loaded posts, and load the next page before they run out. */
   const extend = (feed: HTMLElement, scrollingDown = false) => {
-    if (!seen) return;
+    if (!seen || (byTask && !inView)) return;
     if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= EXTEND_PX) return;
     if (count < placed.length) {
       setFloor(placed[Math.min(count + DRAW_STEP, placed.length) - 1].post.id);
       if (byTask) return;
     }
-    // A fetched page can collapse to a few cards. In a grouped feed, only a
-    // downward scroll or the explicit button should read another page.
-    const prefetch = byTask ? scrollingDown : placed.length - count <= PREFETCH_POSTS;
-    if (more && !loading && prefetch) act.current.older(id);
+    // Grouping can collapse a whole page to one card, leaving no way to scroll.
+    // Fill that space, but do not prefetch merely because a full column is near its bottom.
+    const underfilled = feed.clientHeight > 0 && feed.scrollHeight <= feed.clientHeight + 1;
+    const fill = byTask && underfilled && (total == null || placed.length < total);
+    const prefetch = byTask ? scrollingDown || fill : placed.length - count <= PREFETCH_POSTS;
+    if (more && !loading && prefetch) {
+      if (byTask && !scrollingDown) {
+        // A failed request leaves the page unchanged: allow an explicit retry,
+        // rather than retrying on every loading-state or resize notification.
+        if (!pageCursor || (autoPage.current?.cursor === pageCursor && autoPage.current.generation === pageGeneration)) return;
+        autoPage.current = { cursor: pageCursor, generation: pageGeneration };
+      }
+      act.current.older(id);
+    }
   };
   // Also after a render: a short column, or a page arriving while the feed sits at its bottom.
-  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen, byTask]);
+  useEffect(() => { if (feedRef.current) extend(feedRef.current); }, [placed, count, more, loading, width, expanded, seen, inView, byTask, total, pageCursor, pageGeneration]);
+  const extendRef = useRef(extend);
+  extendRef.current = extend;
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!byTask || !feed || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => extendRef.current(feed));
+    observer.observe(feed);
+    return () => observer.disconnect();
+  }, [byTask]);
   // Back at the top for a while: draw only the newest posts again (the rest stay loaded).
   const shrink = useRef(0);
   useEffect(() => () => clearTimeout(shrink.current), []);
