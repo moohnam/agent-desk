@@ -103,17 +103,19 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote}:
     <div className="code-scope">작업 폴더 전체 · {commit?'첫 번째 부모 대비 커밋 변경':'HEAD 대비 미커밋 변경'}<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>{commit?'선택한 커밋':'기준'} {(commit||content?.head||snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'} · 읽기 전용</small></div>
     {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
     {error&&<p role="alert">{error}</p>}
-    <select aria-label="변경 기준" value={commit} onChange={e=>{
-      setCommit(e.target.value);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);
-    }}>
-      <option value="">미커밋 변경</option>
-      {commit&&!history.some(item=>item.id===commit)&&<option value={commit}>{commit.slice(0,12)}</option>}
-      {history.map(item=><option key={item.id} value={item.id}>{item.id.slice(0,8)} · {item.subject}</option>)}
-    </select>
-    <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
-      {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
-      {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
-    </select>
+    <div className="code-selectors">
+      <select aria-label="변경 기준" value={commit} onChange={e=>{
+        setCommit(e.target.value);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);
+      }}>
+        <option value="">미커밋 변경</option>
+        {commit&&!history.some(item=>item.id===commit)&&<option value={commit}>{commit.slice(0,12)}</option>}
+        {history.map(item=><option key={item.id} value={item.id}>{item.id.slice(0,8)} · {item.subject}</option>)}
+      </select>
+      <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
+        {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
+        {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
+      </select>
+    </div>
     {onQuote&&<button className="quote-code" disabled={!active} onClick={quoteSelection}>선택한 줄 답글에 넣기</button>}
     {loading&&<p role="status">변경을 불러오는 중…</p>}
     <label className="code-wrap-option"><input type="checkbox" checked={wrap} onChange={e=>{
