@@ -1,11 +1,12 @@
 // The subagent pane: in the place of the pinned posts and the code view, beside the thread. A strip
-// of every subagent and background command of the task, and a column for each one switched on
-// (running ones switch on by themselves) with what it was told, said and did, like a thread.
+// of the task's subagents, a column for each one switched on (running ones switch on by themselves)
+// with what it was told, said and did, like a thread; and one column of every background command,
+// the subagents' too, in the order they started.
 
 import { Bot, PanelLeftClose, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
-import { elapsed, isActive, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
+import { elapsed, isActive, isCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
 import { buildPosts } from './posts.ts';
 import { PostView } from './PostView.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -16,6 +17,8 @@ import type { Post, TaskView } from './types.ts';
 const DONE_SHOWN = 6;
 const COLUMN_MIN = 300;
 const WIDTH_STEP = 40;
+/** The key of the background commands' column. */
+const COMMANDS = 'commands';
 
 /**
  * What the deck's keys (deckKeys.ts) do in the pane: `h` from the thread enters its last column;
@@ -34,7 +37,12 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   onClose: () => void; onError: (message: string) => void;
 }) {
   const now = useNow();
-  const byKey = useMemo(() => new Map(subagents.map(s => [subagentKey(s), s])), [subagents]);
+  const agents = useMemo(() => subagents.filter(s => !isCommand(s)), [subagents]);
+  const commands = useMemo(() => subagents.filter(isCommand), [subagents]);
+  const byKey = useMemo(() => new Map(agents.map(s => [subagentKey(s), s])), [agents]);
+  const columnOf = (key: string) => commands.some(s => subagentKey(s) === key) ? COMMANDS : key;
+  const exists = (key: string) => key === COMMANDS ? commands.length > 0 : byKey.has(key);
+  const [commandFocus, setCommandFocus] = useState<{ key: string; n: number }>();
   // Shown columns, in order. Running ones come on by themselves unless switched off here; with none
   // running, the newest one shows first.
   const [on, setOn] = useState<string[]>([]);
@@ -49,16 +57,17 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
 
   useEffect(() => {
     setOn(prev => {
-      const known = prev.filter(k => byKey.has(k));
-      const started = subagents.filter(s => isActive(s) && !known.includes(subagentKey(s)) && !switchedOff.current.has(subagentKey(s))).map(subagentKey);
+      const known = prev.filter(exists);
+      const started = agents.filter(s => isActive(s) && !known.includes(subagentKey(s)) && !switchedOff.current.has(subagentKey(s))).map(subagentKey);
+      if (commands.some(isActive) && !known.includes(COMMANDS) && !switchedOff.current.has(COMMANDS)) started.push(COMMANDS);
       const next = [...known, ...started];
       if (!seeded.current && subagents.length) {
         seeded.current = true;
-        if (!next.length && !reveal) next.push(subagentKey(subagents[subagents.length - 1]));
+        if (!next.length && !reveal) next.push(agents.length ? subagentKey(agents[agents.length - 1]) : COMMANDS);
       }
       return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next;
     });
-  }, [byKey]);
+  }, [subagents]);
 
   const scrollTo = (index: number) => requestAnimationFrame(() =>
     (colsRef.current?.children[index] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
@@ -76,13 +85,15 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
     setFocus(f => f == null || on.length <= 1 ? null : Math.min(f > index ? f - 1 : f, on.length - 2));
   };
 
-  const revealed = !!reveal && byKey.has(reveal.key);
+  const revealed = !!reveal && exists(columnOf(reveal.key));
   useEffect(() => {
     if (!reveal || !revealed) return;
-    switchedOff.current.delete(reveal.key);
-    const at = on.indexOf(reveal.key);
-    if (at < 0) setOn([...on, reveal.key]);
+    const column = columnOf(reveal.key);
+    switchedOff.current.delete(column);
+    const at = on.indexOf(column);
+    if (at < 0) setOn([...on, column]);
     moveFocus(at < 0 ? on.length : at);
+    if (column === COMMANDS) setCommandFocus({ key: reveal.key, n: reveal.n });
   }, [reveal?.n, revealed]);
 
   keys.current = {
@@ -118,11 +129,14 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   }, [focus]);
   useEffect(() => { if (focus != null && focus >= on.length) setFocus(on.length ? on.length - 1 : null); }, [focus, on.length]);
 
-  const shown = on.map(k => byKey.get(k)).filter((s): s is Subagent => !!s);
-  const rest = subagents.filter(s => !on.includes(subagentKey(s)));
+  const shown = on.filter(exists);
+  const shownAgents = shown.map(k => byKey.get(k)).filter((s): s is Subagent => !!s);
+  const rest = agents.filter(s => !on.includes(subagentKey(s)));
   const restDone = rest.filter(s => !isActive(s)).reverse();
-  const strip = [...shown, ...rest.filter(isActive), ...(allDone ? restDone : restDone.slice(0, DONE_SHOWN))];
+  const strip = [...shownAgents, ...rest.filter(isActive), ...(allDone ? restDone : restDone.slice(0, DONE_SHOWN))];
   const running = subagents.filter(isActive).length;
+  const commandsRunning = commands.filter(isActive).length;
+  const setHandle = (key: string) => (h: ColumnHandle | null) => { if (h) handles.current.set(key, h); else handles.current.delete(key); };
   const engine = ENGINE_LABEL[engineOf(task.engine ?? 'claude')] ?? task.engine;
 
   return (
@@ -133,11 +147,19 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
       </header>
       {subagents.length > 0 && (
         <div className="sa-strip" role="group" aria-label="서브 에이전트 목록">
+          {commands.length > 0 && (
+            <button type="button" className={`sa-tab ${commandsRunning ? 'running' : 'done'}${on.includes(COMMANDS) ? ' on' : ''}`} aria-pressed={on.includes(COMMANDS)}
+              title={`백그라운드 명령을 시간 순으로 한 컬럼에서 봅니다 · 누르면 컬럼을 ${on.includes(COMMANDS) ? '닫습니다' : '엽니다'}`} onClick={() => toggle(COMMANDS)}>
+              <span className="sa-dot" />백그라운드 작업 {commands.length}
+              {commandsRunning > 0 && <span className="sa-tabmeta">실행 중 {commandsRunning}</span>}
+            </button>
+          )}
+          {commands.length > 0 && strip.length > 0 && <span className="sa-sep" />}
           {strip.map((s, i) => {
             const key = subagentKey(s);
             const isOn = on.includes(key);
             return [
-              i === shown.length && shown.length > 0 && <span key="sep" className="sa-sep" />,
+              i === shownAgents.length && shownAgents.length > 0 && <span key="sep" className="sa-sep" />,
               <button key={key} type="button" className={`sa-tab ${subagentTone(s)}${isOn ? ' on' : ''}`} aria-pressed={isOn}
                 title={`${subagentMeta(s, now)} · 누르면 컬럼을 ${isOn ? '닫습니다' : '엽니다'}`} onClick={() => toggle(key)}>
                 <span className="sa-dot" />{s.parentId ? '↳ ' : ''}{subagentTitle(s)}
@@ -153,10 +175,12 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
       <div className="sa-cols" ref={colsRef}>
         {!subagents.length && <p className="empty">이 작업에서 실행한 서브 에이전트나 백그라운드 명령이 아직 없습니다.</p>}
         {subagents.length > 0 && !shown.length && <p className="empty">위 목록에서 볼 항목을 누르세요.</p>}
-        {shown.map((s, i) => (
-          <SubagentColumn key={subagentKey(s)} s={s} task={task} engine={engine} focused={focus === i} width={widths[subagentKey(s)]}
-            handle={h => { if (h) handles.current.set(subagentKey(s), h); else handles.current.delete(subagentKey(s)); }}
-            onFocus={() => setFocus(i)} onHide={() => toggle(subagentKey(s))} onError={onError} />
+        {shown.map((key, i) => key === COMMANDS ? (
+          <CommandsColumn key={key} commands={commands} all={subagents} focused={focus === i} width={widths[key]} reveal={commandFocus}
+            handle={setHandle(key)} onFocus={() => setFocus(i)} onHide={() => toggle(key)} />
+        ) : (
+          <SubagentColumn key={key} s={byKey.get(key)!} task={task} engine={engine} focused={focus === i} width={widths[key]}
+            handle={setHandle(key)} onFocus={() => setFocus(i)} onHide={() => toggle(key)} onError={onError} />
         ))}
       </div>
     </aside>
@@ -236,6 +260,70 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
             <Markdown text={s.summary} taskId={task.id} onNotice={onError} />
           </div>
         ) : <p className="sa-note">{statusText(s)} · {elapsed(s, now)}</p>}
+      </div>
+    </section>
+  );
+}
+
+/** Every background command, the subagents' too, in the order they started; o opens one's result. */
+function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus, onHide }: {
+  commands: Subagent[]; all: Subagent[]; focused: boolean; width?: number; reveal?: { key: string; n: number };
+  handle: (h: ColumnHandle | null) => void; onFocus: () => void; onHide: () => void;
+}) {
+  const now = useNow();
+  const [sel, setSel] = useState<string | null>(null);
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
+  const feed = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+  const toggle = (key: string) => setOpen(prev => { const next = new Set(prev); if (!next.delete(key)) next.add(key); return next; });
+  const select = (index: number) => {
+    const s = commands[Math.max(0, Math.min(index, commands.length - 1))];
+    if (!s) return;
+    setSel(subagentKey(s));
+    feed.current?.querySelector(`[data-command="${CSS.escape(subagentKey(s))}"]`)?.scrollIntoView({ block: 'nearest' });
+  };
+  const current = commands.findIndex(s => subagentKey(s) === sel);
+  handle({
+    step: dir => select(current < 0 ? (dir > 0 ? 0 : commands.length - 1) : current + dir),
+    edge: dir => select(dir > 0 ? commands.length - 1 : 0),
+    toggle: () => { if (sel) toggle(sel); },
+  });
+  useEffect(() => () => handle(null), []);
+  useEffect(() => { if (reveal) select(commands.findIndex(s => subagentKey(s) === reveal.key)); }, [reveal?.n]);
+  useLayoutEffect(() => {
+    const f = feed.current;
+    if (f && atBottom.current) f.scrollTop = f.scrollHeight;
+  }, [commands.length]);
+  const starter = (s: Subagent) => s.parentId ? all.find(x => x.session_id === s.session_id && x.id === s.parentId) : undefined;
+  const running = commands.filter(isActive).length;
+
+  return (
+    <section className={`column sa-col${running ? ' running' : ' done'}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
+      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" onMouseDown={onFocus}>
+      <header className="col-head sa-colhead">
+        <span className="sa-dot" />
+        <div className="sa-titles">
+          <h2>백그라운드 작업</h2>
+          <div className="sa-meta">{[`${commands.length}개`, running && `실행 중 ${running}`].filter(Boolean).join(' · ')}</div>
+        </div>
+        <button className="icon-btn" aria-label="컬럼 닫기" title="컬럼 닫기" onClick={onHide}><X size={14} /></button>
+      </header>
+      <div className="feed sa-feed" ref={feed} onScroll={e => {
+        const f = e.currentTarget;
+        atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
+      }}>
+        {commands.map(s => {
+          const key = subagentKey(s), from = starter(s), isOpen = open.has(key);
+          return (
+            <div key={key} data-command={key} className={`sa-command ${subagentTone(s)}${sel === key ? ' selected' : ''}`}
+              onClick={() => { setSel(key); if (s.summary) toggle(key); }}>
+              <div className="sa-command-head"><span className="sa-dot" /><b title={s.description}>{s.description}</b>
+                <time dateTime={s.created_at}>{new Date(s.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</time></div>
+              <div className="sa-meta">{[isActive(s) ? '실행 중' : statusText(s), elapsed(s, now), from && `${subagentTitle(from)}에서`].filter(Boolean).join(' · ')}</div>
+              {s.summary && (isOpen ? <pre className="sa-command-out">{s.summary}</pre> : <div className="sa-meta">결과 보기 (o)</div>)}
+            </div>
+          );
+        })}
       </div>
     </section>
   );

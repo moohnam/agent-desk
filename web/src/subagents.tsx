@@ -95,6 +95,8 @@ export function subagentKind(s: Subagent): string {
   if (s.type === 'local_bash' || s.type === 'shell') return '명령';
   return s.agent ?? (s.type === 'local_agent' || s.type === 'agent' ? '서브 에이전트' : s.type);
 }
+/** A background command, not an agent: the pane lists these together in one column. */
+export const isCommand = (s: Subagent) => subagentKind(s) === '명령';
 export function subagentTitle(s: Subagent): string {
   const kind = subagentKind(s);
   return kind === '명령' ? `명령: ${s.description}` : s.description || kind;

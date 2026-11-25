@@ -88,6 +88,9 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
   const byToolUse = new Map<string, string>();
   const early = new Map<string, SubagentEvent[]>();
   const reported = new Map<string, number>();
+  // A command the turn waits for is an ordinary tool call, shown in the thread; it is recorded only
+  // if it moves to the background.
+  const foreground = new Map<string, SubagentInfo>();
   // Each run (a follow-up starts another) has its id; frames of an earlier run that come late are dropped.
   const runs = new Map<string, string>();
   const late = (taskId: string, runId?: string) => !!runId && (runs.get(taskId) ?? '') > runId;
@@ -129,13 +132,15 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
       if (m.ambient || m.skip_transcript || late(m.task_id, m.run_id)) return true;
       if (m.run_id) runs.set(m.task_id, m.run_id);
       const previous = known.get(m.task_id);
-      report({
+      const info: SubagentInfo = {
         ...previous, id: m.task_id, type: m.task_type ?? previous?.type ?? 'local_agent', description: m.description,
         ...(m.subagent_type && { agent: m.subagent_type }), status: 'running',
         ...(m.is_backgrounded !== undefined && { background: m.is_backgrounded }),
         ...(m.parent_task_id && { parentId: m.parent_task_id }), ...(!previous && m.tool_use_id && { toolUseId: m.tool_use_id }),
         summary: undefined,
-      });
+      };
+      if (!previous && info.type === 'local_bash' && !info.background) { foreground.set(m.task_id, info); return true; }
+      report(info);
       // A follow-up (SendMessage) starts the task again with its message as the prompt.
       if (m.prompt) send(m.task_id, { kind: 'user', text: m.prompt });
       if (m.tool_use_id && !previous) {
@@ -151,12 +156,15 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
       if (Date.now() - (reported.get(m.task_id) ?? 0) >= PROGRESS_MS) report(known.get(m.task_id)!);
     } else if (m.subtype === 'task_updated') {
       if (late(m.task_id, m.run_id)) return true;
+      const waiting = foreground.get(m.task_id);
+      if (waiting && m.patch.is_backgrounded) { foreground.delete(m.task_id); report({ ...waiting, background: true }); return true; }
+      if (waiting) { if (m.patch.status && m.patch.status !== 'running' && m.patch.status !== 'pending') foreground.delete(m.task_id); return true; }
       const status: SubagentStatus | undefined = m.patch.status === 'completed' || m.patch.status === 'failed' ? m.patch.status
         : m.patch.status === 'killed' ? 'stopped' : undefined;
       if (status || m.patch.is_backgrounded !== undefined)
         update(m.task_id, { ...(status && { status }), ...(m.patch.is_backgrounded !== undefined && { background: m.patch.is_backgrounded }) });
     } else if (m.subtype === 'task_notification') {
-      if (late(m.task_id, m.run_id)) return true;
+      if (late(m.task_id, m.run_id) || foreground.delete(m.task_id)) return true;
       update(m.task_id, { status: m.status, summary: clipResult(m.summary ?? ''),
         ...(m.usage && { usage: { tokens: m.usage.total_tokens, toolUses: m.usage.tool_uses, durationMs: m.usage.duration_ms } }) });
     } else return false;

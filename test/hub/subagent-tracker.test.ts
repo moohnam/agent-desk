@@ -60,3 +60,15 @@ test('frames of an earlier run come late and are dropped; a huge input is cut', 
   const step = out.at(-1);
   assert.ok(step?.type === 'subagent_event' && JSON.stringify(step).length < 70_000);
 });
+
+test('a command the turn waits for is recorded only once it moves to the background', () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 't1', description: 'ls', task_type: 'local_bash', is_backgrounded: false }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: '', output_file: '' }));
+  assert.equal(out.length, 0);
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b2', tool_use_id: 't2', description: 'npm test', task_type: 'local_bash', is_backgrounded: false }));
+  track(sdk({ type: 'system', subtype: 'task_updated', task_id: 'b2', patch: { is_backgrounded: true } }));
+  const last = out.at(-1);
+  assert.ok(last?.type === 'subagent' && last.subagent.id === 'b2' && last.subagent.background === true);
+});
