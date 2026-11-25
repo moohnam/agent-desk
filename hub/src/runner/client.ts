@@ -112,7 +112,7 @@ export class RunnerClient implements RunnerPort {
   }
 
   handle(cmd: HubToRunner) {
-    if (!this.connected || !this.socket) throw new Error('runner not connected');
+    if (!this.connected || !this.socket || this.socket.destroyed || this.socket.writable===false) throw new Error('runner not connected');
     if ((cmd.type === 'start' || cmd.type === 'set_model') && cmd.model && modelReference(cmd.model) && !this.supportsModelCatalogs)
       throw new HttpError(409,'현재 로컬 러너는 실제 모델 ID 선택을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요');
     if ((cmd.type === 'start' || cmd.type === 'send') && cmd.skillSnapshot && !this.supportsSkillSnapshot)

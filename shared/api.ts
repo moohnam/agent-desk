@@ -24,7 +24,7 @@ export interface WireEvent<P = unknown> {
 
 export interface Approval<I = unknown> {
   id: string; session_id: string; task_id: string; tool_name: string; input: I;
-  status: 'pending' | 'allowed' | 'denied'; created_at: string;
+  status: 'pending' | 'allowed' | 'denied' | 'cancelled' | 'expired' | 'lost'; created_at: string;
 }
 
 /** A question an attached (MCP) agent asked the user; it waits for the answer. */

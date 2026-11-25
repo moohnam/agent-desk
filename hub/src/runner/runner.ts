@@ -324,9 +324,12 @@ export class Runner {
       }
       case 'approval_result': {
         const entry = this.sessions.get(cmd.sessionId);
-        if (!entry) break;
+        if (!entry || !entry.live.approvals.some(a=>a.approvalId===cmd.approvalId)) break;
         entry.live.approvals = entry.live.approvals.filter((a) => a.approvalId !== cmd.approvalId);
         entry.adapter?.resolveApproval(cmd.approvalId, cmd.allow, cmd.message, cmd.answers);
+        // Legacy hubs accept this receipt envelope and ignore unknown phases.
+        this.emit({type:'event',sessionId:cmd.sessionId,event:{kind:'status',state:'request_receipt',
+          detail:{phase:'approval_resolved',approvalId:cmd.approvalId}}});
         this.schedule(cmd.sessionId, entry);
         break;
       }

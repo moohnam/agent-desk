@@ -154,7 +154,7 @@ export const startAgy: StartEngine = (opts) => {
     const timer = setTimeout(() => {
       if (!pending.delete(approvalId)) return;
       answer(false);
-      emit({type:'approval_cancelled',sessionId,approvalId});
+      emit({type:'approval_cancelled',sessionId,approvalId,reason:'expired'});
     }, APPROVAL_TIMEOUT_MS);
     timer.unref();
     pending.set(approvalId,{timer,answer});

@@ -643,3 +643,34 @@ test('a queued remote follow-up does not become uncertain on an unrelated runner
     assert.equal(t.hub.requests.resumeState(r.id),'received');
   } finally {t.agent.runner.shutdown();t.cleanup();}
 });
+
+
+test('approval receipt uses the legacy event envelope and cannot block later remote output',()=>{
+ const t=setup();
+ try {
+  t.exchange();
+  const task=t.hub.compose(`@compat:moohnam@ws20:${t.dir} #codex fixture`);
+  t.exchange();t.exchange();
+  const start=t.starts[0],sessionId=start.sessionId;
+  start.emit({type:'approval_request',sessionId,approvalId:'compat-approval',toolName:'fixture',input:{}});
+  t.exchange();t.hub.resolveApproval('compat-approval',true);t.exchange();
+  start.emit({type:'busy',sessionId,busy:false});
+  const input=t.request();
+  const receipt=input.events.find(e=>e.value.type==='event'&&e.value.event.kind==='status'&&e.value.event.detail?.phase==='approval_resolved');
+  assert.ok(receipt);
+  assert.equal(receipt.value.type,'event');
+  if(receipt.value.type!=='event'||receipt.value.event.kind!=='status')throw Error('missing receipt');
+  // 164d38a accepts generic status events; unknown request_receipt phases are ignored.
+  assert.equal(receipt.value.event.state,'request_receipt');
+  assert.equal(receipt.value.event.detail?.id,undefined,'must not reuse agent-request receipt IDs');
+  assert.equal(receipt.value.event.detail?.approvalId,'compat-approval');
+  const busy=input.events.find(e=>e.seq>receipt.seq&&e.value.type==='busy');assert.ok(busy);
+  const reply=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,input));
+  assert.equal(reply.eventAck,input.events.at(-1)!.seq);
+  const duplicate=t.hub.atomic(()=>t.hub.remotes.exchange(t.registered.runner.id,input));
+  assert.equal(duplicate.eventAck,reply.eventAck);
+  assert.equal(t.store.getTask(task.id)?.status,'done');
+  assert.equal(t.store.approvalDelivery('compat-approval',sessionId),undefined);
+  assert.equal(t.store.listEvents(task.id).filter(e=>e.kind==='status'&&(e.payload as StatusPayload).state==='request_receipt').length,0);
+ }finally{t.cleanup();}
+});

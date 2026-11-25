@@ -60,8 +60,8 @@ export function AskCard({ post, approval, onError }: {
   // Shown between a successful answer and its approval event arriving.
   const [sent, setSent] = useState<Answers | null>(null);
   const answers: Answers | undefined = r?.answers ?? sent ?? undefined;
-  const outcome = answers ? 'answered' : r ? (r.replied ? 'replied' : r.decision === 'allowed' ? 'empty' : r.decision === 'cancelled' ? 'cancelled' : 'skipped')
-    : approval ? null : 'closed';
+  const outcome = approval ? null : answers ? 'answered' : r ? (r.replied ? 'replied' : r.decision === 'allowed' ? 'empty' : r.decision === 'cancelled' ? 'cancelled' : 'skipped')
+    : 'closed';
 
   useEffect(() => {
     const kept = picks.map((x, i) => (qs[i]?.secret ? { ...x, other: '' } : x));

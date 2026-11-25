@@ -92,7 +92,7 @@ export type RunnerToHub =
   /** Everything the session has running in the background now (replaces the last list). */
   | { type: 'background'; sessionId: string; tasks: BackgroundTask[] }
   | { type: 'approval_request'; sessionId: string; approvalId: string; toolName: string; input: unknown }
-  | { type: 'approval_cancelled'; sessionId: string; approvalId: string }
+  | { type: 'approval_cancelled'; sessionId: string; approvalId: string; reason?: 'expired' }
   /**
    * The session ended. `busy`: whether a turn was still in progress (runner's view). `reason`
    * 'idle': the runner closed it after RUNNER_IDLE_MS without activity; 'user': the user closed it;
@@ -179,7 +179,8 @@ export function checkRunnerToHub(m: unknown): RunnerToHub | string {
     case 'busy': return typeof m.busy === 'boolean' ? m as RunnerToHub : 'busy: not a boolean';
     case 'background': return Array.isArray(m.tasks) ? m as RunnerToHub : 'background: no tasks';
     case 'approval_request': return str(m.approvalId) && str(m.toolName) ? m as RunnerToHub : 'approval_request: bad fields';
-    case 'approval_cancelled': return str(m.approvalId) ? m as RunnerToHub : 'approval_cancelled: no id';
+    case 'approval_cancelled': return str(m.approvalId) && (m.reason===undefined || m.reason==='expired')
+      ? m as RunnerToHub : 'approval_cancelled: bad fields';
     case 'closed': return optStr(m.error) ? m as RunnerToHub : 'closed: bad error';
     default: return `unknown type ${m.type}`;
   }

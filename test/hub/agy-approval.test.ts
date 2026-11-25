@@ -62,6 +62,7 @@ await new Promise((done,fail)=>{
         }
         engine.resolveApproval(pending.get('second'),false);
         engine.resolveApproval(pending.get('first'),true);
+        engine.resolveApproval(pending.get('first'),true);
       }
     }
     if(m.type==='event' && m.event.kind==='status'){

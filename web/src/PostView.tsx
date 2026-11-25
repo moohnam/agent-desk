@@ -233,8 +233,8 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
 }) {
   const p = post.event.payload;
   const r = post.resolution?.payload;
-  const outcome = r ? (r.decision === 'allowed' ? '✓ 승인함' : r.decision === 'cancelled' ? '취소됨' : '✕ 거절함')
-    : approval ? null : '만료됨';
+  const outcome = approval ? null : r ? (r.decision === 'allowed' ? '✓ 승인함' : r.decision === 'cancelled' ? (r.reason==='expired'?'만료됨':r.reason==='session_lost'?'세션 유실':'취소됨') : '✕ 거절함')
+    : '만료됨';
   return (
     <div className={`approve-card${outcome ? ' resolved' : ''}`}>
       {p.toolName === REQUEST_TOOL ? (<>
@@ -435,7 +435,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
               );
             }
             if (e.kind === 'approval') {
-              return <li key={e.id} className="note">{e.payload.toolName} {e.payload.decision === 'allowed' ? '승인함' : '거절함'}</li>;
+              return <li key={e.id} className="note">{e.payload.toolName} {e.payload.decision === 'allowed' ? '승인함' : e.payload.decision==='cancelled'?(e.payload.reason==='expired'?'만료됨':e.payload.reason==='session_lost'?'세션 유실':'취소됨'):'거절함'}</li>;
             }
             return null;
           })}
