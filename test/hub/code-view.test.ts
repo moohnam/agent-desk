@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access, realpath } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access, realpath, open, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -161,4 +161,39 @@ test('untracked list counts stop at the aggregate read budget without hiding fil
  const detail=await readCodeView(root,list.files[16].path,'untracked').catch(error=>error);
  // The file is still selectable; only its rendered diff exceeds the preview limit.
  assert.match(detail.message,/diff가 너무 큽니다/);
+}));
+
+
+test('untracked reads finish partial reads and reject growth or truncation',async t=>repo(async(root)=>{
+ const path=join(root,'new.txt');await writeFile(path,'one\ntwo\n');
+ const handle=await open(path,'r');const prototype=Object.getPrototypeOf(handle);await handle.close();
+ const original=prototype.read;
+ let mode='partial',changed=false;
+ t.mock.method(prototype,'read',async function(this:typeof handle,buffer:Buffer,offset:number,length:number,position:number){
+  const result=await original.call(this,buffer,offset,Math.min(length,2),position);
+  if(!changed&&mode!=='partial') {
+   changed=true;
+   if(mode==='grow')await appendFile(path,'more\n');else await writeFile(path,'x');
+  }
+  return result;
+ });
+ assert.equal((await readCodeView(root)).files[0].additions,2);
+ assert.match((await readCodeView(root,'new.txt','untracked')).diff!,/\+one\n\+two/);
+ for(const mutation of ['grow','shrink']) {
+  await writeFile(path,'one\ntwo\n');mode=mutation;changed=false;
+  assert.equal((await readCodeView(root)).files[0].additions,undefined);
+  await writeFile(path,'one\ntwo\n');changed=false;
+  await assert.rejects(readCodeView(root,'new.txt','untracked'),/内容|내용이 바뀌었습니다/);
+ }
+}));
+
+test('one thousand tiny untracked files allocate buffers proportional to their size',async t=>repo(async(root)=>{
+ for(let i=0;i<1000;i++)await writeFile(join(root,`tiny-${i}`),'x');
+ const original=Buffer.alloc;const allocations:number[]=[];
+ t.mock.method(Buffer,'alloc',((size:number,...args:unknown[])=>{allocations.push(size);return Reflect.apply(original,Buffer,[size,...args]);}) as typeof Buffer.alloc);
+ const list=await readCodeView(root);
+ assert.equal(list.files.length,1000);
+ assert.equal(list.files.reduce((sum,file)=>sum+(file.additions??0),0),1000);
+ assert.equal(allocations.filter(size=>size===2).length,1000);
+ assert.ok(allocations.reduce((sum,size)=>sum+size,0)<1024*1024);
 }));

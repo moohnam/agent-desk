@@ -10,7 +10,7 @@ import { REGISTERED_WORKTREE_UNAVAILABLE, type CodeViewResult } from '../../shar
 const exec = promisify(execFile);
 const MAX = 512 * 1024;
 // Bound both individual previews and the aggregate work of untracked list statistics.
-async function readUntracked(target: string, limit = MAX) {
+async function readUntracked(target: string, limit = MAX, reserve?: (size:number)=>void) {
   if(await realpath(target)!==target)throw new HttpError(409,'심볼릭 링크 파일은 미리 볼 수 없습니다');
   const before=await lstat(target);
   if(!before.isFile()||before.size>limit)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
@@ -21,10 +21,19 @@ async function readUntracked(target: string, limit = MAX) {
     const current=await lstat(target);
     if(await realpath(target)!==target||current.dev!==stat.dev||current.ino!==stat.ino)
       throw new HttpError(409,'파일 경로가 바뀌었습니다. 다시 읽어 주세요');
-    const buffer=Buffer.alloc(limit+1);
-    const {bytesRead}=await file.read(buffer,0,buffer.length,0);
-    if(bytesRead>limit)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
-    return buffer.subarray(0,bytesRead);
+    // One extra byte detects growth without reserving MAX for every tiny file.
+    reserve?.(stat.size);
+    const buffer=Buffer.alloc(stat.size+1);
+    let total=0;
+    while(total<buffer.length) {
+      const {bytesRead}=await file.read(buffer,total,buffer.length-total,total);
+      if(bytesRead===0)break;
+      total+=bytesRead;
+    }
+    const after=await file.stat();
+    if(total!==stat.size||after.size!==stat.size||after.mtimeMs!==stat.mtimeMs||after.ctimeMs!==stat.ctimeMs)
+      throw new HttpError(409,'파일 내용이 바뀌었습니다. 다시 읽어 주세요');
+    return buffer.subarray(0,total);
   }finally{await file.close();}
 }
 function textLines(bytes: Buffer) {
@@ -100,8 +109,7 @@ export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' 
     let budget=8*1024*1024;
     for(const file of files)if(file.status==='untracked'&&budget>0) {
       try {
-        const bytes=await readUntracked(resolve(root,file.path),Math.min(MAX,budget));
-        budget-=bytes.length;
+        const bytes=await readUntracked(resolve(root,file.path),Math.min(MAX,budget),size=>{budget-=size;});
         Object.assign(file,bytes.includes(0)?{binary:true}:{additions:textLines(bytes).length,deletions:0});
       }catch{/* Unsafe, oversized or changing files remain explicitly uncounted. */}
     }
