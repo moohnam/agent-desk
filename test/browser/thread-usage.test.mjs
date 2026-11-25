@@ -79,6 +79,39 @@ test('thread usage details support mouse, keyboard and touch within the viewport
       await page.waitForFunction(({button,detail})=>Math.abs(document.querySelector(button).getBoundingClientRect().bottom-document.querySelector(detail).getBoundingClientRect().top)<1,{}, {button,detail});
       await page.setViewport({width:touch?410:1000,height:844,isMobile:touch,hasTouch:touch});
       await page.waitForSelector(detail,{hidden:true});
+      if(!touch){
+        await page.evaluate(()=>{
+          localStorage.setItem('agent-desk.threadFloat','0');
+          localStorage.setItem('agent-desk.columns.v2',JSON.stringify(Array.from({length:4},(_,i)=>({id:`usage-${i}`,title:`컬럼 ${i}`,filter:{}}))));
+        });
+        await page.reload({waitUntil:'domcontentloaded'});
+        await page.waitForSelector('[data-post]');await page.keyboard.press('r');
+        await page.waitForSelector(`.deck ${button}`);
+        // Leave visible viewport space before the deck, to distinguish container
+        // clipping from merely falling outside the browser viewport.
+        await page.$eval('.deck',e=>e.style.marginLeft='160px');
+        await page.focus(button);await page.keyboard.press('Enter');await page.waitForSelector(detail);
+        const deckPoint=await page.$eval('.deck',e=>{const r=e.getBoundingClientRect();return {x:r.left+20,y:r.bottom-20};});
+        await page.mouse.move(deckPoint.x,deckPoint.y);await page.mouse.wheel({deltaX:1});
+        await page.$eval(button,e=>{
+          const deck=e.closest('.deck'), a=e.getBoundingClientRect(), clip=deck.getBoundingClientRect();
+          deck.scrollBy({left:a.right-clip.left-8,behavior:'instant'});
+        });
+        await page.waitForFunction(selector=>{
+          const e=document.querySelector(selector), a=e.getBoundingClientRect(), clip=e.closest('.deck').getBoundingClientRect();
+          return a.left<clip.left && a.right>clip.left && a.right<clip.left+12;
+        },{},button);
+        await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+        assert.ok(await page.$(detail),'partially visible anchors keep their details');
+        await page.$eval('.deck',e=>e.scrollBy({left:20,behavior:'instant'}));
+        const clipped=await page.$eval(button,e=>{const a=e.getBoundingClientRect(), c=e.closest('.deck').getBoundingClientRect();return {right:a.right,clip:c.left,scroll:e.closest('.deck').scrollLeft};});
+        assert.ok(clipped.right<clipped.clip&&clipped.right>0,JSON.stringify(clipped));
+        await page.waitForSelector(detail,{hidden:true});
+        await page.$eval(button,e=>e.scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'}));
+        await page.focus(button);await page.keyboard.press('Enter');await page.waitForSelector(detail);
+        await page.$eval('.thread-usage',e=>e.style.transform='translateY(-2000px)');
+        await page.waitForSelector(detail,{hidden:true});
+      }
       await page.close();
     }
   }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

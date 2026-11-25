@@ -59,11 +59,19 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
       }
       frame = window.requestAnimationFrame(checkPosition);
     };
+    // Native intersection includes viewport and every clipping scroll ancestor,
+    // even when a clip changes without moving the anchor's own rectangle.
+    const visibility = anchor.current ? new IntersectionObserver(entries => {
+      if (active && entries.some(entry => !entry.isIntersecting
+        || entry.intersectionRect.width <= 0 || entry.intersectionRect.height <= 0)) close();
+    }) : undefined;
+    if (anchor.current) visibility?.observe(anchor.current);
     if (previous) frame = window.requestAnimationFrame(checkPosition);
     window.addEventListener('scroll', repositioned, true);
     window.addEventListener('resize', repositioned);
     return () => {
       active = false;
+      visibility?.disconnect();
       window.removeEventListener('scroll', repositioned, true);
       window.removeEventListener('resize', repositioned);
       clearTimeout(leaveTimer.current);
