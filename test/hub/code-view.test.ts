@@ -56,7 +56,7 @@ test('index-only removal has independently selectable deletion and untracked dif
  await writeFile(join(root,'a.ts'),'const before = 1;\n');git('add','.');git('commit','-m','base');
  git('rm','--cached','a.ts');await writeFile(join(root,'a.ts'),'const after = 2;\n');
  const list=await readCodeView(root);
- assert.deepEqual(list.files,[{path:'a.ts',status:'deleted'},{path:'a.ts',status:'untracked'}]);
+ assert.deepEqual(list.files,[{path:'a.ts',status:'deleted',additions:0,deletions:1},{path:'a.ts',status:'untracked',additions:1,deletions:0}]);
  const deleted=await readCodeView(root,'a.ts','tracked');
  assert.match(deleted.diff!,/-const before = 1;/);assert.doesNotMatch(deleted.diff!,/const after/);
  const added=await readCodeView(root,'a.ts','untracked');
@@ -91,7 +91,7 @@ test('commit diff uses the first parent and ignores the current worktree',async(
   const second=list.commits![0];
   assert.equal(second.subject,'second');
   const history=await readCodeView(root,undefined,undefined,second.id);
-  assert.deepEqual(history.files,[{path:'a.txt',status:'modified'}]);
+  assert.deepEqual(history.files,[{path:'a.txt',status:'modified',additions:1,deletions:1}]);
   const detail=await readCodeView(root,'a.txt','tracked',second.id);
   assert.match(detail.diff!,/-first\n\+second/);
   assert.doesNotMatch(detail.diff!,/uncommitted/);
@@ -124,4 +124,41 @@ test('branch endpoints and registered worktrees are independent of the session c
  await rm(other,{recursive:true});
  execFileSync('git',['init',other],{stdio:'pipe'});
  await assert.rejects(readCodeView(root,undefined,undefined,undefined,{worktree:other}),/저장소가 변경/);
+}));
+
+
+test('line counts respect comparison endpoints, unusual paths, binary and untracked bounds',async()=>repo(async(root,git)=>{
+ const name='한글\tfile\n.txt';
+ await writeFile(join(root,name),'one\ntwo\n');
+ await writeFile(join(root,'binary'),Buffer.from([0,1]));git('add','.');git('commit','-m','base');git('branch','baseline');
+ await writeFile(join(root,name),'new\ntwo\nthree');
+ await writeFile(join(root,'binary'),Buffer.from([0,2]));git('commit','-am','changed');git('branch','feature');
+ const commit=(await readCodeView(root)).head!;
+ await writeFile(join(root,name),'dirty\n');
+ await writeFile(join(root,'empty'),'');await writeFile(join(root,'new'),'a\nb');
+ await writeFile(join(root,'big'),'x'.repeat(512*1024+1));await symlink(join(root,name),join(root,'link'));
+ const list=await readCodeView(root);
+ assert.equal(list.files.find(f=>f.path==='empty')?.additions,0);
+ assert.equal(list.files.find(f=>f.path==='new')?.additions,2);
+ assert.equal(list.files.find(f=>f.path==='big')?.additions,undefined);
+ assert.equal(list.files.find(f=>f.path==='link')?.additions,undefined);
+ assert.deepEqual(list.files.find(f=>f.path===name),{path:name,status:'modified',additions:1,deletions:3});
+ for(const result of [await readCodeView(root,undefined,undefined,commit),await readCodeView(root,undefined,undefined,undefined,{base:'refs/heads/baseline',target:'refs/heads/feature'})]) {
+  assert.deepEqual(result.files.find(f=>f.path===name),{path:name,status:'modified',additions:2,deletions:1});
+  assert.equal(result.files.find(f=>f.path==='binary')?.binary,true);
+  assert.equal(result.files.length,2);
+ }
+}));
+
+
+test('untracked list counts stop at the aggregate read budget without hiding files',async()=>repo(async(root)=>{
+ const text='x'.repeat(512*1024);
+ for(let i=0;i<17;i++)await writeFile(join(root,`file-${String(i).padStart(2,'0')}.txt`),text);
+ const list=await readCodeView(root);
+ assert.equal(list.files.length,17);
+ assert.equal(list.files.filter(file=>file.additions===1).length,16);
+ assert.equal(list.files[16].additions,undefined);
+ const detail=await readCodeView(root,list.files[16].path,'untracked').catch(error=>error);
+ // The file is still selectable; only its rendered diff exceeds the preview limit.
+ assert.match(detail.message,/diff가 너무 큽니다/);
 }));
