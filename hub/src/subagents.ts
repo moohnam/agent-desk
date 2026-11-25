@@ -70,8 +70,8 @@ export class Subagents {
    * says: the list still holds a finished one until the list changes next.
    */
   background(session: Session, tasks: BackgroundTask[], at = now()) {
-    // Codex's 'status' entry says its list is being checked, and agy lists its running tool calls
-    // ('tool'): neither is work of its own.
+    // Ordinary Codex/AGY tools and list-status entries are runtime guards, not background work.
+    // Legacy shell entries without native background evidence must not create history.
     const work = tasks.filter(t => t.type !== 'status' && t.type !== 'tool' && (t.type !== 'shell' || t.backgroundEvidence === 'native'));
     const listed = new Set(work.map(t => t.id));
     for (const t of work) {

@@ -701,3 +701,21 @@ test('invalid subagent optional fields cannot poison remote journal delivery; re
     t.exchange();assert.equal(t.hub.subagents.events(task.id,sessionId,'a').events.length,1);
   }finally{t.cleanup();}
 });
+
+test('managed remote resume restores only the same session original subagent tool links',()=>{
+  const t=setup();try{
+    t.exchange();
+    t.hub.compose(`@fixture:moohnam@ws20:${t.dir} #codex start`);t.exchange();t.exchange();
+    const {sessionId,emit}=t.starts[0];
+    emit({type:'subagent',sessionId,subagent:{id:'child',type:'local_agent',description:'child',status:'completed',toolUseId:'original-call'}});
+    t.exchange();
+    t.agent.runner.handle({type:'close',sessionId});t.exchange();
+    t.hub.remotes.handle({type:'start',sessionId,engine:'codex',cwd:`moohnam@ws20:${t.dir}`,prompt:'followup',resume:'engine-1',permissionMode:'auto'});
+    t.exchange();t.exchange();
+    assert.deepEqual(t.starts[1].subagentLinks,[{id:'child',toolUseId:'original-call'}]);
+    t.agent.runner.handle({type:'close',sessionId});t.exchange();
+    t.hub.remotes.handle({type:'start',sessionId,engine:'codex',cwd:`moohnam@ws20:${t.dir}`,prompt:'fork',resume:'engine-1',fork:true,permissionMode:'auto'});
+    t.exchange();t.exchange();
+    assert.equal(t.starts[2].subagentLinks,undefined,'a fork must not adopt the old child ownership');
+  }finally{t.cleanup();}
+});

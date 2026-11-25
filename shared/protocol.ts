@@ -81,6 +81,7 @@ export interface BackgroundTask { id: string; type: string; description: string;
  * A subagent or background command a session started, as far as the engine tells: Claude reports
  * each one's start, progress and end; for the others the hub follows the background list.
  * 'ended': it stopped running without saying how.
+ * 'unknown': recovered identity without evidence of its current execution state.
  */
 export type SubagentStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'ended' | 'unknown';
 export interface SubagentInfo {

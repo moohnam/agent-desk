@@ -1,13 +1,17 @@
 // ACP 1.5 reports the spawn tool, but omits its child ID and idle notification.
 // Reconcile with agy's own per-session records. Missing records leave work unknown.
-import { readdirSync, readFileSync, openSync, closeSync, fstatSync, constants } from 'node:fs';
+import { readdirSync, readFileSync, openSync, closeSync, fstatSync, constants, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { BackgroundTask } from '../../../shared/protocol.ts';
 
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 function files(dir: string) {
-  try { return readdirSync(dir).filter(f => f.endsWith('.json') && uuid.test(f.slice(0,-5))); }
+  try {
+    return readdirSync(dir).filter(f => f.endsWith('.json') && uuid.test(f.slice(0,-5)))
+      .flatMap(file=>{try{const st=lstatSync(join(dir,file),{bigint:true});return st.isFile()?[{file,at:st.mtimeNs}]:[];}catch{return [];}})
+      .sort((a,b)=>a.at<b.at?-1:a.at>b.at?1:a.file.localeCompare(b.file)).map(x=>x.file);
+  }
   catch { return []; }
 }
 function record(dir: string, file: string) {
@@ -59,6 +63,10 @@ export class AgyChildren {
     this.publish();
   }
   belongs(session:string){if(!this.owned.has(session))this.refresh();return this.owned.has(session);}
+  observeUpdate(session:string,u:any){
+    this.watch(session);
+    if(u?.sessionUpdate==='tool_call' && u.status!=='completed' && u.status!=='failed')this.active(session);
+  }
   watch(session:string){
     if(!this.owned.has(session)||!this.dir)return;
     this.watching.add(session);

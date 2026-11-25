@@ -122,7 +122,7 @@ export function subagentKind(s: Subagent): string {
   if (s.type === 'local_bash' || s.type === 'shell') return '명령';
   return s.agent ?? (s.type === 'local_agent' || s.type === 'agent' ? '서브 에이전트' : s.type);
 }
-/** A background command, not an agent: the pane lists these together in one column. */
+/** A command record; only engine-confirmed active background commands appear in the pane. */
 export const isCommand = (s: Subagent) => subagentKind(s) === '명령';
 export const isCurrentCommand = (s: Subagent) => isCommand(s) && isActive(s) && s.background !== false
   && (s.backgroundEvidence === 'native' || s.detailed && s.background === true);

@@ -15,7 +15,7 @@ export class AgySubagents {
     const id='agent:'+child.conversationId;if(this.known.has(id))return;
     this.report({id,type:'local_agent',description:typeof child.subagentDescriptor?.role==='string'?child.subagentDescriptor.role:'agy 서브 에이전트',
       status:existing?'unknown':'running',background:true,
-      detailNote:'AGY 자식 세션의 도구 기록과 native 종료 알림의 최근 응답을 보존합니다. 식별자 없는 실시간 응답 조각은 진행 요약으로만 표시합니다. 생성 지시와 이전 전체 대화는 연결 자료가 없어 복구하지 않습니다.'});
+      detailNote:'AGY 자식 세션의 도구 기록과 종료 알림의 최근 응답을 보존합니다. 과거 종료 알림은 파일 기록 시각순으로 복구합니다. 식별자 없는 실시간 응답 조각은 진행 요약으로만 표시합니다. 생성 지시와 이전 전체 대화는 연결 자료가 없어 복구하지 않습니다.'});
   }
   idle(childId:string,file:string,response:string){
     const id='agent:'+childId,info=this.known.get(id);if(!info)return;
@@ -25,7 +25,7 @@ export class AgySubagents {
   }
   update(childId:string,u:any){
     const id='agent:'+childId,info=this.known.get(id);if(!info)return;
-    if(info.status!=='running' && u?.sessionUpdate==='tool_call')this.report({...info,status:'running'});
+    if(info.status!=='running' && u?.sessionUpdate==='tool_call' && u.status!=='completed' && u.status!=='failed')this.report({...info,status:'running'});
     if(u?.sessionUpdate==='agent_message_chunk'&&u.content?.type==='text'&&typeof u.content.text==='string'){
       // ACP chunks have no message/run identity. Keep progress in the replaceable row;
       // only the native idle message's stable ID creates a durable assistant event.

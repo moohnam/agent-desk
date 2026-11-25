@@ -54,7 +54,7 @@ import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
 import { ThreadHead } from './ThreadHead.tsx';
 import { SubagentPanel, type SubagentPaneKeys } from './SubagentPanel.tsx';
-import { isActive, subagentKey, useSubagents, type Subagent } from './subagents.tsx';
+import { isActive, isCommand, isCurrentCommand, subagentKey, useSubagents, type Subagent } from './subagents.tsx';
 import { ThreadReferences } from './ThreadReferences.tsx';
 import { useThreadReferences } from './threadReferences.ts';
 import { PANE_VISIBILITY_EVENT } from './mermaid.ts';
@@ -1512,7 +1512,7 @@ export function App() {
           references={canRead ? { open: referencesVisible, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
           subagents={threadTaskView && subagentsShown ? { open: subagentsVisible,
-            running: subagents.length ? subagents.filter(isActive).length : threadTaskView.background?.length ?? 0 } : undefined}
+            running: subagents.length ? subagents.filter(s => isCommand(s) ? isCurrentCommand(s) : isActive(s)).length : threadTaskView.background?.length ?? 0 } : undefined}
           onSubagents={toggleSubagents}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />

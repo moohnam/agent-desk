@@ -235,8 +235,7 @@ export const startAgy: StartEngine = (opts) => {
       } else if (method==='session/update' && readySession) {
         if(params.sessionId===readySession)update(params.update);
         else if(subagents && children.belongs(params.sessionId)){
-          children.watch(params.sessionId);
-          if(params.update?.sessionUpdate==='tool_call')children.active(params.sessionId);
+          children.observeUpdate(params.sessionId,params.update);
           subagents.update(params.sessionId,params.update);
         }
       }

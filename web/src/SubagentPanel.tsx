@@ -331,7 +331,7 @@ function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus
               {command && <code className="sa-command-line" title={command}>$ {command}</code>}
               <div className="sa-meta">{[isActive(s) ? '실행 중' : statusText(s), exit !== undefined && `종료 코드 ${exit}`, elapsed(s, now),
                 from && `${subagentTitle(from)}에서`].filter(Boolean).join(' · ')}</div>
-              {isOpen ? (result ? <pre className="sa-command-out">{result}</pre> : <div className="sa-meta">{isActive(s) ? '끝나면 출력이 표시됩니다.' : '기록된 출력이 없습니다.'}</div>)
+              {isOpen ? (result ? <pre className="sa-command-out">{result}</pre> : <div className="sa-meta">{isActive(s) ? '실행 중인 백그라운드 작업입니다. 종료되면 목록에서 사라집니다.' : '기록된 출력이 없습니다.'}</div>)
                 : result && <div className="sa-meta">{s.output ? '출력 보기 (o)' : '결과 보기 (o)'}</div>}
             </div>
           );
