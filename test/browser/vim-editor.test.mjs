@@ -181,7 +181,9 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.type(textarea, '작성 중인 답글');
       await page.click('[aria-label="코드 변경 보기"]');
       await page.waitForSelector('.code-panel [role="alert"]');
-      await page.click('.code-panel button[aria-label="코드 보기 닫기"]');
+      await page.focus('.code-panel button[aria-label="코드 보기 닫기"]');
+      await page.keyboard.press('Enter');
+      await page.waitForSelector('.code-panel', { hidden: true });
       assert.equal(await page.$eval(textarea, field => field.value), '작성 중인 답글');
     }, false, 'emacs'));
 
