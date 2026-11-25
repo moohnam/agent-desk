@@ -522,7 +522,7 @@ test('a session the runner no longer has after a reconnect is lost, and its queu
   assert.deepEqual(kinds(hub, taskId).slice(-2), ['status:error', 'status:queue_dropped']);
 });
 
-test('without a runner at startup sessions show lost, but what waits on them is kept for the runner\'s report', async () => {
+test('without a runner at startup sessions keep their state and wait for the runner\'s report', async () => {
   const t = setup();
   const { taskId, sessionId } = started(t);
   t.hub.sendMessage(taskId, '대기 중인 말');
@@ -530,7 +530,7 @@ test('without a runner at startup sessions show lost, but what waits on them is 
   const late = setup({ connect: false, graceMs: 5 });
   const hub = new Hub(t.hub.store, { skills: late.hub.skills, runner: (m, c) => (late.runner = new FakeRunner(m, c)), graceMs: 5 });
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(status(hub, taskId), 'error');
+  assert.equal(status(hub, taskId), 'running');
   assert.equal(hub.taskView(hub.store.getTask(taskId)!).queued.length, 1, 'the queue waits for the runner');
   late.runner.hello([{ sessionId, busy: true, approvals: [] }]);
   assert.equal(status(hub, taskId), 'running');

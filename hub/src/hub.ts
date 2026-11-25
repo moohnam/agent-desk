@@ -33,8 +33,6 @@ import { steeringSkillText } from './runner/skill-input.ts';
 import { collectSkillBundle } from './shared-skill-sync.ts';
 import { ASK_USER, type Answers, type LiveSession, type RunnerToHub, type SkillSnapshot } from '../../shared/protocol.ts';
 
-/** Without a runner after this long, sessions left running by an earlier hub are treated as gone. */
-const RUNNER_GRACE_MS = 5000;
 type MessageContext = Pick<UserPayload, 'channel_context' | 'note_context'>;
 type MessageOptions = { noteOnly?: boolean; codeReview?: boolean };
 
@@ -61,6 +59,7 @@ export function maskSecretAnswers(input: unknown, answers: Answers | undefined):
 
 export class Hub extends DeskCore {
   private scheduledReplyTimer?: NodeJS.Timeout;
+  private approvalReplayDepth = 0;
   private scheduledReplyRetries = new Map<string, NodeJS.Timeout>();
   private scheduledExchangeRunner?: string;
   private instructionContext = new AsyncLocalStorage<string>();
@@ -186,15 +185,8 @@ export class Hub extends DeskCore {
   private pathAddress?: string;
   private inboundSkillSnapshot?: SkillSnapshot;
   /**
-   * Sessions shown as lost because no runner connected in time after startup. Their queued messages
-   * and open requests wait for the runner's actual report: it may still have them.
-   */
-  private presumedLost = new Set<string>();
-  private graceTimer: NodeJS.Timeout;
-
-  /**
    * `runner`: makes the runner connection (by default the daemon's, started if need be).
-   * `graceMs`: how long after startup to wait for the runner before showing its sessions as lost.
+   * `graceMs`: retained for callers; startup silence no longer settles session state.
    */
   constructor(store: Store, opts: { skills?: SkillStore; runner?: RunnerFactory; graceMs?: number; channelOptions?: ChannelOptions; pathAddress?: string } = {}) {
     super(store, opts.skills ?? new SkillStore());
@@ -224,7 +216,7 @@ export class Hub extends DeskCore {
       },
     );
     this.remotes = new RemoteRunners(store, localRunner, (m, at) => this.atTime(at, () => this.onRunnerMessage(m)),
-      (sessions, id) => this.reconcile(sessions, false, id), () => {
+      (sessions, id) => this.reconcile(sessions, id), () => {
         this.publish({ type: 'runners', runners: this.remotes.list() });
       }, this.skills, id => this.releaseRemoteScheduledReplies(id), (id, rejected) => {
         const session = this.store.getSession(id);
@@ -236,14 +228,11 @@ export class Hub extends DeskCore {
         this.publishTask(session.task_id);
       });
     this.runner = this.remotes;
-    this.graceTimer = setTimeout(() => { if (!this.runner.connected) this.reconcile([], true); }, opts.graceMs ?? RUNNER_GRACE_MS);
-    this.graceTimer.unref();
     this.armScheduledReplies();
   }
 
   /** Stops timers and read-only sources before the owning store is closed. */
   dispose() {
-    clearTimeout(this.graceTimer);
     this.requests.dispose();
     for (const timer of this.resumeTimers.values()) clearImmediate(timer);
     this.resumeTimers.clear();
@@ -298,16 +287,15 @@ export class Hub extends DeskCore {
   }
 
   /**
-   * Applies the runner's view of live sessions after a (re)connect. `presumed`: no runner has
-   * reported yet; sessions are only marked lost, and what waits on them is settled on the report.
+   * Applies only the authenticated runner's actual live-session report after a (re)connect.
    */
-  private reconcile(sessions: LiveSession[], presumed = false, runnerId?: string) {
+  private reconcile(sessions: LiveSession[], runnerId?: string) {
     const owns = (id: string) => runnerId ? id === runnerId : !this.remotes.owns(id);
     const ownedSession = (id: string) => owns(this.store.getSession(id)?.runner_id ?? '');
     // A local socket write is not an acknowledgement; retry an unconfirmed close after hello.
-    if (!runnerId && !presumed) for (const id of this.revokedCloseSent) if (ownedSession(id)) this.revokedCloseSent.delete(id);
+    if (!runnerId) for (const id of this.revokedCloseSent) if (ownedSession(id)) this.revokedCloseSent.delete(id);
     const approvals = sessions.flatMap((s) => s.approvals.map((a) => ({ ...a, sessionId: s.sessionId })));
-    const { lost, touched } = this.store.reconcile(
+    const { lost, touched, expired } = this.store.reconcile(
       new Set(sessions.map((s) => s.sessionId)), new Set(approvals.map((a) => a.approvalId)), owns);
     // App sessions the runner no longer has died with it (runner restart, crash): say so instead of going quiet.
     for (const r of lost) {
@@ -315,16 +303,32 @@ export class Hub extends DeskCore {
         message: '세션이 비정상 종료되었습니다. 답글을 보내면 이어서 재개합니다.', reason: 'session_lost',
       } });
     }
-    for (const a of approvals) this.onRunnerMessage({ type: 'approval_request', ...a });
-    for (const s of sessions) {
-      const session = this.store.getSession(s.sessionId);
-      if (!session) continue;
-      if (s.approvals.length) this.setStatus(session.task_id, session.id, 'waiting');
-      else if (s.busy) this.setStatus(session.task_id, session.id, 'running');
+    for(const a of expired) {
+      const status=this.store.getApproval(a.id)!.status;
+      this.publish({type:'approval',approval:{...a,status}});
+      this.addEvent(a.session_id,a.task_id,'approval',{approvalId:a.id,toolName:a.tool_name,decision:'cancelled',...(status==='lost'?{reason:'session_lost' as const}:{})});
     }
     this.busy = new Set([...this.busy].filter(id => !ownedSession(id)).concat(sessions.filter(s => s.busy).map(s => s.sessionId)));
     this.background = new Map([...this.background].filter(([id]) => !ownedSession(id)).concat(sessions.filter(s => s.background?.length).map(s => [s.sessionId, s.background!] as [string, import("../../shared/protocol.ts").BackgroundTask[]])));
-    if (!presumed) {
+    for (const s of sessions) {
+      const session = this.store.getSession(s.sessionId);
+      if (!session) continue;
+      this.store.reconcileApprovalDeliveries(session.id,new Set(s.approvals.map(a=>a.approvalId)));
+      if (this.approvalPending(session.id)) this.setStatus(session.task_id, session.id, 'waiting');
+      else if (s.busy) this.setStatus(session.task_id, session.id, 'running');
+      else if(session.status==='waiting'||session.status==='running')this.setStatus(session.task_id,session.id,'done');
+    }
+
+    const replayApprovals=()=>{
+      // Keep queued inputs behind every saved decision in this runner snapshot.
+      this.approvalReplayDepth++;
+      try{for(const a of approvals)this.onRunnerMessage({type:'approval_request',...a});}
+      finally{this.approvalReplayDepth--;}
+      for(const s of sessions)this.settleApprovals(s.sessionId);
+    };
+    if(runnerId)replayApprovals();else this.afterCommit(replayApprovals);
+
+    {
       if (runnerId || this.localNeedsReceiptSync) for (const row of this.requests.unconfirmed()) {
         if (!ownedSession(row.session_id) || !this.remotes.ready(row.session_id)) continue;
         if (runnerId && (this.busy.has(row.session_id) || this.remotes.pendingFor(row.session_id))) continue;
@@ -352,28 +356,25 @@ export class Hub extends DeskCore {
     // Messages that waited for a session the runner no longer has will not be sent.
     const live = new Set(sessions.map((s) => s.sessionId));
     const gone = lost.map((r) => ({ id: r.id, task_id: r.task_id }));
-    if (presumed) { for (const r of gone) this.presumedLost.add(r.id); gone.length = 0; }
-    else {
-      for (const id of this.presumedLost) {
-        const s = this.store.getSession(id);
-        if (s && owns(s.runner_id) && !live.has(id)) gone.push({ id, task_id: s.task_id });
-      }
-      for (const id of this.presumedLost) if (ownedSession(id)) this.presumedLost.delete(id);
-    }
+    for(const id of this.store.approvalDeliverySessions())if(ownedSession(id)&&!live.has(id))this.store.reconcileApprovalDeliveries(id,new Set());
     for (const r of gone) {
+      this.store.reconcileApprovalDeliveries(r.id,new Set());
       this.requests.answerRequests(r.id, '대상 작업의 세션이 끝나');
       if (!this.store.origins.stopped(r.id)) this.dropQueue(r.id, r.task_id, '세션이 종료되어', true);
     }
     // A completed turn is not in Store.reconcile's lost set. The authoritative hello
     // still confirms that an unacknowledged revoked session no longer exists.
-    if (!presumed) for (const id of this.store.origins.stoppingSessions()) {
+    for (const id of this.store.origins.stoppingSessions()) {
       if (ownedSession(id) && !live.has(id)) {
         this.store.origins.stopped(id);
         this.revokedCloseSent.delete(id);
       }
     }
     for (const taskId of touched) this.publishTask(taskId);
-    for (const sessionId of new Set([...this.store.queued().map((q) => q.session_id), ...this.requests.pendingSessions()])) this.drain(sessionId);
+    for (const sessionId of new Set([...this.store.queued().map((q) => q.session_id), ...this.requests.pendingSessions()])) {
+      if(approvals.length&&!this.remotes.canQueue(sessionId))this.afterCommit(()=>this.drain(sessionId));
+      else this.drain(sessionId);
+    }
   }
 
   settings(): Settings {
@@ -934,7 +935,7 @@ export class Hub extends DeskCore {
   }
 
   private drainInner(sessionId: string) {
-    if (maintenanceActive()) return;
+    if (maintenanceActive() || this.approvalReplayDepth>0) return;
     if (!this.remotes.ready(sessionId) || this.busy.has(sessionId) || this.approvalPending(sessionId)
       || this.requests.awaitsContinuation(sessionId)) return;
     const next = this.store.queued({ sessionId })[0];
@@ -1266,6 +1267,20 @@ export class Hub extends DeskCore {
       `사용자가 선택지를 고르지 않고 직접 답했습니다. 이 답을 질문의 답으로 삼아 진행하세요.\n\n${text}`, undefined, true);
   }
 
+  private settleApprovals(sessionId:string) {
+    const session=this.store.getSession(sessionId);
+    if(!session||this.approvalPending(sessionId)||this.store.latestSession(session.task_id)?.id!==sessionId)return;
+    if(session.status==='waiting')this.setStatus(session.task_id,sessionId,this.busy.has(sessionId)?'running':'done');
+    if(!this.busy.has(sessionId))this.drain(sessionId);
+  }
+  private deliverApproval(command: Extract<import('../../shared/protocol.ts').HubToRunner,{type:'approval_result'}>) {
+    const send=()=>{
+      // The stored decision survives a failed write; a matching live request retries it.
+      try{this.runner.handle(command);this.settleApprovals(command.sessionId);}catch{ /* Do not roll back the user's recorded decision. */ }
+    };
+    // Remote handle only appends to the transactional outbox; local handle writes a socket.
+    if(this.remotes.canQueue(command.sessionId))send();else this.afterCommit(send);
+  }
   /** `answers`: the user's picks when the approval is an agent's question (ASK_USER). `replied`: answered by a message. */
   resolveApproval(approvalId: string, allow: boolean, message?: string, answers?: Answers, replied = false) {
     return this.atomic(() => this.resolveApprovalInner(approvalId, allow, message, answers, replied));
@@ -1281,10 +1296,9 @@ export class Hub extends DeskCore {
     this.addEvent(approval.session_id, approval.task_id, 'approval',
       { approvalId, toolName: approval.tool_name, decision: allow ? 'allowed' : 'denied', message,
         answers: maskSecretAnswers(approval.input, answers), ...(replied && { replied: true }) });
-    this.runner.handle({ type: 'approval_result', sessionId: approval.session_id, approvalId, allow, message, answers });
-    if (this.store.pendingApprovals().every((a) => a.task_id !== approval.task_id)) {
-      this.transition(approval.task_id, approval.session_id, 'approvals_cleared');
-    }
+    const command = { type: 'approval_result' as const, sessionId: approval.session_id, approvalId, allow, message, answers };
+    this.store.saveApprovalDelivery(command);
+    this.deliverApproval(command);
   }
 
   private onRunnerMessage(m: RunnerToHub) {
@@ -1336,8 +1350,18 @@ export class Hub extends DeskCore {
         this.drain(session.id);
         break;
       case 'approval_request': {
-        // Already known when replayed after a reconnect.
-        if (this.store.getApproval(m.approvalId)) break;
+        const known=this.store.getApproval(m.approvalId);
+        if(known) {
+          if(known.session_id!==session.id||known.tool_name!==m.toolName||JSON.stringify(known.input)!==JSON.stringify(m.input))break;
+          const decision=this.store.approvalDelivery(m.approvalId,session.id);
+          if(decision){this.deliverApproval(decision);break;}
+          // Old hubs marked startup silence as denied, without a user decision event.
+          if(known.status==='pending') {this.transition(taskId,session.id,'approval_pending');break;}
+          if(!['lost','denied'].includes(known.status)||this.store.hasApprovalDecision(known.id,session.id))break;
+          this.store.setApprovalStatus(known.id,'pending');
+          this.publish({type:'approval',approval:{...known,status:'pending'}});
+          this.transition(taskId,session.id,'approval_pending');break;
+        }
         const approval: Approval = {
           id: m.approvalId, session_id: session.id, task_id: taskId, tool_name: m.toolName,
           input: m.input, status: 'pending', created_at: now(),
@@ -1350,14 +1374,22 @@ export class Hub extends DeskCore {
         this.transition(taskId, session.id, 'approval_pending');
         break;
       }
+      case 'approval_resolved': {
+        this.store.clearApprovalDelivery(m.approvalId,session.id);
+        this.settleApprovals(session.id);
+        break;
+      }
       case 'approval_cancelled': {
         const approval = this.store.getApproval(m.approvalId);
-        if (approval?.status === 'pending') {
-          this.store.setApprovalStatus(m.approvalId, 'denied');
-          this.publish({ type: 'approval', approval: { ...approval, status: 'denied' } });
+        if (approval?.session_id===session.id && (approval.status === 'pending'||this.store.approvalDelivery(m.approvalId,session.id))) {
+          const status=m.reason==='expired'?'expired':'cancelled';
+          this.store.setApprovalStatus(m.approvalId, status);
+          this.publish({ type: 'approval', approval: { ...approval, status } });
           this.addEvent(session.id, taskId, 'approval',
-            { approvalId: m.approvalId, toolName: approval.tool_name, decision: 'cancelled' });
+            { approvalId: m.approvalId, toolName: approval.tool_name, decision: 'cancelled',...(m.reason?{reason:m.reason}:{}) });
         }
+        this.store.clearApprovalDelivery(m.approvalId,session.id);
+        this.settleApprovals(session.id);
         break;
       }
       case 'background': {
@@ -1378,9 +1410,11 @@ export class Hub extends DeskCore {
         this.requests.answerRequests(session.id, '대상 작업의 세션이 끝나');
         // Approvals the closed session was waiting on can no longer be answered.
         for (const approval of this.store.pendingApprovals().filter((x) => x.session_id === session.id)) {
-          this.store.setApprovalStatus(approval.id, 'denied');
-          this.publish({ type: 'approval', approval: { ...approval, status: 'denied' } });
+          this.store.setApprovalStatus(approval.id, 'cancelled');
+          this.publish({ type: 'approval', approval: { ...approval, status: 'cancelled' } });
+          this.addEvent(session.id,taskId,'approval',{approvalId:approval.id,toolName:approval.tool_name,decision:'cancelled'});
         }
+        this.store.reconcileApprovalDeliveries(session.id,new Set());
         // A session a context reset replaced: the task goes on in the new one.
         if (this.store.latestSession(taskId)?.id !== session.id) { this.publishTask(taskId); break; }
         // Older runners do not report `busy`; then the task still running/waiting means mid-turn.

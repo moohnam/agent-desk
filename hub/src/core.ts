@@ -30,6 +30,8 @@ export class DeskCore {
   private waiters = new Map<string, Set<() => void>>();
   private publications: HubMessage[] | null = null;
   private eventTime?: string;
+  private effects: (()=>void)[] | null = null;
+  afterCommit(effect:()=>void) { if(this.effects)this.effects.push(effect);else effect(); }
   atTime<T>(at: string | undefined, work: () => T): T {
     const previous = this.eventTime;
     this.eventTime = at;
@@ -51,22 +53,25 @@ export class DeskCore {
 
   /** Persist a user operation and its remote outbox together; publish only after commit. */
   atomic<T>(work: () => T): T {
-    const outer = this.publications;
+    const outer = this.publications, outerEffects=this.effects;
+    const effects:(()=>void)[]=[];this.effects=effects;
     const messages: HubMessage[] = [];
     const busy = new Set(this.busy), background = new Map(this.background);
     this.publications = messages;
     this.store.database.exec('SAVEPOINT hub_operation');
+    let result:T;
     try {
-      const result = work();
+      result = work();
       this.store.database.exec('RELEASE hub_operation');
-      this.publications = outer;
-      for (const m of messages) this.publish(m);
-      return result;
     } catch (error) {
       this.store.database.exec('ROLLBACK TO hub_operation; RELEASE hub_operation');
-      this.busy = busy; this.background = background; this.publications = outer;
+      this.busy = busy; this.background = background; this.publications = outer;this.effects=outerEffects;
       throw error;
     }
+    this.publications=outer;this.effects=outerEffects;
+    for(const m of messages)this.publish(m);
+    for(const effect of effects)this.afterCommit(effect);
+    return result;
   }
 
   taskView(task: Task): TaskView {

@@ -145,6 +145,9 @@ CREATE INDEX IF NOT EXISTS event_time ON event(ts, id);
 CREATE TABLE IF NOT EXISTS approval (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, tool_name TEXT NOT NULL,
   input_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS approval_delivery (
+  approval_id TEXT PRIMARY KEY REFERENCES approval(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL, command_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS question (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
   answer TEXT, created_at TEXT NOT NULL, answered_at TEXT);
@@ -446,7 +449,7 @@ export class Store {
    * of app sessions expire. External (MCP) sessions are not the runner's and are left alone.
    * Returns the lost sessions and every touched task.
    */
-  reconcile(liveSessions: Set<string>, liveApprovals: Set<string>, owns: (runnerId: string) => boolean = () => true): { lost: { id: string; task_id: string }[]; touched: string[] } {
+  reconcile(liveSessions: Set<string>, liveApprovals: Set<string>, owns: (runnerId: string) => boolean = () => true): { lost: { id: string; task_id: string }[]; touched: string[]; expired: Approval[] } {
     const lost = (this.db.prepare(
       "SELECT id, task_id, runner_id FROM session WHERE source = 'app' AND status IN ('running', 'waiting')",
     ).all() as unknown as { id: string; task_id: string; runner_id: string }[]).filter((r) => owns(r.runner_id) && !liveSessions.has(r.id));
@@ -460,8 +463,8 @@ export class Store {
       this.db.prepare("UPDATE task SET status = 'error', updated_at = ? WHERE id = ? AND status IN ('running', 'waiting')")
         .run(now(), r.task_id);
     }
-    for (const a of expired) this.setApprovalStatus(a.id, 'denied');
-    return { lost, touched: [...new Set([...lost.map((r) => r.task_id), ...expired.map((a) => a.task_id)])] };
+    for (const a of expired) this.setApprovalStatus(a.id, liveSessions.has(a.session_id)?'cancelled':'lost');
+    return { lost, expired, touched: [...new Set([...lost.map((r) => r.task_id), ...expired.map((a) => a.task_id)])] };
   }
 
   addEvent(sessionId: string, taskId: string, kind: EventKind, payload: unknown, ts = now()): Event {
@@ -583,6 +586,26 @@ export class Store {
     return { ...e, ...(edited_at && { edited_at }), payload: state == null ? null : { state } };
   }
 
+  saveApprovalDelivery(command: Extract<import('../../shared/protocol.ts').HubToRunner,{type:'approval_result'}>) {
+    this.db.prepare('INSERT INTO approval_delivery VALUES (?,?,?)').run(command.approvalId,command.sessionId,JSON.stringify(command));
+  }
+  approvalDelivery(id:string,sessionId:string): Extract<import('../../shared/protocol.ts').HubToRunner,{type:'approval_result'}> | undefined {
+    const row=this.db.prepare('SELECT command_json FROM approval_delivery WHERE approval_id=? AND session_id=?').get(id,sessionId) as {command_json:string}|undefined;
+    return row?JSON.parse(row.command_json):undefined;
+  }
+  clearApprovalDelivery(id:string,sessionId:string) {
+    this.db.prepare('DELETE FROM approval_delivery WHERE approval_id=? AND session_id=?').run(id,sessionId);
+  }
+  approvalDeliverySessions() {
+    return (this.db.prepare('SELECT DISTINCT session_id FROM approval_delivery').all() as {session_id:string}[]).map(row=>row.session_id);
+  }
+  reconcileApprovalDeliveries(sessionId:string,live:Set<string>) {
+    const rows=this.db.prepare('SELECT approval_id FROM approval_delivery WHERE session_id=?').all(sessionId) as {approval_id:string}[];
+    for(const row of rows)if(!live.has(row.approval_id))this.clearApprovalDelivery(row.approval_id,sessionId);
+  }
+  hasApprovalDecision(id:string,sessionId:string) {
+    return !!this.db.prepare("SELECT 1 FROM event WHERE session_id=? AND kind='approval' AND json_extract(payload_json,'$.approvalId')=? AND json_extract(payload_json,'$.decision') IN ('allowed','denied') LIMIT 1").get(sessionId,id);
+  }
   createApproval(a: Approval) {
     this.db.prepare('INSERT INTO approval VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(a.id, a.session_id, a.task_id, a.tool_name, JSON.stringify(a.input), a.status, a.created_at);

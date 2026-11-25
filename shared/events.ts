@@ -61,6 +61,7 @@ export interface ApprovalPayload {
   toolName: string;
   input?: unknown;
   decision: 'pending' | 'allowed' | 'denied' | 'cancelled';
+  reason?: 'expired' | 'session_lost';
   message?: string;
   answers?: Answers;
 }
