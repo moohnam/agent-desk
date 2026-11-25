@@ -1323,7 +1323,12 @@ export class Hub extends DeskCore {
         break;
       case 'event':
         if (m.event.kind === 'status' && m.event.state === 'request_receipt') {
-          const {id,phase,proof} = m.event.detail ?? {};
+          const {id,phase,proof,approvalId} = m.event.detail ?? {};
+          if(phase==='approval_resolved' && typeof approvalId==='string') {
+            this.store.clearApprovalDelivery(approvalId,session.id);
+            this.settleApprovals(session.id);
+            break;
+          }
           if (phase === 'bound') this.requests.bindEngine(session,proof);
           if (typeof id === 'string') {
             if (phase === 'received' || phase === 'started') this.requests.markResume(id,phase,session.id);
@@ -1372,11 +1377,6 @@ export class Hub extends DeskCore {
         this.addEvent(session.id, taskId, 'approval',
           { approvalId: m.approvalId, toolName: m.toolName, input: m.input, decision: 'pending' });
         this.transition(taskId, session.id, 'approval_pending');
-        break;
-      }
-      case 'approval_resolved': {
-        this.store.clearApprovalDelivery(m.approvalId,session.id);
-        this.settleApprovals(session.id);
         break;
       }
       case 'approval_cancelled': {

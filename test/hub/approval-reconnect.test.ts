@@ -16,7 +16,7 @@ function fixture() {
  const emitters=new Map<string,(m:RunnerToHub)=>void>();
  const resolved:Extract<HubToRunner,{type:'approval_result'}>[]=[];
  const sent:HubToRunner[]=[];
- const runner=new Runner('fixture',m=>{if(online&&!(dropAck&&m.type==='approval_resolved'))receive(m);},{receiptPath:join(dir,'receipts.db'),start:o=>{
+ const runner=new Runner('fixture',m=>{if(online&&!(dropAck&&m.type==='event'&&m.event.kind==='status'&&m.event.state==='request_receipt'&&m.event.detail?.phase==='approval_resolved'))receive(m);},{receiptPath:join(dir,'receipts.db'),start:o=>{
   emitters.set(o.sessionId,o.emit);
   return {send(){},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{},close(){},resolveApproval(id,allow,message,answers){resolved.push({type:'approval_result',sessionId:o.sessionId,approvalId:id,allow,message,answers});}};
  }});
