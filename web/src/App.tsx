@@ -29,7 +29,8 @@ import { ChannelsDialog } from './Channels.tsx';
 import { ChannelColumn } from './ChannelColumn.tsx';
 import { ColumnDialog } from './ColumnDialog.tsx';
 import { ComposeDrawer, DenyDialog, ReplyBox } from './Compose.tsx';
-import { deskInputSelector, type DeskInput } from './EditorInput.tsx';
+import { useEditorMode } from './editorMode.ts';
+import { deskInputSelector, inputElement, type DeskInput } from './EditorInput.tsx';
 import { NoteReply } from './Note.tsx';
 import type { NoteContext } from '../../shared/api.ts';
 import { SkillsDialog } from './Skills.tsx';
@@ -89,6 +90,7 @@ const ColumnDeck = memo(function ColumnDeck({ inactive, phone, elementRef, child
 }, (a, b) => a.inactive && b.inactive && a.phone === b.phone);
 
 export function App() {
+  const editorMode = useEditorMode();
   const [codeTask, setCodeTask] = useState<string | null>(null);
   const closeCode = useCallback(()=>setCodeTask(null),[]);
   const rawHub = useHub();
@@ -837,6 +839,21 @@ export function App() {
   const sentFrom = useRef<number | null>(null);
   const threadFeedRef = useRef<HTMLDivElement>(null);
   const threadFeed = () => threadFeedRef.current;
+  const leaveReply = () => {
+    if (editorMode !== 'emacs' || document.activeElement !== inputElement(replyRef.current)) {
+      closeThread();
+      return;
+    }
+    setActive(threadSlot(threadAfter));
+    setQueueFocus(null);
+    const selected = selection[THREAD];
+    // The thread-opening effect resolves a requested post once its history arrives.
+    if (threadLoaded && threadFocus == null && !threadPosts.some(post => post.id === selected)) {
+      const newest = threadPosts.at(-1);
+      if (newest) select(THREAD, newest.id);
+    }
+    threadFeedRef.current?.focus({ preventScroll: true });
+  };
   const stickThread = () => {
     const feed = threadFeed();
     if (feed && threadAtBottom.current) feed.scrollTop = feed.scrollHeight;
@@ -1011,7 +1028,8 @@ export function App() {
     }
     if (hub.gone.has(taskId)) return;
     // Commit the new reply target before the next keystroke can reach the deck.
-    flushSync(() => openThread(taskId, { from }));
+    const editingSelectedThread = editorMode === 'emacs' && taskId === threadTask && from === THREAD;
+    if (!editingSelectedThread) flushSync(() => openThread(taskId, { from }));
     const input = replyRef.current;
     input?.focus();
     if (threadTask !== taskId && input && 'value' in input) input.setSelectionRange(input.value.length, input.value.length);
@@ -1444,7 +1462,7 @@ export function App() {
           onReferences={toggleReferences}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
-        <div className="feed thread-feed" ref={threadFeedRef}
+        <div className="feed thread-feed" ref={threadFeedRef} tabIndex={-1}
           onPointerDown={() => { threadInteracted.current = true; }}
           onTouchStart={() => { threadInteracted.current = true; }}
           onWheel={() => { threadInteracted.current = true; }}
@@ -1476,12 +1494,12 @@ export function App() {
           </div>
         </div>
         {threadTaskView && (threadTaskView.kind === 'note' ? (
-          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={closeThread} onBeforeResize={beforeReplyResize} />
+          <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={leaveReply} onBeforeResize={beforeReplyResize} />
         ) : handoff?.open && threadTaskView.source !== 'external' ? (
           <HandoffPanel key={threadTaskView.id} task={threadTaskView} state={handoff} model={models.get(threadTaskView.id)} events={threadEvents}
             onError={setToast} onDone={setToast} />
         ) : (
-          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={closeThread} onBeforeResize={beforeReplyResize} />
+          <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={leaveReply} onBeforeResize={beforeReplyResize} />
         ))}
         <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
       </section>

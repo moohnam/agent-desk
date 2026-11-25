@@ -1096,6 +1096,38 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       }, false, editorMode));
     }
 
+    await t.test('Emacs reply Escape returns to the selected post after suggestions and IME', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'emoji' });
+      await openReply(page, origin);
+      const selected = '.thread .selected[data-post]';
+      await page.waitForSelector(selected);
+      await page.keyboard.type('#au');
+      await page.waitForSelector('.reply-box [role="listbox"]');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.reply-box [role="listbox"]', { hidden: true });
+      assert.equal(await page.$eval(textarea, field => field === document.activeElement), true);
+      await page.keyboard.type(' ');
+      await page.$eval(textarea, field => field.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', code: 'Escape', isComposing: true, bubbles: true, cancelable: true,
+      })));
+      assert.equal(await page.$eval(textarea, field => field === document.activeElement), true);
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.thread-feed:focus');
+      const newest = await page.$eval(selected, post => post.dataset.post);
+      assert.equal(newest, await page.$eval('.thread [data-post]:last-of-type', post => post.dataset.post));
+      await page.keyboard.press('k');
+      await page.waitForFunction((selector, id) => document.querySelector(selector)?.dataset.post !== id, {}, selected, newest);
+      const older = await page.$eval(selected, post => post.dataset.post);
+      await page.keyboard.press('r');
+      await page.waitForSelector(`${textarea}:focus`);
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.thread-feed:focus');
+      assert.equal(await page.$eval(selected, post => post.dataset.post), older);
+      assert.equal(await page.$eval(textarea, field => field.value), '#au ');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.thread-feed', { hidden: true });
+    }, false, 'emacs'));
+
     await t.test('memo cancellation confirms dirty edits and Emacs reply Escape goes back once', () => withPage(async page => {
       await page.setViewport({ width: 525, height: 880 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'note' });
@@ -1128,6 +1160,10 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForSelector(item, { hidden: true });
       await page.evaluate(() => { window.backCalls = 0; });
       await page.focus(textarea);
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.thread-feed:focus');
+      await page.waitForSelector('.thread [data-post="300"].selected');
+      assert.equal(await page.evaluate(() => window.backCalls), 0);
       await page.keyboard.press('Escape');
       await page.waitForSelector(textarea, { hidden: true });
       assert.equal(await page.evaluate(() => window.backCalls), 1);
