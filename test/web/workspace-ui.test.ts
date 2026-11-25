@@ -23,6 +23,7 @@ import * as questionInput from '../../shared/question-input.ts';
 
 // Execute the real browser modules with deterministic hooks and browser boundaries.
 function load(file: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}, extra = ''): any {
+  if (file === 'ThreadUsage.tsx') { globals = {document:{body:{}},...globals}; imports = {'react-dom':{createPortal:(node:any)=>node},...imports}; }
   const source = readFileSync(new URL(`../../web/src/${file}`, import.meta.url), 'utf8') + extra;
   imports={ './modelCatalogs.ts':{useModelCatalogs:()=>({runners:[],loading:false,error:'',refresh(){}})},'../../shared/model-catalog.ts':modelCatalog,'../../shared/scheduled-reply.ts':scheduledReply,'./sourceStream.ts':{openSourceStream:()=>new (globals.EventSource as any)()},'./answerComposer.tsx':{useAnswerTarget:()=>undefined,AnswerDestination:()=>null},'./federation.ts':federation,'./draftRetention.ts':draftRetention,'./Workspaces.tsx':{useSources:()=>[]},'./noteEvents.ts':noteEvents,'./NotePreview.tsx':{NotePreview:()=>null},...imports};
   const code = ts.transpileModule(source, { compilerOptions: {

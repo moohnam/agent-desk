@@ -3,4 +3,4 @@
 .thread-usage.stale > button { opacity: .5; }
 .thread-usage-track { display: inline-block; width: 36px; height: 5px; background: #8884; border-radius: 3px; overflow: hidden; }
 .thread-usage-track i { display: block; height: 100%; background: currentColor; }
-.thread-usage-detail { position: fixed; box-sizing: border-box; max-height: 50vh; overflow: auto; z-index: 30; display: grid; gap: 8px; width: 260px; max-width: 80vw; padding: 12px; color: var(--text, #222); background: var(--col, #fff); border: 1px solid #8886; border-radius: 6px; box-shadow: 0 4px 16px #0004; white-space: normal; }
+.thread-usage-detail { font-size: 12px; line-height: 1.5; position: fixed; box-sizing: border-box; max-height: 50vh; overflow: auto; z-index: 30; display: grid; gap: 8px; width: 260px; max-width: 80vw; padding: 12px; color: var(--text, #222); background: var(--col, #fff); border: 1px solid #8886; border-radius: 6px; box-shadow: 0 4px 16px #0004; white-space: normal; }
