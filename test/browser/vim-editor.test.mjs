@@ -627,13 +627,14 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     },false,'emacs'));
 
     await t.test('code sends survive a panel remount without duplicate requests',()=>withPage(async page=>{
-      let pending;const sends=[];
+      let pending;const sends=[];const queue=new Set();
       await page.setRequestInterception(true);
       page.on('request',request=>{
         const path=new URL(request.url()).pathname;
         if(path==='/api/code-view'){
           const body=JSON.parse(request.postData());return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/repo',head:'abc',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -0,0 +1 @@\n+newCode();\n'}:{})})});
         }
+        if(request.method()==='DELETE'||path.endsWith('/reset')){queue.clear();return void request.respond({status:200,contentType:'application/json',body:'{}'});}
         if(path.endsWith('/messages')&&request.method()==='POST'){sends.push(request);pending=request;return;}
         void request.continue();
       });
@@ -643,9 +644,21 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(sends.length,1);
       const id=sends[0].headers()['x-desk-operation-id'];assert.ok(id);
       await page.click('[aria-label="코드 창 닫기"]');await open();await send();
-      await pending.respond({status:200,contentType:'application/json',body:JSON.stringify({task_id:'t0'})});
-      await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
+      queue.add('q1');await pending.respond({status:200,contentType:'application/json',body:JSON.stringify({task_id:'t0',queued_id:'q1'})});
+      await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('메시지 대기열'));
       assert.equal(sends.length,1);
+      for(const [index,path,method] of [[2,'/api/tasks/t0/queue/q1','DELETE'],[3,'/api/tasks/t0/reset','POST']]){
+        await page.evaluate(async(path,method)=>{await fetch(path,{method});},path,method);
+        assert.equal(queue.size,0);
+        if(index===2)await page.$$eval('.code-actions button',nodes=>nodes.find(node=>node.textContent==='같은 코드로 새 요청').click());
+        else {await page.click('[aria-label="코드 창 닫기"]');await open();}
+        const next=page.waitForRequest(request=>request.url().endsWith('/messages'));await send();await next;
+        assert.equal(sends.length,index);
+        assert.notEqual(sends.at(-1).headers()['x-desk-operation-id'],sends.at(-2).headers()['x-desk-operation-id']);
+        queue.add('q'+index);await pending.respond({status:200,contentType:'application/json',body:JSON.stringify({task_id:'t0',queued_id:'q'+index})});
+        await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('메시지 대기열'));
+        assert.equal(queue.size,1);
+      }
     },false,'emacs'));
 
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {

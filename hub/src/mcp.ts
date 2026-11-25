@@ -176,7 +176,7 @@ function taskLine(t: TaskView) {
   return `- ${t.id} [${t.status}${t.source === 'external' ? ', 터미널' : ''}] @${t.project_name} › ${t.title} (갱신 ${t.updated_at})`;
 }
 
-async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void) {
+async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false) {
   switch (name) {
     case 'desk_settings': {
       if(a.action!=='read'&&a.action!=='save')throw new HttpError(400,'action은 read 또는 save입니다');
@@ -203,7 +203,7 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
         }
       };
       authorizeContext();
-      return text(JSON.stringify(await codeContext(hub,taskId,a.action==='save'?{revision:a.revision,worktree:a.worktree}:undefined,authorizeContext)));
+      return text(JSON.stringify(await codeContext(hub,taskId,a.action==='save'?{revision:a.revision,worktree:a.worktree}:undefined,authorizeContext,shared)));
     }
     case 'desk_attach': {
       const t = hub.external.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
@@ -271,7 +271,7 @@ function requestResult(hub: Hub, r: AgentRequest) {
   return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). question_id: "${r.id}". ${hub.requests.resumeState(r.id) === 'waiting' ? '턴을 끝내도 결과가 오면 이 작업이 이어집니다.' : 'desk_wait_answer로 결과를 조회하세요.'}`);
 }
 
-async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void): Promise<unknown> {
+async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false): Promise<unknown> {
   switch (req.method) {
     case 'initialize': {
       const asked = req.params?.protocolVersion;
@@ -289,7 +289,7 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeTo
     case 'tools/call': {
       const { name, arguments: args = {} } = req.params ?? {};
       try {
-        return await callTool(hub, name, args, signal,resumeToken,authorize);
+        return await callTool(hub, name, args, signal,resumeToken,authorize,shared);
       } catch (err) {
         if (err instanceof RpcError) throw err;
         // Tool failures go back to the model as results it can act on.
@@ -317,12 +317,12 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeTo
   }
 }
 
-async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void) {
+async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false) {
   // Notifications (no id) get no response.
   const isNotification = req.id === undefined;
   try {
     if (req?.jsonrpc !== '2.0' || typeof req.method !== 'string') throw new RpcError(-32600, 'invalid request');
-    const result = await dispatch(hub, req, signal,resumeToken,authorize);
+    const result = await dispatch(hub, req, signal,resumeToken,authorize,shared);
     return isNotification ? null : { jsonrpc: '2.0', id: req.id, result };
   } catch (err) {
     if (isNotification) return null;
@@ -331,7 +331,7 @@ async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeT
   }
 }
 
-export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse, authorize?: () => void) {
+export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse, authorize?: () => void, shared=false) {
   if (req.method !== 'POST') {
     // No server-initiated stream: every response comes back on its POST.
     res.writeHead(405, { allow: 'POST' }).end();
@@ -357,7 +357,7 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
   const replies = (await Promise.all((Array.isArray(body) ? body : [body]).map((r) => {
     const params = r?.params as {name?:string;arguments?:Record<string,unknown>} | undefined;
     const proof = signRequest(req.headers?.['x-desk-session'],toolFields(params?.name??'',params?.arguments??{})) ?? req.headers?.['x-desk-request-proof'];
-    return handleOne(hub,r,abort.signal,proof,authorize);
+    return handleOne(hub,r,abort.signal,proof,authorize,shared);
   })))
     .filter((r) => r !== null);
   if (!replies.length) {

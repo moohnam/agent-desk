@@ -78,8 +78,8 @@ export function taskCodeRoot(hub:Hub,taskId:string,shared=false) {
 export function storedCodeContext(hub:Hub,taskId:string):{revision:string;worktree:string|null} {
   const raw=hub.store.setting('code_context:'+taskId);return raw?JSON.parse(raw):{revision:'initial',worktree:null};
 }
-export async function codeContext(hub:Hub,taskId:string,update?:{revision:unknown;worktree:unknown},authorize?:()=>void) {
-  const cwd=taskCodeRoot(hub,taskId,true);
+export async function codeContext(hub:Hub,taskId:string,update?:{revision:unknown;worktree:unknown},authorize?:()=>void, shared=false) {
+  const cwd=taskCodeRoot(hub,taskId,shared);
   // Clearing a stale registration must also work after its directory disappears.
   let available:Awaited<ReturnType<typeof registeredWorktrees>>=[];
   if(!update||update.worktree!==null)available=await registeredWorktrees(cwd);

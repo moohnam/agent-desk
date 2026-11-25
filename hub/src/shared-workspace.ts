@@ -337,7 +337,7 @@ export class SharedWorkspace {
           const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {},peer);}));
           return json(res,result.status,result.body);
         }
-        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized()));
+        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized(),!this.localAuthority));
         if (this.localAuthority && req.method === 'POST' && url.pathname.startsWith('/v1/runner-exchange/')) {
           const runnerId=decodeURIComponent(url.pathname.slice('/v1/runner-exchange/'.length));
           if (!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token'])) throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');

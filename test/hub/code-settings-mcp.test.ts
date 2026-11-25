@@ -44,6 +44,16 @@ test('gateway MCP settings follow session ownership and share templates and work
     const response=await fetch(origin+'/mcp',{method:'POST',headers:{'content-type':'application/json',...(token?{'x-desk-session':token}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'desk_settings',arguments:{session_id:'engine-code-context',...args}}})});
     const rpc=await response.json() as any;assert.equal(response.status,200);return rpc.result;
   };
+  // A legacy remote locator must be interpreted only by the remote authority.
+  const localExternal=gateway.external.attachExternal({title:'legacy remote',summary:'attached',cwd:root});
+  const localSession=gatewayDb.latestSession(localExternal.id)!;
+  gatewayDb.database.prepare('UPDATE session SET cwd=? WHERE id=?').run('legacy-host:'+root,localSession.id);
+  const localTool=await tool({section:'code_context',action:'read',session_id:undefined,task_id:localExternal.id},null);
+  assert.equal(localTool.isError,true);assert.match(localTool.content[0].text,/원격 작업공간 연결/);
+  const remoteExternal=hub.external.attachExternal({title:'remote legacy',summary:'attached',cwd:root});
+  const remoteSession=db.latestSession(remoteExternal.id)!;db.database.prepare('UPDATE session SET cwd=? WHERE id=?').run('legacy-host:'+root,remoteSession.id);
+  const remoteTool=await tool({section:'code_context',action:'read',session_id:undefined,task_id:remoteExternal.id},null);
+  assert.equal(remoteTool.isError,undefined);assert.ok(JSON.parse(remoteTool.content[0].text).available.length);
   const initial=JSON.parse((await tool({section:'code_context',action:'read'})).content[0].text);
   assert.ok(initial.available.some((item:any)=>item.path===other));
   const register={section:'code_context',action:'save',revision:initial.revision,worktree:other};
