@@ -185,6 +185,9 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.keyboard.press('Enter');
       await page.waitForSelector('.code-panel', { hidden: true });
       assert.equal(await page.$eval(textarea, field => field.value), '작성 중인 답글');
+      await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-panel [role="alert"]');
+      await page.focus('.code-panel button');await page.keyboard.press('Escape');
+      await page.waitForSelector('.code-panel',{hidden:true});assert.ok(await page.$('.thread-head'));
     }, false, 'emacs'));
 
     await t.test('an unknown extension named constructor renders a plain-text diff', () => withPage(async page => {
@@ -377,6 +380,58 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await new Promise(resolve=>setTimeout(resolve,400));
       assert.equal(older,1,'the known task total at scroll start prevents continuation');
     },false,'emacs'));
+
+    for (const width of [1440,390]) await t.test(`code Escape closes only the panel after focus changes (${width})`, () => withPage(async page => {
+      await page.setViewport({width,height:900});
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/prompt-templates')return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({items:[],revision:'empty'})});
+        if(path!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());
+        void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/test',head:'a'.repeat(40),commit:body.commit,commits:[{id:'b'.repeat(40),subject:'commit'}],branches:[{ref:'refs/heads/main',id:'a'.repeat(40)}],files:[{path:'a.ts',status:'modified'},{path:'b.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -1 +1 @@\n-old();\n+newCode();\n'}:{})})});
+      });
+      await openReply(page,origin);
+      const open=async()=>{await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add');};
+      const closed=async()=>{
+        await page.keyboard.press('Escape');await page.waitForSelector('.code-panel',{hidden:true});
+        assert.ok(await page.$('.thread-head'),'Escape must keep the current thread');
+      };
+      await page.click('[aria-label="코드 변경 보기"]');await closed(); // No data/bundle readiness wait.
+      for(const focus of ['opener','commit','file','body','line']){
+        await open();
+        if(focus==='commit'){await page.select('[aria-label="변경 기준"]','b'.repeat(40));await page.focus('[aria-label="변경 기준"]');}
+        if(focus==='file'){await page.select('[aria-label="변경 파일"]',JSON.stringify(['tracked','b.ts']));await page.focus('[aria-label="변경 파일"]');}
+        if(focus==='body')await page.click('.code-diff');
+        if(focus==='line')await page.click('.code-line.add button');
+        await closed();
+      }
+      await open();
+      await page.click('.code-branches summary');await page.keyboard.press('Escape');
+      assert.ok(await page.$('.code-panel'),'first Escape closes internal disclosure only');
+      assert.equal(await page.$eval('.code-branches',e=>e.open),false);await closed();
+      await open();await page.focus('[aria-label="변경 기준"]');await page.keyboard.down('Alt');await page.keyboard.press('ArrowDown');await page.keyboard.up('Alt');
+      await page.waitForFunction(()=>document.querySelector('[aria-label="변경 기준"]').matches(':open'));
+      await page.keyboard.press('Escape');
+      assert.ok(await page.$('.code-panel'),'native select consumes its own Escape');
+      await page.waitForFunction(()=>!document.querySelector('[aria-label="변경 기준"]').matches(':open'));await closed();
+      await open();await page.$$eval('.code-actions button',nodes=>nodes.find(e=>e.textContent==='템플릿 관리').click());
+      await page.waitForSelector('[role="dialog"]');await page.keyboard.press('Escape');
+      await page.waitForSelector('[role="dialog"]',{hidden:true});assert.ok(await page.$('.code-panel'),'dialog closes before the panel');await closed();
+      await open();await page.focus('.code-diff');
+      await page.$eval('.code-diff',e=>e.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,isComposing:true})));
+      assert.ok(await page.$('.code-panel'),'IME cancellation does not close the panel');await closed();
+      if(await page.$('.compose'))await page.click('.compose [aria-label="닫기"]');
+      await page.waitForSelector('.compose',{hidden:true});
+      await open();await page.click('button[aria-label="새 작업"]');
+      await page.waitForSelector('.compose');await page.focus('.compose [aria-label="닫기"]');
+      if(width===390)assert.equal(await page.$eval('.deck-space',e=>e.inert),true,'drawer covers the code panel');
+      await page.keyboard.press('Escape');await page.waitForSelector('.compose',{hidden:true});
+      assert.ok(await page.$('.code-panel'),'foreground compose closes before code');
+      assert.ok(await page.$('.thread-head'),'foreground compose keeps the thread');
+      await closed();
+      await page.keyboard.press('Escape');await page.waitForSelector('.thread-head',{hidden:true});
+    }));
 
     for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});

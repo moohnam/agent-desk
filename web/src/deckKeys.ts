@@ -122,6 +122,7 @@ export interface DeckKeyContext {
   toggleThreadFocus: () => void;
   togglePostReference?: (post: Post) => void;
   toggleReferences?: () => void;
+  closeCode?: () => void;
   openSearch: () => void;
   closeSearch: () => void;
   setDrawer: (open: boolean) => void;
@@ -163,8 +164,10 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     if (ev.key === 'Escape') {
       if (ev.repeat) return;
       const target = ev.target instanceof Element ? ev.target : null;
-      if (target?.closest('select')) return;
       const drawerHasKeys = drawer && (isNarrow() || !!target?.closest('.compose'));
+      // The foreground composer owns Escape before the code pane behind it.
+      if (!help && !drawerHasKeys && c.closeCode) { ev.preventDefault(); c.closeCode(); return; }
+      if (target?.closest('select')) return;
       const close = help ? () => setHelp(false) : drawerHasKeys ? () => setDrawer(false)
         : queueFocus != null ? () => setQueueFocus(null) : activeCol?.id === SEARCH ? closeSearch
         : threadTask ? closeThread : c.searchOpen ? closeSearch : drawer ? () => setDrawer(false) : undefined;

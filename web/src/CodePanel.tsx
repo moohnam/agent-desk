@@ -1,3 +1,4 @@
+import { imeKey } from './keys.ts';
 import { useDiffWrap } from './diffWrap.ts';
 import { CodeActions } from './CodeActions.tsx';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
@@ -124,7 +125,23 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
   }),{added:0,deleted:0,binary:0,unknown:0});
   const fileStats=(file:CodeViewResult['files'][number])=>file.binary?'바이너리':file.additions===undefined||file.deletions===undefined?'줄 수 미집계':`+${file.additions} / -${file.deletions}`;
   const sessionWorktree = 'session-worktree';
-  return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>{if(e.currentTarget.contains(e.target as Node))e.stopPropagation();}}>
+  return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>{
+    // Portalled dialogs retain their own Escape handler on document.
+    if(!e.currentTarget.contains(e.target as Node))return;
+    if(e.key!=='Escape'||imeKey(e.nativeEvent)){e.stopPropagation();return;}
+    if(e.defaultPrevented||e.repeat)return;
+    const select=(e.target as Element).closest('select');
+    if(select&&CSS.supports('selector(select:open)')&&select.matches(':open')){
+      e.stopPropagation();return; // Keep the native default that dismisses its popup.
+    }
+    const disclosure=(e.target as Element).closest<HTMLDetailsElement>('details[open]')
+      ??e.currentTarget.querySelector<HTMLDetailsElement>('details[open]');
+    if(disclosure){
+      e.preventDefault();e.stopPropagation();disclosure.open=false;
+      disclosure.querySelector('summary')?.focus();
+    }
+    // Otherwise let the desk close this panel through its existing close action.
+  }}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
     <div className="code-scope">작업 폴더 전체 · {base&&target?'두 브랜치 끝 커밋의 차이':commit?'첫 번째 부모 대비 커밋 변경':'HEAD 대비 미커밋 변경'}<br/><span title={snapshot?.data.root}>{snapshot?.data.root??'작업 폴더 확인 중…'}</span><small>{base&&target?`${base.replace(/^refs\/(heads|remotes)\//,'')} (${(content?.baseId??snapshot?.data.baseId??'').slice(0,12)}) → ${target.replace(/^refs\/(heads|remotes)\//,'')} (${(content?.targetId??snapshot?.data.targetId??'').slice(0,12)})`:`${commit?'선택한 커밋':'기준'} ${(commit||content?.head||snapshot?.data.head)?.slice(0,12)??'첫 커밋 전'}`} · 읽기 전용</small></div>
     {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}

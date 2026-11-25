@@ -1326,6 +1326,7 @@ export function App() {
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
+      closeCode: codeVisible ? closeCode : undefined,
       setWidth, widthOf, toggleReferences: codeVisible ? closeCode : canRead ? toggleReferences : undefined,
       togglePostReference: canReference ? togglePostReference : undefined,
     };
