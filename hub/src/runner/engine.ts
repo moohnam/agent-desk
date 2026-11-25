@@ -11,6 +11,8 @@ export interface StartOptions {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
   model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillSnapshotHome?: string;
   instructions?: string;
+  /** The hub records subagents (`start.subagents`): report them with `subagent` and `subagent_event`. */
+  subagents?: boolean;
   requestInputId?:string;
   onRequestStarted?(id:string):void;
   connectorMcp?: {url:string;token:string};

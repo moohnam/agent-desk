@@ -1,5 +1,5 @@
 import { ThreadUsage } from './ThreadUsage.tsx';
-import { Code2, ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
+import { Bot, Code2, ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, modelMatches, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
 import { modelShort, projectColor } from './projects.ts';
@@ -10,7 +10,7 @@ import { SharedPending } from './workspace.ts';
 
 interface TitleEdit { taskId: string; value: string; error?: string; saving?: boolean }
 
-export function ThreadHead({ task, project, model, events, now, draft, handoff, references, onReferences, codeOpen, onCode, onClose, onPin, onHandoff, onMenu, onNotice, onRenamed }: {
+export function ThreadHead({ task, project, model, events, now, draft, handoff, references, onReferences, subagents, onSubagents, codeOpen, onCode, onClose, onPin, onHandoff, onMenu, onNotice, onRenamed }: {
   task: TaskView | undefined; project: Project | undefined; model: string | undefined; events: HubEvent[];
   now: number; draft: boolean; onClose: () => void; onPin: () => void; onMenu: (r: DOMRect) => void;
   onNotice: (message: string) => void; onRenamed: (taskId: string, title: string, revision: number) => void;
@@ -18,6 +18,8 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
   handoff: 'open' | 'kept' | null; onHandoff: () => void;
   codeOpen?: boolean; onCode?: () => void;
   references?: { open: boolean; count: number }; onReferences?: () => void;
+  /** The subagent pane: open, and how many of the task's subagents run now. */
+  subagents?: { open: boolean; running: number }; onSubagents?: () => void;
 }) {
   const isNote = task?.kind === 'note';
   const workdir = project?.root_path;
@@ -93,6 +95,9 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         {task && <StatusBadge task={task} now={now} />}
         {draft && <DraftBadge />}
         {task && onCode && <button className="icon-btn code-view-toggle" aria-label="코드 변경 보기" aria-pressed={!!codeOpen} onClick={onCode}><Code2 /></button>}
+        {task && subagents && <button className="icon-btn" aria-label="서브 에이전트 창" aria-pressed={subagents.open}
+          title={`서브 에이전트·백그라운드 창 열기 / 닫기 (b)${subagents.running ? ` · 실행 중 ${subagents.running}개` : ''}`} onClick={onSubagents}>
+          <Bot />{subagents.running > 0 && <span>{subagents.running}</span>}</button>}
         {references && <button className="icon-btn" aria-label="고정한 글 창" aria-pressed={references.open}
           title="고정 글·문서 창 열기 / 닫기 (Ctrl ;) · 현재 스레드의 선택을 기억합니다" onClick={onReferences}><PanelLeft />{references.count > 0 && <span>{references.count}</span>}</button>}
         {task?.source === 'app' && !isNote && (

@@ -142,6 +142,17 @@ CREATE TABLE IF NOT EXISTS event (
   ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, edited_at TEXT);
 CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
 CREATE INDEX IF NOT EXISTS event_time ON event(ts, id);
+CREATE TABLE IF NOT EXISTS subagent (
+  session_id TEXT NOT NULL, id TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL,
+  detailed INTEGER NOT NULL, listed INTEGER NOT NULL, info_json TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (session_id, id));
+CREATE INDEX IF NOT EXISTS subagent_task ON subagent(task_id, created_at);
+CREATE INDEX IF NOT EXISTS subagent_running ON subagent(session_id) WHERE status = 'running';
+CREATE TABLE IF NOT EXISTS subagent_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL, subagent_id TEXT NOT NULL,
+  ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS subagent_event_of ON subagent_event(session_id, subagent_id, id);
+CREATE INDEX IF NOT EXISTS subagent_event_task ON subagent_event(task_id);
 CREATE TABLE IF NOT EXISTS approval (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, tool_name TEXT NOT NULL,
   input_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -382,7 +393,7 @@ export class Store {
   }
 
   /**
-   * Removes tasks with everything recorded for them: sessions, events, approvals, questions, queued
+   * Removes tasks with everything recorded for them: sessions, events, subagents, approvals, questions, queued
    * messages, and requests they sent. Requests other tasks sent them stay (settled by the hub first).
    */
   deleteTasks(ids: string[]) {
@@ -390,7 +401,7 @@ export class Store {
     const marks = ids.map(() => '?').join(',');
     this.db.exec('SAVEPOINT delete_tasks');
     try {
-      for (const table of ['event', 'approval', 'question', 'queued', 'session']) {
+      for (const table of ['event', 'subagent_event', 'subagent', 'approval', 'question', 'queued', 'session']) {
         this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (${marks})`).run(...ids);
       }
       this.db.prepare(`DELETE FROM request WHERE from_task_id IN (${marks})`).run(...ids);

@@ -7,6 +7,7 @@ import { assignProjectColors, forgetProjectColors } from './projects.ts';
 import { feedCursor, compactFeed, IDLE_FEED_LIMIT, IDLE_QUERY_LIMIT, LIVE_FEED_LIMIT } from './feedCache.ts';
 import { confirmedMissingTask } from './draftRetention.ts';
 import { noteRevision, onNoteChange, reportNoteChange, visibleNoteEvents } from './noteEvents.ts';
+import { reportSubagent } from './subagents.tsx';
 import type { Approval, Channel, ChannelEntry, ColumnDef, ColumnFilter, EventKind, HubEvent, HubMessage, PostKind, Project, Question, TaskView } from './types.ts';
 import type { AccessView, RunnerConnectionProblem } from '../../shared/api.ts';
 
@@ -257,6 +258,7 @@ export function useHub() {
       }
       // Publish new posts before their edits so a thread can update them even in one batch.
       for (const m of ms) if (m.type === 'event_updated' || m.type === 'event_removed') reportNoteChange(m);
+      for (const m of ms) if (m.type === 'subagent' || m.type === 'subagent_event') reportSubagent(m);
       for (const entry of channelEntries) channelListeners.current.forEach((fn) => fn(entry));
     };
     const streams=new Map<string,ReturnType<typeof openSourceStream>>();

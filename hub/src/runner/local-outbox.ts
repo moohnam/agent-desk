@@ -6,6 +6,8 @@ interface Entry {
   line: string;
   bytes: number;
   event: boolean;
+  /** A subagent's step: given up first, before the thread's own events. */
+  subagent: boolean;
   output: boolean;
 }
 
@@ -30,19 +32,15 @@ export class LocalRunnerOutbox {
   enqueue(message: RunnerToHub) {
     const line = JSON.stringify(message);
     const entry = { sequence: ++this.next, line, bytes: Buffer.byteLength(line) + 1,
-      event: message.type === 'event', output: isRunnerOutput(message) };
+      event: message.type === 'event', subagent: message.type === 'subagent_event', output: isRunnerOutput(message) };
     if (entry.bytes > this.maxBytes || this.maxCount < 1) return { entry, dropped: true };
     this.entries.set(entry.sequence, entry);
     this.bytes += entry.bytes;
     let dropped = false;
     while (this.entries.size > this.maxCount || this.bytes > this.maxBytes) {
-      const oldest = this.entries.values().next().value!;
-      // Keep control messages for as long as possible, as before.
-      let evict = oldest;
-      for (const candidate of this.entries.values()) {
-        if (candidate.event) { evict = candidate; break; }
-      }
-      this.remove(evict);
+      // Keep control messages for as long as possible, as before; subagent steps go before thread events.
+      const entries = [...this.entries.values()];
+      this.remove(entries.find(e => e.subagent) ?? entries.find(e => e.event) ?? entries[0]);
       dropped = true;
     }
     return { entry, dropped };

@@ -1,0 +1,41 @@
+/* The subagent pane (SubagentPanel.tsx, on the pinned posts' .thread-references) and the chips under posts (subagents.tsx). */
+.sa-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; display: inline-block; color: var(--faint); }
+.running .sa-dot, .sa-working .sa-dot { color: var(--run); animation: sa-pulse 1.4s ease-in-out infinite; }
+.done .sa-dot { color: var(--good); } .error .sa-dot { color: var(--bad); }
+@keyframes sa-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .running .sa-dot, .sa-working .sa-dot { animation: none; } }
+.sa-meta { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.sa-chips { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.sa-chip { display: flex; align-items: center; gap: 8px; min-width: 0; text-align: left; font: inherit; font-size: 12.5px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--col-head); color: var(--text); cursor: pointer; }
+.sa-chip:hover { border-color: var(--line); }
+.sa-chip b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.sa-chip .sa-meta { flex: 1; min-width: 0; }
+.sa-open { display: inline-flex; align-items: center; color: var(--accent); font-size: 11.5px; white-space: nowrap; }
+
+.sa-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); max-height: 30%; overflow-y: auto; }
+.sa-tab { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--col); color: var(--muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-tab.on { color: var(--text); border-color: var(--line); background: var(--sel); font-weight: 600; }
+.sa-tab.more { color: var(--accent); border-style: dashed; }
+.sa-tabmeta { color: var(--faint); font-weight: 400; }
+.sa-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
+
+/* Two columns share the pane half and half; more scroll sideways at the same width. */
+.sa-cols { flex: 1; min-height: 0; display: flex; overflow-x: auto; scroll-snap-type: x proximity; }
+.column.sa-col { flex: 0 0 50%; width: 50%; min-width: 300px; max-width: none; min-height: 0; border-right: 1px solid var(--border); scroll-snap-align: start; }
+.column.sa-col.sized { flex-basis: var(--sa-w); width: var(--sa-w); }
+.column.sa-col:only-child { flex-basis: 100%; width: 100%; }
+.sa-colhead { display: flex; align-items: center; gap: 8px; }
+.sa-titles { flex: 1; min-width: 0; }
+.sa-titles h2 { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-titles .sa-meta { display: block; }
+.sa-feed { flex: 1; min-height: 0; overflow-y: auto; }
+.sa-col .post.user { background: var(--hover); }
+.av.subagent { background: var(--run-bg); color: var(--run); font-size: 10px; }
+.sa-working { display: flex; align-items: center; gap: 8px; padding: 10px 15px 16px; color: var(--run); font-size: 12.5px; }
+.sa-result { margin: 8px 12px 16px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; background: var(--good-bg); overflow-wrap: anywhere; }
+.sa-result.error { background: var(--bad-bg); }
+.sa-result.error > b { color: var(--bad); }
+.sa-note { margin: 8px 12px; color: var(--muted); font-size: 12px; }
+.sa-older { display: block; margin: 8px auto; }
+.sa-cols > .empty { padding: 16px; }

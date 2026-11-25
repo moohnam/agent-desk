@@ -233,7 +233,7 @@ export class Runner {
               const changed = this.receipts?.prepare('UPDATE receipt SET started=1 WHERE session=? AND id=? AND started=0').run(cmd.sessionId,id).changes;
               if (changed) this.receipt(cmd.sessionId,id,'started');
             }, resume: cmd.resume, fork: cmd.fork, permissionMode: cmd.permissionMode,
-            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, mcp: mcp && cmd.requestCredential ? {...mcp,sessionCredential:cmd.requestCredential} : mcp,
+            connectorMcp: cmd.connectorMcp, instructions: cmd.instructions, model: cmd.model, effort: cmd.effort, skills: cmd.skills, skillsHome: cmd.skillsHome, skillSnapshotHome, subagents: cmd.subagents, mcp: mcp && cmd.requestCredential ? {...mcp,sessionCredential:cmd.requestCredential} : mcp,
             emit: (m) => { if (this.track(entry, m)) this.emit(m); },
           });
         } catch (err) {

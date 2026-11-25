@@ -60,6 +60,8 @@ const routes = [
   'GET /feed',
   'GET /feed/:id',
   'GET /tasks/:id/events',
+  'GET /tasks/:id/subagents',
+  'GET /tasks/:id/subagents/:id/events',
   'PATCH /tasks/:id',
   'POST /tasks/:id/messages',
   'POST /tasks/:id/scheduled-replies',
@@ -206,6 +208,16 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
             }, events[0].edited_at ?? events[0].ts))
             : [];
           return reply(200, { events, more, ...(moved.length ? { moved } : {}) });
+        }
+        case 'GET /tasks/:id/subagents':
+          return reply(200, hub.subagents.list(id));
+        case 'GET /tasks/:id/subagents/:id/events': {
+          // A subagent's steps, newest page first like a thread's; `session` names its session.
+          const session = url.searchParams.get('session');
+          if (!session) throw new HttpError(400, 'session이 필요합니다');
+          let subagent: string;
+          try { subagent = decodeURIComponent(parts[4]); } catch { throw new HttpError(400, '서브 에이전트 ID가 잘못되었습니다'); }
+          return reply(200, hub.subagents.events(id, session, subagent, 500, intParam(url, 'before', undefined)));
         }
         case 'PATCH /tasks/:id':
           return reply(200, hub.renameTask(id, body.title));

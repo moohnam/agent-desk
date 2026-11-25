@@ -1,9 +1,9 @@
 import { feedParams, type FeedFilter } from '../../shared/api.ts';
-import type { AccessView, ChannelMessageInput, MessageReceipt, NoteContext } from '../../shared/api.ts';
+import type { AccessView, ChannelMessageInput, MessageReceipt, NoteContext, Subagent } from '../../shared/api.ts';
 import type { UpdateView } from '../../shared/update.ts';
 import type { Channel, ChannelEntryPage, ChannelInput, ChannelTokenReceipt, DeskState, EngineUsage, HubEvent, HubMessage, Project, Settings, Skill, TaskView } from './types.ts';
 import { workspaceId, SharedPending } from './workspace.ts';
-import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
+import { composeSource, compareEvents, discoverSources, eventSourceIndex, getSources, mapEvent, mapState, mapSubagent, mapTask, nativeEventId, scopeId, sourceBase, sourceConnected, sourceFilter, sourceIndex, splitId } from './federation.ts';
 import { noteRevision, onNoteChange, reportNoteChange } from './noteEvents.ts';
 
 const noteWrites = new Set<number>();
@@ -274,6 +274,18 @@ export const api = {
   feed: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal) => feeds(limit,before,q,signal).then(page=>page.events),
   feedPage: (limit = FEED_PAGE, before?: HubEvent, q: FeedQuery = {}, signal?: AbortSignal, onProgress?: (page: FeedPage) => void, scope?: string) => feeds(limit,before,q,signal,onProgress,scope),
   feedCount,
+  /** The task's subagents and background commands, oldest first. */
+  subagents: async (taskId: string) => {
+    const list = await call<Subagent[]>('GET', `/tasks/${taskId}/subagents`);
+    const [source] = splitId(taskId);
+    return source ? list.map(s => mapSubagent(source, s)) : list;
+  },
+  /** A page of a subagent's conversation (events with `subagent_id`), oldest first; `before` pages back. */
+  subagentEvents: (s: Subagent, before?: number) => {
+    const q = new URLSearchParams({ session: splitId(s.session_id)[1] });
+    if (before) q.set('before', String(before));
+    return call<{ events: HubEvent[]; more: boolean }>('GET', `/tasks/${s.task_id}/subagents/${encodeURIComponent(s.id)}/events?${q}`);
+  },
   /**
    * A page of a task's history, oldest first: its newest events (below `before`, when given), and
    * every event from `since` on. `more`: older events exist before the page.

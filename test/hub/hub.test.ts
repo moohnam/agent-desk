@@ -1111,3 +1111,91 @@ test('reconnect retries a missing follow-up only with the same daemon and no pri
   assert.equal(count(),2);
   hub.dispose();
 });
+
+test('subagents are kept apart from the thread, like its events, and end with their session', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  const published: HubMessage[] = [];
+  hub.bus.on('message', (m: HubMessage) => published.push(m));
+  assert.equal(runner.last('start')?.subagents, true, 'the hub asks runners for subagent reports');
+  const session = hub.store.getSession(sessionId)!;
+  // Claude: the background list comes first, then the runner's own report and the conversation.
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'a1', type: 'local_agent', description: '조사', agent: 'general-purpose' }] });
+  runner.say({ type: 'subagent', sessionId, subagent: { id: 'a1', type: 'local_agent', description: '조사', agent: 'general-purpose', status: 'running', background: true } });
+  runner.say({ type: 'subagent_event', sessionId, subagentId: 'a1', event: { kind: 'user', text: '파일을 찾아 줘' } });
+  runner.say({ type: 'subagent_event', sessionId, subagentId: 'a1', event: { kind: 'tool', toolUseId: 't1', name: 'Bash', input: { command: 'x'.repeat(1000) } } });
+  runner.say({ type: 'subagent', sessionId, subagent: { id: 'a1', type: 'local_agent', description: '조사', status: 'completed', summary: '찾았습니다' } });
+  runner.say({ type: 'background', sessionId, tasks: [] });
+  const [a1] = hub.subagents.list(taskId);
+  assert.equal(a1.status, 'completed', 'a reported subagent ends as the runner says, not by leaving the list');
+  assert.equal(a1.detailed, true);
+  assert.equal(a1.summary, '찾았습니다');
+  const { events, more } = hub.subagents.events(taskId, sessionId, 'a1');
+  assert.deepEqual(events.map((e) => e.kind), ['user', 'tool']);
+  assert.equal((events[1].payload as { input: { command: string } }).input.command.length, 1000, 'stored whole');
+  assert.equal(more, false);
+  const live = published.filter((m) => m.type === 'subagent_event');
+  assert.equal(live.length, 2);
+  assert.equal((live[1].event.payload as { clipped?: boolean }).clipped, true, 'live copies come cut like thread events');
+  assert.ok(!kinds(hub, taskId).includes('tool'), 'nothing lands in the thread');
+
+  // Codex and agy: only the background list says a subagent ran and when it stopped.
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'agent:t2', type: 'agent', description: '검토' }] });
+  assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'agent:t2')?.status, 'running');
+  runner.say({ type: 'background', sessionId, tasks: [] });
+  assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'agent:t2')?.status, 'ended');
+
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'shell:3', type: 'shell', description: 'npm test' }] });
+  runner.say({ type: 'closed', sessionId });
+  assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'shell:3')?.status, 'stopped');
+  assert.equal(session.task_id, taskId);
+
+  const api = workspaceApi(hub, 'GET', new URL(`http://x/tasks/${taskId}/subagents`));
+  assert.deepEqual(api.body.map((s: { id: string }) => s.id), ['a1', 'agent:t2', 'shell:3']);
+  const steps = workspaceApi(hub, 'GET', new URL(`http://x/tasks/${taskId}/subagents/a1/events?session=${sessionId}`));
+  assert.equal(steps.body.events.length, 2);
+  assert.throws(() => workspaceApi(hub, 'GET', new URL(`http://x/tasks/${taskId}/subagents/a1/events`)), /session/);
+
+  hub.deleteTask(taskId);
+  assert.deepEqual(hub.subagents.list(taskId), []);
+  assert.equal(hub.subagents.events(taskId, sessionId, 'a1').events.length, 0);
+});
+
+test('subagents a runner no longer runs after reconnecting have stopped', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  runner.say({ type: 'subagent', sessionId, subagent: { id: 'a1', type: 'local_agent', description: '조사', status: 'running' } });
+  runner.hello([]);
+  assert.equal(hub.subagents.list(taskId)[0].status, 'stopped');
+});
+
+test('a finished subagent stays finished while the background list still holds it, and a resumed one keeps where it came from', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  const report = (id: string, status: 'running' | 'completed', extra = {}) =>
+    runner.say({ type: 'subagent', sessionId, subagent: { id, type: 'local_agent', description: id, status, background: true, ...extra } });
+  report('a1', 'running', { toolUseId: 'call', agent: 'Explore' });
+  report('a1', 'completed');
+  // The SDK drops a finished task from the list only when the list changes next.
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'a1', type: 'local_agent', description: 'a1' }, { id: 'b2', type: 'local_agent', description: 'b2' }] });
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'b2', type: 'local_agent', description: 'b2' }] });
+  assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'a1')?.status, 'completed');
+  // A runner that resumed the session meets it first at a follow-up.
+  report('a1', 'running', { toolUseId: 'send' });
+  const a1 = hub.subagents.list(taskId).find((s) => s.id === 'a1')!;
+  assert.equal(a1.toolUseId, 'call');
+  assert.equal(a1.agent, 'Explore');
+  // Codex's own "checking" entry is not work.
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'checking', type: 'status', description: '백그라운드 작업 상태 확인 중', state: 'unknown' }] });
+  assert.ok(!hub.subagents.list(taskId).some((s) => s.id === 'checking'));
+  // Steps of a subagent never reported are not kept.
+  runner.say({ type: 'subagent_event', sessionId, subagentId: 'nobody', event: { kind: 'user', text: 'x' } });
+  assert.equal(hub.subagents.events(taskId, sessionId, 'nobody').events.length, 0);
+});
+
+test('a subagent the turn waited for has ended when the turn ends, even without its last report', () => {
+  const { hub, runner, taskId, sessionId } = started();
+  runner.say({ type: 'subagent', sessionId, subagent: { id: 'f1', type: 'local_agent', description: 'fg', status: 'running', background: false } });
+  runner.say({ type: 'subagent', sessionId, subagent: { id: 'b1', type: 'local_agent', description: 'bg', status: 'running', background: true } });
+  runner.say({ type: 'busy', sessionId, busy: false });
+  const status = (id: string) => hub.subagents.list(taskId).find((s) => s.id === id)?.status;
+  assert.equal(status('f1'), 'ended');
+  assert.equal(status('b1'), 'running');
+});

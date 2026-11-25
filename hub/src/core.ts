@@ -29,7 +29,7 @@ export class DeskCore {
   /** Waiters of desk_ask / desk_request / desk_wait_answer, by question or request id. */
   private waiters = new Map<string, Set<() => void>>();
   private publications: HubMessage[] | null = null;
-  private eventTime?: string;
+  protected eventTime?: string;
   private effects: (()=>void)[] | null = null;
   afterCommit(effect:()=>void) { if(this.effects)this.effects.push(effect);else effect(); }
   atTime<T>(at: string | undefined, work: () => T): T {

@@ -4,7 +4,7 @@
 
 import type { Effort, EngineName, ModelName, PermissionMode } from './compose.ts';
 import type { EventKind } from './events.ts';
-import type { BackgroundTask } from './protocol.ts';
+import type { BackgroundTask, SubagentInfo } from './protocol.ts';
 
 export type TaskStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
 
@@ -108,11 +108,23 @@ export type Settings = Record<EngineName, { model: ModelName | null; effort: Eff
 
 export type RunnerConnectionProblem = 'unreachable' | 'authentication' | 'token' | 'disconnected';
 
+/**
+ * A subagent or background command one of a task's sessions started (protocol SubagentInfo).
+ * `detailed`: the runner reports it (Claude); otherwise only its start and end are known.
+ */
+export interface Subagent extends SubagentInfo {
+  session_id: string; task_id: string; detailed: boolean; created_at: string; updated_at: string;
+}
+/** A step of a subagent's conversation, kept like a thread event (`kind` user, assistant, tool, tool_result). */
+export interface SubagentEvent<P = unknown> extends WireEvent<P> { subagent_id: string }
+
 export type HubMessage<E = WireEvent, A = Approval> =
   | { type: 'event'; event: E }
   | { type: 'event_updated'; event: E }
   | { type: 'event_removed'; task_id: string; event_id: number }
   | { type: 'task'; task: TaskView<E> }
+  | { type: 'subagent'; subagent: Subagent }
+  | { type: 'subagent_event'; event: SubagentEvent }
   | { type: 'approval'; approval: A }
   | { type: 'question'; question: Question }
   | { type: 'runner'; connected: boolean; problem?: RunnerConnectionProblem }

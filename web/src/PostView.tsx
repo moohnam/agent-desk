@@ -19,7 +19,8 @@ import { modelShort } from './projects.ts';
 import { NoteEditor } from './Note.tsx';
 import { NotePreview } from './NotePreview.tsx';
 import type { Approval, HubEvent, Post, Question, TaskView } from './types.ts';
-import type { NoteContext } from '../../shared/api.ts';
+import type { NoteContext, Subagent } from '../../shared/api.ts';
+import { SubagentChips } from './subagents.tsx';
 
 interface Props {
   post: Post;
@@ -55,6 +56,11 @@ interface Props {
   onReference?: () => void;
   onAttachNote?: () => void;
   onCutNote?: (control: HTMLButtonElement) => void;
+  /** Who speaks, instead of me or the task's engine: posts in a subagent's column. */
+  speaker?: { name: string; avatar: string; tag?: string };
+  /** The subagents this post's tool calls started, shown as chips that open them. */
+  subagents?: Subagent[];
+  onSubagent?: (s: Subagent) => void;
 }
 
 const ENGINE_NAME: Record<string, string> = ENGINE_LABEL;
@@ -101,8 +107,9 @@ function samePost(a: Props, b: Props): boolean {
   // Only what the post reads from its task; keep in step with the uses below.
   if ((a.task?.engine ?? null) !== (b.task?.engine ?? null)) return false;
   if (a.task?.kind !== b.task?.kind) return false;
+  if (a.speaker?.name !== b.speaker?.name || a.speaker?.avatar !== b.speaker?.avatar || a.speaker?.tag !== b.speaker?.tag) return false;
   if ((a.task?.status === 'running') !== (b.task?.status === 'running')) return false;
-  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked', 'referenced', 'cuttingNote'] as const) {
+  for (const k of ['model', 'approval', 'question', 'colId', 'selected', 'expanded', 'working', 'flash', 'inThread', 'up', 'down', 'draft', 'picked', 'referenced', 'cuttingNote', 'subagents'] as const) {
     if (a[k] !== b[k]) return false;
   }
   return !a.onOpenThread === !b.onOpenThread && !a.onAttachNote === !b.onAttachNote && !a.onCutNote === !b.onCutNote;
@@ -133,9 +140,9 @@ function PostViewInner(props: Props) {
   const copyText = (post.kind === 'assistant' || post.kind === 'user' || post.kind === 'question') && typeof p.text === 'string' ? p.text : '';
   const postTime = post.event.edited_at ?? post.event.ts;
   const engine = task?.engine ?? 'claude';
-  const avatar = post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', userAvatar(p.author?.ownerName)] : post.kind === 'alert' ? ['alert', '!']
+  const avatar = props.speaker ? ['subagent', props.speaker.avatar] : post.kind === 'user' && p.request ? ['user', '⇄'] : post.kind === 'user' ? ['user', userAvatar(p.author?.ownerName)] : post.kind === 'alert' ? ['alert', '!']
     : [engine, ENGINE_SHORT[engineOf(engine)]];
-  const tag = isNote && !inThread ? <span className="tag via">메모</span>
+  const tag = props.speaker ? (props.speaker.tag ? <span className="tag via">{props.speaker.tag}</span> : null) : isNote && !inThread ? <span className="tag via">메모</span>
     : post.kind === 'approval' ? <span className="tag">{isAsk(p.toolName) ? '질문' : '승인 요청'}</span>
     : post.kind === 'question' ? <span className="tag">질문</span>
     : post.kind === 'alert' ? (p.state === 'interrupted' ? <span className="tag stop">중단됨</span>
@@ -151,7 +158,7 @@ function PostViewInner(props: Props) {
     : post.kind === 'user' && p.delivery === 'new' ? <span className="tag via" title="같은 프로젝트의 새 작업">#new</span>
     : null;
   // Like Twitter, say whom a post answers unless that post is drawn right above it.
-  const replyTo = !up && !isNote && post.parent ? author(post.parent, task) : null;
+  const replyTo = !up && !isNote && !props.speaker && post.parent ? author(post.parent, task) : null;
   const cls = ['post', post.kind, post.kind === 'user' && p.handoff === 'reset' && 'reset-start', props.picked !== undefined && 'pickable', props.picked && 'picked', up && 'chain-up', down && 'chain-down', selected && 'selected', flash && 'flash'];
 
   return (
@@ -173,8 +180,8 @@ function PostViewInner(props: Props) {
             <input type="checkbox" className="pick" checked={props.picked} title="재구성에 쓸 글로 고르기 (x)" aria-label="재구성에 쓸 글로 고르기"
               onClick={(e) => e.stopPropagation()} onChange={() => props.onPick?.()} />
           )}
-          <span className="name">{author(post, task)}</span>
-          {post.kind !== 'user' && model && <span className="handle">{modelShort(model)}</span>}
+          <span className="name">{props.speaker?.name ?? author(post, task)}</span>
+          {post.kind !== 'user' && model && !props.speaker && <span className="handle">{modelShort(model)}</span>}
           {tag}
           {props.draft && <span className="draft-badge" title="이 작업에 보내지 않은 답글이 있습니다 (이 기기에 저장됨)"><PenLine /> 작성 중</span>}
           <span className="spacer" />
@@ -222,6 +229,7 @@ function PostViewInner(props: Props) {
         )}
 
         <Activity events={post.activity} expanded={expanded} onToggle={props.onToggle} />
+        {!!props.subagents?.length && <SubagentChips items={props.subagents} onOpen={props.onSubagent} />}
         {working && <div className="working"><span className="dots"><span /><span /><span /></span>작업 중…</div>}
       </div>
     </article>

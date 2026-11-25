@@ -45,7 +45,7 @@ function harness() {
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const imports: Record<string, unknown> = {
     react, './api.ts': { api }, './posts.ts': { mergeTaskEvents }, './federation.ts': {},
-    './projects.ts': {}, './feedCache.ts': {}, './draftRetention.ts': {}, './sourceStream.ts': {}, './noteEvents.ts': noteEvents,
+    './projects.ts': {}, './feedCache.ts': {}, './draftRetention.ts': {}, './sourceStream.ts': {}, './noteEvents.ts': noteEvents, './subagents.tsx': {},
   };
   const context = {
     exports: {}, require: (name: string) => { assert.ok(name in imports, `missing ${name}`); return imports[name]; },
