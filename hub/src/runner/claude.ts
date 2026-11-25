@@ -1,6 +1,7 @@
 import {catalogProblem,catalogEffort} from '../../../shared/model-catalog.ts';
 import {runnerModelCatalogs} from './model-catalog.ts';
 import { randomUUID } from 'node:crypto';
+import { open } from 'node:fs/promises';
 import { query, type PermissionResult, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { modelReference, type ModelName, type Effort } from '../../../shared/compose.ts';
 import { clipResult, type StartEngine } from './engine.ts';
@@ -60,6 +61,24 @@ function resultText(content: unknown): string {
   return clipResult(text);
 }
 
+/** The end of a background command's output kept with its record. */
+const OUTPUT_MAX = 4000;
+const COMMAND_MAX = 2000;
+/** The last `OUTPUT_MAX` bytes of the file a background command wrote its output to. */
+async function outputTail(path: string): Promise<string | undefined> {
+  const file = await open(path, 'r');
+  try {
+    const { size } = await file.stat();
+    const length = Math.min(size, OUTPUT_MAX);
+    const buffer = Buffer.alloc(length);
+    await file.read(buffer, 0, length, size - length);
+    // Cut at a character, not inside one: skip the continuation bytes of a character begun before the tail.
+    let start = 0;
+    if (size > length) while (start < length && (buffer[start] & 0xc0) === 0x80) start++;
+    return (size > length ? '…\n' : '') + buffer.subarray(start).toString('utf8');
+  } finally { await file.close(); }
+}
+
 /** How often a running subagent's progress is reported, at most. */
 const PROGRESS_MS = 2000;
 /** Subagent messages kept until the subagent they belong to is known, per call and calls; past this they are dropped. */
@@ -91,6 +110,20 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
   // A command the turn waits for is an ordinary tool call, shown in the thread; it is recorded only
   // if it moves to the background.
   const foreground = new Map<string, SubagentInfo>();
+  // Bash calls' commands, by call: a background command's task names only its call.
+  const commands = new Map<string, string>();
+  // What a background subagent handed back (SubagentHandback): its result, where the notice says only that it was sent.
+  const answers = new Map<string, string>();
+  const remember = (m: SDKMessage) => {
+    if (m.type !== 'assistant') return;
+    for (const block of m.message.content) {
+      if (block.type !== 'tool_use' || block.name !== 'Bash') continue;
+      const command = (block.input as { command?: unknown })?.command;
+      if (typeof command !== 'string') continue;
+      commands.set(block.id, command.slice(0, COMMAND_MAX));
+      if (commands.size > 200) commands.delete(commands.keys().next().value!);
+    }
+  };
   // Each run (a follow-up starts another) has its id; frames of an earlier run that come late are dropped.
   const runs = new Map<string, string>();
   const late = (taskId: string, runId?: string) => !!runId && (runs.get(taskId) ?? '') > runId;
@@ -117,9 +150,14 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
   };
   /** Whether `m` was a subagent's (handled here) rather than the main conversation's. */
   return (m: SDKMessage): boolean => {
+    remember(m);
     if ((m.type === 'assistant' || m.type === 'user') && m.parent_tool_use_id) {
       const id = byToolUse.get(m.parent_tool_use_id);
       const events = eventsOf(m);
+      if (id && m.type === 'assistant') for (const block of m.message.content) {
+        const message = block.type === 'tool_use' && block.name === 'SubagentHandback' ? (block.input as { message?: unknown })?.message : undefined;
+        if (typeof message === 'string') answers.set(id, message);
+      }
       if (id) for (const event of events) send(id, event);
       else {
         const waiting = early.get(m.parent_tool_use_id) ?? [];
@@ -139,6 +177,7 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
         ...(m.subagent_type && { agent: m.subagent_type }), status: 'running',
         ...(m.is_backgrounded !== undefined && { background: m.is_backgrounded }),
         ...(m.parent_task_id && { parentId: m.parent_task_id }), ...(!previous && m.tool_use_id && { toolUseId: m.tool_use_id }),
+        ...(!previous && m.tool_use_id && commands.has(m.tool_use_id) && { command: commands.get(m.tool_use_id) }),
         summary: undefined,
       };
       if (!previous && info.type === 'local_bash' && !info.background) { foreground.set(m.task_id, info); return true; }
@@ -167,8 +206,11 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
         update(m.task_id, { ...(status && { status }), ...(m.patch.is_backgrounded !== undefined && { background: m.patch.is_backgrounded }) });
     } else if (m.subtype === 'task_notification') {
       if (late(m.task_id, m.run_id) || foreground.delete(m.task_id)) return true;
-      update(m.task_id, { status: m.status, summary: clipResult(m.summary ?? ''),
+      update(m.task_id, { status: m.status, summary: clipResult(answers.get(m.task_id) ?? m.summary ?? ''),
         ...(m.usage && { usage: { tokens: m.usage.total_tokens, toolUses: m.usage.tool_uses, durationMs: m.usage.duration_ms } }) });
+      // A command's output stays in its file on this machine; its end goes with the record.
+      if (known.get(m.task_id)?.type === 'local_bash' && m.output_file)
+        void outputTail(m.output_file).then(output => { if (output) update(m.task_id, { output }); }, () => {});
     } else return false;
     return true;
   };

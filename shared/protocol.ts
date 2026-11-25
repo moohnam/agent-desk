@@ -91,6 +91,9 @@ export interface SubagentInfo {
   parentId?: string;
   /** The tool call (Agent, Bash…) that started it, in the conversation of its parent. */
   toolUseId?: string;
+  /** A background command: the command it ran, and the end of what it printed once it ended. */
+  command?: string;
+  output?: string;
   usage?: { tokens: number; toolUses: number; durationMs: number };
   lastTool?: string;
   /** Its result when it ended, or a one-line progress note while it runs. */

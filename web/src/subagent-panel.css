@@ -16,7 +16,7 @@
 .sa-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); max-height: 30%; overflow-y: auto; }
 .sa-tab { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--col); color: var(--muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sa-tab.on { color: var(--text); border-color: var(--line); background: var(--sel); font-weight: 600; }
-.sa-tab.more { color: var(--accent); border-style: dashed; }
+.sa-strip .link { font-size: 12px; }
 .sa-tabmeta { color: var(--faint); font-weight: 400; }
 .sa-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
 
@@ -45,4 +45,6 @@
 .sa-command-head b { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sa-command-head time { color: var(--muted); font-size: 11.5px; }
 .sa-command .sa-meta { padding-left: 15px; }
+.sa-command-line { display: block; margin: 3px 0 0 15px; font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-command.open .sa-command-line { white-space: pre-wrap; overflow-wrap: anywhere; }
 .sa-command-out { margin: 6px 0 0 15px; padding: 6px 8px; max-height: 240px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--hover); border-radius: 6px; }

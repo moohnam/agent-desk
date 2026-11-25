@@ -57,16 +57,22 @@ export function useSubagents(taskId: string | null, reload = 0): Subagent[] {
 export function useSubagentEvents(s: Subagent | undefined) {
   const [state, setState] = useState<{ events: HubEvent[]; more: boolean; loading: boolean; error?: string }>({ events: [], more: false, loading: true });
   const busy = useRef(false);
+  // A whole reload asked for while another load runs comes after it.
+  const reloadAfter = useRef(false);
   const key = s && subagentKey(s);
   const load = async (before?: number) => {
-    if (!s || busy.current) return;
+    if (!s) return;
+    if (busy.current) { if (before === undefined) reloadAfter.current = true; return; }
     busy.current = true;
     setState(prev => ({ ...prev, loading: true }));
     try {
       const page = await api.subagentEvents(s, before);
       setState(prev => ({ events: mergeTaskEvents(prev.events, page.events), more: before || !prev.events.length ? page.more : prev.more, loading: false }));
     } catch (e) { setState(prev => ({ ...prev, loading: false, error: e instanceof Error ? e.message : String(e) })); }
-    finally { busy.current = false; }
+    finally {
+      busy.current = false;
+      if (reloadAfter.current) { reloadAfter.current = false; void load(); }
+    }
   };
   useEffect(() => {
     if (!s) return;

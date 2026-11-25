@@ -31,7 +31,8 @@ export class Subagents {
     return this.db.prepare('SELECT * FROM subagent WHERE session_id = ? AND id = ?').get(sessionId, id) as unknown as Row | undefined;
   }
   private save(session: Session, full: SubagentInfo, detailed: boolean, listed: boolean, at: string) {
-    const info = { ...full, description: full.description.slice(0, 500), ...(full.summary && { summary: full.summary.slice(0, 8000) }) };
+    const info = { ...full, description: full.description.slice(0, 500), ...(full.summary && { summary: full.summary.slice(0, 8000) }),
+      ...(full.command && { command: full.command.slice(0, 2000) }), ...(full.output && { output: full.output.slice(-4000) }) };
     const created = this.row(session.id, info.id)?.created_at ?? at;
     this.db.prepare(`INSERT INTO subagent (session_id, id, task_id, status, detailed, listed, info_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (session_id, id) DO UPDATE SET status = excluded.status,
@@ -48,7 +49,7 @@ export class Subagents {
     const row = this.row(session.id, info.id);
     const known: Partial<SubagentInfo> = row ? JSON.parse(row.info_json) : {};
     this.save(session, { ...info, toolUseId: known.toolUseId ?? info.toolUseId, agent: info.agent ?? known.agent,
-      parentId: info.parentId ?? known.parentId }, true, row?.listed === 1, at);
+      parentId: info.parentId ?? known.parentId, command: info.command ?? known.command, output: info.output ?? known.output }, true, row?.listed === 1, at);
   }
 
   /** One step of a subagent's conversation; live copies come cut like a thread's (feedEvent). */

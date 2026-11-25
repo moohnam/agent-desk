@@ -1,7 +1,7 @@
-// The subagent pane: in the place of the pinned posts and the code view, beside the thread. A strip
-// of the task's subagents, a column for each one switched on (running ones switch on by themselves)
-// with what it was told, said and did, like a thread; and one column of every background command,
-// the subagents' too, in the order they started.
+// The subagent pane: in the place of the pinned posts and the code view, beside the thread. A column
+// for each of the task's subagents with what it was told, said and did, like a thread, and one column
+// of every background command, the subagents' too, in the order they started. All show; the strip
+// takes columns out and puts them back.
 
 import { Bot, PanelLeftClose, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
@@ -11,12 +11,29 @@ import { buildPosts } from './posts.ts';
 import { PostView } from './PostView.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useNow } from './clock.ts';
-import type { Post, TaskView } from './types.ts';
+import type { HubEvent, Post, TaskView } from './types.ts';
 
-/** Finished ones shown in the strip before "끝난 항목 N개 더". */
-const DONE_SHOWN = 6;
 const COLUMN_MIN = 300;
 const WIDTH_STEP = 40;
+/** The tool a background subagent hands its answer back to its parent with. */
+const HANDBACK = 'SubagentHandback';
+/** A handed-back answer reads as what the subagent said; the tool's own receipt is left out. */
+function withAnswers(events: HubEvent[]): HubEvent[] {
+  const calls = new Set<string>();
+  return events.flatMap(e => {
+    if (e.kind === 'tool' && e.payload.name === HANDBACK && typeof e.payload.input?.message === 'string') {
+      calls.add(e.payload.toolUseId);
+      return [{ ...e, kind: 'assistant', payload: { text: e.payload.input.message, handback: true, clipped: e.payload.clipped } }];
+    }
+    return e.kind === 'tool_result' && calls.has(e.payload.toolUseId) ? [] : [e];
+  });
+}
+
+/** What Codex calls a background command it cannot name. */
+const CODEX_UNNAMED = '백그라운드 명령';
+/** The CLI's note to the parent agent that a handed-back report came as a message: nothing for a person to read. */
+const isHandoffNotice = (summary: string) => summary.startsWith("This agent's report was delivered");
+
 /** The key of the background commands' column. */
 const COMMANDS = 'commands';
 
@@ -41,77 +58,63 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   const commands = useMemo(() => subagents.filter(isCommand), [subagents]);
   const byKey = useMemo(() => new Map(agents.map(s => [subagentKey(s), s])), [agents]);
   const columnOf = (key: string) => commands.some(s => subagentKey(s) === key) ? COMMANDS : key;
-  const exists = (key: string) => key === COMMANDS ? commands.length > 0 : byKey.has(key);
   const [commandFocus, setCommandFocus] = useState<{ key: string; n: number }>();
-  // Shown columns, in order. Running ones come on by themselves unless switched off here; with none
-  // running, the newest one shows first.
-  const [on, setOn] = useState<string[]>([]);
-  const switchedOff = useRef(new Set<string>());
-  const seeded = useRef(false);
-  const [allDone, setAllDone] = useState(false);
-  const [focus, setFocus] = useState<number | null>(null);
+  // Every column shows (the commands' first, then the subagents as they started) but those taken out here.
+  const all = useMemo(() => [...(commands.length ? [COMMANDS] : []), ...agents.map(subagentKey)], [agents, commands]);
+  const [off, setOff] = useState<ReadonlySet<string>>(() => new Set());
+  const on = all.filter(k => !off.has(k));
+  // The focused column by key, so a column coming in ahead of it does not move the focus.
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const focus = focusKey && on.includes(focusKey) ? on.indexOf(focusKey) : null;
   const [widths, setWidths] = useState<Record<string, number>>({});
   const handles = useRef(new Map<string, ColumnHandle>());
   const colsRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLElement>(null);
 
-  useEffect(() => {
-    setOn(prev => {
-      const known = prev.filter(exists);
-      const started = agents.filter(s => isActive(s) && !known.includes(subagentKey(s)) && !switchedOff.current.has(subagentKey(s))).map(subagentKey);
-      if (commands.some(isActive) && !known.includes(COMMANDS) && !switchedOff.current.has(COMMANDS)) started.push(COMMANDS);
-      const next = [...known, ...started];
-      if (!seeded.current && subagents.length) {
-        seeded.current = true;
-        if (!next.length && !reveal) next.push(agents.length ? subagentKey(agents[agents.length - 1]) : COMMANDS);
-      }
-      return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next;
-    });
-  }, [subagents]);
-
-  const scrollTo = (index: number) => requestAnimationFrame(() =>
-    (colsRef.current?.children[index] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
-  const moveFocus = (index: number | null) => { setFocus(index); if (index != null) scrollTo(index); };
+  const scrollTo = (key: string) => requestAnimationFrame(() =>
+    colsRef.current?.querySelector(`[data-column="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
+  const moveFocus = (key: string | null) => { setFocusKey(key); if (key) scrollTo(key); };
   const toggle = (key: string) => {
     const index = on.indexOf(key);
+    const next = new Set(off);
     if (index < 0) {
-      switchedOff.current.delete(key);
-      setOn([...on, key]);
-      scrollTo(on.length);
+      next.delete(key);
+      setOff(next);
+      scrollTo(key);
       return;
     }
-    switchedOff.current.add(key);
-    setOn(on.filter(k => k !== key));
-    setFocus(f => f == null || on.length <= 1 ? null : Math.min(f > index ? f - 1 : f, on.length - 2));
+    next.add(key);
+    setOff(next);
+    if (focusKey === key) setFocusKey(on[index + 1] ?? on[index - 1] ?? null);
   };
 
-  const revealed = !!reveal && exists(columnOf(reveal.key));
+  const revealed = !!reveal && all.includes(columnOf(reveal.key));
   useEffect(() => {
     if (!reveal || !revealed) return;
     const column = columnOf(reveal.key);
-    switchedOff.current.delete(column);
-    const at = on.indexOf(column);
-    if (at < 0) setOn([...on, column]);
-    moveFocus(at < 0 ? on.length : at);
+    const next = new Set(off);
+    next.delete(column);
+    setOff(next);
+    moveFocus(column);
     if (column === COMMANDS) setCommandFocus({ key: reveal.key, n: reveal.n });
   }, [reveal?.n, revealed]);
 
   keys.current = {
     focused: () => focus != null,
-    enter: () => { if (!on.length) return false; moveFocus(on.length - 1); return true; },
+    enter: () => { if (!on.length) return false; moveFocus(on[on.length - 1]); return true; },
     key: (k) => {
       if (focus == null) return false;
       const handle = handles.current.get(on[focus]);
       switch (k) {
-        case 'h': case 'ArrowLeft': if (focus > 0) moveFocus(focus - 1); return true;
-        case 'l': case 'ArrowRight': moveFocus(focus < on.length - 1 ? focus + 1 : null); return true;
+        case 'h': case 'ArrowLeft': if (focus > 0) moveFocus(on[focus - 1]); return true;
+        case 'l': case 'ArrowRight': moveFocus(on[focus + 1] ?? null); return true;
         case 'j': case 'ArrowDown': handle?.step(1); return true;
         case 'k': case 'ArrowUp': handle?.step(-1); return true;
         case 'G': handle?.edge(1); return true;
         case 'gg': handle?.edge(-1); return true;
         case 'o': case ' ': handle?.toggle(); return true;
         case '<': case '>': {
-          const width = widths[on[focus]] ?? (colsRef.current?.children[focus] as HTMLElement | undefined)?.offsetWidth ?? COLUMN_MIN;
+          const width = widths[on[focus]] ?? colsRef.current?.querySelector<HTMLElement>(`[data-column="${CSS.escape(on[focus])}"]`)?.offsetWidth ?? COLUMN_MIN;
           setWidths({ ...widths, [on[focus]]: Math.max(COLUMN_MIN, width + (k === '>' ? WIDTH_STEP : -WIDTH_STEP)) });
           return true;
         }
@@ -123,17 +126,11 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   // A click outside the pane hands the keys back to the thread.
   useEffect(() => {
     if (focus == null) return;
-    const away = (e: PointerEvent) => { if (!paneRef.current?.contains(e.target as Node)) setFocus(null); };
+    const away = (e: PointerEvent) => { if (!paneRef.current?.contains(e.target as Node)) setFocusKey(null); };
     window.addEventListener('pointerdown', away);
     return () => window.removeEventListener('pointerdown', away);
   }, [focus]);
-  useEffect(() => { if (focus != null && focus >= on.length) setFocus(on.length ? on.length - 1 : null); }, [focus, on.length]);
 
-  const shown = on.filter(exists);
-  const shownAgents = shown.map(k => byKey.get(k)).filter((s): s is Subagent => !!s);
-  const rest = agents.filter(s => !on.includes(subagentKey(s)));
-  const restDone = rest.filter(s => !isActive(s)).reverse();
-  const strip = [...shownAgents, ...rest.filter(isActive), ...(allDone ? restDone : restDone.slice(0, DONE_SHOWN))];
   const running = subagents.filter(isActive).length;
   const commandsRunning = commands.filter(isActive).length;
   const setHandle = (key: string) => (h: ColumnHandle | null) => { if (h) handles.current.set(key, h); else handles.current.delete(key); };
@@ -149,38 +146,37 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
         <div className="sa-strip" role="group" aria-label="서브 에이전트 목록">
           {commands.length > 0 && (
             <button type="button" className={`sa-tab ${commandsRunning ? 'running' : 'done'}${on.includes(COMMANDS) ? ' on' : ''}`} aria-pressed={on.includes(COMMANDS)}
-              title={`백그라운드 명령을 시간 순으로 한 컬럼에서 봅니다 · 누르면 컬럼을 ${on.includes(COMMANDS) ? '닫습니다' : '엽니다'}`} onClick={() => toggle(COMMANDS)}>
+              title={`백그라운드 명령을 시간 순으로 한 컬럼에서 봅니다 · 누르면 컬럼을 ${on.includes(COMMANDS) ? '뺍니다' : '넣습니다'}`} onClick={() => toggle(COMMANDS)}>
               <span className="sa-dot" />백그라운드 작업 {commands.length}
               {commandsRunning > 0 && <span className="sa-tabmeta">실행 중 {commandsRunning}</span>}
             </button>
           )}
-          {commands.length > 0 && strip.length > 0 && <span className="sa-sep" />}
-          {strip.map((s, i) => {
+          {commands.length > 0 && agents.length > 0 && <span className="sa-sep" />}
+          {agents.map(s => {
             const key = subagentKey(s);
-            const isOn = on.includes(key);
-            return [
-              i === shownAgents.length && shownAgents.length > 0 && <span key="sep" className="sa-sep" />,
+            const isOn = !off.has(key);
+            return (
               <button key={key} type="button" className={`sa-tab ${subagentTone(s)}${isOn ? ' on' : ''}`} aria-pressed={isOn}
-                title={`${subagentMeta(s, now)} · 누르면 컬럼을 ${isOn ? '닫습니다' : '엽니다'}`} onClick={() => toggle(key)}>
+                title={`${subagentMeta(s, now)} · 누르면 컬럼을 ${isOn ? '뺍니다' : '넣습니다'}`} onClick={() => toggle(key)}>
                 <span className="sa-dot" />{s.parentId ? '↳ ' : ''}{subagentTitle(s)}
                 <span className="sa-tabmeta">{isActive(s) ? elapsed(s, now) : statusText(s)}</span>
-              </button>,
-            ];
+              </button>
+            );
           })}
-          {!allDone && restDone.length > DONE_SHOWN && (
-            <button type="button" className="sa-tab more" onClick={() => setAllDone(true)}>끝난 항목 {restDone.length - DONE_SHOWN}개 더</button>
-          )}
+          <span className="sa-sep" />
+          <button type="button" className="link" disabled={!off.size} onClick={() => setOff(new Set())}>초기화</button>
+          <button type="button" className="link" disabled={!on.length} onClick={() => { setOff(new Set(all)); setFocusKey(null); }}>모두 빼기</button>
         </div>
       )}
       <div className="sa-cols" ref={colsRef}>
         {!subagents.length && <p className="empty">이 작업에서 실행한 서브 에이전트나 백그라운드 명령이 아직 없습니다.</p>}
-        {subagents.length > 0 && !shown.length && <p className="empty">위 목록에서 볼 항목을 누르세요.</p>}
-        {shown.map((key, i) => key === COMMANDS ? (
+        {subagents.length > 0 && !on.length && <p className="empty">모든 컬럼을 뺐습니다. 위 목록에서 고르거나 초기화로 다시 넣으세요.</p>}
+        {on.map((key, i) => key === COMMANDS ? (
           <CommandsColumn key={key} commands={commands} all={subagents} focused={focus === i} width={widths[key]} reveal={commandFocus}
-            handle={setHandle(key)} onFocus={() => setFocus(i)} onHide={() => toggle(key)} />
+            handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} />
         ) : (
           <SubagentColumn key={key} s={byKey.get(key)!} task={task} engine={engine} focused={focus === i} width={widths[key]}
-            handle={setHandle(key)} onFocus={() => setFocus(i)} onHide={() => toggle(key)} onError={onError} />
+            handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} onError={onError} />
         ))}
       </div>
     </aside>
@@ -193,7 +189,12 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
 }) {
   const now = useNow();
   const { events, more, loading, error, older, whole } = useSubagentEvents(s.detailed ? s : undefined);
-  const posts = useMemo(() => buildPosts(events), [events]);
+  const posts = useMemo(() => buildPosts(withAnswers(events)), [events]);
+  // The answer to the latest instruction: a follow-up after it starts a run that answers anew.
+  const answer = posts.findLast(p => p.event.payload.handback || p.kind === 'user');
+  const handedBack = answer?.event.payload.handback ? answer : undefined;
+  // A live answer comes cut like any tool input; it is read whole.
+  useEffect(() => { if (handedBack?.event.payload.clipped) void whole(); }, [handedBack?.id, handedBack?.event.payload.clipped]);
   const [sel, setSel] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
   const feed = useRef<HTMLDivElement>(null);
@@ -225,11 +226,11 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
   const firstPrompt = posts.find(p => p.kind === 'user')?.id;
   const speaker = (p: Post) => p.kind === 'user'
     ? { name: `${engine} → ${subagentKind(s) === '명령' ? '명령' : '서브 에이전트'}`, avatar: '↳', tag: p.id === firstPrompt ? '지시문' : '추가 지시' }
-    : { name: subagentKind(s), avatar: 'SA' };
+    : { name: subagentKind(s), avatar: 'SA', ...(p.event.payload.handback && { tag: `${engine}에게 보낸 답` }) };
 
   return (
     <section className={`column sa-col ${subagentTone(s)}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
-      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} onMouseDown={onFocus}>
+      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
       <header className="col-head sa-colhead">
         <span className="sa-dot" />
         <div className="sa-titles">
@@ -254,7 +255,8 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
         ))}
         {isActive(s) ? (
           <div className="sa-working"><span className="sa-dot" />작업 중{s.lastTool ? ` · 마지막 도구 ${s.lastTool}` : ''}{s.summary ? ` · ${s.summary}` : ''}</div>
-        ) : s.summary ? (
+        ) : handedBack && s.status !== 'failed' ? <p className="sa-note">{statusText(s)} · {elapsed(s, now)} · 위 글이 {engine}에게 돌려준 답입니다.</p>
+        : s.summary && !isHandoffNotice(s.summary) ? (
           <div className={`sa-result${s.status === 'failed' ? ' error' : ''}`}>
             <b>결과 · {statusText(s)}</b>
             <Markdown text={s.summary} taskId={task.id} onNotice={onError} />
@@ -265,7 +267,7 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
   );
 }
 
-/** Every background command, the subagents' too, in the order they started; o opens one's result. */
+/** Every background command, the subagents' too, in the order they started: what it does, the command, how it ended and how long it took; o opens its output. */
 function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus, onHide }: {
   commands: Subagent[]; all: Subagent[]; focused: boolean; width?: number; reveal?: { key: string; n: number };
   handle: (h: ColumnHandle | null) => void; onFocus: () => void; onHide: () => void;
@@ -299,7 +301,7 @@ function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus
 
   return (
     <section className={`column sa-col${running ? ' running' : ' done'}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
-      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" onMouseDown={onFocus}>
+      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" data-column={COMMANDS} onMouseDown={onFocus}>
       <header className="col-head sa-colhead">
         <span className="sa-dot" />
         <div className="sa-titles">
@@ -314,13 +316,21 @@ function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus
       }}>
         {commands.map(s => {
           const key = subagentKey(s), from = starter(s), isOpen = open.has(key);
+          // Codex names a command by the command itself.
+          const command = s.command ?? (s.type === 'shell' && s.description !== CODEX_UNNAMED ? s.description : undefined);
+          const title = s.command || s.type !== 'shell' ? s.description : CODEX_UNNAMED;
+          const exit = /exit code (\d+)\)?\s*$/.exec(s.summary ?? '')?.[1];
+          const result = s.output ?? (s.summary && !isHandoffNotice(s.summary) ? s.summary : undefined);
           return (
-            <div key={key} data-command={key} className={`sa-command ${subagentTone(s)}${sel === key ? ' selected' : ''}`}
-              onClick={() => { setSel(key); if (s.summary) toggle(key); }}>
-              <div className="sa-command-head"><span className="sa-dot" /><b title={s.description}>{s.description}</b>
+            <div key={key} data-command={key} className={`sa-command ${subagentTone(s)}${sel === key ? ' selected' : ''}${isOpen ? ' open' : ''}`}
+              onClick={() => { setSel(key); if (!window.getSelection()?.toString()) toggle(key); }}>
+              <div className="sa-command-head"><span className="sa-dot" /><b title={title}>{title}</b>
                 <time dateTime={s.created_at}>{new Date(s.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</time></div>
-              <div className="sa-meta">{[isActive(s) ? '실행 중' : statusText(s), elapsed(s, now), from && `${subagentTitle(from)}에서`].filter(Boolean).join(' · ')}</div>
-              {s.summary && (isOpen ? <pre className="sa-command-out">{s.summary}</pre> : <div className="sa-meta">결과 보기 (o)</div>)}
+              {command && <code className="sa-command-line" title={command}>$ {command}</code>}
+              <div className="sa-meta">{[isActive(s) ? '실행 중' : statusText(s), exit !== undefined && `종료 코드 ${exit}`, elapsed(s, now),
+                from && `${subagentTitle(from)}에서`].filter(Boolean).join(' · ')}</div>
+              {isOpen ? (result ? <pre className="sa-command-out">{result}</pre> : <div className="sa-meta">{isActive(s) ? '끝나면 출력이 표시됩니다.' : '기록된 출력이 없습니다.'}</div>)
+                : result && <div className="sa-meta">{s.output ? '출력 보기 (o)' : '결과 보기 (o)'}</div>}
             </div>
           );
         })}

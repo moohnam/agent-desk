@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { subagentTracker } from '../../hub/src/runner/claude.ts';
 import { checkHubToRunner, checkRunnerToHub, type RunnerToHub } from '../../shared/protocol.ts';
@@ -71,4 +74,38 @@ test('a command the turn waits for is recorded only once it moves to the backgro
   track(sdk({ type: 'system', subtype: 'task_updated', task_id: 'b2', patch: { is_backgrounded: true } }));
   const last = out.at(-1);
   assert.ok(last?.type === 'subagent' && last.subagent.id === 'b2' && last.subagent.background === true);
+});
+
+test('a background command is recorded with its command and the end of its output', async () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  const file = join(mkdtempSync(join(tmpdir(), 'desk-output-')), 'out.txt');
+  writeFileSync(file, 'x'.repeat(5000) + 'done\n');
+  track(sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'npm test', run_in_background: true } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 'c1', description: '테스트 실행', task_type: 'local_bash', is_backgrounded: true }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: 'completed (exit code 0)', output_file: file }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const last = out.filter((m) => m.type === 'subagent').at(-1);
+  assert.ok(last?.type === 'subagent');
+  assert.equal(last.subagent.command, 'npm test');
+  assert.equal(last.subagent.status, 'completed');
+  assert.ok(last.subagent.output?.endsWith('done\n') && last.subagent.output.length <= 4002);
+});
+
+test('a long output is cut at a character, and a handed-back answer is the result', async () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  const file = join(mkdtempSync(join(tmpdir(), 'desk-output-')), 'out.txt');
+  writeFileSync(file, '가'.repeat(3000));
+  track(sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'x' } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 'c1', description: 'd', task_type: 'local_bash', is_backgrounded: true }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: '', output_file: file }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', tool_use_id: 'call', description: 'd', task_type: 'local_agent', is_backgrounded: true }));
+  track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'tool_use', id: 'h', name: 'SubagentHandback', input: { message: '찾았습니다' } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'a1', status: 'completed', summary: "This agent's report was delivered to you as a message", output_file: '' }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const reports = out.filter((m) => m.type === 'subagent').map((m) => m.type === 'subagent' ? m.subagent : undefined);
+  const command = reports.filter((r) => r?.id === 'b1').at(-1)!;
+  assert.ok(command.output?.startsWith('…\n가') && !command.output.includes('\uFFFD'));
+  assert.equal(reports.filter((r) => r?.id === 'a1').at(-1)?.summary, '찾았습니다');
 });
