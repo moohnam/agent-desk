@@ -145,7 +145,9 @@ function editorEvents(page, cdp) {
   };
 }
 
-test('Vim replies obey mode boundaries and keep IME composition separate', { timeout: 60_000 }, async t => {
+// This shared-browser fixture runs 56 scenarios sequentially. Allow CI headroom
+// for their combined duration; keep the 5-second default and explicit wait limits.
+test('Vim replies obey mode boundaries and keep IME composition separate', { timeout: 180_000 }, async t => {
   const server = fixtureServer();
   await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
   const origin = `http://127.0.0.1:${server.address().port}`;
