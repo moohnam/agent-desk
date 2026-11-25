@@ -15,7 +15,7 @@ test('thread usage details support mouse, keyboard and touch within the viewport
       let body=data(url)??[];
       if(url.pathname==='/api/state') body={...body,tasks:body.tasks.map(t=>({...t,runner_id:'test-runner',runner_connected:false,source:'app'}))};
       if(/\/tasks\/[^/]+\/events$/.test(url.pathname))body={events:[{id:999,task_id:url.pathname.split('/')[3],kind:'status',ts:'2026-11-25T00:00:00Z',payload:{state:'started',detail:{model:'claude-sonnet-4-6'}}}],more:false};
-      if(url.pathname==='/api/runner-usage')body=url.searchParams.has('engine')?{status:'offline',value:{engine:'claude',plan:null,fetchedAt:'2026-11-25T00:00:00Z',windows:[{label:'5시간',usedPercent:20,resetsAt:'2026-11-25T05:00:00Z',applicability:'all'},{label:'주간',usedPercent:65,resetsAt:null,applicability:'all'},{label:'Opus',usedPercent:99,resetsAt:null,applicability:'opus'}]}}:[{id:'local',runnerId:'test-runner',label:'test'}];
+      if(url.pathname==='/api/runner-usage')body=url.searchParams.has('engine')?{status:'offline',value:{engine:'claude',plan:null,fetchedAt:'2026-11-25T00:00:00Z',windows:[{label:'5시간',usedPercent:20,resetsAt:'2026-11-25T05:00:00Z',applicability:'all'},{label:'주간',usedPercent:65,resetsAt:null,applicability:'all'},{label:'Opus',usedPercent:99,resetsAt:null,applicability:'opus'},...Array.from({length:20},(_,i)=>({label:`추가 ${i}`,usedPercent:1,resetsAt:null,applicability:'all'}))]}}:[{id:'local',runnerId:'test-runner',label:'test'}];
       res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(body));return;
     }
     try {const file=resolve(dist,url.pathname==='/'?'index.html':'.'+url.pathname);if(!file.startsWith(dist+sep))throw Error();const bytes=await readFile(file);res.writeHead(200,{'content-type':{'.html':'text/html','.js':'text/javascript','.css':'text/css'}[extname(file)]??'application/octet-stream'}).end(bytes);}catch{res.writeHead(404).end();}
@@ -36,8 +36,23 @@ test('thread usage details support mouse, keyboard and touch within the viewport
       await page.waitForSelector(detail);assert.match(await page.$eval(detail,e=>e.textContent),/조회/);
       const bounds=await page.$eval(detail,e=>({left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,width:innerWidth}));
       assert.ok(bounds.left>=0&&bounds.right<=bounds.width,JSON.stringify(bounds));
+      if(!touch){
+        const from=await page.$eval(button,e=>{const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
+        const to=await page.$eval(detail,e=>{const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+30};});
+        await page.mouse.move(from.x,from.y);await page.mouse.move(to.x,to.y,{steps:15});
+        await new Promise(resolve=>setTimeout(resolve,180));
+        assert.ok(await page.$(detail),'pointer can cross into details and remain there');
+        await page.mouse.wheel({deltaY:150});
+        await page.waitForFunction(selector=>document.querySelector(selector)?.scrollTop>0,{},detail);
+        assert.ok(await page.$(detail),'details scrolling keeps the popup open');
+      }
       await page.focus(button);await page.keyboard.press('Escape');await page.waitForSelector(detail,{hidden:true});
       await page.keyboard.press('Enter');await page.waitForSelector(detail);
+      await page.$eval('.thread-usage',e=>e.style.transform='translateX(3px)');
+      await page.waitForSelector(detail,{hidden:true});
+      await page.focus(button);await page.keyboard.press('Enter');await page.waitForSelector(detail);
+      await page.setViewport({width:touch?410:1000,height:844,isMobile:touch,hasTouch:touch});
+      await page.waitForSelector(detail,{hidden:true});
       await page.close();
     }
   }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

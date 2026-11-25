@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { engineOf } from '../../shared/compose.ts';
 import { checkUsageReading, checkUsageTargets, type UsageReading } from '../../shared/runner-usage.ts';
 import type { TaskView } from './types.ts';
@@ -14,13 +14,46 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
   const enabled = !!runner && source === runnerSource && task.source !== 'external' && engine !== 'agy' && !!model;
   const key = JSON.stringify([source, runner, engine]);
   const [result, setResult] = useState<{ key: string; reading: UsageReading }>();
+  const anchor = useRef<HTMLSpanElement>(null);
+  const leaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const close = () => { clearTimeout(leaveTimer.current); setOpen(false); setHovered(false); };
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [position, setPosition] = useState({left: 0, top: 0});
   const place = (element: HTMLElement) => {
     const rect = element.getBoundingClientRect();
-    setPosition({left: Math.max(8, Math.min(rect.left, window.innerWidth - 284)), top: rect.bottom + 4});
+    setPosition({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom});
   };
+  useEffect(() => {
+    close();
+  }, [task.id, model]);
+  useEffect(() => {
+    if (!open && !hovered) return;
+    const repositioned = (event: Event) => {
+      // Scrolling the details themselves must remain possible.
+      if (event.type === 'scroll' && event.target instanceof Node && anchor.current?.contains(event.target)) return;
+      close();
+    };
+    // A column can move without a window scroll/resize event. Observe the anchor
+    // only while details are visible, and close rather than leave a detached popup.
+    const origin = anchor.current?.getBoundingClientRect();
+    let frame = 0;
+    const checkPosition = () => {
+      const rect = anchor.current?.getBoundingClientRect();
+      if (!rect || !origin || rect.left !== origin.left || rect.top !== origin.top
+        || rect.width !== origin.width || rect.height !== origin.height) { close(); return; }
+      frame = window.requestAnimationFrame(checkPosition);
+    };
+    if (origin) frame = window.requestAnimationFrame(checkPosition);
+    window.addEventListener('scroll', repositioned, true);
+    window.addEventListener('resize', repositioned);
+    return () => {
+      window.removeEventListener('scroll', repositioned, true);
+      window.removeEventListener('resize', repositioned);
+      clearTimeout(leaveTimer.current);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [open, hovered]);
   useEffect(() => {
     setOpen(false); setHovered(false);
     if (!enabled) return;
@@ -56,14 +89,15 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
   if (!windows.length || !value) return null;
   const remaining = Math.round(Math.min(...windows.map(w => 100 - w.usedPercent!)) * 10) / 10;
   const stale = reading?.status !== 'ready' || task.runner_connected === false;
-  return <span className={`thread-usage${stale ? ' stale' : ''}`} onPointerEnter={e => { if (e.pointerType === 'mouse') { place(e.currentTarget); setHovered(true); } }} onPointerLeave={() => setHovered(false)}
-    onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); setHovered(false); }}
-    onKeyDown={e => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); setOpen(false); setHovered(false); } }}>
+  return <span ref={anchor} className={`thread-usage${stale ? ' stale' : ''}`} onPointerEnter={e => { if (e.pointerType === 'mouse') { clearTimeout(leaveTimer.current); place(e.currentTarget); setHovered(true); } }}
+    onPointerLeave={() => { leaveTimer.current = setTimeout(() => setHovered(false), 120); }}
+    onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) close(); }}
+    onKeyDown={e => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); close(); anchor.current?.querySelector('button')?.focus(); } }}>
     <button type="button" aria-label={`사용량 한도 ${remaining}% 남음${stale ? ' · 마지막 조회값' : ''}`} aria-expanded={open || hovered}
       onClick={e => { place(e.currentTarget); setOpen(v => !v); }}>
       <span className="thread-usage-track" aria-hidden="true"><i style={{width: `${remaining}%`}} /></span>{remaining}% 남음
     </button>
-    {(open || hovered) && <span className="thread-usage-detail" style={position} role="status">
+    {(open || hovered) && <span className="thread-usage-detail" style={position} role="status" tabIndex={0}>
       {stale && <span>연결 대기 또는 조회 실패 · 마지막 조회값</span>}
       {windows.map((w, i) => <span key={i}>{w.label}: {Math.round((100 - w.usedPercent!) * 10) / 10}% 남음<br />
         초기화 {w.resetsAt ? new Date(w.resetsAt).toLocaleString('ko-KR') : '정보 없음'}</span>)}
