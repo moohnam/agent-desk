@@ -397,6 +397,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await page.keyboard.press('Escape');await page.waitForSelector('.code-panel',{hidden:true});
         assert.ok(await page.$('.thread-head'),'Escape must keep the current thread');
       };
+      await page.click('[aria-label="코드 변경 보기"]');await closed(); // No data/bundle readiness wait.
       for(const focus of ['opener','commit','file','body','line']){
         await open();
         if(focus==='commit'){await page.select('[aria-label="변경 기준"]','b'.repeat(40));await page.focus('[aria-label="변경 기준"]');}
