@@ -421,6 +421,15 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await open();await page.focus('.code-diff');
       await page.$eval('.code-diff',e=>e.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,isComposing:true})));
       assert.ok(await page.$('.code-panel'),'IME cancellation does not close the panel');await closed();
+      if(await page.$('.compose'))await page.click('.compose [aria-label="닫기"]');
+      await page.waitForSelector('.compose',{hidden:true});
+      await open();await page.click('button[aria-label="새 작업"]');
+      await page.waitForSelector('.compose');await page.focus('.compose [aria-label="닫기"]');
+      if(width===390)assert.equal(await page.$eval('.deck-space',e=>e.inert),true,'drawer covers the code panel');
+      await page.keyboard.press('Escape');await page.waitForSelector('.compose',{hidden:true});
+      assert.ok(await page.$('.code-panel'),'foreground compose closes before code');
+      assert.ok(await page.$('.thread-head'),'foreground compose keeps the thread');
+      await closed();
       await page.keyboard.press('Escape');await page.waitForSelector('.thread-head',{hidden:true});
     }));
 
