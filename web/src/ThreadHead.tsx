@@ -1,3 +1,4 @@
+import { ThreadUsage } from './ThreadUsage.tsx';
 import { Code2, ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINES, MODE_LABEL, modelLabel, modelMatches, effortNote, engineOf, modelTagsOf } from '../../shared/compose.ts';
@@ -112,6 +113,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
               {/* Switched by a tag, but no turn has run on it yet. */}
               {task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)} (다음 턴)` : ''}
               {task.effort ? ` · effort ${task.effort}` : ''}</span>
+            <ThreadUsage task={task} model={model} />
             {turns > 0 && <span>턴 {turns}</span>}
             {task.permission_mode && task.source !== 'external' && <span>요청한 승인 모드 {MODE_LABEL[task.permission_mode]}</span>}
             {task.source === 'external' ? <span>외부 세션</span>

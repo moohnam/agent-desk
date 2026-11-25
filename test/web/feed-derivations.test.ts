@@ -1,3 +1,5 @@
+import type { EngineUsage } from '../../shared/api.ts';
+import { threadWindows } from '../../web/src/threadUsage.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createFeedLayout, createModelLookup } from '../../web/src/feedDerivations.ts';
@@ -49,7 +51,7 @@ test('filter edits, grouping, input replacement and overlapping column filters p
   }
 });
 
-test('model cache preserves list precedence, updates and removals without retaining stale models', () => {
+test('model cache preserves latest observations, updates and removals without retaining stale models', () => {
   const lookup = createModelLookup();
   const a = [event(1, 'a', {state: 'started', detail: {model: 'one'}}, 'status')];
   const b = [event(2, 'a', {state: 'model_changed', detail: {model: 'two'}}, 'status')];
@@ -68,4 +70,21 @@ test('shared query results keep both ordinary and grouped column layouts', () =>
   const ordinary=layout(posts,base,tasks),grouped=layout(posts,{...base,byTask:true},tasks);
   assert.equal(layout(posts,base,tasks),ordinary);
   assert.equal(layout(posts,{...base,byTask:true},tasks),grouped);
+});
+
+
+test('thread remaining percentage uses the latest model regardless of feed and event order', () => {
+  const old = event(10, 'a', {state:'started', detail:{model:'claude-opus-4-6'}}, 'status');
+  const latest = event(20, 'a', {state:'model_changed', detail:{model:'claude-sonnet-4-6'}}, 'status');
+  const usage: EngineUsage = {engine:'claude',plan:null,fetchedAt:'2026-11-25T00:00:00Z',windows:[
+    {label:'Opus',usedPercent:99,resetsAt:null,applicability:'opus'},
+    {label:'Sonnet',usedPercent:50,resetsAt:null,applicability:'sonnet'},
+  ]};
+  const lookup=createModelLookup();
+  for (const lists of [[[latest],[old]],[[old],[latest]],[[latest,old]],[[old,latest]]]) {
+    const cached=lookup(...lists),direct=modelsOf(...lists);
+    assert.equal(cached.get('a'),'claude-sonnet-4-6');
+    assert.deepEqual(cached,direct);
+    assert.equal(Math.min(...threadWindows(usage,cached.get('a')).map(w=>100-w.usedPercent!)),50);
+  }
 });

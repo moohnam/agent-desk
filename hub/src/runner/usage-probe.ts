@@ -17,7 +17,8 @@ export function usageQuery(params: URLSearchParams): UsageQuery | undefined {
 export function workspaceUsage(remotes: RemoteRunners, includeLocal: boolean, query?: UsageQuery) {
   const targets = remotes.usageTargets(includeLocal);
   if (!query) return targets;
-  const id = query.runner === 'default' ? targets[0]?.id : query.runner;
+  const matches = targets.filter(target => target.id === query.runner || target.runnerId === query.runner);
+  const id = query.runner === 'default' ? targets[0]?.id : matches.length === 1 ? matches[0].id : undefined;
   if (!id || !targets.some(target => target.id === id)) throw new HttpError(404, '등록되지 않은 러너입니다');
   return remotes.readUsage(id, query.engine, query.refresh);
 }

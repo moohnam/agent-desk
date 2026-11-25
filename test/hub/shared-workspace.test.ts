@@ -47,6 +47,8 @@ test('the settings usage endpoint routes shared readings and keeps the last resu
       events: [], more: false, sessions: [], engines: ['codex'], usageReports: [] };
     const url = endpoint + '?' + new URLSearchParams({ runner: 'default', source: link.id, engine: 'codex' });
     assert.equal((await fetch(url, { headers: { origin: 'https://unrelated.example' } })).status, 403);
+    const targets = await read(endpoint + '?' + new URLSearchParams({source:link.id}));
+    assert.ok(targets.some((target: any) => target.runnerId === remoteId && target.source === link.id));
     const usage = read(url);
     let requestId: string | undefined;
     await wait(() => {
@@ -57,6 +59,8 @@ test('the settings usage endpoint routes shared readings and keeps the last resu
       windows: [{ label: '주간', usedPercent: 17, resetsAt: null }] };
     f.runtime.hub.atomic(() => f.runtime.hub.remotes.exchange(remoteId, { ...input, usageReports: [{ requestId: requestId!, value }] }));
     assert.deepEqual(await usage, { status: 'ready', value });
+    assert.deepEqual(await read(endpoint + '?' + new URLSearchParams({runner:remoteId,source:link.id,engine:'codex'})), {status:'ready',value});
+    assert.equal((await read(endpoint + '?' + new URLSearchParams({runner:'not-a-runner',source:link.id,engine:'codex'}))).value,undefined);
     assert.deepEqual(await read(endpoint + '?runner=local&engine=codex'), { status: 'offline' });
     await stop(authority);
     assert.deepEqual(await read(url), { status: 'offline', value });

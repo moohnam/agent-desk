@@ -1,3 +1,4 @@
+import { readUsageApi as read } from './usageReader.ts';
 import { catalogModel } from '../../shared/model-catalog.ts';
 import {useModelCatalogs} from './modelCatalogs.ts';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
@@ -14,15 +15,6 @@ const LOW_AT = 20;
 const errorMessage = (error: unknown) => error instanceof Error && error.name === 'TimeoutError'
   ? '응답 시간이 초과되었습니다. 다시 시도하세요.' : error instanceof Error ? error.message : String(error);
 
-async function read<T>(path: string, signal: AbortSignal, timeout = 15000): Promise<T> {
-  const response = await fetch(`/api/${path}`, {
-    signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
-    credentials: 'same-origin', mode: 'same-origin', cache: 'no-store',
-  });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`);
-  return value as T;
-}
 
 function checkedSettings(value: Settings): Settings {
   if (!value || !ENGINES.every(engine => value[engine]

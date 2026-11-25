@@ -48,6 +48,9 @@ export function claudeWindows(r: Json): UsageWindow[] {
   const rows: Json[] = r?.limits ?? [];
   if (rows.length) {
     return rows.map((x) => ({
+      applicability: x.scope?.surface ? 'unknown' : !x.scope?.model && (x.kind === 'session' || x.kind === 'weekly_all') ? 'all'
+        : /opus/i.test(x.scope?.model?.display_name ?? '') ? 'opus'
+        : /sonnet/i.test(x.scope?.model?.display_name ?? '') ? 'sonnet' : 'unknown',
       label: x.kind === 'session' ? '5시간'
         : x.kind === 'weekly_all' ? '주간 (전체)'
         : x.group === 'weekly' ? `주간 (${x.scope?.model?.display_name ?? x.scope?.surface ?? x.kind})`
@@ -58,7 +61,7 @@ export function claudeWindows(r: Json): UsageWindow[] {
   }
   // Older servers: the fixed windows only.
   return ([['five_hour', '5시간'], ['seven_day', '주간 (전체)'], ['seven_day_opus', '주간 (Opus)'], ['seven_day_sonnet', '주간 (Sonnet)']] as const)
-    .filter(([k]) => r?.[k]).map(([k, label]) => ({ label, usedPercent: r[k].utilization ?? null, resetsAt: iso(r[k].resets_at) }));
+    .filter(([k]) => r?.[k]).map(([k, label]) => ({ applicability: k === 'seven_day_opus' ? 'opus' : k === 'seven_day_sonnet' ? 'sonnet' : 'all', label, usedPercent: r[k].utilization ?? null, resetsAt: iso(r[k].resets_at) }));
 }
 
 function claudeAuth(): Promise<EngineAuth> {
@@ -105,9 +108,10 @@ async function claude(): Promise<Omit<EngineUsage, 'engine' | 'fetchedAt'>> {
 
 /** Codex: each limit's primary and secondary windows. */
 export function codexWindows(r: Json): UsageWindow[] {
-  const snaps: Json[] = Object.values(r?.rateLimitsByLimitId ?? {}).filter(Boolean);
+  const snaps: Json[] = Object.entries(r?.rateLimitsByLimitId ?? {}).filter(([, value]) => !!value).map(([id, value]) => ({ ...(value as Json), limitId: (value as Json).limitId ?? id }));
   if (!snaps.length && r?.rateLimits) snaps.push(r.rateLimits);
   return snaps.flatMap((s) => [s.primary, s.secondary].filter(Boolean).map((w: Json) => ({
+    applicability: !s.limitId || s.limitId === 'codex' ? 'all' : 'unknown',
     label: `${windowLabel(w.windowDurationMins)}${snaps.length > 1 ? ` (${s.limitName ?? s.limitId})` : ''}`,
     usedPercent: typeof w.usedPercent === 'number' ? w.usedPercent : null,
     resetsAt: iso(w.resetsAt),
@@ -198,6 +202,7 @@ export async function readRunnerUsage(engine: EngineName, refresh: boolean): Pro
       usedPercent: window.usedPercent !== null && Number.isFinite(window.usedPercent)
         ? Math.max(0, Math.min(100, window.usedPercent)) : null,
       resetsAt: window.resetsAt,
+      applicability: window.applicability,
     })),
   };
 }

@@ -1,19 +1,21 @@
-import { modelsOf, newestPerTask } from './layout.ts';
+import { latestModels, newestPerTask, type ModelObservation } from './layout.ts';
 import { matches, placeFeed } from './posts.ts';
 import type { ColumnDef, HubEvent, PlacedPost, Post, TaskView } from './types.ts';
 
 /** Event arrays are immutable. Unchanged feeds need only their small per-task model map. */
 export function createModelLookup() {
-  const cache = new WeakMap<HubEvent[], Map<string, string>>();
+  const cache = new WeakMap<HubEvent[], Map<string, ModelObservation>>();
   let previous = new Map<string, string>();
   return (...lists: HubEvent[][]) => {
-    const next = new Map<string, string>();
+    const latest = new Map<string, ModelObservation>();
     for (const list of lists) {
       let models = cache.get(list);
-      if (!models) { models = modelsOf(list); cache.set(list, models); }
-      // Keep the existing list precedence, including overlapping feed/history pages.
-      for (const [task, model] of models) next.set(task, model);
+      if (!models) { models = latestModels(list); cache.set(list, models); }
+      for (const [task, observation] of models) {
+        if (!latest.has(task) || observation.id > latest.get(task)!.id) latest.set(task, observation);
+      }
     }
+    const next = new Map([...latest].map(([task, observation]) => [task, observation.model]));
     if (next.size === previous.size && [...next].every(([id, model]) => previous.get(id) === model)) return previous;
     previous = next;
     return next;

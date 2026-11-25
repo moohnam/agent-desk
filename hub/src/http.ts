@@ -669,7 +669,10 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           };
           if (client.kind === 'device') res.on('close', access.connect(client.device.id, ipOf(req), () => res.destroy()));
           if (!query) {
-            if (source !== null) throw new HttpError(400, '조회할 러너와 엔진을 지정하세요');
+            if (source !== null) {
+              if (source === localAuthorityId) throw new HttpError(404, '등록되지 않은 공유 러너입니다');
+              return sendUsage((await workspaces.runnerUsageTargets(source, controller.signal)).map(target => ({ ...target, source })));
+            }
             const localTargets = localAuthorityId
               ? await workspaces.runnerUsageTargets(localAuthorityId, controller.signal)
               : hub.remotes.usageTargets(true);
@@ -678,7 +681,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
             return sendUsage([...(localTargets.length ? localTargets : [{ id: 'local', label: '이 Mac' }]), ...sharedTargets]);
           }
           if (source !== null) {
-            if (source === localAuthorityId || query.runner !== 'default') throw new HttpError(404, '등록되지 않은 공유 러너입니다');
+            if (source === localAuthorityId) throw new HttpError(404, '등록되지 않은 공유 러너입니다');
             return sendUsage(await workspaces.runnerUsage(source, query, controller.signal));
           }
           return sendUsage(localAuthorityId
