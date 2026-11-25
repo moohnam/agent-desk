@@ -1409,3 +1409,31 @@ test('thread usage ignores late former runner responses and keeps only same-runn
   tree.props.onKeyDown({key:'Escape',preventDefault(){},stopPropagation(){}});tree=render();assert.equal(tree.props.children[1],false);
   h.unmount();
 });
+
+for (const stage of ['targets','reading']) for (const failure of ['network',401,403,404,408,410,429]) test(`thread usage cache after ${failure} at ${stage} from actual API reader`, async () => {
+  const h=hooks(),jsx=(type:any,props:any)=>({type,props});
+  let poll:()=>void=()=>{}, failed=false;
+  const value={engine:'codex',plan:null,fetchedAt:'2026-11-25T00:00:00Z',windows:[{label:'5시간',usedPercent:25,resetsAt:null,applicability:'all'}]};
+  const globals={AbortController,AbortSignal,URLSearchParams,setTimeout:(fn:()=>void)=>{poll=fn;return 1;},clearTimeout(){},
+    fetch:async(path:string)=>{
+      if (failed && (stage==='targets' || path.includes('engine='))) {
+        if(failure==='network')throw new TypeError('Failed to fetch');
+        // Permission errors can be HTML; the reader must retain the HTTP status.
+        return new Response('<html>unavailable</html>',{status:Number(failure)});
+      }
+      return Response.json(path==='runner-usage'||path==='/api/runner-usage'
+        ?[{id:'local',runnerId:'mac',label:'Mac'}]:{status:'ready',value});
+    }};
+  const module=load('ThreadUsage.tsx',{
+    react:h.react,'react/jsx-runtime':{jsx,jsxs:jsx},'../../shared/compose.ts':compose,
+    '../../shared/runner-usage.ts':runnerUsage,'./threadUsage.ts':threadUsage,'./thread-usage.css':{},
+  },globals);
+  const render=()=>h.render(()=>module.ThreadUsage({task:{id:'task',runner_id:'mac',engine:'codex',source:'app',runner_connected:true},model:'gpt-5'}));
+  const tick=()=>new Promise(resolve=>setImmediate(resolve));
+  render();await tick();assert.ok(render());
+  failed=true;poll();await tick();const tree=render();
+  if(failure==='network'||failure===408||failure===429){assert.match(tree.props.className,/stale/);assert.match(tree.props.children[0].props['aria-label'],/75% 남음/);}
+  else assert.equal(tree,null,'confirmed rejection removes the former measurement');
+  failed=false;poll();await tick();assert.ok(render(),'a later authorized response can restore the bar');
+  h.unmount();
+});

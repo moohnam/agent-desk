@@ -38,8 +38,10 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
         const reading = await readUsageApi<unknown>(`runner-usage?${params}`, controller.signal, 45_000);
         if (!checkUsageReading(reading, engine)) throw new Error('사용량 응답 오류');
         if (!controller.signal.aborted) setResult({key, reading});
-      } catch {
-        if (!controller.signal.aborted) setResult(old => old?.key === key
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;
+        const rejected = status >= 400 && status < 500 && status !== 408 && status !== 429;
+        if (!controller.signal.aborted) setResult(old => !rejected && old?.key === key
           ? {key, reading: {...old.reading, status: 'offline'}} : undefined);
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(poll, 60_000);

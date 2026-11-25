@@ -12,16 +12,23 @@ export const SEARCH = 'search';
 export const isAllFilter = (f: ColumnFilter) =>
   !f.taskIds?.length && !f.projectIds?.length && !f.kinds?.length && !f.statuses?.length && !f.query?.trim();
 
-/** Model per task, taken from the session-start events seen so far. */
-export function modelsOf(...lists: HubEvent[][]): Map<string, string> {
-  const out = new Map<string, string>();
+export interface ModelObservation { id: number; model: string }
+/** IDs are ordered within a task's owning source; feed order and arrival order are not. */
+export function latestModels(...lists: HubEvent[][]): Map<string, ModelObservation> {
+  const out = new Map<string, ModelObservation>();
   for (const list of lists) for (const e of list) {
-    // The model a turn actually ran on: reported at the start and again after a model tag switch.
-    if (e.kind === 'status' && (e.payload.state === 'started' || e.payload.state === 'model_changed') && e.payload.detail?.model) {
-      out.set(e.task_id, e.payload.detail.model);
+    if (e.kind === 'status' && (e.payload.state === 'started' || e.payload.state === 'model_changed')
+      && typeof e.payload.detail?.model === 'string' && e.payload.detail.model
+      && (!out.has(e.task_id) || e.id > out.get(e.task_id)!.id)) {
+      out.set(e.task_id, { id: e.id, model: e.payload.detail.model });
     }
   }
   return out;
+}
+
+/** Model per task, taken from the newest observed session/model event. */
+export function modelsOf(...lists: HubEvent[][]): Map<string, string> {
+  return new Map([...latestModels(...lists)].map(([task, observation]) => [task, observation.model]));
 }
 
 /** Splits a placed feed into runs of connected posts, each shown under one task header. */

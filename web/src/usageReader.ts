@@ -3,8 +3,10 @@ export async function readUsageApi<T>(path: string, signal: AbortSignal, timeout
     signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
     credentials: 'same-origin', mode: 'same-origin', cache: 'no-store',
   });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`);
-  return value as T;
+  if (!response.ok) {
+    const value = await response.json().catch(() => undefined);
+    throw Object.assign(new Error(value?.error ?? `HTTP ${response.status}`), {status: response.status});
+  }
+  return await response.json() as T;
 }
 
