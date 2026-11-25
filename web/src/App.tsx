@@ -1,3 +1,4 @@
+import { sendCode } from './codeSend.ts';
 import { lazy, Suspense } from 'react';
 import { useRemovalView } from './useRemovalView.ts';
 const CodePanel = lazy(() => import('./CodePanel.tsx').then(module => ({default: module.CodePanel})));
@@ -1579,6 +1580,7 @@ export function App() {
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
         {codeVisible && codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
           <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode}
+            onSend={async text=>{onThreadSend();return sendCode(codeTask,text);}}
             onQuote={threadTaskView && threadTaskView.source!=='external' && threadTaskView.kind!=='note' && !handoff?.open ? quote=>{
               const key='reply:'+codeTask;
               const draft=getDraft<{text:string;pick?:string|null}>(key);

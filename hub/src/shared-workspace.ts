@@ -1,4 +1,5 @@
 import { taskCodeView } from './code-view.ts';
+import { MAX_PROMPT_TEMPLATES_BODY } from './prompt-templates.ts';
 import { SshEnrollment } from './ssh-enrollment.ts';
 import { SshAuthority } from './ssh-authority.ts';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -260,7 +261,7 @@ export class SharedWorkspace {
           const merges=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remote_merge'").get()
             ? this.db.prepare('SELECT old_runner_id,target_runner_id,fingerprint FROM remote_merge WHERE activated_at IS NOT NULL').all()
             : [];
-          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1,note_cut:1},...(migrated&&{migration:migrated}),merges});
+          return json(res,200,{version:1,workspace_id:this.id,capabilities:{skill_snapshots:1,file_preview:1,file_permission:1,file_path:1,instructions:1,connectors:1,connector_tags:1,notes:1,note_cut:1,code_review_messages:1},...(migrated&&{migration:migrated}),merges});
         }
         if (req.headers['x-workspace-id'] !== this.id) return json(res,409,{code:'workspace_mismatch',error:'연결 대상 작업공간이 바뀌었습니다. 연결 설정을 확인하세요'});
         if (req.method==='GET' && url.pathname==='/v1/ssh/requests')
@@ -336,7 +337,7 @@ export class SharedWorkspace {
           const result=this.hub.store.origins.with(this.author(peer),()=>this.hub.atomic(()=>{assertAuthorized();return handleWorkspaceBroker(this.hub,action,body as Record<string,unknown> ?? {},peer);}));
           return json(res,result.status,result.body);
         }
-        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized()));
+        if (url.pathname === '/v1/mcp') return await this.hub.store.origins.with(this.author(peer),()=>handleMcp(this.hub,req,res,()=>assertAuthorized(),!this.localAuthority));
         if (this.localAuthority && req.method === 'POST' && url.pathname.startsWith('/v1/runner-exchange/')) {
           const runnerId=decodeURIComponent(url.pathname.slice('/v1/runner-exchange/'.length));
           if (!this.hub.remotes.accepts(runnerId,req.headers['x-runner-token'])) throw new HttpError(401,'이 러너의 연결 토큰이 필요합니다');
@@ -379,7 +380,10 @@ export class SharedWorkspace {
           return json(res,200,this.read(path,peer));
         }
         if (req.method === 'POST' && url.pathname === '/v1/operation') {
-          const body=await readBody(req,8*1024*1024);
+          const body=await readBody(req,MAX_PROMPT_TEMPLATES_BODY,body => {
+            const op = body as Partial<WorkspaceOperation> | null;
+            return op?.method === 'PUT' && op.path === '/prompt-templates' ? MAX_PROMPT_TEMPLATES_BODY : 8 * 1024 * 1024;
+          });
           assertAuthorized();
           const result = this.execute(peer,body);
           return json(res,result.status,result.body);

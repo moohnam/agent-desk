@@ -1,4 +1,6 @@
+import { messageReceipt } from './message-receipt.ts';
 import { taskCodeView } from './code-view.ts';
+import { MAX_PROMPT_TEMPLATES_BODY } from './prompt-templates.ts';
 import { agentPublicKeys } from './ssh-signature.ts';
 import { multiplexStream } from './stream-mux.ts';
 import { InstructionStore } from './instruction-store.ts';
@@ -23,7 +25,7 @@ import type { HubMessage } from '../../shared/api.ts';
 import { config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Hub } from './hub.ts';
-import { handleMcp } from './mcp.ts';
+import { handleMcp, readMcpBody } from './mcp.ts';
 import { linkTarget, localOrigin, openTarget } from './open.ts';
 import { saveFromUrl, saveUpload } from './uploads.ts';
 import { readEngineUsage, readUsage } from './usage.ts';
@@ -54,8 +56,8 @@ async function serveStatic(pathname: string, res: ServerResponse) {
   }
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
-  const b = await readBody(req);
+async function readJson(req: IncomingMessage, limit?:number): Promise<Record<string, any>> {
+  const b = await readBody(req,limit);
   if (b === undefined) return {};
   if (!b || typeof b !== 'object' || Array.isArray(b)) throw new HttpError(400, 'JSON 객체가 필요합니다');
   return b as Record<string, any>;
@@ -309,6 +311,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         if (url.pathname === '/api/updates/cancel') return send(res, 200, await updates.cancel(body.commit));
         throw new HttpError(404, '업데이트 요청을 찾을 수 없습니다');
       }
+      if(parts[0]==='api'&&url.pathname.endsWith('/prompt-templates'))res.setHeader('cache-control','no-store');
       if (url.pathname === '/api/instructions') {
         res.setHeader('cache-control', 'no-store');
         if (req.method === 'GET') return send(res, 200, { ...instructions.read(), editable: access.isLocal(req) });
@@ -321,7 +324,7 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
       }
       if (url.pathname === '/mcp') {
         if(!localAuthorityId)return await handleMcp(hub,req,res);
-        const body=await readBody(req);
+        const body=await readMcpBody(req);
         if(await handleBrokerMcp(workspaces,localAuthorityId,body,req,res))return;
         return await workspaces.proxyMcp(localAuthorityId,req,res,body);
       }
@@ -552,8 +555,8 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
           }
           return await workspaces.proxy(owner??localAuthorityId,workspaceUrl.pathname+url.search,req,res,undefined,body);
         }
-        const body = req.method === 'GET' ? {} : await readJson(req);
-        const result = (() => {
+        const body = req.method === 'GET' ? {} : await readJson(req,route === 'PUT /prompt-templates' ? MAX_PROMPT_TEMPLATES_BODY : undefined);
+        const perform = () => {
           if (!directWorkspace || !directPeer) return workspaceApi(hub, req.method!, workspaceUrl, body);
           if (route === 'POST /tasks/:id/scheduled-replies') {
             const requestId = req.headers['x-desk-operation-id'];
@@ -572,7 +575,10 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
             if (grant && result.status >= 400) connectorAuthority.revoke(grant.capability);
             return result;
           }));
-        })();
+        };
+        const operationId=req.headers['x-desk-operation-id'];
+        const result=route==='POST /tasks/:id/messages'&&typeof operationId==='string'&&directPeer
+          ?messageReceipt(hub,directPeer,operationId,workspaceUrl.pathname,body,perform):perform();
         return send(res, result.status, result.body);
       }
       if (localAuthorityId && req.method === 'GET' && url.pathname === '/api/state') {

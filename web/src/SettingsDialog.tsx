@@ -1,3 +1,5 @@
+import { useDiffWrap, setDiffWrap } from './diffWrap.ts';
+import { PromptTemplates } from './PromptTemplates.tsx';
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Bot, ChevronDown, Monitor, Package, Plug, Server } from 'lucide-react';
 import { Modal } from './Modal.tsx';
@@ -54,6 +56,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
   floatingThread:boolean; onThreadLayoutChange?:(floating:boolean)=>void;
   onChanged:()=>Promise<unknown>; manageChannels?:boolean; updates:UpdatesState; updateAvailable:boolean; runnerProblem?:RunnerConnectionProblem;
 }) {
+  const diffWrap=useDiffWrap();
   const [section,setSection]=useState<typeof SECTIONS[number]['id']>('appearance');
   const editorMode = useEditorMode();
   const [notice,setNotice]=useState('');
@@ -80,6 +83,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
       <div className="settings-pages">
         {notice&&<p className="muted small" role="status">{notice}</p>}
         <section className="settings-content" hidden={section!=='appearance'} aria-label="화면·입력">
+          <label className="settings-row"><strong>코드 diff 긴 줄 자동 줄바꿈</strong><input aria-label="코드 diff 긴 줄 자동 줄바꿈" type="checkbox" checked={diffWrap} onChange={e=>setDiffWrap(e.target.checked)}/></label>
           <label className="settings-row">
             <strong>대화·메모 편집 키</strong>
             <select className="input" value={editorMode} onChange={event => setEditorMode(event.target.value === 'vim' ? 'vim' : 'emacs')}>
@@ -97,6 +101,7 @@ export function SettingsDialog({ local, onClose, channels, onOpenChannel, tasks,
         </section>
         <section className="settings-content" hidden={section!=='agent'} aria-label="에이전트 실행">
           {panel('agent','기본 모델·사용량','새 작업의 기본 모델과 추론 강도, 계정 사용량',<ModelDialog onClose={close} prefetchUsage/>,true)}
+          {panel('agent','프롬프트 템플릿','코드와 함께 보낼 요청 문구 추가·수정·삭제',<PromptTemplates onClose={close}/>)}
           {panel('agent','기본 지침','이 허브에서 시작하는 실행에 전달할 공통 지침',<InstructionsDialog onClose={close}/>)}
         </section>
         <section className="settings-content" hidden={section!=='connections'} aria-label="연동">

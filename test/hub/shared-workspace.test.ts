@@ -435,7 +435,7 @@ test('a workspace gateway delivers note operations without reading connector or 
   }
 });
 
-test('a rolled-back workspace preserves note receipts and rejects only new unsupported writes', async () => {
+test('a rolled-back workspace preserves receipts and rejects only new unsupported note and code writes', async () => {
   const store = new Store(':memory:'), links = new WorkspaceLinks(store);
   const committed = randomUUID(), missing = randomUUID(), unavailable = randomUUID(), following = randomUUID();
   const result = { status: 201, body: { id: 'saved-note', kind: 'note' } };
@@ -484,6 +484,13 @@ test('a rolled-back workspace preserves note receipts and rejects only new unsup
       { status: number; result: string };
     assert.equal(cut.status, 409);
     assert.equal(JSON.parse(cut.result).feature, 'note_cut');
+    const reviewId = randomUUID();
+    links.enqueue('test',{id:reviewId,method:'POST',path:'/tasks/t1/messages',body:{text:'코드 검토',code_review:true}});
+    await links.flush('test');
+    const review = store.database.prepare('SELECT status, result FROM workspace_delivery WHERE id=?').get(reviewId) as
+      { status: number; result: string };
+    assert.equal(review.status,409);
+    assert.equal(JSON.parse(review.result).feature,'code_review_messages');
     assert.equal(requests.filter(path=>path==='/v1/operation').length,1);
   } finally {
     await links.close(); store.database.close();

@@ -1,3 +1,4 @@
+import { readPromptTemplates, savePromptTemplates } from './prompt-templates.ts';
 // Shared by the local HTTP API and the runner-owned workspace. Synchronous so the
 // result receipt and all engine commands can commit in one SQLite transaction.
 import type { Hub } from './hub.ts';
@@ -48,6 +49,8 @@ function noteEventId(input: string): number {
 export const NOTE_CUT_ROUTE = 'POST /tasks/:id/notes/:id/cut';
 
 const routes = [
+  'GET /prompt-templates',
+  'PUT /prompt-templates',
   'GET /settings',
   'GET /models',
   'PUT /settings',
@@ -146,6 +149,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
   switch (route) {
         case 'GET /models':
           return reply(200, hub.refreshModelCatalogs(url.searchParams.get('refresh') === '1'));
+        case 'GET /prompt-templates': return reply(200,readPromptTemplates(hub.store));
+        case 'PUT /prompt-templates': return reply(200,savePromptTemplates(hub.store,body));
         case 'GET /settings':
           return reply(200, hub.settings());
         case 'PUT /settings':
@@ -207,7 +212,9 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         case 'POST /tasks/:id/messages': {
           const b = body;
           const receipt: MessageReceipt = {};
-          const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), b.note_only === true);
+          const task_id = hub.sendMessage(id, b.text, false, receipt, noteContext(b.note_context), {
+            noteOnly: b.note_only === true, codeReview: b.code_review === true,
+          });
           return reply(202, { ok: true, task_id, ...receipt });
         }
         case 'POST /tasks/:id/scheduled-replies':

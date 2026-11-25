@@ -399,9 +399,9 @@ export async function handleBrokerMcp(links: WorkspaceLinks, localAuthorityId: s
   if (rpc.method !== 'tools/call') return false;
   const name = rpc.params?.name;
   if (!['desk_attach', 'desk_post', 'desk_checkpoint', 'desk_ask', 'desk_wait_answer',
-    'desk_request', 'desk_reply', 'desk_finish', 'desk_handoff', 'desk_list_tasks'].includes(name)) return false;
-  const work = broker(links, localAuthorityId);
+    'desk_request', 'desk_reply', 'desk_finish', 'desk_handoff', 'desk_list_tasks', 'desk_settings'].includes(name)) return false;
   const args = rpc.params?.arguments ?? {};
+  const work = broker(links, localAuthorityId);
   return work.run(async () => {
   try {
     if (name === 'desk_list_tasks') {

@@ -1,7 +1,9 @@
+import { codeContext } from './code-context.ts';
+import { MAX_PROMPT_TEMPLATES_BODY, readPromptTemplates, savePromptTemplates } from './prompt-templates.ts';
 import { signRequest, toolFields } from './request-proof.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
-import { readBody } from './body.ts';
+import { MAX_BODY, readBody } from './body.ts';
 import type { AgentRequest } from './db.ts';
 import type { TaskView } from '../../shared/api.ts';
 import { ENGINES, HANDOFF_ENGINES } from '../../shared/compose.ts';
@@ -37,6 +39,16 @@ const INSTRUCTIONS = `Agent Desk: 사용자가 여러 에이전트 작업을 한
 const str = (description: string) => ({ type: 'string', description });
 
 const TOOLS = [
+  {
+    name:'desk_settings',
+    description:'코드 검토 설정을 조회·변경합니다. section=code_context는 현재 작업의 Git worktree 연결(생성·삭제 아님), section=prompt_templates는 연결한 작업공간의 별도 프롬프트 템플릿입니다. 먼저 action=read로 revision을 읽고 action=save로 저장합니다. 코드 연결은 session_id 또는 데스크에 붙은 task_id가 필요합니다. worktree=null은 연결 해제입니다. 템플릿 items는 전체 목록이며 삭제할 항목만 제외하고 기존 항목을 보존하세요. 모델·승인 모드는 변경하지 않습니다.',
+    inputSchema:{type:'object',required:['section','action'],properties:{
+      section:{type:'string',enum:['code_context','prompt_templates']},action:{type:'string',enum:['read','save']},
+      session_id:str('현재 엔진 세션 ID'),task_id:str('데스크에 붙은 작업 ID'),revision:str('직전 조회의 revision'),
+      worktree:{type:['string','null'],description:'available 목록의 절대 경로 또는 연결 해제용 null'},
+      items:{type:'array',items:{type:'object',required:['id','name','text'],properties:{id:str('변하지 않는 고유 ID'),name:str('표시 이름'),text:str('프롬프트 내용')}}},
+    }},
+  },
   {
     name: 'desk_attach',
     description: '현재 작업을 데스크에 작업으로 등록하고 task_id를 받습니다. 사용자가 데스크에 붙으라고 요청했을 때만 호출하세요. 같은 작업에 다시 붙을 때는 task_id를 넘깁니다.',
@@ -145,6 +157,12 @@ const PROMPTS = [{
 }];
 
 interface RpcRequest { jsonrpc: '2.0'; id?: string | number | null; method: string; params?: any }
+export const readMcpBody = (req: IncomingMessage) => readBody(req,MAX_PROMPT_TEMPLATES_BODY,body => {
+  const rpc = body as RpcRequest | null;
+  return rpc?.method === 'tools/call' && rpc.params?.name === 'desk_settings'
+    && rpc.params.arguments?.section === 'prompt_templates' && rpc.params.arguments?.action === 'save'
+    ? MAX_PROMPT_TEMPLATES_BODY : MAX_BODY;
+});
 
 class RpcError extends Error {
   readonly code: number;
@@ -158,8 +176,35 @@ function taskLine(t: TaskView) {
   return `- ${t.id} [${t.status}${t.source === 'external' ? ', 터미널' : ''}] @${t.project_name} › ${t.title} (갱신 ${t.updated_at})`;
 }
 
-async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal, resumeToken?: unknown) {
+async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false) {
   switch (name) {
+    case 'desk_settings': {
+      if(a.action!=='read'&&a.action!=='save')throw new HttpError(400,'action은 read 또는 save입니다');
+      if(a.section==='prompt_templates'){
+        authorize?.();return text(JSON.stringify(a.action==='read'?readPromptTemplates(hub.store):savePromptTemplates(hub.store,{revision:a.revision,items:a.items})));
+      }
+      if(a.section!=='code_context')throw new HttpError(400,'지원하지 않는 설정입니다');
+      const session = typeof a.session_id === 'string' ? hub.store.sessionByEngineId(a.session_id) : undefined;
+      const taskId = session?.task_id ?? (typeof a.task_id === 'string' ? a.task_id : undefined);
+      if (!taskId) throw new HttpError(404,'현재 작업의 session_id 또는 task_id가 필요합니다');
+      if ((a.session_id !== undefined && !session) || (session && a.task_id !== undefined && session.task_id !== a.task_id)) {
+        throw new HttpError(403,'작업과 엔진 세션이 일치하지 않습니다');
+      }
+      const fields = toolFields(name,a);
+      const authorizeContext = () => {
+        authorize?.();
+        const current = hub.store.latestSession(taskId);
+        if (session) {
+          if (current?.id !== session.id || !hub.requests.proven(session,fields,resumeToken)) {
+            throw new HttpError(403,'현재 엔진 세션을 확인할 수 없습니다');
+          }
+        } else if (current?.source !== 'external') {
+          throw new HttpError(403,'데스크가 실행한 작업은 session_id를 사용하세요');
+        }
+      };
+      authorizeContext();
+      return text(JSON.stringify(await codeContext(hub,taskId,a.action==='save'?{revision:a.revision,worktree:a.worktree}:undefined,authorizeContext,shared)));
+    }
     case 'desk_attach': {
       const t = hub.external.attachExternal({ title: a.title, summary: a.summary, cwd: a.cwd, engine: a.engine, taskId: a.task_id });
       return text(`데스크에 붙었습니다. task_id: ${t.id} (프로젝트 @${t.project_name}). 이후 호출에 이 task_id를 쓰세요.`);
@@ -226,7 +271,7 @@ function requestResult(hub: Hub, r: AgentRequest) {
   return text(`아직 답이 없습니다 (${REQUEST_WAITING[r.status] ?? r.status}). question_id: "${r.id}". ${hub.requests.resumeState(r.id) === 'waiting' ? '턴을 끝내도 결과가 오면 이 작업이 이어집니다.' : 'desk_wait_answer로 결과를 조회하세요.'}`);
 }
 
-async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown): Promise<unknown> {
+async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false): Promise<unknown> {
   switch (req.method) {
     case 'initialize': {
       const asked = req.params?.protocolVersion;
@@ -244,7 +289,7 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeTo
     case 'tools/call': {
       const { name, arguments: args = {} } = req.params ?? {};
       try {
-        return await callTool(hub, name, args, signal,resumeToken);
+        return await callTool(hub, name, args, signal,resumeToken,authorize,shared);
       } catch (err) {
         if (err instanceof RpcError) throw err;
         // Tool failures go back to the model as results it can act on.
@@ -272,12 +317,12 @@ async function dispatch(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeTo
   }
 }
 
-async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown) {
+async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeToken?: unknown, authorize?:()=>void, shared=false) {
   // Notifications (no id) get no response.
   const isNotification = req.id === undefined;
   try {
     if (req?.jsonrpc !== '2.0' || typeof req.method !== 'string') throw new RpcError(-32600, 'invalid request');
-    const result = await dispatch(hub, req, signal,resumeToken);
+    const result = await dispatch(hub, req, signal,resumeToken,authorize,shared);
     return isNotification ? null : { jsonrpc: '2.0', id: req.id, result };
   } catch (err) {
     if (isNotification) return null;
@@ -286,7 +331,7 @@ async function handleOne(hub: Hub, req: RpcRequest, signal: AbortSignal, resumeT
   }
 }
 
-export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse, authorize?: () => void) {
+export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerResponse, authorize?: () => void, shared=false) {
   if (req.method !== 'POST') {
     // No server-initiated stream: every response comes back on its POST.
     res.writeHead(405, { allow: 'POST' }).end();
@@ -297,7 +342,7 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } }));
   };
-  try { body = await readBody(req) as RpcRequest | RpcRequest[]; }
+  try { body = await readMcpBody(req) as RpcRequest | RpcRequest[]; }
   catch (err) {
     if (err instanceof HttpError && err.status !== 400) return fail(err.status, -32600, err.message);
     return fail(400, -32700, 'parse error');
@@ -312,7 +357,7 @@ export async function handleMcp(hub: Hub, req: IncomingMessage, res: ServerRespo
   const replies = (await Promise.all((Array.isArray(body) ? body : [body]).map((r) => {
     const params = r?.params as {name?:string;arguments?:Record<string,unknown>} | undefined;
     const proof = signRequest(req.headers?.['x-desk-session'],toolFields(params?.name??'',params?.arguments??{})) ?? req.headers?.['x-desk-request-proof'];
-    return handleOne(hub,r,abort.signal,proof);
+    return handleOne(hub,r,abort.signal,proof,authorize,shared);
   })))
     .filter((r) => r !== null);
   if (!replies.length) {

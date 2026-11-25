@@ -16,5 +16,8 @@ export function verifyRequest(digest: string, fields: readonly unknown[], proof:
   return timingSafeEqual(Buffer.from(mac,'hex'),Buffer.from(signature(digest,[nonce,...fields]),'hex'));
 }
 export function toolFields(name: string,args: Record<string,unknown>) {
+  if (name === 'desk_settings') {
+    return [name,args.session_id,args.task_id,args.section,args.action,args.revision,args.worktree,args.items];
+  }
   return [name,args.session_id,args.task_id,args.to,args.question,args.question_id,args.answer,args.timeout_sec];
 }
