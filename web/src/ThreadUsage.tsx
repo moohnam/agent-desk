@@ -115,8 +115,12 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
       // Keep the original adjacent keyboard order despite rendering in a portal.
       if (e.key === 'Tab' && !e.shiftKey && e.target === button && (open || hovered)) {
         e.preventDefault(); details.current?.focus();
-      } else if (e.key === 'Tab' && e.shiftKey && e.target === details.current) {
-        e.preventDefault(); button?.focus();
+      } else if (e.key === 'Tab' && e.target === details.current) {
+        if (e.shiftKey) e.preventDefault();
+        // Forward Tab starts from the anchor's DOM position, not the end of body.
+        // Keep its default action so the browser chooses the next native control.
+        button?.focus();
+        if (!e.shiftKey) close();
       }
     }}>
 
