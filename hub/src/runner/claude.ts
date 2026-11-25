@@ -94,7 +94,9 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
   // Each run (a follow-up starts another) has its id; frames of an earlier run that come late are dropped.
   const runs = new Map<string, string>();
   const late = (taskId: string, runId?: string) => !!runId && (runs.get(taskId) ?? '') > runId;
-  const report = (info: SubagentInfo) => {
+  const report = (full: SubagentInfo) => {
+    // A command's description can be the whole command; neither it nor a result may grow a message unboundedly.
+    const info = { ...full, description: full.description.slice(0, 500), ...(full.summary && { summary: clipResult(full.summary) }) };
     known.set(info.id, info);
     reported.set(info.id, Date.now());
     emit({ type: 'subagent', sessionId, subagent: info });

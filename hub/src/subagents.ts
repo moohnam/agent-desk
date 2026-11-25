@@ -30,7 +30,8 @@ export class Subagents {
   private row(sessionId: string, id: string): Row | undefined {
     return this.db.prepare('SELECT * FROM subagent WHERE session_id = ? AND id = ?').get(sessionId, id) as unknown as Row | undefined;
   }
-  private save(session: Session, info: SubagentInfo, detailed: boolean, listed: boolean, at: string) {
+  private save(session: Session, full: SubagentInfo, detailed: boolean, listed: boolean, at: string) {
+    const info = { ...full, description: full.description.slice(0, 500), ...(full.summary && { summary: full.summary.slice(0, 8000) }) };
     const created = this.row(session.id, info.id)?.created_at ?? at;
     this.db.prepare(`INSERT INTO subagent (session_id, id, task_id, status, detailed, listed, info_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (session_id, id) DO UPDATE SET status = excluded.status,
@@ -67,8 +68,9 @@ export class Subagents {
    * says: the list still holds a finished one until the list changes next.
    */
   background(session: Session, tasks: BackgroundTask[], at = now()) {
-    // Codex's 'status' entry says its list is being checked; it is no work of its own.
-    const work = tasks.filter(t => t.type !== 'status');
+    // Codex's 'status' entry says its list is being checked, and agy lists its running tool calls
+    // ('tool'): neither is work of its own.
+    const work = tasks.filter(t => t.type !== 'status' && t.type !== 'tool');
     const listed = new Set(work.map(t => t.id));
     for (const t of work) {
       const row = this.row(session.id, t.id);

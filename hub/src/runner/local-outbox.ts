@@ -39,8 +39,12 @@ export class LocalRunnerOutbox {
     let dropped = false;
     while (this.entries.size > this.maxCount || this.bytes > this.maxBytes) {
       // Keep control messages for as long as possible, as before; subagent steps go before thread events.
-      const entries = [...this.entries.values()];
-      this.remove(entries.find(e => e.subagent) ?? entries.find(e => e.event) ?? entries[0]);
+      let evict: Entry | undefined, event: Entry | undefined;
+      for (const entry of this.entries.values()) {
+        if (entry.subagent) { evict = entry; break; }
+        event ??= entry.event ? entry : undefined;
+      }
+      this.remove(evict ?? event ?? this.entries.values().next().value!);
       dropped = true;
     }
     return { entry, dropped };

@@ -1373,7 +1373,7 @@ export function App() {
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
       closeCode: codeVisible ? closeCode : subagentsVisible ? closeSubagents : undefined,
       toggleSubagents: subagentsShown ? toggleSubagents : undefined,
-      subagentPane: subagentsVisible ? subagentKeys.current ?? undefined : undefined,
+      subagentPane: subagentsVisible ? subagentKeys : undefined,
       setWidth, widthOf, toggleReferences: codeVisible ? closeCode : canRead ? toggleReferences : undefined,
       togglePostReference: canReference ? togglePostReference : undefined,
     };

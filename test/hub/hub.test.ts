@@ -1185,6 +1185,9 @@ test('a finished subagent stays finished while the background list still holds i
   // Codex's own "checking" entry is not work.
   runner.say({ type: 'background', sessionId, tasks: [{ id: 'checking', type: 'status', description: '백그라운드 작업 상태 확인 중', state: 'unknown' }] });
   assert.ok(!hub.subagents.list(taskId).some((s) => s.id === 'checking'));
+  // Nor agy's running tool calls.
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'tool:1', type: 'tool', description: 'Read' }] });
+  assert.ok(!hub.subagents.list(taskId).some((s) => s.id === 'tool:1'));
   // Steps of a subagent never reported are not kept.
   runner.say({ type: 'subagent_event', sessionId, subagentId: 'nobody', event: { kind: 'user', text: 'x' } });
   assert.equal(hub.subagents.events(taskId, sessionId, 'nobody').events.length, 0);

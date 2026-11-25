@@ -127,7 +127,8 @@ export interface DeckKeyContext {
   /** Opens or closes the subagent pane beside the thread. */
   toggleSubagents?: () => void;
   /** The open subagent pane's keys (SubagentPanel.tsx). */
-  subagentPane?: import('./SubagentPanel.tsx').SubagentPaneKeys;
+  /** Read when a key is pressed: the pane's focus changes without the deck drawing again. */
+  subagentPane?: RefObject<import('./SubagentPanel.tsx').SubagentPaneKeys | null>;
   openSearch: () => void;
   closeSearch: () => void;
   setDrawer: (open: boolean) => void;
@@ -263,7 +264,7 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
     }
 
     // In the subagent pane the moving keys move between its columns and posts; `h` from the thread enters it.
-    const pane = c.subagentPane;
+    const pane = c.subagentPane?.current;
     if (pane?.focused()) {
       const k = e.key === 'g' && now - pendingG.current < 600 ? 'gg' : e.key;
       if (pane.key(k)) { if (k === 'gg') pendingG.current = 0; e.preventDefault(); return; }

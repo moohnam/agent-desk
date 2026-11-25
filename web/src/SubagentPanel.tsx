@@ -243,7 +243,7 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
         if (f.scrollTop < 80) void older();
       }}>
-        {!s.detailed && <p className="sa-note">이 엔진은 서브 에이전트·백그라운드 작업의 시작과 종료만 알려 줍니다.</p>}
+        {!s.detailed && <p className="sa-note">시작과 종료만 기록됐습니다. Codex·agy이거나, 러너가 상세 기록을 보내기 전에 시작한 항목입니다.</p>}
         {more && <button className="link sa-older" disabled={loading} onClick={() => void older()}>이전 기록 더 보기</button>}
         {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}</p>}
         {s.detailed && loading && !events.length && <p className="sa-note">불러오는 중…</p>}
