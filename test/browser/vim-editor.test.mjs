@@ -146,7 +146,7 @@ function editorEvents(page, cdp) {
   };
 }
 
-// This shared-browser fixture runs 56 scenarios sequentially. Allow CI headroom
+// This shared-browser fixture runs many scenarios sequentially. Allow CI headroom
 // for their combined duration; keep the 5-second default and explicit wait limits.
 test('Vim replies obey mode boundaries and keep IME composition separate', { timeout: 180_000 }, async t => {
   const server = fixtureServer();
@@ -569,6 +569,33 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForFunction(()=>document.querySelector('[role="dialog"]')?.textContent.includes('템플릿을 저장했습니다.'));
       assert.equal(templates.items.length,0);
     },false,'emacs'));
+
+    await t.test('file line counts and totals follow uncommitted, commit and branch comparisons',()=>withPage(async page=>{
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        if(new URL(request.url()).pathname!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData()),count=body.commit?3:body.base&&body.target?7:1;
+        void request.respond({status:200,contentType:'application/json',body:JSON.stringify({
+          root:'/repo',head:'a'.repeat(40),files:[{path:'a.ts',status:'modified',additions:count,deletions:2},{path:'image',status:'modified',binary:true},{path:'large',status:'untracked'}],
+          commits:[{id:'a'.repeat(40),subject:'change'}],
+          branches:[{ref:'refs/heads/main',id:'a'.repeat(40)},{ref:'refs/heads/feature',id:'b'.repeat(40)}],
+          ...(body.commit?{commit:body.commit}:{}),
+          ...(body.base&&body.target?{base:body.base,target:body.target,baseId:'a'.repeat(40),targetId:'b'.repeat(40)}:{}),
+          ...(body.path?{path:body.path,diff:'@@ -1 +1 @@\n-before\n+after\n'}:{}),
+        })});
+      });
+      await openReply(page,origin);await page.click('[aria-label="코드 변경 보기"]');
+      const expect=async count=>{
+        await page.waitForFunction(n=>document.querySelector('[aria-label="비교 범위 변경량"]')?.textContent.includes(`+${n} / -2줄`),{},count);
+        assert.match(await page.$eval('[aria-label="변경 파일"] option',node=>node.textContent),new RegExp(`a.ts · \\+${count} / -2`));
+        const summary=await page.$eval('[aria-label="비교 범위 변경량"]',node=>node.textContent);
+        assert.ok(summary.includes('바이너리 1개'));assert.ok(summary.includes('미집계 1개 (합계 제외)'));
+      };
+      await expect(1);await page.select('[aria-label="변경 기준"]','a'.repeat(40));await expect(3);
+      await page.click('.code-branches summary');await page.select('[aria-label="기준 브랜치"]','refs/heads/main');
+      await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
+      await page.select('[aria-label="대상 브랜치"]','refs/heads/feature');await expect(7);
+    }));
 
     await t.test('branch and worktree comparisons carry the selected source into quoted code',()=>withPage(async page=>{
       const requests=[];

@@ -115,6 +115,11 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
   };
   const lang=path&&language(path);
   const changeWorktree=(path:string|null)=>{setWorktree(path);setSnapshot(undefined);setContent(undefined);setSelected(undefined);setRevision(n=>n+1);};
+  const stats=snapshot?.data.files.reduce((sum,file)=>({
+    added:sum.added+(file.additions??0),deleted:sum.deleted+(file.deletions??0),
+    binary:sum.binary+(file.binary?1:0),unknown:sum.unknown+(!file.binary&&(file.additions===undefined||file.deletions===undefined)?1:0),
+  }),{added:0,deleted:0,binary:0,unknown:0});
+  const fileStats=(file:CodeViewResult['files'][number])=>file.binary?'바이너리':file.additions===undefined||file.deletions===undefined?'줄 수 미집계':`+${file.additions} / -${file.deletions}`;
   const sessionWorktree = 'session-worktree';
   return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>{if(e.currentTarget.contains(e.target as Node))e.stopPropagation();}}>
     <header><strong title={title}>코드 변경 · {title}</strong><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
@@ -137,9 +142,10 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
       </select>
       <select aria-label="변경 파일" value={selected??''} onChange={e=>{setContent(undefined);setSelected(e.target.value);}} disabled={!snapshot?.data.files.length}>
         {!snapshot?.data.files.length&&<option value="">변경 파일 없음</option>}
-        {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path}</option>)}
+        {snapshot?.data.files.map(file=><option key={keyOf(file)} value={keyOf(file)}>{({untracked:'[새 파일] ',added:'[추가] ',deleted:'[삭제] ',modified:'[수정] '})[file.status]}{file.path} · {fileStats(file)}</option>)}
       </select>
     </div>
+    {stats&&<div className="code-stats" aria-label="비교 범위 변경량">{snapshot!.data.files.length}개 파일 · +{stats.added} / -{stats.deleted}줄{stats.binary>0&&` · 바이너리 ${stats.binary}개`}{stats.unknown>0&&` · 미집계 ${stats.unknown}개 (합계 제외)`}</div>}
     {onQuote&&onSend&&<CodeActions taskId={taskId} quote={selectedQuote()} onQuote={text=>{onQuote(text);setRange(undefined);}} onSend={onSend}/> }
     {loading&&<p role="status">변경을 불러오는 중…</p>}
     <div className={wrap?'code-diff wrap':'code-diff'} onPointerUp={captureSelection} onKeyUp={captureSelection} ref={scroll} tabIndex={0} aria-label="파일 diff">

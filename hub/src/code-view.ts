@@ -9,6 +9,36 @@ import { HttpError } from './errors.ts';
 import { REGISTERED_WORKTREE_UNAVAILABLE, type CodeViewResult } from '../../shared/code-view.ts';
 const exec = promisify(execFile);
 const MAX = 512 * 1024;
+// Bound both individual previews and the aggregate work of untracked list statistics.
+async function readUntracked(target: string, limit = MAX, reserve?: (size:number)=>void) {
+  if(await realpath(target)!==target)throw new HttpError(409,'심볼릭 링크 파일은 미리 볼 수 없습니다');
+  const before=await lstat(target);
+  if(!before.isFile()||before.size>limit)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
+  const file=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+  try {
+    const stat=await file.stat();
+    if(!stat.isFile()||stat.size>limit)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
+    const current=await lstat(target);
+    if(await realpath(target)!==target||current.dev!==stat.dev||current.ino!==stat.ino)
+      throw new HttpError(409,'파일 경로가 바뀌었습니다. 다시 읽어 주세요');
+    // One extra byte detects growth without reserving MAX for every tiny file.
+    reserve?.(stat.size);
+    const buffer=Buffer.alloc(stat.size+1);
+    let total=0;
+    while(total<buffer.length) {
+      const {bytesRead}=await file.read(buffer,total,buffer.length-total,total);
+      if(bytesRead===0)break;
+      total+=bytesRead;
+    }
+    const after=await file.stat();
+    if(total!==stat.size||after.size!==stat.size||after.mtimeMs!==stat.mtimeMs||after.ctimeMs!==stat.ctimeMs)
+      throw new HttpError(409,'파일 내용이 바뀌었습니다. 다시 읽어 주세요');
+    return buffer.subarray(0,total);
+  }finally{await file.close();}
+}
+function textLines(bytes: Buffer) {
+  const lines=bytes.toString('utf8').split('\n');if(lines.at(-1)==='')lines.pop();return lines;
+}
 export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' | 'untracked', commit?: string, options: {base?:string;target?:string;worktree?:string} = {}): Promise<CodeViewResult> {
   let root = await realpath(cwd);
   let target=resolve(root,path??'.'),rel=relative(root,target);
@@ -67,6 +97,23 @@ export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' 
   const untracked = commit || baseId ? [] : (await git(['ls-files','--others','--exclude-standard','-z','--',path??'.'])).split('\0').filter(Boolean);
   if(changed.length+untracked.length>1000) throw new HttpError(413,'변경 파일이 1,000개를 넘습니다. 작업 범위를 줄여 주세요');
   const files: CodeViewResult['files'] = [...changed,...untracked.map(path=>({path,status:'untracked' as const}))];
+  const numstat=await git(['diff','--no-ext-diff','--no-textconv','--no-renames','--numstat','-z','--relative',...comparison,'--',path??'.']);
+  for(const record of numstat.split('\0').filter(Boolean)) {
+    // Only the first two tabs delimit counts: paths may contain tabs and newlines.
+    const first=record.indexOf('\t'),second=record.indexOf('\t',first+1);
+    const added=record.slice(0,first),deleted=record.slice(first+1,second);
+    const file=changed.find(file=>file.path===record.slice(second+1));
+    if(file)Object.assign(file,added==='-'||deleted==='-'?{binary:true}:{additions:Number(added),deletions:Number(deleted)});
+  }
+  if(path===undefined) {
+    let budget=8*1024*1024;
+    for(const file of files)if(file.status==='untracked'&&budget>0) {
+      try {
+        const bytes=await readUntracked(resolve(root,file.path),Math.min(MAX,budget),size=>{budget-=size;});
+        Object.assign(file,bytes.includes(0)?{binary:true}:{additions:textLines(bytes).length,deletions:0});
+      }catch{/* Unsafe, oversized or changing files remain explicitly uncounted. */}
+    }
+  }
   const result: CodeViewResult = {root,head,files,...(baseId?{base:options.base,target:options.target,baseId,targetId}:{})};
   if(commit)result.commit=commit;
   if(path===undefined) {
@@ -83,23 +130,11 @@ export async function readCodeView(cwd: string, path?: string, kind?: 'tracked' 
   if(!selected)throw new HttpError(404,'변경 파일 목록에 없는 경로입니다');
   let diff: string;
   if(selected.status==='untracked') {
-    const canonical=await realpath(target);
-    if(canonical!==target)throw new HttpError(409,'심볼릭 링크 파일은 미리 볼 수 없습니다');
-    const file=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-    try {
-      const stat=await file.stat();
-      if(!stat.isFile()||stat.size>MAX)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
-      const current=await lstat(target);
-      if(await realpath(target)!==target||current.dev!==stat.dev||current.ino!==stat.ino)
-        throw new HttpError(409,'파일 경로가 바뀌었습니다. 다시 읽어 주세요');
-      const buffer=Buffer.alloc(MAX+1);
-      const {bytesRead}=await file.read(buffer,0,buffer.length,0);
-      if(bytesRead>MAX)throw new HttpError(413,'파일이 너무 큽니다 (최대 512 KiB)');
-      const bytes=buffer.subarray(0,bytesRead);
-      if(bytes.includes(0))return {...result,path,binary:true};
-      const lines=bytes.toString('utf8').split('\n');if(lines.at(-1)==='')lines.pop();
-      diff=`--- /dev/null\n+++ ${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line=>'+'+line).join('\n')}\n`;
-    }finally{await file.close();}
+    const bytes=await readUntracked(target);
+    if(bytes.includes(0)){selected.binary=true;return {...result,path,binary:true};}
+    const lines=textLines(bytes);
+    Object.assign(selected,{additions:lines.length,deletions:0});
+    diff=`--- /dev/null\n+++ ${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line=>'+'+line).join('\n')}\n`;
   }else diff=await git(['diff','--no-ext-diff','--no-textconv','--no-color','--no-renames','--relative','--unified=3',...comparison,'--',path]);
   if(Buffer.byteLength(diff)>MAX)throw new HttpError(413,'diff가 너무 큽니다 (최대 512 KiB)');
   return {...result,path,diff,binary:/^Binary files .* differ$/m.test(diff)};

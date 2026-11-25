@@ -27,3 +27,5 @@
 .code-worktree{display:flex;gap:6px;padding:0 8px 8px;font-size:12px}.code-worktree select{min-width:0;flex:1}
 .code-branches{margin:0 8px 8px;font-size:12px}.code-branches .code-selectors{margin:6px 0}
 .code-actions .row[hidden]{display:none}
+
+.code-stats{padding:0 10px 8px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}

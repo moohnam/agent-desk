@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access, realpath } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink, rm, chmod, access, realpath, open, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -56,7 +56,7 @@ test('index-only removal has independently selectable deletion and untracked dif
  await writeFile(join(root,'a.ts'),'const before = 1;\n');git('add','.');git('commit','-m','base');
  git('rm','--cached','a.ts');await writeFile(join(root,'a.ts'),'const after = 2;\n');
  const list=await readCodeView(root);
- assert.deepEqual(list.files,[{path:'a.ts',status:'deleted'},{path:'a.ts',status:'untracked'}]);
+ assert.deepEqual(list.files,[{path:'a.ts',status:'deleted',additions:0,deletions:1},{path:'a.ts',status:'untracked',additions:1,deletions:0}]);
  const deleted=await readCodeView(root,'a.ts','tracked');
  assert.match(deleted.diff!,/-const before = 1;/);assert.doesNotMatch(deleted.diff!,/const after/);
  const added=await readCodeView(root,'a.ts','untracked');
@@ -91,7 +91,7 @@ test('commit diff uses the first parent and ignores the current worktree',async(
   const second=list.commits![0];
   assert.equal(second.subject,'second');
   const history=await readCodeView(root,undefined,undefined,second.id);
-  assert.deepEqual(history.files,[{path:'a.txt',status:'modified'}]);
+  assert.deepEqual(history.files,[{path:'a.txt',status:'modified',additions:1,deletions:1}]);
   const detail=await readCodeView(root,'a.txt','tracked',second.id);
   assert.match(detail.diff!,/-first\n\+second/);
   assert.doesNotMatch(detail.diff!,/uncommitted/);
@@ -124,4 +124,76 @@ test('branch endpoints and registered worktrees are independent of the session c
  await rm(other,{recursive:true});
  execFileSync('git',['init',other],{stdio:'pipe'});
  await assert.rejects(readCodeView(root,undefined,undefined,undefined,{worktree:other}),/저장소가 변경/);
+}));
+
+
+test('line counts respect comparison endpoints, unusual paths, binary and untracked bounds',async()=>repo(async(root,git)=>{
+ const name='한글\tfile\n.txt';
+ await writeFile(join(root,name),'one\ntwo\n');
+ await writeFile(join(root,'binary'),Buffer.from([0,1]));git('add','.');git('commit','-m','base');git('branch','baseline');
+ await writeFile(join(root,name),'new\ntwo\nthree');
+ await writeFile(join(root,'binary'),Buffer.from([0,2]));git('commit','-am','changed');git('branch','feature');
+ const commit=(await readCodeView(root)).head!;
+ await writeFile(join(root,name),'dirty\n');
+ await writeFile(join(root,'empty'),'');await writeFile(join(root,'new'),'a\nb');
+ await writeFile(join(root,'big'),'x'.repeat(512*1024+1));await symlink(join(root,name),join(root,'link'));
+ const list=await readCodeView(root);
+ assert.equal(list.files.find(f=>f.path==='empty')?.additions,0);
+ assert.equal(list.files.find(f=>f.path==='new')?.additions,2);
+ assert.equal(list.files.find(f=>f.path==='big')?.additions,undefined);
+ assert.equal(list.files.find(f=>f.path==='link')?.additions,undefined);
+ assert.deepEqual(list.files.find(f=>f.path===name),{path:name,status:'modified',additions:1,deletions:3});
+ for(const result of [await readCodeView(root,undefined,undefined,commit),await readCodeView(root,undefined,undefined,undefined,{base:'refs/heads/baseline',target:'refs/heads/feature'})]) {
+  assert.deepEqual(result.files.find(f=>f.path===name),{path:name,status:'modified',additions:2,deletions:1});
+  assert.equal(result.files.find(f=>f.path==='binary')?.binary,true);
+  assert.equal(result.files.length,2);
+ }
+}));
+
+
+test('untracked list counts stop at the aggregate read budget without hiding files',async()=>repo(async(root)=>{
+ const text='x'.repeat(512*1024);
+ for(let i=0;i<17;i++)await writeFile(join(root,`file-${String(i).padStart(2,'0')}.txt`),text);
+ const list=await readCodeView(root);
+ assert.equal(list.files.length,17);
+ assert.equal(list.files.filter(file=>file.additions===1).length,16);
+ assert.equal(list.files[16].additions,undefined);
+ const detail=await readCodeView(root,list.files[16].path,'untracked').catch(error=>error);
+ // The file is still selectable; only its rendered diff exceeds the preview limit.
+ assert.match(detail.message,/diff가 너무 큽니다/);
+}));
+
+
+test('untracked reads finish partial reads and reject growth or truncation',async t=>repo(async(root)=>{
+ const path=join(root,'new.txt');await writeFile(path,'one\ntwo\n');
+ const handle=await open(path,'r');const prototype=Object.getPrototypeOf(handle);await handle.close();
+ const original=prototype.read;
+ let mode='partial',changed=false;
+ t.mock.method(prototype,'read',async function(this:typeof handle,buffer:Buffer,offset:number,length:number,position:number){
+  const result=await original.call(this,buffer,offset,Math.min(length,2),position);
+  if(!changed&&mode!=='partial') {
+   changed=true;
+   if(mode==='grow')await appendFile(path,'more\n');else await writeFile(path,'x');
+  }
+  return result;
+ });
+ assert.equal((await readCodeView(root)).files[0].additions,2);
+ assert.match((await readCodeView(root,'new.txt','untracked')).diff!,/\+one\n\+two/);
+ for(const mutation of ['grow','shrink']) {
+  await writeFile(path,'one\ntwo\n');mode=mutation;changed=false;
+  assert.equal((await readCodeView(root)).files[0].additions,undefined);
+  await writeFile(path,'one\ntwo\n');changed=false;
+  await assert.rejects(readCodeView(root,'new.txt','untracked'),/内容|내용이 바뀌었습니다/);
+ }
+}));
+
+test('one thousand tiny untracked files allocate buffers proportional to their size',async t=>repo(async(root)=>{
+ for(let i=0;i<1000;i++)await writeFile(join(root,`tiny-${i}`),'x');
+ const original=Buffer.alloc;const allocations:number[]=[];
+ t.mock.method(Buffer,'alloc',((size:number,...args:unknown[])=>{allocations.push(size);return Reflect.apply(original,Buffer,[size,...args]);}) as typeof Buffer.alloc);
+ const list=await readCodeView(root);
+ assert.equal(list.files.length,1000);
+ assert.equal(list.files.reduce((sum,file)=>sum+(file.additions??0),0),1000);
+ assert.equal(allocations.filter(size=>size===2).length,1000);
+ assert.ok(allocations.reduce((sum,size)=>sum+size,0)<1024*1024);
 }));

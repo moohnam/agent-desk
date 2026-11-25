@@ -1,4 +1,4 @@
-export interface CodeViewFile { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }
+export interface CodeViewFile { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked'; additions?: number; deletions?: number; binary?: boolean }
 export const REGISTERED_WORKTREE_UNAVAILABLE = '등록된 작업 폴더를 사용할 수 없습니다. 작업 폴더 등록을 확인해 주세요';
 export interface CodeViewResult {
   root: string; head: string | null; files: CodeViewFile[];
