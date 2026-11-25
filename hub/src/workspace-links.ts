@@ -494,7 +494,7 @@ export class WorkspaceLinks {
     if (usageAccessDenied(response)) { this.usageCache.delete(id); return []; }
     if (signal?.aborted || this.usageCache.get(id) !== cache) return [];
     if (response?.status === 200 && checkUsageTargets(response.body)) {
-      const targets = response.body.map(({ id, label }) => ({ id, label }));
+      const targets = response.body.map(({ id, label, runnerId }) => ({ id, label, runnerId }));
       cache.targets = targets;
       return targets;
     }

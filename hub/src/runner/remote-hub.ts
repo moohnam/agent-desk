@@ -92,8 +92,8 @@ export class RemoteRunners implements RunnerPort {
   acceptLocalUsage(report: UsageReport) { this.localUsage.accept(report); }
 
   usageTargets(includeLocal: boolean): UsageTarget[] {
-    return [...(includeLocal ? [{ id: 'local', label: '이 Mac' }] : []),
-      ...this.peers().map(peer => ({ id: peer.id, label: peer.address }))];
+    return [...(includeLocal ? [{ id: 'local', label: '이 Mac', runnerId: this.localUsageId }] : []),
+      ...this.peers().map(peer => ({ id: peer.id, label: peer.address, runnerId: peer.id }))];
   }
 
   readUsage(id: string, engine: EngineName, refresh: boolean): Promise<UsageReading> {

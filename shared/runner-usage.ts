@@ -1,7 +1,7 @@
 import type { EngineAuth, EngineUsage } from './api.ts';
 import { ENGINES, type EngineName } from './compose.ts';
 
-export interface UsageTarget { id: string; label: string; source?: string }
+export interface UsageTarget { id: string; label: string; source?: string; runnerId?: string }
 export interface UsageRequest { requestId: string; engine: EngineName; refresh: boolean }
 export interface UsageReport { requestId: string; value: EngineUsage }
 export interface UsageReading {
@@ -27,7 +27,7 @@ function checkUsageValue(input: unknown): input is EngineUsage {
   return record(input) && usageEngine(input.engine) && stamp(input.fetchedAt)
     && (input.plan === null || short(input.plan, 100)) && (input.error === undefined || short(input.error, 160)) && auth(input.auth)
     && Array.isArray(input.windows) && input.windows.length <= 40 && input.windows.every(window =>
-      record(window) && short(window.label, 140) && (window.resetsAt === null || stamp(window.resetsAt))
+      record(window) && (window.applicability === undefined || ['all', 'opus', 'sonnet', 'unknown'].includes(window.applicability as string)) && short(window.label, 140) && (window.resetsAt === null || stamp(window.resetsAt))
       && (window.usedPercent === null || typeof window.usedPercent === 'number'
         && Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100));
 }
@@ -44,5 +44,5 @@ export function checkUsageReading(input: unknown, engine: EngineName): input is 
 
 export function checkUsageTargets(input: unknown): input is UsageTarget[] {
   return Array.isArray(input) && input.every(target => record(target) && short(target.id, 128) && !!target.id
-    && short(target.label, 120) && (target.source === undefined || short(target.source, 128)));
+    && (target.runnerId === undefined || short(target.runnerId, 128)) && short(target.label, 120) && (target.source === undefined || short(target.source, 128)));
 }

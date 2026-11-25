@@ -1,3 +1,4 @@
+import * as threadUsage from '../../web/src/threadUsage.ts';
 import assert from 'node:assert/strict';
 import * as federation from '../../web/src/federation.ts';
 import * as draftRetention from '../../web/src/draftRetention.ts';
@@ -28,6 +29,8 @@ function load(file: string, imports: Record<string, unknown>, globals: Record<st
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
   const context = { window: { addEventListener() {}, removeEventListener() {} }, exports: {}, require: (name: string) => {
+    if (name === './usageReader.ts' && !(name in imports)) return load('usageReader.ts', {}, globals);
+    if (name === './ThreadUsage.tsx') return { ThreadUsage: () => null };
     if (name === './keys.ts') return keys;
     if (name === './slackEmoji.ts') return slackEmoji;
     if (name === './EditorInput.tsx' && !(name in imports)) return { EditorInput: () => null, editorText: (text: string) => text, inputElement: (input: any) => input?.element ?? input };
@@ -1373,4 +1376,36 @@ for (const boundary of ['gap', 'history']) for (const failure of [false, true]) 
     assert.equal(feed.more,false);
     const count=cursors.length;render().loadEarlier('column');await settle();assert.equal(cursors.length,count);
   }finally{h.unmount();globalThis.fetch=originalFetch;}
+});
+
+
+test('thread usage ignores late former runner responses and keeps only same-runner offline values', async () => {
+  const h=hooks(), jsx=(type:any,props:any)=>({type,props});
+  const pending: {path:string; resolve:(value:any)=>void}[]=[];
+  let poll:()=>void=()=>{};
+  const module=load('ThreadUsage.tsx',{
+    react:h.react,'react/jsx-runtime':{jsx,jsxs:jsx},'../../shared/compose.ts':compose,
+    '../../shared/runner-usage.ts':runnerUsage,'./threadUsage.ts':threadUsage,'./thread-usage.css':{},
+    './usageReader.ts':{readUsageApi:(path:string)=>path==='runner-usage'
+      ? Promise.resolve([{id:'local',runnerId:'mac',label:'Mac'},{id:'server',runnerId:'server',label:'Server'}])
+      : new Promise(resolve=>pending.push({path,resolve}))},
+  },{AbortController,URLSearchParams,setTimeout:(fn:()=>void)=>{poll=fn;return 1;},clearTimeout(){}});
+  let task:any={id:'task',runner_id:'mac',engine:'codex',source:'app',runner_connected:true};
+  const render=()=>h.render(()=>module.ThreadUsage({task,model:'gpt-5'}));
+  const tick=()=>new Promise(resolve=>setImmediate(resolve));
+  const reading=(usedPercent:number)=>({status:'ready',value:{engine:'codex',plan:null,fetchedAt:'2026-11-25T00:00:00Z',windows:[{label:'5시간',usedPercent,resetsAt:null,applicability:'all'}]}});
+  render();await tick();
+  pending[0].resolve(reading(10));await tick();
+  let tree=render();assert.match(tree.props.children[0].props['aria-label'],/90% 남음/);
+  task={...task,runner_id:'server'};
+  assert.equal(render(),null,'old runner value hidden synchronously');await tick();
+  pending[1].resolve(reading(70));await tick();tree=render();assert.match(tree.props.children[0].props['aria-label'],/30% 남음/);
+  poll();await tick();
+  task={...task,runner_id:'mac'};assert.equal(render(),null);await tick();
+  pending[2].resolve(reading(99));await tick();assert.equal(render(),null,'late former request cannot fill new runner');
+  pending[3].resolve(reading(20));await tick();tree=render();assert.match(tree.props.children[0].props['aria-label'],/80% 남음/);
+  task={...task,runner_connected:false};tree=render();assert.match(tree.props.className,/stale/);
+  tree.props.children[0].props.onClick({currentTarget:{getBoundingClientRect:()=>({left:20,bottom:50})}});tree=render();assert.ok(tree.props.children[1]);
+  tree.props.onKeyDown({key:'Escape',preventDefault(){},stopPropagation(){}});tree=render();assert.equal(tree.props.children[1],false);
+  h.unmount();
 });

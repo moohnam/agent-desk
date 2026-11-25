@@ -1,3 +1,4 @@
+import { workspaceUsage } from '../../hub/src/runner/usage-probe.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,7 +65,8 @@ test('runner usage is isolated, shares simultaneous requests and keeps the last 
     assert.equal(remote().usageRequests, undefined);
     remote([], true);
     t.localSay({ type: 'hello', runnerId: 'local-test', host: 'host', capabilities: { engines: ['codex'], usage: true }, sessions: [] });
-    const local = t.hub.remotes.readUsage('local', 'codex', false);
+    assert.equal(t.hub.remotes.usageTargets(true).find(target => target.id === 'local')?.runnerId, 'local-test');
+    const local = workspaceUsage(t.hub.remotes, true, {runner:'local-test',engine:'codex',refresh:false});
     const fromRemote = t.hub.remotes.readUsage(id, 'codex', false);
     assert.equal(t.hub.remotes.readUsage(id, 'codex', true), fromRemote);
     const cmd = t.localSent.at(-1)!;
@@ -84,6 +86,8 @@ test('runner usage is isolated, shares simultaneous requests and keeps the last 
     t.hub.remotes.rotate(id);
     assert.deepEqual(await t.hub.remotes.readUsage(id, 'codex', false), { status: 'offline', value: remoteValue });
     assert.equal(t.hub.remotes.list()[0].pending, 0);
+    t.localSay({ type: 'hello', runnerId: 'replacement', host: 'host', capabilities: { engines: ['codex'], usage: true }, sessions: [] });
+    assert.throws(() => workspaceUsage(t.hub.remotes, true, {runner:'local-test',engine:'codex',refresh:false}), /등록되지 않은/);
   } finally { t.cleanup(); }
 });
 
