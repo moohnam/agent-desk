@@ -142,7 +142,19 @@ fn notification_origin(hub: &Url) -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        // WebKit discarded this document. The bundled page can wait for the hub
+        // even if the network has not returned yet after waking the Mac.
+        let webview = webview.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = webview.navigate(Url::parse("tauri://localhost/index.html").unwrap()) {
+                eprintln!("[agent-desk] could not restore the connection page: {error}");
+            }
+        });
+    });
+    builder
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![desk_notify, desk_notify_permission, hub_startup::desk_startup])
         .setup(|app| {
