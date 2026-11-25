@@ -1,4 +1,5 @@
 import { signRequest, toolFields } from './request-proof.ts';
+import { MAX_PROMPT_TEMPLATES_BODY } from './prompt-templates.ts';
 import { enrollmentCall, requestEnrollment, sshLogin } from './ssh-client.ts';
 import { agentPublicKeys, validatePublicKey } from './ssh-signature.ts';
 import { readSse } from './sse-reader.ts';
@@ -524,7 +525,7 @@ export class WorkspaceLinks {
     const body=suppliedBody??await readBody(req);
     const rpc=body as {params?:{name?:string;arguments?:Record<string,unknown>}};
     const name=rpc?.params?.name;
-    const proof=(name==='desk_request'||name==='desk_reply') && signRequest(req.headers?.['x-desk-session'],toolFields(name,rpc.params?.arguments??{}));
+    const proof=(name==='desk_request'||name==='desk_reply'||name==='desk_settings') && signRequest(req.headers?.['x-desk-session'],toolFields(name,rpc.params?.arguments??{}));
     const controller=new AbortController();
     res.on('close',()=>controller.abort());
     try {
@@ -699,10 +700,15 @@ export class WorkspaceLinks {
             return state !== 'unavailable';
           };
           const literalNote = isNoteInput(op.method, op.path, op.body);
-          if (literalNote || op.body.note_context !== undefined) {
+          const codeReview = workspaceRoute(op.method, op.path) === 'POST /tasks/:id/messages' && op.body.code_review === true;
+          if (literalNote || op.body.note_context !== undefined || codeReview) {
             const identity = await this.request(this.link(id), '/v1/identity');
-            if (!('status' in identity) || identity.status !== 200) { failure('notes_capability_unavailable'); break; }
-            if (identity.body?.capabilities?.notes !== 1) {
+            if (!('status' in identity) || identity.status !== 200) { failure(codeReview?'code_review_capability_unavailable':'notes_capability_unavailable'); break; }
+            if (codeReview && identity.body?.capabilities?.code_review_messages !== 1) {
+              if (!await unsupported('code_review_messages','공유 러너가 코드 검토 전송을 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내 주세요')) break;
+              continue;
+            }
+            if ((literalNote || op.body.note_context !== undefined) && identity.body?.capabilities?.notes !== 1) {
               if (!await unsupported('notes','공유 러너가 메모를 지원하지 않습니다. 러너를 업데이트한 뒤 다시 보내주세요')) break;
               continue;
             }
@@ -846,7 +852,8 @@ export class WorkspaceLinks {
       if('status' in r)return json(res,r.status,r.body);return;
     }
     const requestId=req.headers['x-desk-operation-id'];
-    const op={id:typeof requestId==='string'?requestId:randomUUID(),method:req.method!,path,body:(suppliedBody??await readBody(req))??{}};
+    const limit = workspaceRoute(req.method!,path) === 'PUT /prompt-templates' ? MAX_PROMPT_TEMPLATES_BODY : undefined;
+    const op={id:typeof requestId==='string'?requestId:randomUUID(),method:req.method!,path,body:(suppliedBody??await readBody(req,limit))??{}};
     this.enqueue(id,op);
     let timer:NodeJS.Timeout|undefined;
     try { await Promise.race([this.flush(id),new Promise<void>(resolve=>{timer=setTimeout(resolve,3500);})]); }

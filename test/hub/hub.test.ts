@@ -469,6 +469,21 @@ test('a message answers a single open question instead of waiting for the turn',
   assert.equal(status(hub, taskId), 'running');
 });
 
+test('a code review message waits behind an open question and preserves the normal reply path', () => {
+  const {hub, runner, taskId, sessionId} = started();
+  runner.say({type:'approval_request',sessionId,approvalId:'code-question',toolName:'AskUserQuestion',
+    input:{questions:[{question:'어떻게 할까요?'}]}});
+  const reviewed = workspaceApi(hub,'POST',new URL(`/tasks/${taskId}/messages`,'http://workspace'),{
+    text:'변경을 검토해 주세요\n\n```diff\n+change();\n```',code_review:true,
+  });
+  assert.equal(reviewed.status,202);
+  assert.ok(reviewed.body.queued_id);
+  assert.equal(runner.last('approval_result'),undefined);
+  assert.equal(hub.state().approvals.length,1);
+  hub.sendMessage(taskId,'질문에 대한 답변');
+  assert.match(runner.last('approval_result')!.message!,/질문에 대한 답변/);
+});
+
 test('in Codex a message answers its single open question', () => {
   const t = setup();
   const view = t.hub.compose(`@web:${t.dir} #codex 고쳐 줘`);

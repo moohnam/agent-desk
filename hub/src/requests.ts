@@ -56,7 +56,7 @@ export class AgentRequests {
     return token;
   }
 
-  private proven(session: Session, fields: readonly unknown[], proof: unknown) {
+  proven(session: Session, fields: readonly unknown[], proof: unknown) {
     const row = this.core.store.database.prepare('SELECT digest FROM request_identity WHERE session_id=?').get(session.id);
     return typeof row?.digest === 'string' && verifyRequest(row.digest,fields,proof);
   }

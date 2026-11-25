@@ -3,7 +3,8 @@
 .code-panel header strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.code-panel header button{padding:4px;display:flex}
 .code-panel p{padding:8px;font-size:12px}.code-panel [role=alert]{color:var(--bad)}
 .code-scope{padding:8px 10px;font-size:12px;color:var(--muted)}.code-scope span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.code-scope small{display:block;margin-top:4px}
-.code-panel select{margin:0 8px 8px;max-width:calc(100% - 16px);padding:6px;background:var(--col);color:var(--text);border:1px solid var(--border)}
+.code-selectors{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0 8px 8px}
+.code-selectors select{min-width:0;width:100%;text-overflow:ellipsis;padding:6px;background:var(--col);color:var(--text);border:1px solid var(--border)}
 .code-diff{overflow:auto;flex:1;min-height:0;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:4}
 .code-line{display:flex;min-width:max-content;white-space:pre}.code-line code{font:inherit;white-space:pre;padding-right:12px}
 .code-number{width:4em;flex:none;text-align:right;padding-right:8px;color:var(--muted);user-select:none;border-right:1px solid var(--border)}.code-sign{width:2em;text-align:center;flex:none;user-select:none}
@@ -18,3 +19,11 @@
 .quote-code{align-self:flex-start;margin:0 8px 6px;padding:4px 8px}
 .code-line.quoted{box-shadow:inset 3px 0 var(--text);background:var(--border)}
 .code-line button.code-sign{padding:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.code-actions{padding:0 8px 8px;font-size:12px;max-height:40%;overflow:auto;flex-shrink:0}
+.code-actions .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.code-actions select{max-width:100%;min-width:0}.code-actions label{min-width:0}
+.code-actions pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto}
+.code-actions .quote-code{margin:4px 0}.code-actions button{padding:4px 6px}.code-actions p{padding:4px 0;margin:0}
+.code-worktree{display:flex;gap:6px;padding:0 8px 8px;font-size:12px}.code-worktree select{min-width:0;flex:1}
+.code-branches{margin:0 8px 8px;font-size:12px}.code-branches .code-selectors{margin:6px 0}
+.code-actions .row[hidden]{display:none}

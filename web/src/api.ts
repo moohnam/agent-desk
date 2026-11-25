@@ -17,6 +17,8 @@ async function writeNotePost<T>(eventId: number, write: () => Promise<T>): Promi
 // getRandomValues works on phones using an HTTP LAN address.
 export const workspaceOperationId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
 
+export class CodeSendRejected extends Error {}
+
 async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, target?:string, operationId?: string): Promise<T> {
   let source=target??'';
   const url=new URL(path,'http://desk');
@@ -45,6 +47,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   if(source&&route.startsWith('/channels/'))throw new Error('채널 대화는 같은 허브의 프로젝트를 선택하세요');
   path=url.pathname+url.search;
   const scheduling = method === 'POST' && route.endsWith('/scheduled-replies');
+  const codeReview = method === 'POST' && route.endsWith('/messages') && input?.code_review === true;
   const requestId = operationId ?? (source && method !== 'GET' && route !== '/open' ? workspaceOperationId() : undefined);
   const init:RequestInit = {
     method,
@@ -58,10 +61,16 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
     if (scheduling && res.ok && data?.shared_pending !== true &&
         (typeof data?.task_id !== 'string' || typeof data?.queued_id !== 'string'))
       throw new Error('예약 접수 결과를 확인하지 못했습니다. 입력을 그대로 두고 다시 시도해 주세요');
+    if (codeReview && res.ok && data?.shared_pending !== true && (typeof data?.task_id !== 'string' || !data.task_id))
+      throw new Error('코드 전송 결과를 확인하지 못했습니다. 다시 시도해 주세요');
     return { res, data };
   };
   const { res, data } = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
-  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+  if (!res.ok) {
+    if (codeReview && res.status >= 400 && res.status < 500 && ![408,425,429].includes(res.status) && typeof data.error === 'string')
+      throw new CodeSendRejected(data.error);
+    throw new Error(data.error ?? `HTTP ${res.status}`);
+  }
   if (data.shared_pending) throw new SharedPending();
   if(!source)return data as T;
   const index=sourceIndex(source);
@@ -230,9 +239,10 @@ async function feedCount(q:FeedQuery,signal?:AbortSignal,scope?:string,details=f
 export const FEED_PAGE = 1000;
 
 export const api = {
-  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked', commit?: string) => {
+  promptTemplates: (source='',input?:import('../../shared/prompt-templates.ts').PromptTemplates,signal?:AbortSignal,operationId?:string)=>call<import('../../shared/prompt-templates.ts').PromptTemplates>(input?'PUT':'GET','/prompt-templates',input,signal,source,operationId),
+  codeView: (taskId: string, path?: string, signal?: AbortSignal, kind?: 'tracked' | 'untracked', commit?: string, comparison?: {base?:string;target?:string;worktree?:string|null}) => {
     const [source, task_id] = splitId(taskId);
-    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind,commit}, signal, '');
+    return call<import('../../shared/code-view.ts').CodeViewResult>('POST', '/code-view', {source,task_id,path,kind,commit,...comparison}, signal, '');
   },
   remember,
   updates: (signal?: AbortSignal, refreshLatest = false) => call<UpdateView>('GET', refreshLatest ? '/updates?refresh=1' : '/updates', undefined, signal),
@@ -308,6 +318,7 @@ export const api = {
     call<TaskView>('POST', '/tasks', { project_id, title, prompt }),
   /** Returns the task that got the message: a new one for #new or #fork. */
   send: (taskId: string, text: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text }),
+  sendCode: (taskId: string, text: string, operationId: string) => call<{ task_id: string } & MessageReceipt>('POST', `/tasks/${taskId}/messages`, { text, code_review: true },undefined,undefined,operationId),
   scheduleReply: (taskId: string, text: string, at: string, operationId: string, sessionId?: string) =>
     call<{ task_id: string; queued_id: string }>('POST', `/tasks/${taskId}/scheduled-replies`, { text, scheduled_at: at, session_id: sessionId }, undefined, undefined, operationId),
   writeNote: (taskId: string, text: string) => call('POST', `/tasks/${taskId}/messages`, { text, note_only: true }),
