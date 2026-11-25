@@ -6,8 +6,11 @@ import hljs from 'highlight.js/lib/common';
 import { api } from './api.ts';
 import type { CodeSendResult } from './codeSend.ts';
 import { diffLines, REGISTERED_WORKTREE_UNAVAILABLE, type CodeViewResult } from '../../shared/code-view.ts';
-import './code-panel.css';
-const language = (path: string) => ({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'} as Record<string,string>)[path.split('.').at(-1)??''];
+const languages: Record<string,string> = {ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',rb:'ruby',rs:'rust',go:'go',sh:'bash',yml:'yaml',yaml:'yaml',json:'json',css:'css',html:'xml',md:'markdown',sql:'sql',c:'c',h:'c',cpp:'cpp',java:'java'};
+function language(path: string) {
+  const extension = path.split('.').at(-1) ?? '';
+  return Object.hasOwn(languages, extension) ? languages[extension] : undefined;
+}
 const branchLabel = (ref:string) => ref.startsWith('refs/remotes/')
   ? `${ref.slice('refs/remotes/'.length)} (원격 추적)`
   : `${ref.slice('refs/heads/'.length)} (로컬)`;

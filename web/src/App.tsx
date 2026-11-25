@@ -1,5 +1,6 @@
 import { sendCode } from './codeSend.ts';
 import { lazy, Suspense } from 'react';
+import { CodePanelBoundary } from './CodePanelBoundary.tsx';
 import { useRemovalView } from './useRemovalView.ts';
 const CodePanel = lazy(() => import('./CodePanel.tsx').then(module => ({default: module.CodePanel})));
 import { feedCursor } from './feedCache.ts';
@@ -1596,7 +1597,7 @@ export function App() {
           ids={references.ids} files={references.files} order={references.order} fileFocus={references.fileFocus} onMove={references.move} onResolveFile={references.resolveFile}
           onRemoveFile={references.removeFile} events={threadEvents} reload={hub.synced} onRemove={references.toggle} onClear={references.clear}
           onClose={() => references.show(false)} onReveal={(id) => openThread(threadTaskView.id, { post: id })} onError={setToast} />}
-        {codeVisible && codeTask && <Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
+        {codeVisible && codeTask && <CodePanelBoundary key={codeTask} onClose={closeCode}><Suspense fallback={<aside className="code-panel" role="status">코드 뷰 준비 중…</aside>}>
           <CodePanel key={codeTask} taskId={codeTask} title={hub.tasks.get(codeTask)?.title??'작업'} onClose={closeCode}
             onSend={async text=>{onThreadSend();return sendCode(codeTask,text);}}
             onQuote={threadTaskView && threadTaskView.source!=='external' && threadTaskView.kind!=='note' && !handoff?.open ? quote=>{
@@ -1607,7 +1608,7 @@ export function App() {
               if(documentOverlay)closeCode();
               requestAnimationFrame(()=>{const input=replyRef.current;input?.focus();input?.setSelectionRange(text.length,text.length);});
             }:undefined} />
-        </Suspense>}
+        </Suspense></CodePanelBoundary>}
         <ColumnDeck inactive={referencesVisible || codeVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}
           {!phone && editable && (

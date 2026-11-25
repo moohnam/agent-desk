@@ -171,6 +171,38 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       } finally { await context.close(); }
     };
 
+    await t.test('a missing diff bundle leaves the thread and draft usable', () => withPage(async page => {
+      await page.setRequestInterception(true);
+      page.on('request', request => {
+        if (/\/CodePanel-[^/]+\.js$/.test(new URL(request.url()).pathname)) void request.abort();
+        else void request.continue();
+      });
+      await openReply(page, origin);
+      await page.type(textarea, '작성 중인 답글');
+      await page.click('[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-panel [role="alert"]');
+      await page.focus('.code-panel button[aria-label="코드 보기 닫기"]');
+      await page.keyboard.press('Enter');
+      await page.waitForSelector('.code-panel', { hidden: true });
+      assert.equal(await page.$eval(textarea, field => field.value), '작성 중인 답글');
+    }, false, 'emacs'));
+
+    await t.test('an unknown extension named constructor renders a plain-text diff', () => withPage(async page => {
+      await page.setRequestInterception(true);
+      page.on('request', request => {
+        if (new URL(request.url()).pathname !== '/api/code-view') return void request.continue();
+        const { path } = JSON.parse(request.postData());
+        void request.respond({ contentType: 'application/json', body: JSON.stringify({
+          root: '/repo', head: 'a'.repeat(40), files: [{ path: 'file.constructor', status: 'modified' }],
+          ...(path && {path, diff: '@@ -0,0 +1 @@\n+plain text\n'}),
+        }) });
+      });
+      await openReply(page, origin);
+      await page.click('[aria-label="코드 변경 보기"]');
+      await page.waitForSelector('.code-line.add');
+      assert.equal(await page.$eval('.code-line.add code', el => el.textContent), 'plain text');
+    }, false, 'emacs'));
+
     await t.test('grouped columns fill empty space after resize without paging a full viewport', () => withPage(async page => {
       await page.setViewport({ width: 1440, height: 180 });
       await page.setExtraHTTPHeaders({ 'x-desk-fixture': 'grouped-feed' });
