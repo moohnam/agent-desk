@@ -54,6 +54,10 @@ test('thread usage details support mouse, keyboard and touch within the viewport
       await page.focus(detail);await page.keyboard.press('Escape');await page.waitForSelector(detail,{hidden:true});
       assert.ok(await page.$eval(button,e=>document.activeElement===e),'Escape returns focus from portalled details');
       await page.keyboard.press('Enter');await page.waitForSelector(detail);
+      await page.keyboard.press('Tab');
+      assert.ok(await page.$eval(detail,e=>document.activeElement===e),'Tab reaches portalled details');
+      await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
+      assert.ok(await page.$eval(button,e=>document.activeElement===e),'Shift+Tab returns to the anchor');
       // A real first tap can overlap smooth thread movement. The popup must track
       // the anchor rather than close on each subpixel animation step.
       await page.$eval('.thread-usage',async e=>{await e.animate([{transform:'translateX(0)'},{transform:'translateX(5px)'}],{duration:220}).finished;});

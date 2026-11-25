@@ -108,7 +108,18 @@ export function ThreadUsage({ task, model }: { task: TaskView; model: string | u
   return <span ref={anchor} className={`thread-usage${stale ? ' stale' : ''}`} onPointerEnter={e => { if (e.pointerType === 'mouse') { clearTimeout(leaveTimer.current); place(); setHovered(true); } }}
     onPointerLeave={leave}
     onBlur={e => { if (!anchor.current?.contains(e.relatedTarget) && !details.current?.contains(e.relatedTarget)) close(); }}
-    onKeyDown={e => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); close(); anchor.current?.querySelector('button')?.focus(); } }}>
+    onKeyDown={e => {
+      e.stopPropagation();
+      const button = anchor.current?.querySelector('button');
+      if (e.key === 'Escape') { e.preventDefault(); close(); button?.focus(); }
+      // Keep the original adjacent keyboard order despite rendering in a portal.
+      if (e.key === 'Tab' && !e.shiftKey && e.target === button && (open || hovered)) {
+        e.preventDefault(); details.current?.focus();
+      } else if (e.key === 'Tab' && e.shiftKey && e.target === details.current) {
+        e.preventDefault(); button?.focus();
+      }
+    }}>
+
     <button type="button" aria-label={`사용량 한도 ${remaining}% 남음${stale ? ' · 마지막 조회값' : ''}`} aria-expanded={open || hovered}
       onClick={() => { place(); setOpen(v => !v); }}>
       <span className="thread-usage-track" aria-hidden="true"><i style={{width: `${remaining}%`}} /></span>{remaining}% 남음
