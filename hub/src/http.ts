@@ -456,6 +456,13 @@ export function createHttpServer(hub: Hub, access: Access, uploadsDir: string, o
         });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/api/removals') {
+        res.setHeader('cache-control','no-store');
+        const etag=`"${workspaces.removalRevision}"`;
+        res.setHeader('etag',etag);
+        if (req.headers['if-none-match'] === etag) { res.writeHead(304);res.end();return; }
+        return send(res,200,workspaces.removals(localAuthorityId));
+      }
       if (parts[1] === 'workspaces') {
         if (parts.length === 2 && req.method === 'GET') return send(res,200,workspaces.list().filter(link=>link.id!==localAuthorityId));
         if (parts.length === 3 && ['ssh-keys','ssh-requests','ssh-outgoing'].includes(id)) {

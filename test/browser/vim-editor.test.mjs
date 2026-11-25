@@ -57,6 +57,7 @@ function fixtureServer() {
           return;
         }
         let body = (layout === 'grouped-deep' ? deepGroupedFeed : layout?.startsWith('grouped-') ? groupedFeed : fixture)(url);
+        if (url.pathname === '/api/removals') body = [];
         if (url.pathname === '/api/updates') body = {
           ...body, targets: [],
           ...(request.headers['x-desk-settings-update'] && { current: 'old', latest: 'new' }),

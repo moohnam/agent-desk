@@ -62,7 +62,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   };
   const { res, data } = await send().catch(e=>{if(requestId&&!signal?.aborted)return send();throw e;});
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-  if (data.shared_pending) throw new SharedPending();
+  if (data.shared_pending) throw new SharedPending(data.operation_id);
   if(!source)return data as T;
   const index=sourceIndex(source);
   if(route==='/compose'||route==='/tasks'&&method==='POST'||method==='PATCH'&&/^\/tasks\/[^/]+$/.test(route))return mapTask(source,index,data) as T;

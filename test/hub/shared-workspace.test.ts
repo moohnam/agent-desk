@@ -267,6 +267,48 @@ test('shared file request times out on headers and honors cancellation',async()=
 });
 
 // Exercise each engine's hub/journal contract without a model call. CLI protocols are tested separately.
+test('offline deletion intent survives a gateway restart and finishes on reconnect', async () => {
+  const f=fixture(),authority=f.runtime.workspace.server();
+  const runnerUrl=await listen(authority),port=Number(new URL(runnerUrl).port);
+  const store=new Store(join(f.dir,'removals.db'));
+  let links=new WorkspaceLinks(store);
+  const hub=new Hub(store,{skills:new SkillStore(join(f.dir,'gateway-skills')),
+    runner:()=>({connected:false,id:null,engines:new Set(),has:()=>false,handle:()=>{}})});
+  const server=createHttpServer(hub,new Access(join(f.dir,'token'),4317),join(f.dir,'uploads'),{workspaces:links});
+  try {
+    const task=f.runtime.hub.external.attachExternal({title:'delete me',summary:'test',cwd:f.project});
+    const peer=f.runtime.workspace.grant('gateway');
+    const link=await links.attach({name:'remote',url:runnerUrl,token:peer.token});
+    const gateway=await listen(server);
+    await stop(authority);
+    const id=randomUUID();
+    const response=await fetch(`${gateway}/api/workspaces/${link.id}/tasks/${task.id}`,{
+      method:'DELETE',headers:{'x-desk-operation-id':id}});
+    assert.equal(response.status,202);
+    assert.equal((await response.json() as any).operation_id,id);
+    const read=await fetch(gateway+'/api/removals');
+    assert.equal(read.headers.get('cache-control'),'no-store');
+    assert.deepEqual(await read.json(),[{id,taskId:`w:${link.id}:${task.id}`,status:null}]);
+    const unchanged=await fetch(gateway+'/api/removals',{headers:{'if-none-match':read.headers.get('etag')!}});
+    assert.equal(unchanged.status,304,'unchanged deletion intent needs no response body');
+    assert.ok(f.runtime.hub.store.getTask(task.id),'runner has not received the deletion yet');
+    await links.close();
+    links=new WorkspaceLinks(store);
+    assert.equal(links.removals()[0].status,null,'durable intent survives a new gateway instance');
+    assert.equal(links.removals(link.id)[0].taskId,task.id,'local authority uses unscoped IDs');
+    const version=links.removalRevision;
+    await listen(authority,port);await links.flush(link.id);
+    assert.notEqual(links.removalRevision,version);
+    assert.equal(f.runtime.hub.store.getTask(task.id),undefined);
+    assert.ok(links.removals()[0].status!<400);
+    links.enqueue(link.id,{id:randomUUID(),method:'DELETE',path:'/tasks/unrelated/queue/message',body:{}});
+    assert.equal(links.removals().length,1,'queue deletion does not hide the task');
+  } finally {
+    await stop(server);await links.close();hub.dispose();store.database.close();
+    await stop(authority);f.close();
+  }
+});
+
 function fixture(){
  const dir=mkdtempSync(join(tmpdir(),'desk-workspace-'));const project=join(dir,'project');mkdirSync(project);
  const starts:StartOptions[]=[],sends:string[]=[],approved:string[]=[];let interrupts=0;

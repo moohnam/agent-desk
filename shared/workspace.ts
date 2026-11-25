@@ -12,6 +12,9 @@ export interface WorkspaceOperation {
 export interface WorkspaceDelivery {
   id: string; method: string; path: string; status: number | null; error?: string; text?: string;
 }
+export interface WorkspaceRemoval {
+  id: string; taskId?: string; projectId?: string; status: number | null; error?: string;
+}
 
 export interface SshPeerView {
   peerId:string; ownerId:string; ownerName:string; fingerprint:string; name:string; publicKey:string; admin:boolean; revoked:boolean;

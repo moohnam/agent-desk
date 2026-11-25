@@ -90,9 +90,65 @@ test('clearing the reference pane closes it, resets the document focus and prese
   assert.equal(cleared.files, undefined);
   assert.equal(cleared.fileFocus, undefined);
   assert.equal(render('other').ids[0], 10);
+  cleared.show(true);
+  assert.equal(render('current').open, false, 'an empty pane cannot be reopened');
+  render('current').addFile('current', '/preview.md');
+  render('current').toggle(20);
+  render('current').removeFile('/preview.md');
+  assert.equal(render('current').open, true, 'a remaining post keeps the pane open');
+  render('current').toggle(20);
+  assert.equal(render('current').open, false, 'removing the last post closes the pane');
+  render('current').addFile('current', '/preview.md');
+  render('current').toggle(20);
+  render('current').toggle(20);
+  assert.equal(render('current').open, true, 'a remaining document keeps the pane open');
+  render('current').removeFile('/preview.md');
+  assert.equal(render('current').open, false, 'removing the last document closes the pane');
+  assert.equal(render('other').open, true, 'another thread is unaffected');
 });
 
 const askOptions = [{ label: '표준' }];
+test('durable deletion intent hides stale tasks and restores a rejected deletion', async () => {
+  const h = hooks();
+  let next: any[] = [], poll = () => {}, finish: ((value:any)=>void) | undefined;
+  const {useRemovalView} = load('useRemovalView.ts', {react:h.react}, {
+    AbortController,
+    fetch: async () => ({ok:true,headers:new Headers(),json:() => finish ? new Promise(resolve => {finish=resolve;}) : Promise.resolve(next)}),
+    setTimeout:(fn:()=>void) => {poll=fn;return 1;}, clearTimeout() {},
+  });
+  const hub:any = {projects:[{id:'p'},{id:'other'}], tasks:new Map([['t',{id:'t',project_id:'p'}],['keep',{id:'keep',project_id:'other'}]]),
+    approvals:new Map([['a',{task_id:'t'}]]), questions:new Map(), events:[{task_id:'t'}], gone:new Set(), connected:true};
+  const render=()=>h.render(()=>useRemovalView(hub));
+  assert.equal(render().tasks.size,0,'initial source state waits for durable deletion intent');
+  await new Promise(resolve=>setImmediate(resolve));
+  render().acceptRemoval('task','t','delete-1');
+  assert.equal(render().tasks.has('t'),false);
+  assert.equal(render().approvals.size,0);
+  assert.equal(render().hiddenTasks.has('t'),true);
+  assert.equal(render().gone.has('t'),false,'pending deletion must not discard drafts or history');
+  assert.equal(hub.tasks.has('t'),true,'raw cached state is retained until the runner decides');
+  next=[{id:'delete-1',taskId:'t',status:null}];poll();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(render().tasks.has('t'),false,'polling the durable queue preserves the hidden state');
+  next=[{id:'delete-1',taskId:'t',status:403,error:'권한 없음'}];poll();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(render().tasks.has('t'),true);
+  assert.match(render().removalError.message,/권한 없음/);
+  render().acceptRemoval('task','t','delete-1');
+  assert.equal(render().tasks.has('t'),true,'a late 202 response cannot overwrite the final rejection');
+  next=[{id:'delete-project',projectId:'p',status:null}];poll();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(render().tasks.has('t'),false);
+  assert.equal(render().projects.length,1);
+  assert.equal(render().hiddenProjects.has('p'),true,'project mask also guards feeds before task metadata arrives');
+  assert.equal(render().tasks.has('keep'),true);
+  next=[{id:'delete-project',projectId:'p',status:200}];poll();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(render().tasks.has('t'),false,'an old snapshot cannot restore a confirmed deletion');
+  hub.connected=false;assert.equal(render().connected,false,'unrelated hub state remains current');
+  finish=()=>{};poll();await new Promise(resolve=>setImmediate(resolve));
+  render().acceptRemoval('task','keep','delete-2');
+  finish!([]);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(render().tasks.has('keep'),false,'a response started before deletion cannot reveal it');
+  h.unmount();
+});
+
 function askCardHarness(questions: { question: string; options?: typeof askOptions; multiSelect?: boolean; secret?: boolean }[], stored = new Map<string, string>()) {
   const h = hooks();
   const react = { ...h.react, useSyncExternalStore<T>(_subscribe: unknown, snapshot: () => T) { return snapshot(); } };

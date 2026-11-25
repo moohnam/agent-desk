@@ -1,4 +1,5 @@
 import { lazy, Suspense } from 'react';
+import { useRemovalView } from './useRemovalView.ts';
 const CodePanel = lazy(() => import('./CodePanel.tsx').then(module => ({default: module.CodePanel})));
 import { feedCursor } from './feedCache.ts';
 import { ThreadPosts, type ThreadPostActions } from './ThreadPosts.tsx';
@@ -89,7 +90,8 @@ const ColumnDeck = memo(function ColumnDeck({ inactive, phone, elementRef, child
 export function App() {
   const [codeTask, setCodeTask] = useState<string | null>(null);
   const closeCode = useCallback(()=>setCodeTask(null),[]);
-  const hub = useHub();
+  const rawHub = useHub();
+  const hub = useRemovalView(rawHub);
   const updates = useUpdates();
   const updateVersion = updates.view?.latest ?? updates.view?.available;
   const newVersion = !!updates.view?.current && !!updateVersion && updateVersion !== updates.view.current;
@@ -146,6 +148,7 @@ export function App() {
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [phoneChannel, setPhoneChannel] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => { if (hub.removalError) setToast(hub.removalError.message); }, [hub.removalError]);
   const composeRef = useRef<DeskInput>(null);
   const replyRef = useRef<DeskInput>(null);
   const focusDrawer = useRef(false);
@@ -336,10 +339,11 @@ export function App() {
   }, [feeds, columns, view, viewOrder]);
   const postsCache = useRef(new WeakMap<HubEvent[], Post[]>());
   const columnPosts = useMemo(() => new Map([...feeds].map(([id, f]) => {
+    if (!hub.removalsReady) return [id, [] as Post[]];
     let posts = postsCache.current.get(f.events);
     if (!posts) postsCache.current.set(f.events, posts = buildPosts(f.events).reverse());
-    return [id, posts];
-  })), [feeds]);
+    return [id, hub.hiddenTasks.size || hub.hiddenProjects.size ? posts.filter(post => !hub.hiddenTasks.has(post.taskId) && (!hub.hiddenProjects.size || hub.tasks.has(post.taskId))) : posts];
+  })), [feeds, hub.hiddenTasks, hub.hiddenProjects, hub.tasks, hub.removalsReady]);
   const lookupModels = useMemo(createModelLookup, []);
   const models = useMemo(() => lookupModels(hub.events, threadEvents, ...[...feeds.values()].map((f) => f.events)),
     [hub.events, threadEvents, feeds, lookupModels]);
@@ -508,11 +512,11 @@ export function App() {
   // Drafts outlive nothing they belong to: a deleted task, or a question answered elsewhere.
   useEffect(() => {
     if (!hub.synced) return;
-    const state = { tasks: hub.tasks, questions: hub.questions, approvals: hub.approvals,
+    const state = { tasks: rawHub.tasks, questions: rawHub.questions, approvals: rawHub.approvals,
       gone: hub.gone, availableSources: hub.availableSources };
     pruneDrafts((k, d) => keepTaskDraft(k, d, state));
     if (hub.availableSources.has('')) pruneDrafts((k) => !k.startsWith('channel-chat:') && !k.startsWith('channel-sources:') || hub.channels.has(k.slice(k.indexOf(':') + 1)));
-  }, [hub.synced, hub.tasks, hub.questions, hub.approvals, hub.channels, hub.gone, hub.availableSources]);
+  }, [hub.synced, rawHub.tasks, rawHub.questions, rawHub.approvals, hub.channels, hub.gone, hub.availableSources]);
 
   const widthOf = (id: string) => widths[id] ?? (id === THREAD ? THREAD_WIDTH : DEFAULT_WIDTH);
 
@@ -800,12 +804,16 @@ export function App() {
   };
   const closeThread = () => (history.state?.thread ? history.back() : dropThread());
   // The thread's task was deleted (here or in another window).
-  useEffect(() => { if (threadTask && hub.gone.has(threadTask)) closeThread(); }, [hub.gone]);
+  useEffect(() => { if (threadTask && (hub.gone.has(threadTask) || hub.removalsReady && hub.hiddenTasks.has(threadTask))) closeThread(); }, [hub.gone, hub.hiddenTasks, hub.removalsReady]);
   /** Deletes a task or a project for good (the menu asks twice first). */
   const remove = (what: 'task' | 'project', id: string) => {
     (what === 'task' ? api.deleteTask(id) : api.deleteProject(id))
       .then(() => setToast(what === 'task' ? '작업을 삭제했습니다' : '프로젝트를 삭제했습니다'))
-      .catch((e) => setToast(`삭제하지 못했습니다: ${e instanceof Error ? e.message : String(e)}`));
+      .catch((e) => {
+        if (e instanceof SharedPending && e.operationId) {
+          hub.acceptRemoval(what,id,e.operationId);
+        } else setToast(`삭제하지 못했습니다: ${e instanceof Error ? e.message : String(e)}`);
+      });
   };
   /** What the ⋯ menu of a column can delete: the thread's or a task column's task, a project column's project. */
   const removable = (colId: string): { label: string; onRemove: () => void } | undefined => {
@@ -1549,6 +1557,7 @@ export function App() {
         onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
       <div className={`workspace${documentOverlay&&(referencesVisible||codeVisible)?' document-overlay':''}`} ref={workspaceRef}>
+        {!hub.removalsReady && <p className="empty" role="status">삭제 처리 상태를 확인하고 있습니다…</p>}
         {drawer && (
           <ComposeDrawer projects={hub.projects} tasks={taskList} inputRef={composeRef}
             noteAttachment={noteAttachment}

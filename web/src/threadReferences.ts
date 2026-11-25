@@ -100,7 +100,7 @@ export function toggleReference(state: ThreadReferences, task: string, id: numbe
   const ids = held ? current.ids.filter(n => n !== id) : [id, ...current.ids];
   const order = referenceOrder(current).filter(entry => entry.kind !== 'event' || entry.id !== id);
   if (!held) order.unshift({ kind: 'event', id });
-  return { ...state, [task]: { ...current, ids, order, open: held ? current.open : true } };
+  return { ...state, [task]: { ...current, ids, order, open: held ? current.open && (ids.length > 0 || !!current.files?.length) : true } };
 }
 
 /** Whole, task-scoped originals only; a live clipped event must be fetched before displaying it. */
@@ -133,7 +133,7 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
       if (!current?.files?.includes(href)) return s;
       const files = current.files.filter(file => file !== href);
       const order = referenceOrder(current).filter(entry => entry.kind !== 'file' || entry.href !== href);
-      return { ...s, [taskId]: { ...current, files, order, identities: keepIdentities(current.identities, files) } };
+      return { ...s, [taskId]: { ...current, files, order, open: current.open && (current.ids.length > 0 || files.length > 0), identities: keepIdentities(current.identities, files) } };
     });
   }, [taskId]);
   const resolveFile = useCallback((href: string, identity: string | undefined) => {
@@ -159,7 +159,12 @@ export function useThreadReferences(taskId: string | null, gone: Set<string>) {
     resolveFile,
     move,
     toggle: (id: number) => { if (taskId) setState(s => toggleReference(s, taskId, id)); },
-    show: (open: boolean) => { if (taskId) setState(s => ({ ...s, [taskId]: { ...(Object.hasOwn(s, taskId) ? s[taskId] : EMPTY), open } })); },
+    show: (open: boolean) => {
+      if (taskId) setState(s => {
+        const current = Object.hasOwn(s, taskId) ? s[taskId] : EMPTY;
+        return { ...s, [taskId]: { ...current, open: open && (current.ids.length > 0 || !!current.files?.length) } };
+      });
+    },
     clear: () => {
       if (!taskId) return;
       setFileFocus(undefined);

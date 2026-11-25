@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import type { SharedWorkspaceView, WorkspaceOperation, SshConnectRequest, WorkspaceConnectRequest, OutgoingConnectRequest } from '../../shared/workspace.ts';
+import type { SharedWorkspaceView, WorkspaceOperation, WorkspaceRemoval, SshConnectRequest, WorkspaceConnectRequest, OutgoingConnectRequest } from '../../shared/workspace.ts';
 import type { Store } from './db.ts';
 import { HttpError } from './errors.ts';
 import { canonical, digest, json, operation, connectorUserInput } from './shared-workspace.ts';
@@ -36,6 +36,7 @@ type Outgoing = OutgoingConnectRequest & {
   link_id: string; link_binding: string; remote_id: string; workspace_id: string; url: string; key: string;
 };
 type Legacy = {runner_id:string;link_id:string;address:string;fingerprint:string;legacy_json:string};
+const removalPath = (path:string) => /^\/(tasks|projects)\/([^/]+)$/.exec(new URL(path,'http://desk').pathname);
 function address(value: unknown) {
   if (typeof value !== 'string') throw new HttpError(400,'공유 러너 주소가 필요합니다');
   let url: URL;
@@ -67,6 +68,9 @@ export class WorkspaceLinks {
   private requests = new Map<AbortController,string>();
   private usageCache = new Map<string, { targets?: UsageTarget[]; values: Map<string, EngineUsage> }>();
   private files = new TemporaryFiles();
+  removalRevision = randomUUID();
+  private removalCache?: {local?:string;items:WorkspaceRemoval[]};
+  private invalidateRemovals() { this.removalCache=undefined;this.removalRevision=randomUUID(); }
   constructor(store:Store,skills?:SkillStore) {
     this.db=store.database;
     this.skills=skills;
@@ -444,6 +448,7 @@ export class WorkspaceLinks {
     if(this.flushing.has(id)||this.list().find(l=>l.id===id)!.pending)throw new HttpError(409,'전달 중이거나 미전달 입력이 있어 연결을 제거할 수 없습니다');
     this.db.prepare('DELETE FROM workspace_delivery WHERE link_id=?').run(id);
     this.db.prepare('DELETE FROM workspace_link WHERE id=?').run(id);
+    this.invalidateRemovals();
     this.db.prepare('DELETE FROM workspace_ssh_link WHERE link_id=?').run(id);
     this.sshSessions.delete(id);
     this.usageCache.delete(id);
@@ -456,6 +461,23 @@ export class WorkspaceLinks {
       .map(r=>{const op=JSON.parse(r.payload);return {id:r.id,status:r.status,method:op.method,path:op.path,
         text:r.status!==null&&r.status>=400&&typeof op.body?.text==='string'?op.body.text:undefined,
         error:r.result?JSON.parse(r.result).error:undefined};});
+  }
+  removals(localAuthorityId?: string): WorkspaceRemoval[] {
+    if (this.removalCache && this.removalCache.local === localAuthorityId) return this.removalCache.items;
+    const rows = this.db.prepare(`SELECT d.id,d.link_id,d.payload,d.status,d.result
+      FROM workspace_delivery d JOIN workspace_link l ON l.id=d.link_id
+      WHERE json_extract(d.payload,'$.method')='DELETE' ORDER BY d.seq`).all() as
+      {id:string;link_id:string;payload:string;status:number|null;result:string|null}[];
+    const items = rows.flatMap(row => {
+      const match = removalPath(JSON.parse(row.payload).path);
+      if (!match) return [];
+      const nativeId = decodeURIComponent(match[2]);
+      const id = row.link_id === localAuthorityId ? nativeId : `w:${row.link_id}:${nativeId}`;
+      return [{id:row.id, [match[1] === 'tasks' ? 'taskId' : 'projectId']:id,
+        status:row.status, ...(row.result && {error:JSON.parse(row.result).error})}];
+    });
+    this.removalCache={local:localAuthorityId,items};
+    return items;
   }
   async read(id:string,path:string,timeout?:number,signal?:AbortSignal) {
     const usage = /^\/runner-usage(?:\?|$)/.test(path);
@@ -654,6 +676,7 @@ export class WorkspaceLinks {
         .run(op.id,id,hash,payload,prepared);
       this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id,accepted_at,unsent_attempts) VALUES(?,?,0)').run(op.id,new Date().toISOString());
       this.db.exec('RELEASE connector_enqueue');
+      if (op.method === 'DELETE' && removalPath(op.path)) this.invalidateRemovals();
       } catch (error) { this.db.exec('ROLLBACK TO connector_enqueue; RELEASE connector_enqueue'); throw error; }
     }
     this.db.prepare('INSERT OR IGNORE INTO workspace_delivery_attempt(id,accepted_at) VALUES(?,?)').run(op.id,new Date().toISOString());
@@ -681,6 +704,7 @@ export class WorkspaceLinks {
             // Drop prompts and secret answers once delivery is confirmed. Keep the receipt and digest.
             this.db.prepare('UPDATE workspace_delivery SET status=?,result=?,payload=?,prepared_payload=NULL WHERE id=?')
               .run(status,JSON.stringify(body),status<400?JSON.stringify({id:op.id,method:op.method,path:op.path}):row.payload,row.id);
+            if (op.method === 'DELETE' && removalPath(op.path)) this.invalidateRemovals();
           };
           const receipt = async () => {
             const reply = await this.request(this.link(id), '/v1/receipts/' + encodeURIComponent(op.id));
