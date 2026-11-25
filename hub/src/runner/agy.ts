@@ -3,7 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { AgyAcp } from './agy-acp.ts';
 import { join } from 'node:path';
-import type { ModelName } from '../../../shared/compose.ts';
+import { MODE_LABEL, type PermissionMode, type ModelName } from '../../../shared/compose.ts';
 import { config } from '../config.ts';
 import { deskInstructions } from './instructions.ts';
 import { steeringSkillText } from './skill-input.ts';
@@ -20,6 +20,15 @@ const APPROVAL_TIMEOUT_MS = 60 * 60_000;
 const DEFAULT_FAMILY: ModelName = 'flash';
 
 type Json = any;
+
+export class AgyModeError extends Error {
+  readonly mode: PermissionMode;
+  constructor(mode: PermissionMode, cause: unknown) {
+    super(`AGY가 ${MODE_LABEL[mode]} 승인 모드를 적용하지 못했습니다. ${cause instanceof Error ? cause.message : String(cause)}. ${MODE_LABEL[mode]} 태그를 다시 보내세요. 실행이 중단됐다면 이어갈 지시도 함께 보내세요.`);
+    this.mode = mode;
+  }
+  get detail() { return {mode:this.mode, phase:'failed', message:this.message}; }
+}
 
 /** An agy tool call as the desk shows it: commands as Bash, a file path where the call has one. */
 export function toolView(name: string, args: Json): { name: string; input: Json } {
@@ -82,6 +91,7 @@ export const startAgy: StartEngine = (opts) => {
   const activity = new AgyActivity(tasks=>{activeTools=tasks;reportWork();});
   const children = new AgyChildren(tasks=>{activeChildren=tasks;reportWork();});
   let mode = opts.permissionMode;
+  let modeVersion = 0;
   let family: ModelName = opts.model ?? DEFAULT_FAMILY;
   let effort = opts.effort;
   let selectedId: string | undefined;
@@ -185,6 +195,19 @@ export const startAgy: StartEngine = (opts) => {
     tools.delete(key);
   };
 
+  const applyMode = async (rpc: AgyAcp, sessionId: string, requested: PermissionMode, version: number) => {
+    try {
+      await rpc.call('session/set_mode',{sessionId,modeId:requested});
+    } catch (error) {
+      if (rpc !== acp || closing) return;
+      appliedMode = undefined;
+      throw new AgyModeError(requested,error);
+    }
+    if (rpc !== acp || closing) return;
+    appliedMode = requested;
+    if (version === modeVersion) event({kind:'status',state:'mode',detail:{mode:requested,phase:'applied'}});
+  };
+
   const processFor = async (model: string) => {
     if (acp && running === model && readySession) return acp;
     if (child) {
@@ -193,6 +216,7 @@ export const startAgy: StartEngine = (opts) => {
       const old=child; child=null; acp?.close(); old.stdin?.end(); stopTree(old,'SIGTERM');
     }
     readySession=undefined;
+    appliedMode=undefined;
     const env = {...process.env};
     delete env.AGENT_DESK_AGY_URL;
     delete env.AGENT_DESK_AGY_TOKEN;
@@ -233,17 +257,23 @@ export const startAgy: StartEngine = (opts) => {
         emit({type:'engine_session',sessionId,engineSessionId:created.sessionId});
       }
       await rpc.call('session/set_model',{sessionId:conversationId,modelId:model});
-      let applied: typeof mode;
+      let version: number;
       do {
-        applied=mode;
-        await rpc.call('session/set_mode',{sessionId:conversationId,modeId:applied});
-      } while(applied!==mode);
-      appliedMode=applied;
+        version=modeVersion;
+        try {
+          await applyMode(rpc,conversationId!,mode,version);
+        } catch (error) {
+          // A new request arrived while the initial RPC was pending. Apply that choice before prompting.
+          if (version === modeVersion) throw error;
+        }
+        if (rpc !== acp || closing) throw new Error('agy 연결이 종료되었습니다');
+      } while(version!==modeVersion);
       readySession=conversationId!;
       event({kind:'status',state:reported?'model_changed':'started',detail:{model,cwd:opts.cwd,resumed}});
       reported=model;
       return rpc;
     } catch(error) {
+      if (error instanceof AgyModeError) event({kind:'status',state:'warning',detail:error.detail});
       if (child===proc) {child=null;acp=undefined;readySession=undefined;stopTree(proc,'SIGTERM');}
       rpc.close();
       throw error;
@@ -282,9 +312,13 @@ export const startAgy: StartEngine = (opts) => {
       if (!current()) return;
       const proc = await processFor(model);
       if (!current()) return;
-      await modeChange.catch(() => {});
+      let changing;
+      do {
+        changing = modeChange;
+        await changing.catch(() => {});
+      } while (changing !== modeChange && current());
       if (!current()) return;
-      if (appliedMode !== mode) throw new Error('agy 승인 모드가 적용되지 않았습니다');
+      if (appliedMode !== mode) throw new Error(`승인 모드를 확인할 수 없어 입력을 실행하지 않았습니다. ${MODE_LABEL[mode]} 태그와 입력을 다시 보내세요.`);
       children.beforePrompt(readySession!);
       prompting = true;
       const result = await proc.call('session/prompt',{sessionId:readySession,prompt:[{type:'text',text:turnText(turn)}]});
@@ -349,13 +383,14 @@ export const startAgy: StartEngine = (opts) => {
     interrupt,
     setMode: (m) => {
       mode = m;
+      const version = ++modeVersion;
       const rpc = acp, session = readySession;
       modeChange = modeChange.catch(()=>{}).then(async () => {
-        if (!rpc || !session || rpc !== acp || session !== readySession) return;
+        if (version !== modeVersion || !rpc || !session || rpc !== acp || session !== readySession) return;
         try {
-          await rpc.call('session/set_mode',{sessionId:session,modeId:m});
-          if (acp === rpc) appliedMode = m;
+          await applyMode(rpc,session,m,version);
         } catch (error) {
+          if (version !== modeVersion) return;
           if (m === 'default' && rpc === acp && (prompting || activity.hasWork() || activeChildren.length))
             await interrupt();
           throw error;

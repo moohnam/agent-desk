@@ -87,6 +87,140 @@ assert.deepEqual([...pending.keys()],['first','second']);`;
 });
 
 
+test('a rejected repeat invalidates the last AGY acknowledgement until an explicit retry succeeds',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'desk-agy-mode-'));
+  try {
+    const cli=join(dir,'agy');
+    writeFileSync(cli,`#!/usr/bin/env node
+import {createInterface} from 'node:readline';
+import {existsSync,writeFileSync} from 'node:fs';
+import {setTimeout as wait} from 'node:timers/promises';
+if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium');process.exit(0);}
+let changes=0, prompts=0;
+for await(const line of createInterface({input:process.stdin})){
+  const r=JSON.parse(line);
+  let result={};
+  if(r.method==='initialize') result={protocolVersion:1};
+  if(r.method==='session/new') result={sessionId:'native'};
+  if(r.method==='session/set_mode')changes++;
+  if(r.method==='session/set_mode' && changes===1){
+    writeFileSync('initial-mode','');
+    while(!existsSync('retry-in-flight'))await wait(5);
+  }
+  if(r.method==='session/set_mode' && (changes===1 || changes===3)){
+    console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32602,message:'rejected'}}));
+    continue;
+  }
+  if(r.method==='session/prompt'){
+    if(++prompts===2 && !r.params.prompt[0].text.includes('after retry'))process.exit(1);
+    result={stopReason:'end_turn'};
+  }
+  console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
+}
+`,{mode:0o755});
+    const runner=new URL('../../hub/src/runner/runner.ts',import.meta.url).href;
+    const driver=`
+import assert from 'node:assert/strict';
+import {Runner} from ${JSON.stringify(runner)};
+import {existsSync,writeFileSync} from 'node:fs';
+const phases=[];
+let turns=0, blocked=false;
+await new Promise((done,fail)=>{
+  const runner=new Runner('test',m=>{
+    if(m.type!=='event'||m.event.kind!=='status')return;
+    const {state,detail}=m.event;
+    if(detail?.phase){phases.push(detail.phase);assert.equal(detail.mode,'auto');}
+    if(state==='warning'){assert.match(detail.message,/#auto.*다시/);return;}
+    if(state==='error'){
+      assert.match(detail.message,/#auto/);blocked=true;
+      queueMicrotask(()=>{runner.handle({type:'set_mode',sessionId:'s',permissionMode:'auto'});runner.handle({type:'send',sessionId:'s',text:'after retry'});});
+    }
+    if(state==='turn_done' && ++turns===1){
+      runner.handle({type:'set_mode',sessionId:'s',permissionMode:'auto'});
+      runner.handle({type:'send',sessionId:'s',text:'must be blocked'});
+    }else if(state==='turn_done'){
+      runner.handle({type:'close',sessionId:'s'});done();
+    }
+  });
+  runner.handle({type:'start',sessionId:'s',engine:'agy',cwd:process.cwd(),prompt:'start',permissionMode:'auto'});
+  const poll=setInterval(()=>{
+    if(!existsSync('initial-mode'))return;
+    clearInterval(poll);
+    runner.handle({type:'set_mode',sessionId:'s',permissionMode:'auto'});
+    writeFileSync('retry-in-flight','');
+  },5);
+});
+assert.equal(blocked,true);assert.deepEqual(phases,['applied','failed','applied']);`;
+    const result=spawnSync(process.execPath,['--input-type=module','-e',driver],{
+      cwd:dir,env:{...process.env,AGY_BIN:cli},encoding:'utf8',timeout:8000
+    });
+    assert.equal(result.status,0,result.stderr||String(result.error));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('a superseded live #ask failure preserves the newer #auto input and skips obsolete queued modes',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'desk-agy-mode-race-'));
+  try {
+    const cli=join(dir,'agy');
+    writeFileSync(cli,`#!/usr/bin/env node
+import {createInterface} from 'node:readline';
+import assert from 'node:assert/strict';
+if(process.argv[2]==='models'){console.log('gemini-3.8-flash-medium');process.exit(0);}
+const emit=m=>console.log(JSON.stringify({jsonrpc:'2.0',...m}));
+const tool=name=>emit({method:'session/update',params:{sessionId:'native',update:{sessionUpdate:'tool_call',toolCallId:name,title:name,status:'completed'}}});
+let prompt, modes=[];
+for await(const line of createInterface({input:process.stdin})){
+  const r=JSON.parse(line);
+  let result={};
+  if(r.method==='initialize')result={protocolVersion:1};
+  if(r.method==='session/new')result={sessionId:'native'};
+  if(r.method==='session/set_mode'){
+    modes.push(r.params.modeId);
+    if(r.params.modeId==='default'){
+      tool('strict-in-flight');
+      emit({id:r.id,error:{code:-32602,message:'old strict request rejected'}});
+      continue;
+    }
+    if(prompt)emit({id:prompt,result:{stopReason:'end_turn'}});
+  }
+  if(r.method==='session/prompt'){
+    if(!prompt){prompt=r.id;tool('first-prompt');continue;}
+    assert.deepEqual(modes,['auto','default','auto']);
+    assert.equal(r.params.prompt[0].text,'latest input');
+    result={stopReason:'end_turn'};
+  }
+  emit({id:r.id,result});
+}
+`,{mode:0o755});
+    const runner=new URL('../../hub/src/runner/runner.ts',import.meta.url).href;
+    const driver=`
+import assert from 'node:assert/strict';
+import {Runner} from ${JSON.stringify(runner)};
+let turns=0;
+await new Promise((done,fail)=>{
+  const runner=new Runner('test',m=>{
+    if(m.type!=='event')return;
+    const e=m.event;
+    const mode=permissionMode=>runner.handle({type:'set_mode',sessionId:'s',permissionMode});
+    if(e.kind==='tool' && e.name==='first-prompt')mode('default');
+    if(e.kind==='tool' && e.name==='strict-in-flight'){
+      mode('auto');mode('default');mode('auto');
+      runner.handle({type:'send',sessionId:'s',text:'latest input'});
+    }
+    if(e.kind==='status'){
+      if(['interrupted','warning','error'].includes(e.state)){runner.handle({type:'close',sessionId:'s'});fail(Error(JSON.stringify(e)));}
+      if(e.state==='turn_done' && ++turns===2){runner.handle({type:'close',sessionId:'s'});done();}
+    }
+  });
+  runner.handle({type:'start',sessionId:'s',engine:'agy',cwd:process.cwd(),prompt:'first',permissionMode:'auto'});
+});`;
+    const result=spawnSync(process.execPath,['--input-type=module','-e',driver],{
+      cwd:dir,env:{...process.env,AGY_BIN:cli},encoding:'utf8',timeout:8000
+    });
+    assert.equal(result.status,0,result.stderr||String(result.error));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test('agy keeps a spawned child active until the session records its idle notification',()=>{
   const dir=mkdtempSync(join(tmpdir(),'desk-agy-child-'));
   const parent='00000000-0000-4000-8000-000000000001', child='00000000-0000-4000-8000-000000000002';

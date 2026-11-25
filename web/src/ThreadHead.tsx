@@ -113,7 +113,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
               {task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)} (다음 턴)` : ''}
               {task.effort ? ` · effort ${task.effort}` : ''}</span>
             {turns > 0 && <span>턴 {turns}</span>}
-            {task.permission_mode && task.source !== 'external' && <span>{task.permission_mode === 'auto' ? '자동 승인' : '매번 확인'} ({MODE_LABEL[task.permission_mode]})</span>}
+            {task.permission_mode && task.source !== 'external' && <span>요청한 승인 모드 {MODE_LABEL[task.permission_mode]}</span>}
             {task.source === 'external' ? <span>외부 세션</span>
               : task.runner_id ? <span title={`러너 ID: ${task.runner_id}`}>러너 {task.runner_label ?? task.runner_id} · {task.runner_connected ? '연결됨' : '연결 대기 · 마지막 확인 상태'}</span>
               : <span>러너 {task.source === null ? '미지정' : '정보 없음'}</span>}

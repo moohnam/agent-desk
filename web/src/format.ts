@@ -1,3 +1,4 @@
+import { MODE_LABEL } from '../../shared/compose.ts';
 import type { HubEvent, PostKind, TaskStatus, TaskView } from './types.ts';
 
 export const STATUS_LABEL: Record<TaskStatus, string> = {
@@ -67,6 +68,12 @@ const STATE_LABEL: Record<string, string> = {
   started: '세션 시작', context_reset: '컨텍스트 재구성', turn_done: '턴 완료', finished: '작업 종료', error: '오류', interrupted: '중단됨', handoff: '터미널 세션 넘겨받음', mkdir: '디렉터리 새로 만듦', closed: '세션 닫음',
 };
 
+export function modeSummary(detail?: { mode?: unknown; phase?: unknown }): string {
+  const mode = detail?.mode;
+  if (mode !== 'auto' && mode !== 'default') return '승인 모드';
+  return `${MODE_LABEL[mode]} ${detail?.phase === 'applied' ? '적용됨' : '요청됨'}`;
+}
+
 export function eventSummary(e: HubEvent): string {
   const p = e.payload;
   switch (e.kind) {
@@ -76,7 +83,7 @@ export function eventSummary(e: HubEvent): string {
     case 'tool': return `${p.name} ${toolSummary(p.name, p.input)}`;
     case 'tool_result': return p.isError ? `도구 오류: ${p.text}` : '도구 결과 수신';
     case 'approval': return `${p.toolName} ${p.decision === 'allowed' ? '승인' : '거절'}`;
-    case 'status': return STATE_LABEL[p.state] ?? p.state;
+    case 'status': return p.state === 'mode' ? modeSummary(p.detail) : STATE_LABEL[p.state] ?? p.state;
     default: return p.text ?? '';
   }
 }

@@ -8,7 +8,7 @@ import { config } from '../config.ts';
 import { requireAdmission } from '../runtime-control.ts';
 import { startClaude } from './claude.ts';
 import type { StartEngine } from './engine.ts';
-import { startAgy } from './agy.ts';
+import { AgyModeError, startAgy } from './agy.ts';
 import { startCodex } from './codex.ts';
 import { materializeSkillSnapshot, pruneSkillSnapshots } from './skill-input.ts';
 import type { RunnerMcp } from './managed-mcp.ts';
@@ -178,7 +178,7 @@ export class Runner {
     const adapter = this.sessions.get(sessionId)?.adapter;
     if (!adapter) return;
     const report = (err: unknown) => this.emit({
-      type: 'event', sessionId, event: { kind: 'status', state: 'warning', detail: { message: `${what}: ${errorText(err)}` } },
+      type: 'event', sessionId, event: { kind: 'status', state: 'warning', detail: err instanceof AgyModeError ? err.detail : { message: `${what}: ${errorText(err)}` } },
     });
     try { call(adapter).catch(report); } catch (err) { report(err); }
   }

@@ -3,14 +3,14 @@ import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
 import { previewLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, Paperclip, PenLine, Trash2 } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { ENGINE_LABEL, ENGINE_SHORT, MODE_LABEL, modelLabel, REQUEST_TOOL, engineOf, type ModelName, type PermissionMode } from '../../shared/compose.ts';
+import { ENGINE_LABEL, ENGINE_SHORT, modelLabel, REQUEST_TOOL, engineOf, type ModelName } from '../../shared/compose.ts';
 import { api } from './api.ts';
 import { asyncAnswerText } from './asyncAnswers.ts';
 import type { AsyncQuestion } from '../../shared/protocol.ts';
 import { usesReplyComposer } from '../../shared/question-input.ts';
 import { AskCard, isAsk } from './AskCard.tsx';
 import { getDraft, setDraft, setSharedDraft, useDraftSync } from './drafts.ts';
-import { relTime, toolSummary } from './format.ts';
+import { modeSummary, relTime, toolSummary } from './format.ts';
 import { useNow } from './clock.ts';
 import { LongText, Markdown } from './Markdown.tsx';
 import { CopyButton } from './CopyButton.tsx';
@@ -389,7 +389,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
   const cost = done?.payload.detail?.cost_usd;
   const line = [
     tools.length ? `도구 ${tools.length}회 · ${names.slice(0, 4).join(', ')}${names.length > 4 ? ' …' : ''}` : '세부',
-    ...modes.map((m) => m.payload.state === 'model' ? modelSwitch(m.payload.detail) : `모드 → ${MODE_LABEL[m.payload.detail.mode as PermissionMode]}`),
+    ...modes.map((m) => m.payload.state === 'model' ? modelSwitch(m.payload.detail) : modeSummary(m.payload.detail)),
     done ? `턴 완료${cost != null ? ` · 누적 $${Number(cost).toFixed(2)}` : ''}` : null,
     finished ? '작업 종료' : null,
     forks ? `포크 ${forks}개` : null,
@@ -422,7 +422,7 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
               const d = e.payload.detail ?? {};
               return (
                 <li key={e.id} className="note">
-                  {e.payload.state === 'mode' ? `모드 → ${MODE_LABEL[d.mode as PermissionMode]}`
+                  {e.payload.state === 'mode' ? modeSummary(d)
                     : e.payload.state === 'model' ? modelSwitch(d)
                     : e.payload.state === 'closed' ? (d.busy ? '진행 중이던 턴을 끊고 세션을 닫았습니다' : '세션을 닫았습니다')
                     : e.payload.state === 'mkdir' ? `디렉터리를 새로 만들었습니다 · ${d.path}`

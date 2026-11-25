@@ -648,9 +648,10 @@ export class Hub extends DeskCore {
     const model = c.model; // An explicit repeat also retries a runner-side model-change failure.
     const effort = c.effort;
     if (model || effort) this.checkCatalog(engine,model ?? session.model,effort ?? session.effort,undefined,session.runner_id);
-    if ((model || effort || (c.mode && c.mode !== session.permission_mode)) && this.approvalPending(session.id))
+    const setMode = c.mode && (engine === 'agy' || c.mode !== session.permission_mode);
+    if ((model || effort || setMode) && this.approvalPending(session.id))
       throw new HttpError(409,'먼저 대기 중인 승인·질문에 답한 뒤 실행 설정을 바꿔 주세요');
-    if ((model || effort || (c.mode && c.mode !== session.permission_mode))
+    if ((model || effort || setMode)
       && this.connectorSwitchBlocked(session.id,this.connectorContext.getStore(),false))
       throw new HttpError(409, '다른 외부 연결 계정의 작업이 끝난 뒤 실행 설정을 바꿀 수 있습니다');
     if (!wait) this.addEvent(session.id, taskId, 'user', { text: text.trim(), mode: c.mode, skills: c.skills, delivery: c.delivery, ...context });
@@ -662,10 +663,10 @@ export class Hub extends DeskCore {
       } });
     }
 
-    if (c.mode && c.mode !== session.permission_mode) {
+    if (c.mode && setMode) {
       this.store.updateSession(session.id, { permission_mode: c.mode });
+      this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'mode', detail: { mode: c.mode, ...(engine === 'agy' && {phase:'requested'}) } });
       if (live || this.remotes.canQueue(session.id)) this.runner.handle({ type: 'set_mode', sessionId: session.id, permissionMode: c.mode });
-      this.addEvent(session.id, taskId, 'status', { kind: 'status', state: 'mode', detail: { mode: c.mode } });
     }
     if (!content) return taskId;
     if (asked) {

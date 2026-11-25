@@ -120,6 +120,19 @@ function fixture() {
   return {hub,store,dir,sent,say,hello,close:()=>{hub.dispose();store.database.close();rmSync(dir,{recursive:true,force:true});}};
 }
 
+test('repeating an AGY permission tag sends the command again without claiming native success',()=>{
+  const f=fixture();
+  try {
+    const task=f.hub.compose(`@agy:${f.dir} #agy #auto 첫 작업`);
+    f.hub.sendMessage(task.id,'#auto');
+    f.hub.sendMessage(task.id,'#auto');
+    assert.deepEqual(f.sent.filter(m=>m.type==='set_mode').map(m=>m.permissionMode),['auto','auto']);
+    const phases=f.store.eventsAfter(task.id,0,100).filter(e=>e.kind==='status' && (e.payload as any).state==='mode')
+      .map(e=>(e.payload as any).detail.phase);
+    assert.deepEqual(phases,['requested','requested']);
+  } finally {f.close();}
+});
+
 test('actual model settings and #fable run on the checked runner; refresh never changes an existing selection',()=>{
   const f=fixture();
   try {

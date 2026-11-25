@@ -390,7 +390,7 @@ function interpretNew(text: string, projects: Project[], tasks: TaskView[], skil
   if (problem) ok = false;
   rows.push(problem ? { label: '모델', value: problem, tone: 'bad' } : { label: '모델', value: modelRow(engine, c, continuing, settings) });
   const mode = c.mode ?? (continuing ? continuing.permission_mode : null);
-  rows.push({ label: '승인', value: c.mode ? `${MODE_LABEL[c.mode]}로 전환` : mode ? `${MODE_LABEL[mode]} (작업 유지)` : `${MODE_LABEL[DEFAULT_MODE]} 자동 승인 (기본)` });
+  rows.push({ label: '요청할 승인 모드', value: c.mode ? MODE_LABEL[c.mode] : mode ? `${MODE_LABEL[mode]} (작업 유지)` : `${MODE_LABEL[DEFAULT_MODE]} (기본)` });
   if (c.skills.length) rows.push({ label: '스킬', value: `${c.skills.map((k) => `#${k}`).join(' ')} (이 메시지에만)` });
   const delivery = continuing ? deliveryText(continuing, c.delivery) : c.delivery && c.delivery !== 'new' ? `새 작업이라 #${c.delivery}는 무시` : null;
   if (delivery) rows.push({ label: '전달', value: delivery });
@@ -527,8 +527,8 @@ export function ComposeDrawer({ projects: allProjects, tasks: allTasks, inputRef
           <code>@프로젝트 #note 제목</code><span>프로젝트에 메모 만들기</span>
           <code>#new</code><span>같은 프로젝트에서 새 작업 시작 (이전 대화 없이)</span>
           <code>@이름:/경로</code><span>프로젝트를 만들고 새 작업 시작</span>
-          <code>#auto</code><span>이제부터 자동 승인 (새 작업 기본)</span>
-          <code>#ask</code><span>이제부터 매번 확인</span>
+          <code>#auto</code><span>자동 승인 (새 작업 기본, agy는 필요할 때 확인)</span>
+          <code>#ask</code><span>도구 실행 확인 (agy는 설정에 따라 확인)</span>
           {ENGINES.map((e) => <Fragment key={e}><code>#{e}</code><span>새 작업을 {ENGINE_INFO[e].tagLabel}로{e === DEFAULT_ENGINE ? ' (기본)' : ''}</span></Fragment>)}
           {ENGINES.map((e) => <Fragment key={e}><code>{modelTagsOf(e)}</code><span>{modelHelpOf(e)} (작업에 유지)</span></Fragment>)}
           <code>#low … #max</code><span>effort 고르기 (작업에 유지, {effortNote()})</span>
@@ -740,12 +740,13 @@ export function ReplyBox({ task, projects, tasks, inputRef, onError, onSend, onE
       <div className="to"><b>@{name}</b>에게 답글 · {task.project_name}#{task.seq}</div>
       <ComposeField value={text} onChange={(v) => { edited(); setText(v); setSent(null); }} onSubmit={() => void submit(true)} onEscape={onEscape} onBlur={() => shortcut.current.reset()} inputRef={inputRef} rows={2} onBeforeResize={onBeforeResize}
         projects={projects} tasks={tasks} mentions="refer" source={splitId(task.id)[0]} runnerId={task.runner_id}
-        placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 매번 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
+        placeholder={answerTarget ? '선택한 질문에 답하세요…' : task.source === 'external' ? '위 질문에서 대화창에서 답하기를 선택하세요…' : running ? '실행 중… 답글은 턴이 끝난 뒤 보냅니다  (#now 끼워넣기 · #new 새 작업 · #fork 포크)' : '답글로 지시하기…  (#auto 자동 승인 · #ask 도구 실행 확인 · #스킬 · #new 새 작업 · #fork 포크)'} />
       {note && <div className={`reply-note${note.warn ? ' warn' : ''}`}>{note.text}</div>}
       <div className="reply-tools">
         {!answerTarget && task.source !== 'external' && <>
         <button className="toggle" aria-pressed={auto} disabled={busy}
-          title={auto ? '누르면 #ask: 매번 확인' : '누르면 #auto: 자동 승인'}
+          title={auto ? (task.engine === 'agy' ? '#ask 요청 · agy 설정에 따라 확인' : '#ask 요청 · 매번 확인')
+            : (task.engine === 'agy' ? '#auto 요청 · 안전한 작업은 자동 허용하고 필요할 때 확인' : '#auto 요청 · 자동 승인')}
           onClick={() => { shortcut.current.reset(); void send(auto ? '#ask' : '#auto'); }}>#auto</button>
         {choices.map((d) => (
           <button key={d} className="toggle" aria-pressed={delivery === d} disabled={!!c.delivery || !!schedule}

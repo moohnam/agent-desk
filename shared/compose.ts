@@ -139,8 +139,8 @@ const EFFORT_HELP: Record<Effort, string> = {
 /** Every built-in tag and what it does, in the order the compose box suggests them. */
 export const TAG_HELP: { tag: string; help: string }[] = [
   ...CONNECTOR_SCOPES.map(tag => ({tag, help: `이번 요청에만 ${tag === 'slack' ? 'Slack' : tag === 'jira' ? 'Jira' : 'Confluence'} 읽기·검색 허용`})),
-  { tag: 'auto', help: '이제부터 자동 승인 (일반 새 작업 기본)' },
-  { tag: 'ask', help: '이제부터 매번 확인' },
+  { tag: 'auto', help: '자동 승인 (새 작업 기본, agy는 필요할 때 확인)' },
+  { tag: 'ask', help: '도구 실행 확인 (agy는 설정에 따라 확인)' },
   ...ENGINES.map((e) => ({ tag: e, help: `새 작업을 ${ENGINE_INFO[e].tagLabel}로${e === DEFAULT_ENGINE ? ' (기본)' : ''}` })),
   ...MODEL_TAGS.map((m) => ({ tag: m, help: `${MODEL_INFO[m].help} (작업에 유지)` })),
   ...EFFORT_TAGS.map((t) => ({ tag: t, help: `${EFFORT_HELP[t]} (작업에 유지)` })),
