@@ -26,6 +26,7 @@ test('thread usage details support mouse, keyboard and touch within the viewport
     browser=await puppeteer.launch({executablePath:process.env.CHROME_BIN??(process.platform==='darwin'?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':'/usr/bin/google-chrome'),headless:true,pipe:true,args:['--disable-background-networking']});
     for(const touch of [false,true]){
       const page=await browser.newPage();page.setDefaultTimeout(5000);
+      if(touch){const cdp=await page.createCDPSession();await cdp.send('Emulation.setCPUThrottlingRate',{rate:6});}
       await page.setViewport({width:touch?390:1100,height:844,isMobile:touch,hasTouch:touch});
       await page.goto(`http://127.0.0.1:${server.address().port}`,{waitUntil:'domcontentloaded'});
       await page.waitForSelector('[data-post]');await page.keyboard.press('r');
@@ -42,15 +43,29 @@ test('thread usage details support mouse, keyboard and touch within the viewport
         await page.mouse.move(from.x,from.y);await page.mouse.move(to.x,to.y,{steps:15});
         await new Promise(resolve=>setTimeout(resolve,180));
         assert.ok(await page.$(detail),'pointer can cross into details and remain there');
+        const edge=await page.$eval(detail,e=>e.getBoundingClientRect().right);
+        await page.mouse.move(edge+20,to.y);await page.mouse.move(to.x,to.y);
+        await new Promise(resolve=>setTimeout(resolve,180));
+        assert.ok(await page.$(detail),'quick re-entry cancels every pending hover dismissal');
         await page.mouse.wheel({deltaY:150});
         await page.waitForFunction(selector=>document.querySelector(selector)?.scrollTop>0,{},detail);
         assert.ok(await page.$(detail),'details scrolling keeps the popup open');
       }
+      await page.focus(detail);await page.keyboard.press('Escape');await page.waitForSelector(detail,{hidden:true});
+      assert.ok(await page.$eval(button,e=>document.activeElement===e),'Escape returns focus from portalled details');
+      await page.keyboard.press('Enter');await page.waitForSelector(detail);
+      // A real first tap can overlap smooth thread movement. The popup must track
+      // the anchor rather than close on each subpixel animation step.
+      await page.$eval('.thread-usage',async e=>{await e.animate([{transform:'translateX(0)'},{transform:'translateX(5px)'}],{duration:220}).finished;});
+      assert.ok(await page.$(detail),'anchor animation keeps details open');
+      await page.$eval('.thread-usage',e=>e.style.transform='translateX(3px)');
+      await page.waitForFunction(({button,detail})=>{
+        const a=document.querySelector(button).getBoundingClientRect(), d=document.querySelector(detail)?.getBoundingClientRect();
+        return d && Math.abs(d.top-a.bottom)<1 && Math.abs(d.left-Math.max(8,Math.min(a.left,innerWidth-268)))<1;
+      },{}, {button,detail});
       await page.focus(button);await page.keyboard.press('Escape');await page.waitForSelector(detail,{hidden:true});
       await page.keyboard.press('Enter');await page.waitForSelector(detail);
-      await page.$eval('.thread-usage',e=>e.style.transform='translateX(3px)');
-      await page.waitForSelector(detail,{hidden:true});
-      await page.focus(button);await page.keyboard.press('Enter');await page.waitForSelector(detail);
+      await page.waitForFunction(({button,detail})=>Math.abs(document.querySelector(button).getBoundingClientRect().bottom-document.querySelector(detail).getBoundingClientRect().top)<1,{}, {button,detail});
       await page.setViewport({width:touch?410:1000,height:844,isMobile:touch,hasTouch:touch});
       await page.waitForSelector(detail,{hidden:true});
       await page.close();
