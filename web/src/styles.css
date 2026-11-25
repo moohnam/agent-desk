@@ -156,7 +156,6 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .queue-row .acts .yes { background: var(--text); border-color: var(--text); color: var(--col); }
 .queue-row .acts .no:hover { border-color: var(--bad); color: var(--bad); }
 .queue-row .qtag { font-size: 11px; font-weight: 500; color: var(--accent); }
-.queue-more { flex: none; align-self: flex-start; margin: 6px 12px; color: var(--muted); }
 .queue-hint { flex: none; margin: 0; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
 .queue-launcher { flex: none; display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 5px; font-size: 12.5px; }
 .queue-launcher > svg { color: var(--warn); width: 16px; height: 16px; }

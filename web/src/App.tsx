@@ -24,7 +24,7 @@ import { SshPeers, useWorkspaceRequests, WorkspaceDialog, initialLocation, inLoc
 import { SharedPending, workspaceId } from './workspace.ts';
 import { writeClipboardText } from './clipboard.ts';
 import { noteRevision } from './noteEvents.ts';
-import { ApprovalQueue, QUEUE_ROWS, queueItems, type QueueItem } from './ApprovalQueue.tsx';
+import { ApprovalQueue, queueItems, type QueueItem } from './ApprovalQueue.tsx';
 import { ColumnFinder } from './ColumnFinder.tsx';
 import { ChannelsDialog } from './Channels.tsx';
 import { ChannelColumn } from './ChannelColumn.tsx';
@@ -107,7 +107,6 @@ export function App() {
   const { view, setView, byTask: viewByTask, setByTask: setViewByTask, order: viewOrder, setOrder: setViewOrder } = useView();
   const [widths, setWidth] = useColumnWidths();
   const [queueFocusId, setQueueFocusId] = useState<string | null>(null);
-  const [queueAll, setQueueAll] = useState(false);
   const [threadTask, setThreadTask] = useState<string | null>(null);
   const references = useThreadReferences(threadTask, hub.gone);
   const referencedIds = useMemo(() => new Set(references.ids), [references.ids]);
@@ -506,8 +505,7 @@ export function App() {
   const setQueueFocus = (index:number|null) => setQueueFocusId(index===null ? null : queue[index]?.id ?? null);
   useEffect(() => {
     if (queueFocusId && queueFocus===null) setQueueFocusId(null);
-    if (queueIndex >= QUEUE_ROWS) setQueueAll(true);
-  }, [queueFocusId, queueFocus, queueIndex]);
+  }, [queueFocusId, queueFocus]);
   const counts = useMemo(() => {
     const c = { running: 0, error: 0 };
     for (const t of hub.tasks.values()) { if(taskRunning(t))c.running++; if(t.status==='error')c.error++; }
@@ -1574,8 +1572,8 @@ export function App() {
         <div className="runner-warn" role="alert">러너 연결이 끊겼습니다. 실행 중인 세션 상태를 확인할 수 없습니다.</div>
       )}
 
-      <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus} showAll={queueAll}
-        onShowAll={setQueueAll} onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
+      <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus}
+        onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
       <div className={`workspace${documentOverlay&&(referencesVisible||codeVisible)?' document-overlay':''}`} ref={workspaceRef}>
         {!hub.removalsReady && <p className="empty" role="status">삭제 처리 상태를 확인하고 있습니다…</p>}

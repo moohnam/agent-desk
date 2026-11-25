@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { signRequest } from '../../hub/src/request-proof.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -451,9 +452,20 @@ test('HTTP gateway sends a cross-source MCP request through authenticated worksp
     from.store.updateSession(from.session.id,{engine_session_id:'http-origin-engine'});
     from.hub.addEvent(from.session.id,from.task.id,'user',{text:'@http-target#1 문의'});
     const credential = (from.sent[0] as {requestCredential:string}).requestCredential;
+    from.hub.requests.bindEngine(from.session,signRequest(credential,['bound',from.session.id]));
+    for (const target of ['@http-origin#1','@http-target#1']) {
+      for (const identity of [{task_id:from.task.id},{session_id:' http-origin-engine '},{session_id:'http-origin-engine'}]) {
+        const unsigned = await tool(40,'desk_request',{to:target,question:'비동기 문의',...identity});
+        assert.equal(unsigned.body.result.isError,true);
+        assert.match(unsigned.body.result.content[0].text,/agent-desk-runtime/);
+      }
+    }
+    assert.equal(from.store.openRequests().length,0);
     const ticket = await tool(4,'desk_request',{to:'@http-target#1',question:'비동기 문의',session_id:'http-origin-engine'},credential);
     assert.match(ticket.body.result.content[0].text,/턴을 끝내도/);
     const ticketId = /question_id: "([^"]+)"/.exec(ticket.body.result.content[0].text)![1];
+    const retried = await tool(41,'desk_request',{to:'@http-target#1',question:'비동기 문의',session_id:'http-origin-engine'},credential);
+    assert.ok(retried.body.result.content[0].text.includes(ticketId));
     for (let i=0;i<100 && to.store.getRequest(ticketId)?.status!=='running';i++) await new Promise(resolve=>setTimeout(resolve,10));
     assert.equal(to.store.getRequest(ticketId)?.status,'running');
     const reply = {question_id:ticketId,session_id:'http-target-engine',answer:'비동기 회신'};

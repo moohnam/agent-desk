@@ -7,9 +7,6 @@ import { relTime, toolSummary } from './format.ts';
 import { projectColor } from './projects.ts';
 import type { Approval, Question, TaskView } from './types.ts';
 
-/** Rows shown before "외 N건". */
-export const QUEUE_ROWS = 3;
-
 /** Something an agent is blocked on: a tool approval, or a question answered in its thread. */
 export type QueueItem =
   | { kind: 'approval'; id: string; task_id: string; created_at: string; approval: Approval }
@@ -32,9 +29,9 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
 }
 
 /** A compact bottom-left launcher opens the pending responses without resizing the deck. */
-export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow, onDeny, onOpen, onFocus }: {
-  items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null; showAll: boolean;
-  onShowAll: (v: boolean) => void; onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
+export function ApprovalQueue({ items, tasks, focus, onAllow, onDeny, onOpen, onFocus }: {
+  items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null;
+  onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
   onOpen: (item: QueueItem) => void; onFocus: (i: number | null) => void;
 }) {
   const panelId = useId();
@@ -42,11 +39,11 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
   // The list shows whenever something waits, not only in keyboard mode (`focus`, entered with `a`).
   // Folded away, it opens again when a new item arrives.
   const [folded, setFolded] = useState(false);
-  const seen = useRef(items.length);
+  const seen = useRef(new Set(items.map(item => item.id)));
   useEffect(() => {
-    if (items.length > seen.current) setFolded(false);
-    seen.current = items.length;
-  }, [items.length]);
+    if (items.some(item => !seen.current.has(item.id))) setFolded(false);
+    seen.current = new Set(items.map(item => item.id));
+  }, [items]);
   const open = focus != null || !folded;
   // Keyboard mode moves the focus to the chosen row, only when the choice changes and never out of
   // a field being typed in or a dialog: a row taking the focus there would turn the next `y` typed
@@ -59,8 +56,6 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
     row.scrollIntoView({ block: 'nearest' });
   }, [focus]);
   if (!items.length) return null;
-  const rows = showAll ? items : items.slice(0, QUEUE_ROWS);
-  const rest = items.length - rows.length;
   const cur = focus != null ? items[focus] : undefined;
   return (
     <aside className="queue-dock" aria-label="응답 대기"
@@ -81,7 +76,7 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
         <button className="icon-btn" aria-label="응답 대기 접기" title="접기" onClick={() => { setFolded(true); onFocus(null); }}><ChevronDown /></button>
       </header>
       <div className="queue-list" ref={list}>
-      {rows.map((item, i) => {
+      {items.map((item, i) => {
         if (item.kind === 'workspace') return (
           <div key={item.id} data-queue-index={i} tabIndex={0} className={`queue-row${focus===i?' selected':''}`}
             onClick={()=>onFocus(i)} onFocus={()=>onFocus(i)} onDoubleClick={()=>onOpen(item)}>
@@ -130,11 +125,6 @@ export function ApprovalQueue({ items, tasks, focus, showAll, onShowAll, onAllow
         );
       })}
       </div>
-      {(rest > 0 || (showAll && items.length > QUEUE_ROWS)) && (
-        <button className="link queue-more" onClick={() => onShowAll(!showAll)}>
-          {showAll ? '접기' : <>외 {rest}건 <ChevronDown /></>}
-        </button>
-      )}
       <p className="queue-hint">{focus == null ? 'a 키로 목록 선택 · 버튼으로 바로 승인·거절' : cur?.kind === 'workspace' ? 'j/k 이동 · Enter 연결 요청 확인 · Esc 목록 선택 끝내기' : cur?.kind === 'question' || cur?.kind === 'ask' || (cur?.kind === 'approval' && isAsk(cur.approval.tool_name))
         ? 'j/k 이동 · Enter 스레드에서 답하기 · Esc 목록 선택 끝내기'
         : 'j/k 이동 · y 승인 · n 거절 · Enter 스레드 · Esc 목록 선택 끝내기'}</p>

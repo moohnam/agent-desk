@@ -33,7 +33,7 @@ const INSTRUCTIONS = `Agent Desk: 사용자가 여러 에이전트 작업을 한
 3. 사용자 판단이 필요하면 desk_ask로 묻고 답을 기다립니다. "아직 답 없음"이 오면 desk_wait_answer를 다시 호출합니다.
 4. 작업을 마치면 desk_finish를 호출합니다.
 사용자가 이 세션을 데스크로 "넘겨", "옮겨", "가져가"라고 하면 desk_handoff를 씁니다. 세션 ID는 Claude Code면 \`echo $CLAUDE_CODE_SESSION_ID\`, Codex면 \`echo $CODEX_THREAD_ID\`로 얻습니다(비어 있으면 생략). 넘긴 뒤에는 이 터미널 세션을 더 진행하지 말고 종료하라고 사용자에게 알립니다.
-다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. 접수 후 자동 재개가 표시되면 턴을 끝내도 됩니다. 직접 조회는 desk_wait_answer를 씁니다. 받은 문의에는 desk_reply로 요청 ID를 지정해 답합니다.
+다른 프로젝트나 작업의 에이전트에게 알아볼 것이 있으면 desk_request로 물을 수 있습니다. 사용자가 그 대상을 @로 언급했으면 바로 전달되고, 아니면 사용자 승인을 거칩니다. 묻는 쪽은 데스크에 붙은 작업이면 task_id를, 데스크가 실행한 작업이면 session_id에 세션 ID(위와 같은 환경 변수)를 넘깁니다. 데스크가 실행한 세션은 agent-desk-runtime의 desk_request와 desk_reply를 사용합니다. 자동 재개가 등록되면 답변을 받은 턴에서 기존 작업을 이어가세요. 직접 조회 안내가 나오면 desk_wait_answer로 답을 받을 때까지 기다려 후속 작업을 진행하세요. 받은 문의에는 desk_reply로 요청 ID를 지정해 답합니다.
 데스크에 쓰는 글은 한국어로 씁니다.`;
 
 const str = (description: string) => ({ type: 'string', description });
@@ -225,6 +225,7 @@ async function callTool(hub: Hub, name: string, a: Record<string, any>, signal: 
       return answerResult(await hub.external.waitAnswer(a.question_id, ms, signal));
     }
     case 'desk_request': {
+      if (a.timeout_sec === undefined) hub.requests.checkAsyncCaller(a,resumeToken);
       const r = hub.atomic(() => hub.requests.request({ to: a.to, text: a.question, fromTaskId: a.task_id, sessionId: a.session_id, resumeProof: a.timeout_sec === undefined ? resumeToken : undefined }));
       if (a.timeout_sec === undefined) return requestResult(hub,r);
       return requestResult(hub, await hub.requests.waitRequest(r.id, waitSec(a.timeout_sec) * 1000, signal));

@@ -1,4 +1,4 @@
-import { signRequest } from './request-proof.ts';
+import { signRequest, toolFields } from './request-proof.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -12,7 +12,7 @@ import { expandHome } from './paths.ts';
 import type { WorkspaceLinks } from './workspace-links.ts';
 
 type Lookup = { peer: CrossPeer; source: 'app' | 'external'; last_user_event_id: number | null;
-  last_user_message_id: number | null };
+  last_user_message_id: number | null; boundMcp?: boolean };
 type LocalEdge = { from: string; to: string };
 type Call = { status: number; body: any };
 type BrokerRow = { id: string; fingerprint: string; origin: string; target: string; from_json: string;
@@ -30,6 +30,10 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
       last_user_event_id: hub.store.lastEventOf(task.id, 'user')?.id ?? null,
       last_user_message_id: hub.store.lastUserMessageId(task.id) };
   };
+  if (action === 'check-async-caller') {
+    hub.requests.checkAsyncCaller(body,body.proof);
+    return {status:200,body:{}};
+  }
   if (action === 'lookup') {
     const kind = String(body.kind ?? '');
     if (kind === 'request' || kind === 'question' || kind === 'reply') {
@@ -56,6 +60,7 @@ export function handleWorkspaceBroker(hub: Hub, action: string, body: Record<str
       const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
       const session = taskId ? hub.store.latestSession(taskId) : sessionId ? hub.store.sessionByEngineId(sessionId) : undefined;
       const found = session && (!sessionId || session.engine_session_id === sessionId) && hub.store.latestSession(session.task_id)?.id === session.id && peerOf(session.task_id);
+      if (found && session && session.source === 'app') found.boundMcp = hub.requests.hasBoundMcp(session.id);
       return { status: found ? 200 : 404, body: found ?? { error: '묻는 작업을 찾지 못했습니다' } };
     }
     if (kind === 'target') {
@@ -193,6 +198,9 @@ class RequestBroker {
     const from = await this.lookup('origin', { task_id: a.task_id, session_id: a.session_id });
     const to = await this.lookup('target', { to: a.to });
     if (from.source === to.source) return { proxy: from.source };
+    if (from.result.boundMcp && a.timeout_sec === undefined)
+      await this.call(from.source,'check-async-caller',{session_id:a.session_id,task_id:a.task_id,to:a.to,question:a.question,
+        proof:signRequest(resumeToken,toolFields('desk_request',a))});
     if (to.result.source !== 'app') throw new HttpError(409, '대상은 터미널에서 붙은 작업이라 질문을 넣을 수 없습니다');
     const pending = this.pending().find(row => row.origin === from.source && row.target === to.source
       && (JSON.parse(row.from_json) as CrossPeer).session_id === from.result.peer.session_id

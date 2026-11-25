@@ -14,6 +14,8 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 
 function fixtureServer() {
   const fixture = interactionData(24);
+  const settledApprovals = new Set();
+  const approvalStreams = new Set();
   const groupedFeed = interactionData(215, 'short');
   const deepGroupedFeed = interactionData(1500, 'short');
   let groupedFailure = true;
@@ -31,6 +33,10 @@ function fixtureServer() {
       if (url.pathname === '/api/streams') {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.write('data: {"source":"","connected":true}\n\n');
+        if (request.headers['x-desk-fixture']==='queue-many') {
+          approvalStreams.add(response);
+          response.on('close',()=>approvalStreams.delete(response));
+        }
         if (['grouped-failure', 'grouped-deep'].includes(request.headers['x-desk-fixture'])) { groupedStreams.add(response); response.on('close', () => groupedStreams.delete(response)); }
         return;
       }
@@ -63,6 +69,19 @@ function fixtureServer() {
           ...body, targets: [],
           ...(request.headers['x-desk-settings-update'] && { current: 'old', latest: 'new' }),
         };
+        if (layout === 'queue-many') {
+          if (url.pathname==='/api/state') body.approvals=Array.from({length:6},(_,i)=>({
+            id:'many'+i,task_id:'t0',session_id:'s0',tool_name:'Bash',input:{command:'cmd'+i},
+            status:'pending',created_at:'2026-01-02T00:00:0'+i+'Z',
+          })).filter(a=>!settledApprovals.has(a.id));
+          if (request.method==='POST' && url.pathname.startsWith('/api/approvals/')) {
+            const id=url.pathname.split('/').at(-1);
+            settledApprovals.add(id);
+            const message={type:'approval',approval:{id,task_id:'t0',session_id:'s0',tool_name:'Bash',status:'allowed'}};
+            for(const stream of approvalStreams)stream.write('data: '+JSON.stringify({source:'',message})+'\n\n');
+            body={ok:true};
+          }
+        }
         if (layout === 'queue-reorder' && url.pathname==='/api/state') {
           body.approvals=['first','second'].map((id,index)=>({id,task_id:'t'+index,session_id:'s'+index,
             tool_name:'Bash',input:{command:id},status:'pending',created_at:`2026-01-02T00:00:0${index}Z`}));
@@ -1153,6 +1172,44 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForFunction(selector=>document.querySelector(selector)?.textContent.includes('SHA256:fixture'),{},dialog);
       await page.$eval(dialog,element=>[...element.querySelectorAll('button')].find(button=>button.textContent==='승인').click());
       await page.waitForFunction(()=>!document.querySelector('.queue-row'));
+    }));
+
+    await t.test('a replacement approval reopens the folded queue and survives subsequent thread messages', () => withPage(async page => {
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'queue-reorder'});
+      await page.evaluateOnNewDocument(() => {
+        window.EventSource = class extends EventSource {
+          constructor(...args) { super(...args); window.deskTestStream = this; }
+        };
+      });
+      await page.goto(origin,{waitUntil:'domcontentloaded'});
+      await page.waitForSelector('.queue-row[data-queue-index="1"]');
+      await page.click('[aria-label="응답 대기 접기"]');
+      await page.evaluate(() => {
+        const send = message => window.deskTestStream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({source:'',message})}));
+        const common = {task_id:'t0',session_id:'s0',created_at:new Date().toISOString()};
+        send({type:'approval',approval:{...common,id:'first',tool_name:'Bash',input:{},status:'allowed'}});
+        send({type:'approval',approval:{...common,id:'next',tool_name:'desk_request',input:{to:'@target#1',description:'후속 문의'},status:'pending'}});
+        for (const [i,kind] of ['tool_result','assistant','status'].entries())
+          send({type:'event',event:{id:90001+i,task_id:'t0',kind,ts:common.created_at,payload:kind==='status'?{state:'turn_done'}:{text:'후속 메시지'}}});
+      });
+      await page.waitForFunction(()=>document.querySelector('.queue')?.textContent.includes('후속 문의'));
+    }));
+
+    await t.test('each pending approval has a card until that approval is settled', () => withPage(async page => {
+      await page.setViewport({width:390,height:480});
+      await page.setExtraHTTPHeaders({'x-desk-fixture':'queue-many'});
+      await page.goto(origin,{waitUntil:'domcontentloaded'});
+      const labels = () => page.$$eval('.queue-row .mono',els=>els.map(el=>el.textContent));
+      await page.waitForFunction(()=>document.querySelectorAll('.queue-row').length===6);
+      assert.deepEqual(await labels(),['cmd0','cmd1','cmd2','cmd3','cmd4','cmd5']);
+      await page.$eval('.queue-list',list=>{list.scrollTop=list.scrollHeight;});
+      assert.ok(await page.$eval('.queue-list',list=>{
+        const bottom=list.lastElementChild.getBoundingClientRect().bottom;
+        return list.scrollTop>0 && bottom<=list.getBoundingClientRect().bottom+1 && bottom<=innerHeight;
+      }));
+      await page.click('.queue-row[data-queue-index="3"] .yes');
+      await page.waitForFunction(()=>document.querySelectorAll('.queue-row').length===5);
+      assert.deepEqual(await labels(),['cmd0','cmd1','cmd2','cmd4','cmd5']);
     }));
 
     await t.test('an older connection request cannot redirect keyboard approval to another item', () => withPage(async page => {
