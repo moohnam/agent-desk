@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS subagent_event (
   ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS subagent_event_of ON subagent_event(session_id, subagent_id, id);
 CREATE INDEX IF NOT EXISTS subagent_event_task ON subagent_event(task_id);
+CREATE INDEX IF NOT EXISTS subagent_event_source ON subagent_event(session_id, subagent_id, json_extract(payload_json, '$.sourceId'));
 CREATE TABLE IF NOT EXISTS approval (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, tool_name TEXT NOT NULL,
   input_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);

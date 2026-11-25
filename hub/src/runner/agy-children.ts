@@ -29,15 +29,22 @@ export class AgyChildren {
   private dir?: string;
   private emit: (tasks:BackgroundTask[])=>void;
   private brain: string;
-  constructor(emit:(tasks:BackgroundTask[])=>void, brain=join(homedir(),'.gemini','antigravity-cli','brain')) {
+  private details?: { discover(child:any, existing:boolean):void; idle(child:string,file:string,response:string):void };
+  private owned = new Set<string>();
+  private watching = new Set<string>();
+  constructor(emit:(tasks:BackgroundTask[])=>void, brain=join(homedir(),'.gemini','antigravity-cli','brain'), details?: { discover(child:any,existing:boolean):void; idle(child:string,file:string,response:string):void }) {
     this.emit=emit;
-    this.brain=brain;
+    this.brain=brain;this.details=details;
   }
   beforePrompt(session:string) {
     if(this.timer || !uuid.test(session)) return;
     this.dir=join(this.brain,session,'.system_generated');
     this.seenChildren=new Set(files(join(this.dir,'subagents')));
     this.seenMessages=new Set(files(join(this.dir,'messages')));
+    if(this.details){
+      for(const file of this.seenChildren){const child=record(join(this.dir,'subagents'),file);if(child?.conversationId!==file.slice(0,-5))continue;this.owned.add(child.conversationId);this.details.discover(child,true);}
+      for(const file of this.seenMessages)this.detailMessage(file);
+    }
   }
   observe(update:any) {
     if(update.name!=='invoke_subagent') return;
@@ -51,9 +58,30 @@ export class AgyChildren {
     this.waiting.set(key,{id:'spawn:'+key,type:'local_agent',description:String(update.rawInput?.Role??'agy 서브 에이전트'),state:'unknown'});
     this.publish();
   }
+  belongs(session:string){if(!this.owned.has(session))this.refresh();return this.owned.has(session);}
+  watch(session:string){
+    if(!this.owned.has(session)||!this.dir)return;
+    this.watching.add(session);
+    if(!this.timer){this.timer=setInterval(()=>this.refresh(),1500);this.timer.unref();}
+  }
+  active(session:string){
+    if(!this.owned.has(session)||!this.dir)return;
+    if(!this.running.has(session)){
+      this.running.set(session,{id:'agent:'+session,type:'local_agent',description:'agy 서브 에이전트',state:'unknown'});
+      this.publish();
+    }
+    if(!this.timer){this.timer=setInterval(()=>this.refresh(),1500);this.timer.unref();}
+  }
+  private detailMessage(file:string){
+    if(!this.dir||!this.details)return;
+    const msg=record(join(this.dir,'messages'),file);
+    if(msg?.sender!=='system'||typeof msg.content!=='string')return;
+    const match=/^Subagent ([\da-f-]+) has gone idle\.([\s\S]*)$/i.exec(msg.content);
+    if(match&&this.owned.has(match[1]))this.details.idle(match[1],file,match[2].startsWith(" This was the subagent's most recent response: ")?match[2].slice(" This was the subagent's most recent response: ".length):'');
+  }
   owns(session:string) { this.refresh(); return this.running.has(session); }
   private refresh() {
-    if(!this.dir || !this.waiting.size && !this.running.size) return;
+    if(!this.dir || !this.waiting.size && !this.running.size && !this.watching.size) return;
     const dir=this.dir;
     let changed=false;
     for(const file of files(join(dir,'subagents'))) {
@@ -61,6 +89,7 @@ export class AgyChildren {
       const child=record(join(dir,'subagents'),file);
       if(child?.conversationId!==file.slice(0,-5)) continue;
       this.seenChildren.add(file);
+      this.owned.add(child.conversationId);this.details?.discover(child,false);
       const role=child.subagentDescriptor?.role;
       const waiting=[...this.waiting].find(([,task])=>task.description===role) ?? this.waiting.entries().next().value;
       if(!waiting) continue;
@@ -73,19 +102,19 @@ export class AgyChildren {
       const msg=record(join(dir,'messages'),file);
       if(!msg) continue;
       const idle=msg.sender==='system' && /^Subagent ([\da-f-]+) has gone idle\./i.exec(msg.content);
-      if(idle && !this.running.has(idle[1])) continue;
-      this.seenMessages.add(file);
-      if(idle && this.running.delete(idle[1])) changed=true;
+      if(idle && !this.running.has(idle[1]) && !this.watching.has(idle[1])) continue;
+      this.seenMessages.add(file);this.detailMessage(file);
+      if(idle){this.watching.delete(idle[1]);if(this.running.delete(idle[1]))changed=true;}
     }
     if(changed) this.publish();
   }
   private publish() {
     this.emit([...this.waiting.values(),...this.running.values()]);
-    if(!this.waiting.size && !this.running.size) { clearInterval(this.timer); this.timer=undefined; }
+    if(!this.waiting.size && !this.running.size && !this.watching.size) { clearInterval(this.timer); this.timer=undefined; }
   }
   private stop() {
     clearInterval(this.timer); this.timer=undefined; this.dir=undefined;
-    this.seenChildren.clear(); this.seenMessages.clear();
+    this.watching.clear();this.owned.clear();this.seenChildren.clear(); this.seenMessages.clear();
   }
   reset() {this.waiting.clear();this.running.clear();this.stop();this.emit([]);}
 }

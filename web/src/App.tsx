@@ -267,7 +267,8 @@ export function App() {
   const threadTaskInfo = threadTask ? hub.tasks.get(threadTask) : undefined;
   /** Only engine sessions the desk runs have subagents to show. */
   const subagentsShown = threadTaskInfo?.source === 'app' && threadTaskInfo.kind !== 'note';
-  const subagents = useSubagents(subagentsShown ? threadTask : null, hub.synced + (threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) ?? 0 : 0));
+  const subagentReload = hub.synced + (threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) ?? 0 : 0);
+  const subagents = useSubagents(subagentsShown ? threadTask : null, subagentReload);
   const previousByPost = useRef(new Map<number, Subagent[]>());
   /** Subagents by the thread post whose tool call started them: chips under it. */
   const subagentsByPost = useMemo(() => {
@@ -1661,7 +1662,7 @@ export function App() {
               requestAnimationFrame(()=>{const input=replyRef.current;input?.focus();input?.setSelectionRange(text.length,text.length);});
             }:undefined} />
         </Suspense></CodePanelBoundary>}
-        {subagentsVisible && threadTaskView && <SubagentPanel key={threadTaskView.id} task={threadTaskView} subagents={subagents}
+        {subagentsVisible && threadTaskView && <SubagentPanel key={threadTaskView.id} task={threadTaskView} subagents={subagents} reload={subagentReload}
           reveal={subagentReveal} keys={subagentKeys} onClose={closeSubagents} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible || codeVisible || subagentsVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}

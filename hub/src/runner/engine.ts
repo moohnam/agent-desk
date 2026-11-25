@@ -13,6 +13,7 @@ export interface StartOptions {
   instructions?: string;
   /** The hub records subagents (`start.subagents`): report them with `subagent` and `subagent_event`. */
   subagents?: boolean;
+  subagentLinks?: { id: string; toolUseId: string }[];
   requestInputId?:string;
   onRequestStarted?(id:string):void;
   connectorMcp?: {url:string;token:string};

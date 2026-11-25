@@ -18,7 +18,8 @@ export class CodexActivity {
   private request:Request;
   private emit:(tasks:BackgroundTask[])=>void;
   private interval:number;
-  constructor(request:Request, emit:(tasks:BackgroundTask[])=>void, interval=5000) {this.request=request;this.emit=emit;this.interval=interval;}
+  private onChild?: (thread:Json, root:string)=>void;
+  constructor(request:Request, emit:(tasks:BackgroundTask[])=>void, interval=5000, onChild?: (thread:Json, root:string)=>void) {this.request=request;this.emit=emit;this.interval=interval;this.onChild=onChild;}
 
   start(root:string) { this.root=root; this.refresh(); }
   stop() { this.closed=true; clearTimeout(this.timer); this.tasks.clear(); this.owners.clear(); }
@@ -28,7 +29,7 @@ export class CodexActivity {
     if(next!==this.last){this.last=next;this.emit(tasks);}
   }
   private active(id:string, description:string, type='local_agent') {
-    this.tasks.set(id,{id,type,description:description.slice(0,500)});
+    this.tasks.set(id,{id,type,description:description.slice(0,500),...(type==='shell'?{backgroundEvidence:'native' as const}:{})});
   }
   notification(method:string,p:Json) {
     if(this.closed||!this.root)return;
@@ -36,7 +37,7 @@ export class CodexActivity {
     if(method==='thread/started'){
       const t=p.thread;
       const parent=t?.parentThreadId??t?.source?.subAgent?.thread_spawn?.parent_thread_id;
-      if(t?.id&&owned(parent)){this.owners.add(t.id);if(t.status?.type==='active')this.active(`agent:${t.id}`,t.agentNickname||t.agentRole||'서브 에이전트');}
+      if(t?.id&&owned(parent)){this.owners.add(t.id);this.onChild?.(t,this.root);if(t.status?.type==='active')this.active(`agent:${t.id}`,t.agentNickname||t.agentRole||'서브 에이전트');}
       else return;
     }else if(!owned(p.threadId))return;
     else if(method==='thread/status/changed'&&p.threadId!==this.root){
@@ -51,7 +52,7 @@ export class CodexActivity {
       if(item?.type==='collabAgentToolCall'){
         for(const id of item.receiverThreadIds??[]){
           if(typeof id!=='string'||id===this.root)continue;
-          if(item.tool==='spawnAgent')this.owners.add(id);
+          if(item.tool==='spawnAgent'){this.owners.add(id);this.onChild?.({id,parentThreadId:p.threadId,status:{type:'active'}},this.root);}
           else if(!this.owners.has(id))continue;
           const status=item.agentsStates?.[id]?.status;
           if(status==='running'||status==='pendingInit')this.active(`agent:${id}`,'서브 에이전트');
@@ -60,13 +61,14 @@ export class CodexActivity {
         }
       }else if(item?.type==='subAgentActivity'&&item.agentThreadId){
         if(item.agentThreadId===this.root)return;
-        if(item.kind==='started')this.owners.add(item.agentThreadId);
+        if(item.kind==='started'){this.owners.add(item.agentThreadId);this.onChild?.({id:item.agentThreadId,parentThreadId:p.threadId,status:{type:'active'}},this.root);}
         else if(!this.owners.has(item.agentThreadId))return;
         if(item.kind==='started'||item.kind==='interacted')this.active(`agent:${item.agentThreadId}`,item.agentPath||'서브 에이전트');
         else this.tasks.delete(`agent:${item.agentThreadId}`);
       }else if(item?.type==='commandExecution'){
         const id=`command:${p.threadId}:${item.processId??item.id}`;
-        if(item.status==='inProgress'||(item.processId&&item.status==='completed'&&item.exitCode==null))this.active(id,item.command||'백그라운드 명령','shell');
+        if(item.processId&&item.status==='completed'&&item.exitCode==null)this.active(id,item.command||'백그라운드 명령','shell');
+        else if(item.status==='inProgress')this.active(id,item.command||'실행 중인 도구','tool');
         else this.tasks.delete(id);
       }else return;
     }else if(method!=='turn/completed')return;
@@ -119,12 +121,13 @@ export class CodexActivity {
         for(const t of terminals){
           if(typeof t.processId!=='string')throw Error('백그라운드 명령 응답 오류');
           const key=`command:${id}:${t.processId}`;
-          next.set(key,{id:key,type:'shell',description:String(t.command||'백그라운드 명령').slice(0,500)});
+          next.set(key,{id:key,type:'shell',backgroundEvidence:'native',description:String(t.command||'백그라운드 명령').slice(0,500)});
         }
       }
       if(this.closed)return;
       // A response captured before a live event must never erase the newer work.
       if(revision!==this.revision){this.again=true;return;}
+      for(const t of children)this.onChild?.(t,this.root);
       this.tasks=next;this.owners=owners;this.failures=0;
     })().catch(()=>{
       this.failures=Math.min(this.failures+1,4);

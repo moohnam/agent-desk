@@ -6,7 +6,7 @@
 import { Bot, PanelLeftClose, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
-import { elapsed, isActive, isCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
+import { elapsed, isActive, isCommand, isCurrentCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
 import { buildPosts } from './posts.ts';
 import { PostView } from './PostView.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -46,8 +46,8 @@ export interface SubagentPaneKeys { focused(): boolean; enter(): boolean; key(k:
 
 interface ColumnHandle { step(dir: 1 | -1): void; edge(dir: 1 | -1): void; toggle(): void }
 
-export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError }: {
-  task: TaskView; subagents: Subagent[];
+export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, onError }: {
+  task: TaskView; subagents: Subagent[]; reload: number;
   /** A subagent to show and focus (a chip was pressed); `n` tells a repeated press apart. */
   reveal?: { key: string; n: number };
   keys: RefObject<SubagentPaneKeys | null>;
@@ -55,7 +55,7 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
 }) {
   const now = useNow();
   const agents = useMemo(() => subagents.filter(s => !isCommand(s)), [subagents]);
-  const commands = useMemo(() => subagents.filter(isCommand), [subagents]);
+  const commands = useMemo(() => subagents.filter(isCurrentCommand), [subagents]);
   const byKey = useMemo(() => new Map(agents.map(s => [subagentKey(s), s])), [agents]);
   const columnOf = (key: string) => commands.some(s => subagentKey(s) === key) ? COMMANDS : key;
   const [commandFocus, setCommandFocus] = useState<{ key: string; n: number }>();
@@ -131,7 +131,8 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
     return () => window.removeEventListener('pointerdown', away);
   }, [focus]);
 
-  const running = subagents.filter(isActive).length;
+  const visibleCount = agents.length + commands.length;
+  const running = agents.filter(isActive).length + commands.length;
   const commandsRunning = commands.filter(isActive).length;
   const setHandle = (key: string) => (h: ColumnHandle | null) => { if (h) handles.current.set(key, h); else handles.current.delete(key); };
   const engine = ENGINE_LABEL[engineOf(task.engine ?? 'claude')] ?? task.engine;
@@ -139,10 +140,10 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   return (
     <aside className="thread-references subagent-panel" aria-label="서브 에이전트·백그라운드" ref={paneRef}>
       <header className="reference-head">
-        <div><h2><Bot /> 서브 에이전트·백그라운드 <span>{running ? `실행 중 ${running} · ` : ''}{subagents.length}</span></h2><p>{task.project_name}#{task.seq}</p></div>
+        <div><h2><Bot /> 서브 에이전트·백그라운드 <span>{running ? `실행 중 ${running} · ` : ''}{visibleCount}</span></h2><p>{task.project_name}#{task.seq}</p></div>
         <button className="icon-btn" title="서브 에이전트 창 닫기 (b)" aria-label="서브 에이전트 창 닫기" onClick={onClose}><PanelLeftClose /></button>
       </header>
-      {subagents.length > 0 && (
+      {visibleCount > 0 && (
         <div className="sa-strip" role="group" aria-label="서브 에이전트 목록">
           {commands.length > 0 && (
             <button type="button" className={`sa-tab ${commandsRunning ? 'running' : 'done'}${on.includes(COMMANDS) ? ' on' : ''}`} aria-pressed={on.includes(COMMANDS)}
@@ -169,13 +170,13 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
         </div>
       )}
       <div className="sa-cols" ref={colsRef}>
-        {!subagents.length && <p className="empty">이 작업에서 실행한 서브 에이전트나 백그라운드 명령이 아직 없습니다.</p>}
-        {subagents.length > 0 && !on.length && <p className="empty">모든 컬럼을 뺐습니다. 위 목록에서 고르거나 초기화로 다시 넣으세요.</p>}
+        {!visibleCount && <p className="empty">표시할 서브 에이전트나 현재 실행 중인 백그라운드 명령이 없습니다.</p>}
+        {visibleCount > 0 && !on.length && <p className="empty">모든 컬럼을 뺐습니다. 위 목록에서 고르거나 초기화로 다시 넣으세요.</p>}
         {on.map((key, i) => key === COMMANDS ? (
           <CommandsColumn key={key} commands={commands} all={subagents} focused={focus === i} width={widths[key]} reveal={commandFocus}
             handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} />
         ) : (
-          <SubagentColumn key={key} s={byKey.get(key)!} task={task} engine={engine} focused={focus === i} width={widths[key]}
+          <SubagentColumn key={key} s={byKey.get(key)!} reload={reload} task={task} engine={engine} focused={focus === i} width={widths[key]}
             handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} onError={onError} />
         ))}
       </div>
@@ -183,12 +184,12 @@ export function SubagentPanel({ task, subagents, reveal, keys, onClose, onError 
   );
 }
 
-function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHide, onError }: {
-  s: Subagent; task: TaskView; engine: string; focused: boolean; width?: number;
+function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFocus, onHide, onError }: {
+  s: Subagent; reload: number; task: TaskView; engine: string; focused: boolean; width?: number;
   handle: (h: ColumnHandle | null) => void; onFocus: () => void; onHide: () => void; onError: (message: string) => void;
 }) {
   const now = useNow();
-  const { events, more, loading, error, older, whole } = useSubagentEvents(s.detailed ? s : undefined);
+  const { events, more, loading, error, older, whole } = useSubagentEvents(s.detailed ? s : undefined, reload);
   const posts = useMemo(() => buildPosts(withAnswers(events)), [events]);
   // The answer to the latest instruction: a follow-up after it starts a run that answers anew.
   const answer = posts.findLast(p => p.event.payload.handback || p.kind === 'user');
@@ -244,7 +245,8 @@ function SubagentColumn({ s, task, engine, focused, width, handle, onFocus, onHi
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
         if (f.scrollTop < 80) void older();
       }}>
-        {!s.detailed && <p className="sa-note">시작과 종료만 기록됐습니다. Codex·agy이거나, 러너가 상세 기록을 보내기 전에 시작한 항목입니다.</p>}
+        {!s.detailed && <p className="sa-note">상태 목록만 수신한 항목입니다. 해당 실행의 상세 기록이 허브에 전달되지 않아 대화를 복구할 수 없습니다.</p>}
+        {s.detailNote && <p className="sa-note">{s.detailNote}</p>}
         {more && <button className="link sa-older" disabled={loading} onClick={() => void older()}>이전 기록 더 보기</button>}
         {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}</p>}
         {s.detailed && loading && !events.length && <p className="sa-note">불러오는 중…</p>}

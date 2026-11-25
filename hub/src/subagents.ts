@@ -49,13 +49,14 @@ export class Subagents {
     const row = this.row(session.id, info.id);
     const known: Partial<SubagentInfo> = row ? JSON.parse(row.info_json) : {};
     this.save(session, { ...info, toolUseId: known.toolUseId ?? info.toolUseId, agent: info.agent ?? known.agent,
-      parentId: info.parentId ?? known.parentId, command: info.command ?? known.command, output: info.output ?? known.output }, true, row?.listed === 1, at);
+      parentId: info.parentId ?? known.parentId, command: info.command ?? known.command, output: info.output ?? (info.status === 'running' ? undefined : known.output) }, true, row?.listed === 1, at);
   }
 
   /** One step of a subagent's conversation; live copies come cut like a thread's (feedEvent). */
   event(session: Session, subagentId: string, event: RunnerSubagentEvent, at = now()) {
     // The runner reports a subagent before its steps; steps of none it reported are not kept.
     if (!this.row(session.id, subagentId)) return;
+    if (event.sourceId && this.db.prepare("SELECT 1 FROM subagent_event WHERE session_id = ? AND subagent_id = ? AND json_extract(payload_json, '$.sourceId') = ? LIMIT 1").get(session.id, subagentId, event.sourceId)) return;
     const r = this.db.prepare('INSERT INTO subagent_event (session_id, task_id, subagent_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?, ?)')
       .run(session.id, session.task_id, subagentId, at, event.kind, JSON.stringify(event));
     const stored: SubagentEvent = { id: Number(r.lastInsertRowid), session_id: session.id, task_id: session.task_id,
@@ -71,14 +72,14 @@ export class Subagents {
   background(session: Session, tasks: BackgroundTask[], at = now()) {
     // Codex's 'status' entry says its list is being checked, and agy lists its running tool calls
     // ('tool'): neither is work of its own.
-    const work = tasks.filter(t => t.type !== 'status' && t.type !== 'tool');
+    const work = tasks.filter(t => t.type !== 'status' && t.type !== 'tool' && (t.type !== 'shell' || t.backgroundEvidence === 'native'));
     const listed = new Set(work.map(t => t.id));
     for (const t of work) {
       const row = this.row(session.id, t.id);
       const known: SubagentInfo | undefined = row && JSON.parse(row.info_json);
       if (row?.detailed === 1) { if (row.listed !== 1) this.save(session, known!, true, true, at); continue; }
-      if (row?.listed === 1 && row.status === 'running' && known!.description === t.description && known!.agent === t.agent) continue;
-      this.save(session, { ...known, id: t.id, type: t.type, description: t.description, agent: t.agent, status: 'running', background: true }, false, true, at);
+      if (row?.listed === 1 && row.status === 'running' && known!.description === t.description && known!.agent === t.agent && known!.backgroundEvidence === t.backgroundEvidence) continue;
+      this.save(session, { ...known, id: t.id, type: t.type, description: t.description, agent: t.agent, status: 'running', background: true, backgroundEvidence: t.backgroundEvidence }, false, true, at);
     }
     const gone = this.db.prepare("SELECT * FROM subagent WHERE session_id = ? AND status = 'running' AND listed = 1 AND detailed = 0")
       .all(session.id) as unknown as Row[];

@@ -102,9 +102,9 @@ const fit = (event: SubagentEvent): SubagentEvent => {
  * say and do. A subagent's messages carry the id of the Agent tool call that started it, even when a
  * follow-up (SendMessage) resumes it; `task_started` ties that call to the task.
  */
-export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>[0]['emit']) {
+export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>[0]['emit'], links: {id:string;toolUseId:string}[] = []) {
   const known = new Map<string, SubagentInfo>();
-  const byToolUse = new Map<string, string>();
+  const byToolUse = new Map(links.map(link => [link.toolUseId, link.id]));
   const early = new Map<string, SubagentEvent[]>();
   const reported = new Map<string, number>();
   // A command the turn waits for is an ordinary tool call, shown in the thread; it is recorded only
@@ -126,6 +126,7 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
   };
   // Each run (a follow-up starts another) has its id; frames of an earlier run that come late are dropped.
   const runs = new Map<string, string>();
+  const generations = new Map<string, number>();
   const late = (taskId: string, runId?: string) => !!runId && (runs.get(taskId) ?? '') > runId;
   const report = (full: SubagentInfo) => {
     // A command's description can be the whole command; neither it nor a result may grow a message unboundedly.
@@ -171,6 +172,8 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
     if (m.subtype === 'task_started') {
       if (m.ambient || m.skip_transcript || late(m.task_id, m.run_id)) return true;
       if (m.run_id) runs.set(m.task_id, m.run_id);
+      generations.set(m.task_id, (generations.get(m.task_id) ?? 0) + 1);
+      answers.delete(m.task_id); // A resumed run must not inherit the previous handback.
       const previous = known.get(m.task_id);
       const info: SubagentInfo = {
         ...previous, id: m.task_id, type: m.task_type ?? previous?.type ?? 'local_agent', description: m.description,
@@ -178,7 +181,7 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
         ...(m.is_backgrounded !== undefined && { background: m.is_backgrounded }),
         ...(m.parent_task_id && { parentId: m.parent_task_id }), ...(!previous && m.tool_use_id && { toolUseId: m.tool_use_id }),
         ...(!previous && m.tool_use_id && commands.has(m.tool_use_id) && { command: commands.get(m.tool_use_id) }),
-        summary: undefined,
+        summary: undefined, usage: undefined, lastTool: undefined, output: undefined,
       };
       if (!previous && info.type === 'local_bash' && !info.background) { foreground.set(m.task_id, info); return true; }
       report(info);
@@ -209,8 +212,10 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
       update(m.task_id, { status: m.status, summary: clipResult(answers.get(m.task_id) ?? m.summary ?? ''),
         ...(m.usage && { usage: { tokens: m.usage.total_tokens, toolUses: m.usage.tool_uses, durationMs: m.usage.duration_ms } }) });
       // A command's output stays in its file on this machine; its end goes with the record.
-      if (known.get(m.task_id)?.type === 'local_bash' && m.output_file)
-        void outputTail(m.output_file).then(output => { if (output) update(m.task_id, { output }); }, () => {});
+      if (known.get(m.task_id)?.type === 'local_bash' && m.output_file) {
+        const generation = generations.get(m.task_id);
+        void outputTail(m.output_file).then(output => { if (output && generations.get(m.task_id) === generation) update(m.task_id, { output }); }, () => {});
+      }
     } else return false;
     return true;
   };
@@ -272,7 +277,7 @@ export const startClaude: StartEngine = (opts) => {
     },
   });
 
-  const subagents = opts.subagents ? subagentTracker(sessionId, emit) : undefined;
+  const subagents = opts.subagents ? subagentTracker(sessionId, emit, opts.subagentLinks) : undefined;
   const handle = (m: SDKMessage) => {
     if (subagents?.(m)) return;
     if (m.type === 'system' && m.subtype === 'init') {

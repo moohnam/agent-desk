@@ -678,3 +678,26 @@ test('approval receipt uses the legacy event envelope and cannot block later rem
   assert.equal(t.store.listEvents(task.id).filter(e=>e.kind==='status'&&(e.payload as StatusPayload).state==='request_receipt').length,0);
  }finally{t.cleanup();}
 });
+
+test('invalid subagent optional fields cannot poison remote journal delivery; replayed source steps deduplicate',()=>{
+  const t=setup();try{
+    t.exchange();
+    const task=t.hub.compose(`@fixture:moohnam@ws20:${t.dir} #codex start`);
+    t.exchange();t.exchange();
+    const opts=t.starts[0],sessionId=opts.sessionId;
+    assert.equal(opts.subagents,true);
+    opts.emit({type:'subagent',sessionId,subagent:{id:'a',type:'local_agent',description:'child',status:'running',summary:{bad:true}}} as any);
+    opts.emit({type:'subagent',sessionId,subagent:{id:'a',type:'local_agent',description:'child',status:'running',background:true}});
+    const event={kind:'assistant' as const,text:'native child answer',sourceId:'turn/item/text'};
+    opts.emit({type:'subagent_event',sessionId,subagentId:'a',event});
+    opts.emit({type:'subagent_event',sessionId,subagentId:'a',event});
+    opts.emit({type:'busy',sessionId,busy:false});
+    const input=t.request();const reply=t.exchange();
+    assert.equal(reply.eventAck,input.events.at(-1)!.seq);
+    assert.equal(t.journal.events().length,0);
+    assert.equal(t.store.getTask(task.id)?.status,'done');
+    assert.equal(t.hub.subagents.events(task.id,sessionId,'a').events.length,1);
+    assert.equal(t.store.listEvents(task.id).some(e=>(e.payload as any).text==='native child answer'),false,'child details never enter parent feed');
+    t.exchange();assert.equal(t.hub.subagents.events(task.id,sessionId,'a').events.length,1);
+  }finally{t.cleanup();}
+});

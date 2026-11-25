@@ -109,3 +109,25 @@ test('a long output is cut at a character, and a handed-back answer is the resul
   assert.ok(command.output?.startsWith('…\n가') && !command.output.includes('\uFFFD'));
   assert.equal(reports.filter((r) => r?.id === 'a1').at(-1)?.summary, '찾았습니다');
 });
+
+test('a follow-up failure never reuses the previous run handback or progress',()=>{
+  const out:RunnerToHub[]=[];const track=subagentTracker('s',m=>out.push(m));
+  const start=(run:string)=>track(sdk({type:'system',subtype:'task_started',task_id:'a',run_id:run,tool_use_id:'call',description:'worker',prompt:run}));
+  start('r1');
+  track(sdk({type:'assistant',parent_tool_use_id:'call',message:{content:[{type:'tool_use',id:'h',name:'SubagentHandback',input:{message:'first result'}}]}}));
+  track(sdk({type:'system',subtype:'task_notification',task_id:'a',run_id:'r1',status:'completed',summary:'sent'}));
+  start('r2');
+  track(sdk({type:'system',subtype:'task_notification',task_id:'a',run_id:'r2',status:'failed',summary:'second failed'}));
+  const last=out.filter(m=>m.type==='subagent').at(-1)!;
+  assert.equal(last.subagent.summary,'second failed');assert.equal(last.subagent.status,'failed');
+  assert.equal(last.subagent.usage,undefined);
+});
+
+test('optional subagent reports and step payloads must satisfy storage and rendering contracts',()=>{
+  const info={id:'a',type:'local_agent',description:'worker',status:'running'};
+  for(const field of ['summary','command','output','agent','parentId','toolUseId','lastTool','detailNote']){
+    assert.equal(typeof checkRunnerToHub({type:'subagent',sessionId:'s',subagent:{...info,[field]:{bad:true}}}),'string',field);
+  }
+  for(const usage of [{tokens:NaN,toolUses:1,durationMs:2},{tokens:1,toolUses:-1,durationMs:2},true])assert.equal(typeof checkRunnerToHub({type:'subagent',sessionId:'s',subagent:{...info,usage}}),'string');
+  for(const event of [{kind:'assistant',text:4},{kind:'tool',name:3,toolUseId:'x'},{kind:'tool_result',toolUseId:'x',text:'x',isError:'no'}])assert.equal(typeof checkRunnerToHub({type:'subagent_event',sessionId:'s',subagentId:'a',event}),'string');
+});

@@ -241,3 +241,23 @@ test('agy keeps a spawned child active until the session records its idle notifi
     assert.deepEqual(tasks,[]);
   } finally {monitor.reset();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('AGY restores only UUID-owned metadata and idle responses without assigning same-role spawn prompts',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'desk-agy-details-'));
+  const parent='00000000-0000-4000-8000-000000000001',child='00000000-0000-4000-8000-000000000002';
+  const records=join(dir,parent,'.system_generated');const found:any[]=[],answers:any[]=[];
+  const monitor=new AgyChildren(()=>{},dir,{discover:(c,existing)=>found.push([c,existing]),idle:(...args)=>answers.push(args)});
+  try{
+    for(const subdir of ['subagents','messages'])mkdirSync(join(records,subdir),{recursive:true});
+    writeFileSync(join(records,'subagents',child+'.json'),JSON.stringify({conversationId:child,subagentDescriptor:{role:'worker'}}));
+    writeFileSync(join(records,'messages',parent+'.json'),JSON.stringify({sender:'system',content:`Subagent ${child} has gone idle. This was the subagent's most recent response: recovered result`}));
+    monitor.beforePrompt(parent);
+    assert.equal(found.length,1);assert.equal(found[0][1],true);assert.equal(monitor.belongs(child),true);assert.equal(monitor.owns(child),false,'history does not assert currently running');
+    assert.deepEqual(answers,[[child,parent+'.json','recovered result']]);
+    assert.equal(monitor.belongs(parent),false);
+    monitor.active(child);assert.equal(monitor.owns(child),true,'a resumed child restarts native idle monitoring');
+    const next='00000000-0000-4000-8000-000000000003';
+    writeFileSync(join(records,'messages',next+'.json'),JSON.stringify({sender:'system',content:`Subagent ${child} has gone idle. This was the subagent's most recent response: followup result`}));
+    assert.equal(monitor.owns(child),false);assert.equal(answers.at(-1)![2],'followup result');
+  }finally{monitor.reset();rmSync(dir,{recursive:true,force:true});}
+});

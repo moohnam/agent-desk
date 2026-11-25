@@ -1144,7 +1144,7 @@ test('subagents are kept apart from the thread, like its events, and end with th
   runner.say({ type: 'background', sessionId, tasks: [] });
   assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'agent:t2')?.status, 'ended');
 
-  runner.say({ type: 'background', sessionId, tasks: [{ id: 'shell:3', type: 'shell', description: 'npm test' }] });
+  runner.say({ type: 'background', sessionId, tasks: [{ id: 'shell:3', type: 'shell', description: 'npm test', backgroundEvidence: 'native' }] });
   runner.say({ type: 'closed', sessionId });
   assert.equal(hub.subagents.list(taskId).find((s) => s.id === 'shell:3')?.status, 'stopped');
   assert.equal(session.task_id, taskId);
@@ -1201,4 +1201,27 @@ test('a subagent the turn waited for has ended when the turn ends, even without 
   const status = (id: string) => hub.subagents.list(taskId).find((s) => s.id === id)?.status;
   assert.equal(status('f1'), 'ended');
   assert.equal(status('b1'), 'running');
+});
+
+
+test('a resumed command clears the previous run output in durable subagent storage',()=>{
+  const {hub,runner,taskId,sessionId}=started();
+  const report=(status:'running'|'completed',output?:string)=>runner.say({type:'subagent',sessionId,subagent:{id:'cmd',type:'local_bash',description:'command',background:true,status,output}});
+  report('completed','old output');assert.equal(hub.subagents.list(taskId)[0].output,'old output');
+  report('running');report('completed');assert.equal(hub.subagents.list(taskId)[0].output,undefined);
+  hub.dispose();
+});
+
+test('legacy foreground-looking shell snapshots stay in runtime guards without creating background command history',()=>{
+  const {hub,runner,taskId,sessionId}=started();
+  const command={id:'command:root:1',type:'shell',description:'old runner foreground'};
+  runner.say({type:'background',sessionId,tasks:[command]});
+  assert.equal(hub.subagents.list(taskId).length,0);
+  runner.say({type:'background',sessionId,tasks:[{...command,backgroundEvidence:'native'}]});
+  runner.say({type:'background',sessionId,tasks:[{...command,backgroundEvidence:'native'}]});
+  assert.equal(hub.subagents.list(taskId).length,1);
+  assert.equal(hub.subagents.list(taskId)[0].status,'running');
+  runner.say({type:'background',sessionId,tasks:[]});
+  assert.equal(hub.subagents.list(taskId)[0].status,'ended');
+  hub.dispose();
 });

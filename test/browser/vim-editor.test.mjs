@@ -400,6 +400,45 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(older,1,'the known task total at scroll start prevents continuation');
     },false,'emacs'));
 
+    for(const width of [1440,390])await t.test(`subagent pane separates active commands from history (${width})`,()=>withPage(async page=>{
+      await page.setViewport({width,height:900});await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/state'){
+          const state=interactionData(24)(new URL(request.url()));state.tasks=state.tasks.map(t=>({...t,source:'app'}));
+          return void request.respond({status:200,contentType:'application/json',body:JSON.stringify(state)});
+        }
+        const match=/\/tasks\/([^/]+)\/subagents$/.exec(path);
+        if(match){
+          const base={task_id:match[1],session_id:'s',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:01Z',detailed:true,background:true};
+          return void request.respond({status:200,contentType:'application/json',body:JSON.stringify([
+            {...base,id:'agent',type:'local_agent',description:'완료된 하위 작업',status:'ended',detailNote:'과거 전체 기록은 제공되지 않았습니다.'},
+            {...base,id:'bg',type:'shell',backgroundEvidence:'native',description:'실제 백그라운드 명령',status:'running',command:'sleep fixture'},
+            {...base,id:'legacy',type:'shell',detailed:false,description:'구버전 미확인 명령',status:'running'},
+            {...base,id:'old',type:'shell',description:'기존 오분류 종료 명령',status:'completed'},
+            {...base,id:'foreground',type:'local_bash',description:'전경 명령',status:'running',background:false},
+          ])});
+        }
+        if(/\/subagents\/[^/]+\/events$/.test(path))return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[],more:false})});
+        void request.continue();
+      });
+      await openReply(page,origin);await page.waitForSelector('[aria-label="서브 에이전트 창"]');
+      if(width===390){
+        await page.evaluate(()=>document.activeElement?.blur());await page.keyboard.press('b');
+        await page.waitForFunction(()=>document.body.textContent.includes('서브 에이전트 창은 스레드를 옆에 띄운 넓은 화면에서 열 수 있습니다.'));
+        assert.equal(await page.$('.subagent-panel'),null);return;
+      }
+      await page.click('[aria-label="서브 에이전트 창"]');
+      await page.waitForSelector('.sa-command');
+      assert.equal(await page.$$eval('.sa-command',nodes=>nodes.length),1);
+      const content=await page.$eval('.subagent-panel',e=>e.textContent);
+      assert.ok(content.includes('실제 백그라운드 명령'));assert.ok(content.includes('완료된 하위 작업'));
+      assert.ok(content.includes('과거 전체 기록은 제공되지 않았습니다.'));
+      assert.ok(!content.includes('기존 오분류 종료 명령'));assert.ok(!content.includes('전경 명령'));assert.ok(!content.includes('구버전 미확인 명령'));
+      await page.keyboard.press('Escape');await page.waitForSelector('.subagent-panel',{hidden:true});
+      assert.ok(await page.$('.thread-head'));
+    }));
+
     for (const width of [1440,390]) await t.test(`code Escape closes only the panel after focus changes (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});
       await page.setRequestInterception(true);

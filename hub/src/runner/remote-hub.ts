@@ -233,7 +233,11 @@ export class RemoteRunners implements RunnerPort {
   handle(cmd: HubToRunner, previousModel?: PreviousModel) {
     if (cmd.type === 'auth') throw new Error('unexpected auth command');
     // This hub stores subagent reports (subagents.ts); runners send them only when asked.
-    if (cmd.type === 'start') cmd = { ...cmd, subagents: true };
+    if (cmd.type === 'start') {
+      const rows = cmd.resume && !cmd.fork ? this.db.prepare('SELECT id, info_json FROM subagent WHERE session_id = ? LIMIT 10000').all(cmd.sessionId) as {id:string;info_json:string}[] : [];
+      const links = rows.flatMap(row => { const info = JSON.parse(row.info_json); return typeof info.toolUseId === 'string' ? [{id:row.id,toolUseId:info.toolUseId}] : []; });
+      cmd = { ...cmd, subagents: true, ...(links.length ? {subagentLinks:links} : {}) };
+    }
     const peer = this.sessionPeer(cmd.sessionId);
     if (!peer) { this.local.handle(cmd); return; }
     const feature = unsupported(cmd, { models: this.modelSupport.get(peer.id),

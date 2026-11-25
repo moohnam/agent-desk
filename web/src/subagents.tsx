@@ -54,42 +54,63 @@ export function useSubagents(taskId: string | null, reload = 0): Subagent[] {
  * A subagent's conversation as thread events, oldest first; `more`: older steps exist. Live steps
  * come cut like a thread's; `whole()` loads the newest page again with them whole.
  */
-export function useSubagentEvents(s: Subagent | undefined) {
-  const [state, setState] = useState<{ events: HubEvent[]; more: boolean; loading: boolean; error?: string }>({ events: [], more: false, loading: true });
-  const busy = useRef(false);
-  // A whole reload asked for while another load runs comes after it.
-  const reloadAfter = useRef(false);
-  const key = s && subagentKey(s);
-  const load = async (before?: number) => {
-    if (!s) return;
-    if (busy.current) { if (before === undefined) reloadAfter.current = true; return; }
-    busy.current = true;
-    setState(prev => ({ ...prev, loading: true }));
-    try {
-      const page = await api.subagentEvents(s, before);
-      setState(prev => ({ events: mergeTaskEvents(prev.events, page.events), more: before || !prev.events.length ? page.more : prev.more, loading: false }));
-    } catch (e) { setState(prev => ({ ...prev, loading: false, error: e instanceof Error ? e.message : String(e) })); }
-    finally {
-      busy.current = false;
-      if (reloadAfter.current) { reloadAfter.current = false; void load(); }
-    }
-  };
+export function useSubagentEvents(s: Subagent | undefined, reload = 0) {
+  const empty = { events: [] as HubEvent[], more: false, loading: true, error: undefined as string | undefined };
+  const [state, setState] = useState(empty);
+  const control = useRef<{ load: (older?: boolean) => Promise<void> } | undefined>(undefined);
+  const key = s && `${s.task_id}/${subagentKey(s)}`;
   useEffect(() => {
-    if (!s) return;
-    setState({ events: [], more: false, loading: true });
+    setState(empty);
+    if (!s) { control.current = undefined; return; }
+    let live = true, busy = false, again = false, initialized = false;
+    let oldest: number | undefined, newest: number | undefined;
+    const load = async (older = false) => {
+      if (busy) { if (!older) again = true; return; }
+      busy = true;
+      setState(prev => ({ ...prev, loading: true, error: undefined }));
+      try {
+        let before = older ? oldest : undefined;
+        const boundary = newest ?? (initialized ? 0 : undefined);
+        let receivedNewest = newest;
+        do {
+          const page = await api.subagentEvents(s, before);
+          if (!live) return;
+          const first = page.events[0]?.id;
+          const last = page.events.at(-1)?.id;
+          const ownsHistory = older || !initialized || newest === undefined;
+          if (ownsHistory) oldest = first ?? oldest;
+          if (last != null) receivedNewest = Math.max(receivedNewest ?? last, last);
+          setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, page.events),
+            more: ownsHistory ? page.more : prev.more }));
+          initialized = true;
+          // Reconnect may span several pages. Fill down to the last server record, not a live SSE ID.
+          if (older || boundary === undefined || !page.more || first === undefined || first <= boundary) break;
+          if (before !== undefined && first >= before) throw new Error('기록 페이지 커서가 진행하지 않았습니다');
+          before = first;
+        } while (live);
+        newest = receivedNewest;
+      } catch (e) { if (live) setState(prev => ({ ...prev, error: e instanceof Error ? e.message : String(e) })); }
+      finally {
+        busy = false;
+        if (live) {
+          setState(prev => ({ ...prev, loading: false }));
+          if (again) { again = false; void load(); }
+        }
+      }
+    };
+    control.current = { load };
     const off = onSubagent(m => {
       if (m.type !== 'subagent_event' || m.event.task_id !== s.task_id || m.event.session_id !== s.session_id || m.event.subagent_id !== s.id) return;
       setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, [m.event as HubEvent]) }));
     });
-    void load();
-    return off;
-    // A subagent's key names it; its other fields change as it runs.
+    return () => { live = false; off(); control.current = undefined; };
   }, [key]);
-  return { ...state, older: () => state.more ? load(state.events[0]?.id) : undefined, whole: () => load() };
+  useEffect(() => { void control.current?.load(); }, [key, reload]);
+  return { ...state, older: () => state.more ? control.current?.load(true) : undefined, whole: () => control.current?.load() };
 }
 
 const STATUS: Record<Subagent['status'], string> = {
-  running: '실행 중', completed: '완료', failed: '실패', stopped: '중지됨', ended: '종료',
+  running: '실행 중', completed: '완료', failed: '실패', stopped: '중지됨', ended: '종료', unknown: '상태 미확인',
 };
 export const statusText = (s: Subagent) => STATUS[s.status];
 /** The class for its colored dot. */
@@ -103,6 +124,8 @@ export function subagentKind(s: Subagent): string {
 }
 /** A background command, not an agent: the pane lists these together in one column. */
 export const isCommand = (s: Subagent) => subagentKind(s) === '명령';
+export const isCurrentCommand = (s: Subagent) => isCommand(s) && isActive(s) && s.background !== false
+  && (s.backgroundEvidence === 'native' || s.detailed && s.background === true);
 export function subagentTitle(s: Subagent): string {
   const kind = subagentKind(s);
   return kind === '명령' ? `명령: ${s.description}` : s.description || kind;

@@ -130,3 +130,19 @@ test('the same activity keeps UI running, blocks replacement and survives reconn
   emit({type:'background',sessionId:'s',tasks:[]});assert.deepEqual(sessionBlockers(runner.snapshot()),[]);
   await new Promise(r=>setTimeout(r,40));assert.equal(closed,1);
 });
+
+test('ordinary foreground commands keep restart protection but never become background command rows',async()=>{
+  const f=fixture();try{
+    f.monitor.start('root');await flush();
+    f.monitor.notification('item/started',{threadId:'root',item:{type:'commandExecution',id:'call',processId:'p',command:'long foreground',status:'inProgress'}});
+    assert.equal(f.last().filter(t=>t.type==='shell').length,0);
+    assert.ok(f.last().some(t=>t.type==='tool'),'execution guard is retained');
+    f.monitor.notification('item/completed',{threadId:'root',item:{type:'commandExecution',id:'call',processId:'p',command:'long foreground',status:'completed',exitCode:0}});await flush();
+    assert.equal(f.last().filter(t=>t.type==='shell').length,0);
+    f.monitor.notification('item/completed',{threadId:'root',item:{type:'commandExecution',id:'call2',processId:'bg',command:'background',status:'completed',exitCode:null}});
+    assert.equal(f.last().filter(t=>t.type==='shell').length,1);
+    f.set([],[{processId:'bg',command:'background'}]);f.monitor.refresh();await flush();
+    assert.equal(f.last().filter(t=>t.type==='shell').length,1,'snapshot keeps the same process identity');
+    f.set([]);f.monitor.refresh();await flush();assert.equal(f.last().filter(t=>t.type==='shell').length,0);
+  }finally{f.monitor.stop();}
+});

@@ -12,6 +12,7 @@ import { latestOfFamily, catalogModel, catalogProblem } from '../../../shared/mo
 import { runnerModelCatalogs } from './model-catalog.ts';
 import { AgyChildren } from './agy-children.ts';
 import type { BackgroundTask } from '../../../shared/protocol.ts';
+import { AgySubagents } from './agy-subagents.ts';
 import { AgyActivity } from './agy-activity.ts';
 import type { RunnerEvent } from '../../../shared/protocol.ts';
 
@@ -89,7 +90,8 @@ export const startAgy: StartEngine = (opts) => {
   let activeTools:BackgroundTask[] = [], activeChildren:BackgroundTask[] = [];
   const reportWork = () => emit({type:'background',sessionId,tasks:[...activeTools,...activeChildren]});
   const activity = new AgyActivity(tasks=>{activeTools=tasks;reportWork();});
-  const children = new AgyChildren(tasks=>{activeChildren=tasks;reportWork();});
+  const subagents = opts.subagents ? new AgySubagents(sessionId,emit) : undefined;
+  const children = new AgyChildren(tasks=>{activeChildren=tasks;reportWork();},undefined,subagents);
   let mode = opts.permissionMode;
   let modeVersion = 0;
   let family: ModelName = opts.model ?? DEFAULT_FAMILY;
@@ -230,7 +232,14 @@ export const startAgy: StartEngine = (opts) => {
       if (id != null) {
         if (method==='session/request_permission') permission(rpc,id,params);
         else rpc.unsupported(id);
-      } else if (method==='session/update' && readySession && params.sessionId===readySession) update(params.update);
+      } else if (method==='session/update' && readySession) {
+        if(params.sessionId===readySession)update(params.update);
+        else if(subagents && children.belongs(params.sessionId)){
+          children.watch(params.sessionId);
+          if(params.update?.sessionUpdate==='tool_call')children.active(params.sessionId);
+          subagents.update(params.sessionId,params.update);
+        }
+      }
     });
     acp=rpc;
     const gone = (message:string) => {
@@ -373,7 +382,7 @@ export const startAgy: StartEngine = (opts) => {
         running = null; acp?.close(); acp=undefined; readySession=undefined;
         stopTree(proc, 'SIGINT');
       }
-      activity.reset(); children.reset();
+      subagents?.close(); activity.reset(); children.reset();
       // Without a process the turn was still starting; startTurn sees it ended and stops there.
       turnEnded('interrupted', { subtype: 'interrupted' });
   };
