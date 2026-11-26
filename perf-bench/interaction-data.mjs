@@ -7,7 +7,7 @@ export function interactionData(count, text = 'long', liveText = 'repeat', liveT
     engine: 'claude', status: 'done', created_at: project.created_at, updated_at: project.created_at, last_event: es.at(-1), queued_messages: [] }));
   const respond = url => {
     const path = url.pathname;
-    if (['/api/workspaces/ssh-requests', '/api/workspaces', '/api/runners', '/api/channels', '/api/skills', '/api/models'].includes(path)) return [];
+    if (['/api/workspaces/ssh-requests', '/api/workspaces', '/api/runners', '/api/channels', '/api/skills', '/api/models', '/api/removals'].includes(path)) return [];
     if (path === '/api/settings') return { claude: { model: null, effort: null }, codex: { model: null, effort: null }, agy: { model: null, effort: null } };
     if (path === '/api/updates') return { phase: 'idle' };
     if (path === '/api/state') return { projects: [project], tasks, approvals: [], questions: [], channels: [], runner: { connected: true }, client: { local: true } };
@@ -20,6 +20,8 @@ export function interactionData(count, text = 'long', liveText = 'repeat', liveT
     }
     return undefined;
   };
+  // 다른 시나리오가 같은 작업의 글을 스레드로 다시 쓸 수 있게 한다(subagent-data.mjs).
+  respond.data = data;
   let nextId = 10 * count, tick = 0;
   respond.next = () => {
     const index = tick++ % liveTasks;
