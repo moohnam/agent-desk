@@ -33,7 +33,8 @@ const arg = (name, fallback) => Number(process.argv.find(a => a.startsWith(`--${
 const scenario = process.argv.find(a => a.startsWith('--scenario='))?.split('=')[1] ?? 'thread';
 if (!['thread', 'columns', 'repeat', 'wheel', 'typing', 'subagents'].includes(scenario)) throw new Error('scenario는 thread, columns, repeat, wheel, typing 또는 subagents입니다.');
 const fault = process.argv.find(a => a.startsWith('--fault='))?.split('=')[1] ?? 'none';
-if (!['none', 'no-scroll'].includes(fault) || (fault !== 'none' && scenario !== 'columns')) throw new Error('--fault=no-scroll은 columns에서만 지원합니다.');
+if (!['none', 'no-scroll', 'drop-live', 'hole'].includes(fault) || (fault === 'no-scroll' && scenario !== 'columns') || (['drop-live', 'hole'].includes(fault) && scenario !== 'subagents'))
+  throw new Error('--fault=no-scroll은 columns, drop-live와 hole은 subagents에서만 지원합니다.');
 const text = process.argv.find(a => a.startsWith('--text='))?.split('=')[1] ?? 'long';
 if (!['long', 'short'].includes(text)) throw new Error('text는 long 또는 short입니다.');
 const liveText = process.argv.find(a => a.startsWith('--live-text='))?.split('=')[1] ?? 'repeat';
@@ -42,10 +43,12 @@ const profile = process.argv.includes('--profile');
 const liveTasks = arg('live-tasks', 10);
 if (!Number.isInteger(liveTasks) || liveTasks < 1 || liveTasks > 10) throw new Error('live-tasks는 1..10 정수입니다.');
 const live = arg('live', scenario === 'subagents' ? 10 : 0);
-const agents = arg('agents', 8), steps = arg('steps', 80), commands = arg('commands', 30);
-if (scenario === 'subagents' && (![agents, steps, commands].every(Number.isInteger) || agents < 2 || agents > 40 || steps < 4 || steps > 500 || commands < 0 || commands > 500 || !live))
-  throw new Error('subagents는 agents=2..40, steps=4..500, commands=0..500, live=1..50 정수가 필요합니다.');
-const mockData = () => scenario === 'subagents' ? subagentData(count, text, { agents, steps, commands }) : interactionData(count, text, liveText, liveTasks);
+const agents = arg('agents', 8), steps = arg('steps', 80), commands = arg('commands', 30), pageSize = arg('page', 30);
+if (scenario === 'subagents' && (![agents, steps, commands, pageSize].every(Number.isInteger) || agents < 2 || agents > 40 || steps < 4 || steps > 500 || commands < 0 || commands > 500 || pageSize < 1 || pageSize > 500 || !live))
+  throw new Error('subagents는 agents=2..40, steps=4..500, commands=0..500, page=1..500, live=1..50 정수가 필요합니다.');
+// 실시간 단계는 live 빈도로 정확히 5초 분량을 보낸다. 기준 비교는 이 입력량까지 같아야 한다.
+const liveTotal = live * 5;
+const mockData = () => scenario === 'subagents' ? subagentData(count, text, { agents, steps, commands, page: pageSize, live: liveTotal, fault }) : interactionData(count, text, liveText, liveTasks);
 if (!Number.isInteger(live) || live < 0 || live > 50 || (live && (scenario === 'thread' || process.argv.includes('--verify-feed')))) throw new Error('live=0..50; thread/verify-feed와 live는 함께 사용할 수 없습니다.');
 const count = arg('count', scenario !== 'thread' ? 40 : 500), runs = arg('runs', 3), cpu = arg('cpu', 4);
 if (![count, runs, cpu].every(Number.isInteger) || count < 24 || count > 5000 || runs < 1 || runs > 20 || cpu < 1 || cpu > 10)
@@ -126,29 +129,44 @@ try {
           if (scenario === 'subagents') {
             // 측정 작업의 스레드를 열고 서브 에이전트를 띄운 글 아래 칩이 모두 그려질 때까지 기다린다.
             await page.click('section[data-col="c0"] [data-post]');
-            await page.waitForFunction(n => document.querySelectorAll('.sa-chip').length === n, { timeout: 30000 }, mock.expected.chips)
+            await page.waitForFunction(n => document.querySelectorAll('.sa-chip').length === n, { timeout: 30000 }, agents)
               .catch(e => { throw new Error(`${e.message}: 칩 ${[...errors, ...unexpected].join('; ')}`); });
             await new Promise(ok => setTimeout(ok, 500));
-            await page.evaluate(expected => window.armPane(expected), mock.expected);
+            const asked = { ...mock.requests };
+            await page.evaluate(() => window.armPane());
             await page.keyboard.press('b');
             await page.waitForFunction(() => window.pane?.done, { timeout: 30000 });
             const open = await page.evaluate(() => { const { frames, ...rest } = window.pane; return rest; });
             if (open.error) throw new Error(open.error);
-            const requests = mock.requests.events;
-            await new Promise(ok => setTimeout(ok, 300));
+            open.requests = { history: mock.requests.history - asked.history, detail: mock.requests.detail - asked.detail };
+            // 공통 history는 아래로, 실행 중인 서브 에이전트 컬럼은 위로 끝까지 읽고 전체 기록과 대조한다.
+            const older = [];
+            for (const [column, toBottom] of [['history', true], [mock.firstRunning, false]]) {
+              const result = await page.evaluate((c, b) => window.pageBack(c, b), column, toBottom);
+              if (result.error) throw new Error(result.error);
+              if (result.more || !result.advancing) throw new Error(`이전 페이지 조회가 끝까지 진행하지 않았습니다: ${column}`);
+              const shown = new Set(result.rendered), all = mock.allPosts(column), lost = all.filter(id => !shown.has(id));
+              if (lost.length) throw new Error(`${column} 기록 ${lost.length}/${all.length}건이 화면에 없습니다: ${lost.slice(0, 5).join(',')}`);
+              older.push({ column, pages: result.served, times: result.times, posts: all.length });
+            }
+            // 창을 연 채 정해진 수의 단계를 보내고, 단계마다 해당 컬럼에 처음 나타난 시각을 보낸 시각과 대조한다.
             await page.evaluate(() => window.armWindow());
-            const before = streamedEvents;
             mock.streaming = true;
-            await new Promise(ok => setTimeout(ok, 5000));
+            for (const until = Date.now() + 60000; mock.sent.length < liveTotal && Date.now() < until;) await new Promise(ok => setTimeout(ok, 50));
             mock.streaming = false;
-            await new Promise(ok => setTimeout(ok, 500));
-            const liveSample = { ...await page.evaluate(() => window.finishWindow()), sent: streamedEvents - before };
-            if (!liveSample.sent || !mock.last) throw new Error('실시간 서브 에이전트 단계가 발생하지 않았습니다.');
-            const shown = await page.$eval(`.subagent-panel [data-column="s0/${mock.last.agent}"]`, (el, text) => el.textContent.includes(text), mock.last.text);
-            if (!shown) throw new Error('실시간 서브 에이전트 단계가 해당 컬럼에 반영되지 않았습니다.');
+            await new Promise(ok => setTimeout(ok, 1500));
+            const { seen, ...frames } = await page.evaluate(() => window.finishWindow());
+            const firstSeen = new Map(seen.map(s => [s.id, s]));
+            const latencies = [], lost = [];
+            for (const sent of mock.sent) {
+              const shown = firstSeen.get(sent.id);
+              if (shown?.column === sent.column) latencies.push(shown.at - sent.sentAt); else lost.push(sent.id);
+            }
+            if (mock.sent.length !== liveTotal) throw new Error(`실시간 단계를 정해진 수만큼 보내지 못했습니다: ${mock.sent.length}/${liveTotal}`);
+            if (lost.length) throw new Error(`보낸 실시간 단계 ${lost.length}/${liveTotal}개가 해당 컬럼 카드에 나타나지 않았습니다: ${lost.slice(0, 5).join(',')}`);
             if (errors.length || unexpected.length) throw new Error([...errors, ...unexpected].join('; '));
-            if (run >= 0) results.push({ run, mode, open: { ...open, requests }, live: liveSample, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
-            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms, 실시간 단계 ${liveSample.sent}개 반영 검증\n`);
+            if (run >= 0) results.push({ run, mode, open, older, live: { ...frames, sent: mock.sent.length, latencies }, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
+            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms, 이전 페이지 ${older.map(o => `${o.column} ${o.pages}회`).join('·')}, 실시간 ${liveTotal}개 표시 검증\n`);
             continue;
           }
           if (scenario === 'typing') {
@@ -277,13 +295,19 @@ try {
   }));
   if (scenario === 'subagents') {
     const opens = results.map(r => r.open), lives = results.map(r => r.live), sum = xs => xs.reduce((a, b) => a + b, 0);
+    const p95 = xs => xs.toSorted((a, b) => a - b)[Math.ceil(xs.length * .95) - 1] ?? 0;
     const open = { samples: opens.length, openMs: median(opens.map(o => o.openMs)), feedbackMs: median(opens.map(o => o.feedbackMs)),
       maxFrameGapMs: Math.max(...opens.map(o => o.maxFrameGapMs)), framesOver50ms: sum(opens.map(o => o.framesOver50ms)),
-      longTaskMs: sum(opens.map(o => o.longTaskMs)), requests: median(opens.map(o => o.requests)), domNodes: median(opens.map(o => o.domNodes)) };
-    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), p95FrameMs: median(lives.map(l => l.p95FrameMs)),
+      longTaskMs: sum(opens.map(o => o.longTaskMs)), historyRequests: median(opens.map(o => o.requests.history)),
+      detailRequests: median(opens.map(o => o.requests.detail)), domNodes: median(opens.map(o => o.domNodes)) };
+    const pages = results.flatMap(r => r.older.flatMap(o => o.times));
+    const older = { pages: median(results.map(r => sum(r.older.map(o => o.pages)))), measuredPages: median(results.map(r => sum(r.older.map(o => o.times.length)))), posts: median(results.map(r => sum(r.older.map(o => o.posts)))), medianPageMs: pages.length ? median(pages) : 0, p95PageMs: p95(pages) };
+    const latencies = lives.flatMap(l => l.latencies);
+    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), medianLatencyMs: median(latencies), p95LatencyMs: p95(latencies),
+      maxLatencyMs: Math.max(...latencies), p95FrameMs: median(lives.map(l => l.p95FrameMs)),
       maxFrameGapMs: Math.max(...lives.map(l => l.maxFrameGapMs)), framesOver50ms: sum(lives.map(l => l.framesOver50ms)), longTaskMs: sum(lives.map(l => l.longTaskMs)) };
     summary = { current: { openMs: open.openMs, maxFrameGapMs: Math.max(open.maxFrameGapMs, liveSummary.maxFrameGapMs), framesOver50ms: open.framesOver50ms + liveSummary.framesOver50ms },
-      phases: { open, live: liveSummary } };
+      phases: { open, older, live: liveSummary } };
   } else if (scenario !== 'thread' && scenario !== 'typing') {
     const samples = results.flatMap(r => r.samples);
     const p95 = xs => xs.toSorted((a,b)=>a-b)[Math.ceil(xs.length * .95)-1];
@@ -305,11 +329,11 @@ try {
   }
   const report = { schema: 7, environment: { platform: platform(), arch: arch(), processor: cpus()[0]?.model,
     node: process.version, browser: await browser.version(), cpuThrottle: cpu, scenario, fault, text, live, liveText, liveTasks, profile, count, runs, build: 'production',
-    ...(scenario === 'subagents' && { agents, steps, commands }) },
-    scope: scenario === 'subagents' ? '실제 App에서 측정 작업의 스레드를 열어 서브 에이전트 칩을 그린 뒤 b로 서브 에이전트 창을 연다. feedbackMs는 b 입력부터 창이 보인 rAF, openMs는 모든 컬럼이 지시문·글과 명령 줄까지 그려진 뒤 이중 rAF까지의 근삿값이며 INP가 아님. requests는 서브 에이전트 기록 요청 수. 이어서 창을 연 채 live 빈도로 실행 중인 서브 에이전트에 단계(5번에 1번 진행 보고 포함)를 5초간 보내며 프레임 간격과 긴 작업을 기록하고, 마지막 단계가 해당 컬럼에 나타났는지 검증한다. 고정 API·루프백이며 실제 네트워크·러너·모델 실행은 포함하지 않는다.' : scenario === 'repeat' ? '실제 App에서 30/60/100ms 요청 간격으로 오른쪽 8회·즉시 왼쪽 4회 키 반복. CDP 왕복과 처리 시간 때문에 실제 간격은 inputs.time으로 확인한다. 마지막 입력 이후 최종 스크롤 변경까지 tailMotionMs, 첫 스크롤 변경까지 firstMotionMs. 최종 목적 컬럼 가시성 검증. 물리 입력·실제 네트워크는 미측정.' : scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
+    ...(scenario === 'subagents' && { agents, steps, commands, page: pageSize, liveTotal }) },
+    scope: scenario === 'subagents' ? '실제 App에서 측정 작업의 스레드를 열어 서브 에이전트 칩을 그린 뒤 b로 창을 연다. 실행 중인 서브 에이전트마다 컬럼, 끝난 서브 에이전트는 공통 history, 실행 중 백그라운드 명령은 명령 컬럼이다. feedbackMs는 b 입력부터 창이 보인 rAF, openMs는 목록 응답으로 계산한 기대 컬럼이 모두 서고 컬럼마다 받은 첫 페이지의 글 ID가 전부 그 컬럼에 그려진 뒤 이중 rAF까지의 근삿값이며 INP가 아님. 이어서 history는 아래로, 실행 중 컬럼 하나는 위로 before/more 페이지를 끝까지 읽어 페이지마다 스크롤부터 표시까지 재고 커서 진행과 전체 기록 누락을 검증한다. 마지막으로 live 빈도로 정확히 live×5개의 단계를 보내고, 단계마다 보낸 시각부터 해당 컬럼 카드(data-post)가 처음 생긴 시각까지의 벽시계 지연과 누락을 기록한다. 고정 API·루프백이며 실제 네트워크·러너·모델 실행은 포함하지 않는다.' : scenario === 'repeat' ? '실제 App에서 30/60/100ms 요청 간격으로 오른쪽 8회·즉시 왼쪽 4회 키 반복. CDP 왕복과 처리 시간 때문에 실제 간격은 inputs.time으로 확인한다. 마지막 입력 이후 최종 스크롤 변경까지 tailMotionMs, 첫 스크롤 변경까지 firstMotionMs. 최종 목적 컬럼 가시성 검증. 물리 입력·실제 네트워크는 미측정.' : scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
     summary, results };
   if (baseline) {
-    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'fault', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build', 'agents', 'steps', 'commands'];
+    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'fault', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build', 'agents', 'steps', 'commands', 'page', 'liveTotal'];
     if (baseline.schema !== report.schema || keys.some(k => baseline.environment?.[k] !== report.environment[k]))
       throw new Error('기준 결과의 실행 환경·횟수·데이터 조건이 다릅니다. 같은 조건으로 다시 측정하세요.');
     report.comparison = compareSummaries(scenario, baseline.summary, summary);
