@@ -31,6 +31,10 @@ function fixtureServer() {
         for(const stream of subagentStreams)stream.write(`data: ${JSON.stringify({source:'',message})}\n\n`);
         response.writeHead(204).end();return;
       }
+      if (url.pathname === '/__fixture/subagent-reconnect' && request.method === 'POST') {
+        for (const stream of subagentStreams) stream.end();
+        response.writeHead(204).end();return;
+      }
       if (url.pathname === '/__fixture/grouped-live') {
         for (let i = 0; i < 3; i++) for (const stream of groupedStreams) stream.write(`data: ${JSON.stringify({ source: '', message: {
           type: 'event', event: {id: 100001+i, task_id:url.searchParams.get('task') ?? 't9', kind:'assistant', ts:'2026-01-02T00:00:00.000Z', payload:{text:`재시도 보호 ${i}`}},
@@ -420,7 +424,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const match=/\/tasks\/([^/]+)\/subagents$/.exec(path);
         if(match){
           const base={task_id:match[1],session_id:'s',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:01Z',detailed:true,background:true};
-          backgroundItem={...base,id:'bg',toolUseId:'call-bg',type:'shell',backgroundEvidence:'native',description:'실제 백그라운드 명령',status:'running',command:'sleep fixture'};
+          backgroundItem={...base,id:'bg',toolUseId:'call-bg',type:'shell',backgroundEvidence:'native',description:'실제 백그라운드 명령',status:'running',command:'sleep fixture',output:'보존된 명령 출력'};
           return void request.respond({status:200,contentType:'application/json',body:JSON.stringify([
             {...base,id:'agent',toolUseId:'call-agent',type:'local_agent',description:'완료된 하위 작업',status:'ended',detailNote:'과거 전체 기록은 제공되지 않았습니다.'},
             backgroundItem,
@@ -437,7 +441,8 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
             ...['agent','bg','old'].map((id,i)=>({...e,id:9002+i,kind:'tool',payload:{name:'Bash',toolUseId:'call-'+id,input:{command:id}}})),
           ],more:false})});
         }
-        if(/\/subagents\/[^/]+\/events$/.test(path))return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[],more:false})});
+        if(/\/subagents\/history$/.test(path))return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[],more:false})});
+        if(/\/subagents\/[^/]+\/events$/.test(path))return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[{id:8000,task_id:path.split('/')[3],session_id:'s',subagent_id:'agent',kind:'assistant',ts:'2026-01-01T00:00:00Z',payload:{text:'선택한 과거 에이전트의 본문'}}],more:false})});
         void request.continue();
       });
       await openReply(page,origin);await page.waitForSelector('[aria-label="서브 에이전트 창"]');
@@ -455,16 +460,206 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForSelector('.sa-command');
       assert.equal(await page.$$eval('.sa-command',nodes=>nodes.length),1);
       const content=await page.$eval('.subagent-panel',e=>e.textContent);
-      assert.ok(content.includes('실제 백그라운드 명령'));assert.ok(content.includes('완료된 하위 작업'));
+      assert.ok(content.includes('실제 백그라운드 명령'));assert.ok(content.includes('보존된 명령 출력'));assert.ok(content.includes('완료된 하위 작업'));
       assert.ok(content.includes('과거 전체 기록은 제공되지 않았습니다.'));
+      assert.equal(await page.$$eval('[data-column="history"]',nodes=>nodes.length),1);
+      assert.equal(await page.$$eval('[data-column="commands"]',nodes=>nodes.length),1);
+      assert.equal(await page.$('.sa-strip'),null);
+      assert.equal(await page.$('.sa-col [aria-label="컬럼 닫기"]'),null);
       assert.ok(!content.includes('기존 오분류 종료 명령'));assert.ok(!content.includes('전경 명령'));assert.ok(!content.includes('구버전 미확인 명령'));
       await page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),{type:'subagent',subagent:{...backgroundItem,status:'completed',updated_at:'2026-01-01T00:00:02Z'}});
       await page.waitForFunction(()=>document.querySelectorAll('.thread .sa-chip').length===1 && !document.querySelector('.sa-command'));
       assert.ok((await page.$eval('.thread .sa-chip',e=>e.textContent)).includes('완료된 하위 작업'));
       assert.equal(await page.$('[aria-label="서브 에이전트 창"] span'),null);
+      await page.click('.thread .sa-chip');
+      await page.waitForFunction(()=>document.querySelector('[data-column="history"] .post.selected')?.textContent.includes('선택한 과거 에이전트의 본문'));
       await page.keyboard.press('Escape');await page.waitForSelector('.subagent-panel',{hidden:true});
       assert.ok(await page.$('.thread-head'));
     }));
+
+
+    await t.test('subagent columns follow concurrent lifecycles and retain isolated history across reconnect and reload',()=>withPage(async page=>{
+      await page.setViewport({width:2400,height:1000});
+      let taskId, snapshots=0, historyReads=0;
+      const started=Date.now()-5000;
+      const timestamp=seconds=>new Date(started+seconds*1000).toISOString();
+      const screenshot=async suffix=>{
+        if(!process.env.DESK_SUBAGENT_SCREENSHOT)return;
+        const target=resolve(process.env.DESK_SUBAGENT_SCREENSHOT);
+        assert.ok(target.startsWith('/private/tmp/')||target.startsWith('/tmp/'),'comparison screenshot must use a system temporary directory');
+        const path=suffix?target.slice(0,target.length-extname(target).length)+'-'+suffix+'.png':target;
+        await page.screenshot({path,fullPage:true});
+      };
+      let agents=[], events=[];
+      const send=message=>page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),message);
+      const respond=(request,body)=>void request.respond({status:200,contentType:'application/json',body:JSON.stringify(body)});
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const url=new URL(request.url()), path=url.pathname;
+        if(path==='/api/state'){
+          const state=interactionData(24)(url);state.tasks=state.tasks.map(t=>({...t,source:'app'}));
+          return respond(request,state);
+        }
+        const list=/\/tasks\/([^/]+)\/subagents$/.exec(path);
+        if(list){snapshots++;return respond(request,list[1]===taskId?agents:[]);}
+        const history=/\/tasks\/([^/]+)\/subagents\/history$/.exec(path);
+        if(history){historyReads++;return respond(request,{events:history[1]===taskId?events:[],more:false});}
+        const detail=/\/tasks\/([^/]+)\/subagents\/([^/]+)\/events$/.exec(path);
+        if(detail)return respond(request,{events:events.filter(e=>e.task_id===detail[1]&&e.subagent_id===decodeURIComponent(detail[2])),more:false});
+        void request.continue();
+      });
+      const open=async()=>{
+        await page.waitForSelector('[data-post]');await page.click('[data-post]');
+        await page.waitForSelector('.thread');
+        await page.click('[aria-label="서브 에이전트 창"]');
+        await page.waitForSelector('[data-column="history"]');
+      };
+      await page.goto(origin,{waitUntil:'networkidle2'});
+      await page.waitForSelector('.column:not(.sa-col) [data-post]');
+      await screenshot('all');
+      await open();
+      taskId=await page.$eval('.thread',e=>e.dataset.task);
+      assert.equal(await page.$$eval('.sa-col',nodes=>nodes.length),1,'empty history column stays present');
+      const base={task_id:taskId,session_id:'parallel-session',type:'local_agent',background:true,detailed:true,
+        created_at:timestamp(0),updated_at:timestamp(1),status:'running'};
+      agents=[1,2,3].map(n=>({...base,id:'worker-'+n,description:'동시 작업 '+n}));
+      for(const agent of agents)await send({type:'subagent',subagent:agent});
+      const activeColumns=()=>page.$$eval('.sa-col[data-column]',nodes=>nodes.map(n=>n.dataset.column).filter(k=>k!=='history'&&k!=='commands').sort());
+      await page.waitForFunction(()=>document.querySelectorAll('.sa-col').length===4);
+      assert.deepEqual(await activeColumns(),agents.map(a=>a.session_id+'/'+a.id));
+      assert.equal(await page.$('.sa-strip'),null);
+      assert.equal(await page.$('.sa-col [aria-label="컬럼 닫기"]'),null);
+      assert.equal(await page.$$eval('.sa-col .col-head .col-head-row',nodes=>nodes.length),4);
+      events=agents.map((a,i)=>({id:12000+i,task_id:taskId,session_id:a.session_id,subagent_id:a.id,
+        kind:'assistant',ts:timestamp(2),payload:{text:'검증 본문 '+a.id}}));
+      for(const event of events){await send({type:'subagent_event',event});await send({type:'subagent_event',event});}
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('.sa-col:not([data-column="history"]) .post')).filter(n=>n.textContent.includes('검증 본문')).length===3);
+      assert.ok(!(await page.$eval('[data-column="history"]',e=>e.textContent)).includes('검증 본문'),'running agents retain their bodies only in individual columns');
+      await screenshot('active');
+      await send({type:'subagent_event',event:{...events[0],id:13000,task_id:'foreign-parent',payload:{text:'다른 부모의 본문'}}});
+      await send({type:'subagent',subagent:{...agents[0],task_id:'foreign-parent',id:'foreign-worker',description:'다른 부모의 작업'}});
+      agents[0]={...agents[0],status:'completed',updated_at:timestamp(3),summary:'첫 작업의 요약 결과'};
+      await send({type:'subagent',subagent:agents[0]});
+      await page.waitForFunction(()=>document.querySelectorAll('.sa-col').length===3);
+      assert.deepEqual(await activeColumns(),agents.slice(1).map(a=>a.session_id+'/'+a.id));
+      const verifyHistory=async()=>{
+        await page.waitForFunction(()=>document.querySelector('[data-column="history"]')?.textContent.includes('검증 본문 worker-1')&&document.querySelector('[data-column="history"]')?.textContent.includes('첫 작업의 요약 결과'));
+        const bodies=await page.$$eval('[data-column="history"] .post',nodes=>nodes.map(n=>n.textContent).join('\n'));
+        assert.equal(bodies.split('검증 본문 worker-1').length-1,1,'repeated event is represented once');
+        assert.ok(bodies.includes('첫 작업의 요약 결과'),'summary is rendered as a post');
+        assert.ok(!(await page.$eval('.subagent-panel',e=>e.textContent)).includes('다른 부모의'));
+      };
+      await verifyHistory();
+      await screenshot('');
+      const before={snapshots,historyReads};
+      await page.evaluate(()=>fetch('/__fixture/subagent-reconnect',{method:'POST'}));
+      const deadline=Date.now()+10000;
+      while((snapshots<=before.snapshots||historyReads<=before.historyReads)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
+      assert.ok(snapshots>before.snapshots&&historyReads>before.historyReads,'reconnect reloads list and shared history');
+      await verifyHistory();assert.equal((await activeColumns()).length,2);
+      await page.reload({waitUntil:'networkidle2'});
+      if(!await page.$('.thread'))await open();
+      else if(!await page.$('[data-column="history"]'))await page.click('[aria-label="서브 에이전트 창"]');
+      await page.waitForFunction(()=>document.querySelectorAll('.sa-col').length===3);
+      await verifyHistory();assert.equal((await activeColumns()).length,2);
+      for(const [index,status] of ['failed','stopped'].entries()){
+        agents[index+1]={...agents[index+1],status,updated_at:timestamp(4)};
+        await send({type:'subagent',subagent:agents[index+1]});
+      }
+      for(const [index,status] of ['ended','unknown'].entries()){
+        const agent={...base,id:'past-'+index,status,description:'과거 상태 '+status,summary:'과거 요약 '+status};
+        agents.push(agent);await send({type:'subagent',subagent:agent});
+      }
+      await page.waitForFunction(()=>document.querySelectorAll('.sa-col').length===1);
+      await page.waitForFunction(()=>document.querySelector('[data-column="history"]')?.textContent.includes('과거 요약 unknown'));
+      const finalHistory=await page.$eval('[data-column="history"]',e=>e.textContent);
+      for(const agent of agents.slice(0,3))assert.equal(finalHistory.split('검증 본문 '+agent.id).length-1,1,'all completed bodies are retained once');
+      assert.ok(finalHistory.includes('과거 요약 ended'));
+    },false,'emacs'));
+
+
+    await t.test('subagent history retains an older page and its scroll anchor when another agent finishes',()=>withPage(async page=>{
+      await page.setViewport({width:2400,height:1000});
+      let taskId, agents=[], completedB=false;
+      const historyRequests=[], detailRequests=[];
+      const timestamp=id=>new Date(Date.UTC(2026,0,1)+id*1000).toISOString();
+      const event=(id,agent='a')=>({id,task_id:taskId,session_id:'retention-session',subagent_id:agent,
+        kind:'assistant',ts:timestamp(id),payload:{text:`보존 검증 ${agent} ${id}`}});
+      const aEvents=()=>Array.from({length:591},(_,i)=>event(i+10));
+      const respond=(request,body)=>void request.respond({status:200,contentType:'application/json',body:JSON.stringify(body)});
+      const send=message=>page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),message);
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const url=new URL(request.url()), path=url.pathname;
+        if(path==='/api/state'){
+          const state=interactionData(24)(url);state.tasks=state.tasks.map(t=>({...t,source:'app'}));
+          return respond(request,state);
+        }
+        const list=/\/tasks\/([^/]+)\/subagents$/.exec(path);
+        if(list)return respond(request,list[1]===taskId?agents:[]);
+        const history=/\/tasks\/([^/]+)\/subagents\/history$/.exec(path);
+        if(history){
+          const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):undefined;
+          historyRequests.push({before,completedB});
+          const all=history[1]===taskId&&agents.some(a=>a.id==='a'&&a.status==='completed')?aEvents():[];
+          // B's old body is below even A's previously loaded boundary. Its own endpoint must supply it.
+          if(completedB)all.push(event(5,'b'));
+          all.sort((a,b)=>a.id-b.id);
+          const eligible=all.filter(e=>before===undefined||e.id<before);
+          return respond(request,{events:eligible.slice(-500),more:eligible.length>500});
+        }
+        const detail=/\/tasks\/([^/]+)\/subagents\/([^/]+)\/events$/.exec(path);
+        if(detail){
+          detailRequests.push({agent:detail[2],before:url.searchParams.get('before'),completedB});
+          return respond(request,{events:detail[2]==='b'&&completedB?[event(5,'b')]:[],more:false});
+        }
+        void request.continue();
+      });
+      await page.goto(origin,{waitUntil:'networkidle2'});
+      await page.waitForSelector('[data-post]');await page.click('[data-post]');
+      await page.waitForSelector('.thread');
+      taskId=await page.$eval('.thread',e=>e.dataset.task);
+      const base={task_id:taskId,session_id:'retention-session',type:'local_agent',background:true,detailed:true,
+        created_at:timestamp(0),updated_at:timestamp(601)};
+      agents=[{...base,id:'a',description:'기존 완료 A',status:'completed'},
+        {...base,id:'b',description:'새 완료 B',status:'running'}];
+      for(const subagent of agents)await send({type:'subagent',subagent});
+      await page.click('[aria-label="서브 에이전트 창"]');
+      const history='[data-column="history"]';
+      const oldCard=`${history} [data-history-key="retention-session/a/10"]`;
+      await page.waitForSelector(`${history} [data-history-key="retention-session/a/101"]`);
+      assert.equal(await page.$(oldCard),null,'initial latest 500 excludes A event 10');
+      await page.click(`${history} .sa-older`);
+      await page.waitForSelector(oldCard);
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] .sa-note'));
+      assert.ok(historyRequests.some(r=>r.before===101),'the reader explicitly loaded the older page');
+      await page.$eval(oldCard,e=>{
+        const feed=e.closest('.sa-feed');
+        feed.scrollTop+=e.getBoundingClientRect().top-feed.getBoundingClientRect().top-120;
+        window.retainedHistoryCard=e;
+      });
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      const offset=()=>page.$eval(oldCard,e=>e.getBoundingClientRect().top-e.closest('.sa-feed').getBoundingClientRect().top);
+      const beforeOffset=await offset();
+      const feedHeight=await page.$eval(`${history} .sa-feed`,e=>e.clientHeight);
+      assert.ok(beforeOffset>=0&&beforeOffset<feedHeight,'A event 10 is the visible reading anchor');
+      completedB=true;
+      agents[1]={...agents[1],status:'completed',updated_at:timestamp(602)};
+      await send({type:'subagent',subagent:agents[1]});
+      // No click or user-triggered previous-page request follows B's completion.
+      await page.waitForSelector(`${history} [data-history-key="retention-session/b/5"]`);
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] .sa-note'));
+      assert.ok(detailRequests.some(r=>r.agent==='b'&&r.completedB&&r.before===null),'new member B is backfilled from its latest individual page');
+      assert.ok(historyRequests.some(r=>r.completedB&&r.before===undefined),'completion refreshes shared latest history, whose 500 events exclude A event 10');
+      assert.equal(await page.$eval(oldCard,e=>e===window.retainedHistoryCard),true,'previously read A card remains the same DOM node');
+      assert.ok(Math.abs(await offset()-beforeOffset)<=2,'A event 10 retains its viewport offset without another previous-page action');
+      assert.equal(await page.$$eval(`${history} [data-history-key="retention-session/a/10"]`,nodes=>nodes.length),1);
+      agents[0]={...agents[0],status:'running',updated_at:timestamp(603)};
+      await send({type:'subagent',subagent:agents[0]});
+      await page.waitForSelector('[data-column="retention-session/a"]');
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] [data-subagent="retention-session/a"]'));
+      assert.ok(await page.$(`${history} [data-history-key="retention-session/b/5"]`),'resuming A leaves B history intact');
+    },false,'emacs'));
 
 
     await t.test('subagent header snapshot ignores foreground guards before history exists',()=>withPage(async page=>{

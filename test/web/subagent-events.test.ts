@@ -107,3 +107,48 @@ test('snapshot counts and post links exclude foreground, unproven and ended comm
   assert.equal(hasSubagentPaneTarget(item('local_bash',{status:'running',detailed:true,background:false})),false);
   assert.equal(hasSubagentPaneTarget(item('local_agent',{status:'completed'})),true);
 });
+
+test('common history retains read pages across membership changes and isolates resumed sources',async()=>{
+ (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
+ const prior=(globalThis as any).window;(globalThis as any).window={HTMLIFrameElement:class {}};
+ const doc={nodeType:9,addEventListener(){},defaultView:(globalThis as any).window};
+ const container={nodeType:1,tagName:'DIV',ownerDocument:doc,addEventListener(){},namespaceURI:'http://www.w3.org/1999/xhtml'};
+ const original=api.subagentHistory,originalDetail=api.subagentEvents;
+ api.subagentEvents=async s=>({events:[{...event(5),subagent_id:s.id}],more:false}) as any;
+ const requests:{before?:number;resolve:(v:any)=>void;reject:(e:Error)=>void}[]=[];let state:any;
+ api.subagentHistory=(_task,before)=>new Promise((resolve,reject)=>requests.push({before,resolve,reject}));
+ const members=(ids:string[],task:string)=>ids.map(id=>({id,task_id:task,session_id:'s'}));
+ const History=({ids=['a'],reload=0,task='t'})=>{state=useSubagentEvents(undefined,reload,{taskId:task,members:members(ids,task)});return null;};
+ const root=createRoot(container as any);const deliver=async(events:any[],more=false)=>{await act(async()=>requests.shift()!.resolve({events,more}));};
+ try{
+  await act(()=>root.render(createElement(History)));
+  await deliver([event(600)],true);
+  await act(()=>reportSubagent({type:'subagent_event',event:{...event(601),subagent_id:'running'}}));
+  assert.deepEqual(state.events.map((e:any)=>e.id),[600]);
+  await act(()=>{void state.older();});assert.equal(requests[0].before,600);await deliver([event(10)],true);
+  await act(()=>root.render(createElement(History,{ids:['a','b']})));
+  assert.ok(state.events.some((e:any)=>e.id===10),'read records stay present while refreshing membership');
+  await deliver(Array.from({length:500},(_,i)=>event(101+i)),true);
+  assert.ok(state.events.some((e:any)=>e.id===10),'latest page need not contain the old read card');
+  assert.equal(requests[0].before,101);
+  await act(async()=>requests.shift()!.reject(Error('offline during repair')));
+  await act(()=>{void state.older();});
+  assert.equal(requests[0].before,undefined,'older retries interrupted repair before advancing its cursor');
+  await deliver(Array.from({length:500},(_,i)=>event(101+i)),true);
+  assert.equal(requests[0].before,101);
+  await deliver([event(10),{...event(11),subagent_id:'b'}]);
+  assert.ok(state.events.some((e:any)=>e.id===11),'repair restores records absent from the individual latest page');
+  assert.ok(state.events.some((e:any)=>e.id===10));
+  assert.equal(state.events.filter((e:any)=>e.id===5).length,1);
+  await act(()=>root.render(createElement(History,{ids:['b']})));
+  await deliver([{...event(5),subagent_id:'b'}]);
+  await act(()=>reportSubagent({type:'subagent_event',event:event(602)}));
+  assert.deepEqual(state.events.map((e:any)=>e.id),[5,11],'resumed agent history must leave the common column');
+  await act(()=>root.render(createElement(History,{ids:['b'],reload:1})));
+  const stale=requests.shift()!;
+  await act(()=>root.render(createElement(History,{task:'other',ids:['b']})));
+  await deliver([{...event(9000,'other'),subagent_id:'b'}]);
+  await act(async()=>stale.resolve({events:[event(999)],more:true}));
+  assert.deepEqual(state.events.map((e:any)=>e.id),[9000],'parent switches discard old read windows and stale responses');
+ }finally{await act(()=>root.unmount());api.subagentHistory=original;api.subagentEvents=originalDetail;(globalThis as any).window=prior;}
+});

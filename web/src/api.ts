@@ -77,7 +77,7 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   if(route==='/compose'||route==='/tasks'&&method==='POST'||method==='PATCH'&&/^\/tasks\/[^/]+$/.test(route))return mapTask(source,index,data) as T;
   if(route==='/projects'&&method==='POST')return {...data,id:scopeId(source,data.id)} as T;
   if(method==='PATCH'&&/^\/tasks\/[^/]+\/notes\/\d+$/.test(route))return mapEvent(source,index,data) as T;
-  if(route.endsWith('/events')) {
+  if(route.endsWith('/events') || /^\/tasks\/[^/]+\/subagents\/history$/.test(route)) {
     if(Array.isArray(data))return data.map(e=>mapEvent(source,index,e)) as T;
     const mapped = (e: HubEvent) => mapEvent(source, index, e);
     return {...data,events:data.events.map(mapped), ...(Array.isArray(data.moved) && { moved: data.moved.map(mapped) }) } as T;
@@ -279,6 +279,12 @@ export const api = {
     const list = await call<Subagent[]>('GET', `/tasks/${taskId}/subagents`);
     const [source] = splitId(taskId);
     return source ? list.map(s => mapSubagent(source, s)) : list;
+  },
+  /** Non-running agents' detailed history across the task's sessions, oldest id first. */
+  subagentHistory: (taskId: string, before?: number) => {
+    const q = new URLSearchParams();
+    if (before != null) q.set('before', String(before));
+    return call<{ events: HubEvent[]; more: boolean }>('GET', `/tasks/${taskId}/subagents/history?${q}`);
   },
   /** A page of a subagent's conversation (events with `subagent_id`), oldest first; `before` pages back. */
   subagentEvents: (s: Subagent, before?: number) => {
