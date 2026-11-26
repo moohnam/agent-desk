@@ -140,6 +140,11 @@ const visibleColumns = () => {
   return box ? panelColumns().filter(c => { const r = c.getBoundingClientRect(); return r.right > box.left + 1 && r.left < box.right - 1; }).map(c => c.getAttribute('data-column')!) : [];
 };
 const column = (key: string) => document.querySelector<HTMLElement>(`.subagent-panel [data-column="${CSS.escape(key)}"]`);
+/** 기대한 실행 중 명령 중 명령 컬럼에 줄(data-command)로 그려지지 않은 것. */
+const missingCommands = () => {
+  const shown = new Set([...document.querySelectorAll('.subagent-panel [data-command]')].map(e => e.getAttribute('data-command')));
+  return (served.list ?? []).filter(isCurrentCommand).map((s: any) => `${s.session_id}/${s.id}`).filter((key: string) => !shown.has(key));
+};
 (window as any).missingPosts = missing;
 
 let pane: any;
@@ -162,7 +167,7 @@ let pane: any;
       const visible = visibleColumns();
       const complete = !!panel && !!expected && columns.join() === expected.join() && visible.length > 0
         && visible.filter(c => c !== 'commands').every(c => served.pages.get(c)?.length) && !Object.keys(missing()).length
-        && (!visible.includes('commands') || panel.querySelectorAll('.sa-command').length === commands);
+        && (!visible.includes('commands') || !missingCommands().length);
       if (complete && pane.openMs == null) requestAnimationFrame(() => requestAnimationFrame(() => { pane.openMs = performance.now() - pane.start; }));
       if (pane.openMs != null && now - pane.start - pane.openMs > 300) {
         pane.maxFrameGapMs = Math.max(...pane.frames);
@@ -197,13 +202,39 @@ const reveal = async (key: string) => {
 (window as any).visitColumns = async (keys: string[]) => {
   const out: { column: string; ms: number; requestedBefore: boolean; posts: number }[] = [];
   for (const key of keys) {
-    const requestedBefore = !!served.pages.get(key)?.length, start = performance.now();
+    // 명령 컬럼은 따로 조회하지 않고 목록의 실행 중 명령을 그린다. 기대한 명령 키가 모두 줄로 그려져야 한다.
+    const commands = key === 'commands';
+    const requestedBefore = commands || !!served.pages.get(key)?.length, start = performance.now();
     column(key)?.scrollIntoView({ block: 'nearest', inline: 'start' });
-    const ok = await settle(() => !!served.pages.get(key)?.length && !missing()[key] && visibleColumns().includes(key));
-    if (!ok) return { error: `방문한 컬럼이 기록을 표시하지 않았습니다: ${key}, 조회 ${served.pages.get(key)?.length ?? 0}회, 누락 ${JSON.stringify(missing()[key] ?? [])}` };
-    out.push({ column: key, ms: performance.now() - start, requestedBefore, posts: served.pages.get(key)!.flatMap(p => p.ids).length });
+    const ok = await settle(() => visibleColumns().includes(key) && (commands ? !missingCommands().length : !!served.pages.get(key)?.length && !missing()[key]));
+    if (!ok) return { error: commands ? `방문한 명령 컬럼에 명령 ${missingCommands().length}개가 없습니다: ${missingCommands().slice(0, 5).join(',')}`
+      : `방문한 컬럼이 기록을 표시하지 않았습니다: ${key}, 조회 ${served.pages.get(key)?.length ?? 0}회, 누락 ${JSON.stringify(missing()[key] ?? [])}` };
+    out.push({ column: key, ms: performance.now() - start, requestedBefore, posts: commands ? 0 : served.pages.get(key)!.flatMap(p => p.ids).length });
   }
   return { visits: out };
+};
+
+/**
+ * 지연 조회 컬럼에서 아직 받지 않은 실시간 단계(ids)를 찾아 실제 이전 페이지를 따라간다. 모든 ID를 받았거나 더 오래된 ID까지 내려가면 멈춘다.
+ * 받은 ID와 그 컬럼에 그려진 ID를 돌려준다. more만으로 통과시키지 않고 실제 페이지와 카드를 대조하기 위해서다.
+ */
+(window as any).findPosts = async (key: string, ids: number[], limit: number) => {
+  await reveal(key);
+  const received = () => new Set((served.pages.get(key) ?? []).flatMap(p => p.ids));
+  const oldest = () => Math.min(...(served.pages.get(key) ?? []).flatMap(p => p.ids), Infinity);
+  const older = () => (served.pages.get(key) ?? []).filter(p => p.before != null);
+  while (!ids.every(id => received().has(id)) && Math.min(...ids) < oldest() && served.pages.get(key)?.at(-1)?.more) {
+    if (older().length > limit) return { error: `이전 페이지가 상한 ${limit}회를 넘었습니다: ${key}` };
+    const count = served.pages.get(key)!.length, f = column(key)?.querySelector<HTMLElement>('.feed');
+    if (!f) return { error: `컬럼이 없습니다: ${key}` };
+    f.scrollTop = 0;
+    f.dispatchEvent(new Event('scroll'));
+    if (!await settle(() => served.pages.get(key)!.length > count && !missing()[key])) return { error: `이전 페이지가 그려지지 않았습니다: ${key}` };
+    const cursors = older().map(p => p.before!);
+    if (cursors.some((b, i) => i > 0 && b >= cursors[i - 1])) return { error: `이전 페이지 커서가 줄지 않았습니다: ${key}` };
+  }
+  const el = column(key), shown = el ? renderedIn(el) : new Set<number>();
+  return { received: ids.filter(id => received().has(id)), rendered: ids.filter(id => shown.has(id)), pages: older().length };
 };
 
 /**

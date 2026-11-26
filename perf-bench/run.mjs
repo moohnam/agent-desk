@@ -33,8 +33,8 @@ const arg = (name, fallback) => Number(process.argv.find(a => a.startsWith(`--${
 const scenario = process.argv.find(a => a.startsWith('--scenario='))?.split('=')[1] ?? 'thread';
 if (!['thread', 'columns', 'repeat', 'wheel', 'typing', 'subagents'].includes(scenario)) throw new Error('scenario는 thread, columns, repeat, wheel, typing 또는 subagents입니다.');
 const fault = process.argv.find(a => a.startsWith('--fault='))?.split('=')[1] ?? 'none';
-if (!['none', 'no-scroll', 'drop-live', 'hole'].includes(fault) || (fault === 'no-scroll' && scenario !== 'columns') || (['drop-live', 'hole'].includes(fault) && scenario !== 'subagents'))
-  throw new Error('--fault=no-scroll은 columns, drop-live와 hole은 subagents에서만 지원합니다.');
+if (!['none', 'no-scroll', 'drop-live', 'hole', 'drop-detail'].includes(fault) || (fault === 'no-scroll' && scenario !== 'columns') || (['drop-live', 'hole', 'drop-detail'].includes(fault) && scenario !== 'subagents'))
+  throw new Error('--fault=no-scroll은 columns, drop-live·hole·drop-detail은 subagents에서만 지원합니다.');
 const text = process.argv.find(a => a.startsWith('--text='))?.split('=')[1] ?? 'long';
 if (!['long', 'short'].includes(text)) throw new Error('text는 long 또는 short입니다.');
 const liveText = process.argv.find(a => a.startsWith('--live-text='))?.split('=')[1] ?? 'repeat';
@@ -161,17 +161,21 @@ try {
             }
             if (lost.length) throw new Error(`보낸 실시간 단계 ${lost.length}/${liveTotal}개가 불러온 컬럼의 카드에 나타나지 않았습니다: ${lost.slice(0, 5).join(',')}`);
             // 2) 방문: 나머지 컬럼을 하나씩 보이게 해 첫 조회와 표시를 잰다.
-            const rest = open.columns.filter(c => c !== 'commands' && !open.visible.includes(c) && c !== mock.firstRunning);
+            // 명령 컬럼도 처음 화면 밖이면 방문해 기대한 명령이 모두 그려지는지 확인한다.
+            const rest = open.columns.filter(c => !open.visible.includes(c) && c !== mock.firstRunning);
             const visit = await page.evaluate(keys => window.visitColumns(keys), rest);
             if (visit.error) throw new Error(visit.error);
             const late = deferred.filter(sent => !rest.includes(sent.column));
             if (late.length) throw new Error(`방문할 수 없는 컬럼으로 간 실시간 단계가 있습니다: ${late.map(s => s.column).join(',')}`);
-            // 방문 뒤 받은 페이지에 든 단계는 화면에 있어야 한다. 아직 받지 않은 단계는 그 컬럼에 이전 페이지가 남아 있을 때만 정상이다.
-            const shownAfter = await page.evaluate(ids => ids.filter(([id, c]) => {
-              const pages = window.servedPages(c), received = pages.some(p => p.ids.includes(id));
-              return received ? !document.querySelector(`.subagent-panel [data-column="${CSS.escape(c)}"] [data-post="${id}"]`) : !pages.at(-1)?.more;
-            }), deferred.map(s => [s.id, s.column]));
-            if (shownAfter.length) throw new Error(`지연 조회 컬럼의 실시간 단계 ${shownAfter.length}/${deferred.length}개가 방문 뒤 받은 기록에도, 남은 이전 페이지에도 없습니다: ${shownAfter.slice(0, 5).map(x => x[0]).join(',')}`);
+            // 지연 조회 단계는 컬럼마다 실제 이전 페이지를 따라가 받은 기록과 카드에서 찾는다. 끝내 없으면 영구 누락이다.
+            const unresolved = [];
+            for (const key of new Set(deferred.map(sent => sent.column))) {
+              const ids = deferred.filter(sent => sent.column === key).map(sent => sent.id);
+              const found = await page.evaluate((c, i, limit) => window.findPosts(c, i, limit), key, ids, mock.pageLimit(key));
+              if (found.error) throw new Error(found.error);
+              unresolved.push(...ids.filter(id => !found.rendered.includes(id)));
+            }
+            if (unresolved.length) throw new Error(`지연 조회 컬럼의 실시간 단계 ${unresolved.length}/${deferred.length}개가 이전 페이지를 끝까지 따라가도 카드에 없습니다: ${unresolved.slice(0, 5).join(',')}`);
             // 3) 이전 페이지: 공통 history는 아래로, 실행 중 컬럼 하나는 위로 끝까지 읽고 전체 기록과 대조한다.
             const older = [];
             for (const [column, toBottom] of [['history', true], [mock.firstRunning, false]]) {
@@ -185,7 +189,7 @@ try {
             if (errors.length || unexpected.length) throw new Error([...errors, ...unexpected].join('; '));
             if (run >= 0) results.push({ run, mode, open, visits: [...first.visits, ...visit.visits], older, live: { ...frames, sent: mock.sent.length, deferred: deferred.length, latencies,
               loadedColumns: Object.keys(loadedAt) }, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
-            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms(보임 ${open.visible.join('·')}), 실시간 ${liveTotal - deferred.length}개 표시·${deferred.length}개 지연 조회, 방문 ${[...first.visits, ...visit.visits].map(v => `${v.column} ${v.requestedBefore ? '이미 조회됨' : '방문 시 조회'}`).join('·')}, 이전 페이지 ${older.map(o => `${o.column} ${o.pages}회`).join('·')}\n`);
+            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms(보임 ${open.visible.join('·')}), 실시간 ${liveTotal - deferred.length}개 표시·${deferred.length}개 지연 조회, 방문 ${[...first.visits, ...visit.visits].map(v => `${v.column} ${v.column === 'commands' ? '명령 표시 확인' : v.requestedBefore ? '이미 조회됨' : '방문 시 조회'}`).join('·')}, 이전 페이지 ${older.map(o => `${o.column} ${o.pages}회`).join('·')}\n`);
             continue;
           }
           if (scenario === 'typing') {
@@ -325,7 +329,7 @@ try {
     const visit = { columns: median(results.map(r => r.visits.length)), lazy: median(results.map(r => r.visits.filter(v => !v.requestedBefore).length)),
       medianVisitMs: visits.length ? median(visits.map(v => v.ms)) : 0, p95VisitMs: p95(visits.map(v => v.ms)) };
     const latencies = lives.flatMap(l => l.latencies);
-    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), deferred: sum(lives.map(l => l.deferred)), medianLatencyMs: median(latencies), p95LatencyMs: p95(latencies),
+    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), deferred: sum(lives.map(l => l.deferred)), latencySamples: latencies.length, medianLatencyMs: median(latencies), p95LatencyMs: p95(latencies),
       maxLatencyMs: latencies.length ? Math.max(...latencies) : 0, p95FrameMs: median(lives.map(l => l.p95FrameMs)),
       maxFrameGapMs: Math.max(...lives.map(l => l.maxFrameGapMs)), framesOver50ms: sum(lives.map(l => l.framesOver50ms)), longTaskMs: sum(lives.map(l => l.longTaskMs)) };
     summary = { current: { openMs: open.openMs, maxFrameGapMs: Math.max(open.maxFrameGapMs, liveSummary.maxFrameGapMs), framesOver50ms: open.framesOver50ms + liveSummary.framesOver50ms },

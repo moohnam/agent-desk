@@ -27,6 +27,8 @@ export function compareSummaries(scenario: string, before: Summary, after: Summa
   // 같은 입력량끼리만 비교한다: 보낸 실시간 단계, 읽은 기록 글 수, 방문한 컬럼 수.
   if (scenario === 'subagents') for (const [phase, key] of [['live', 'sent'], ['older', 'posts'], ['visit', 'columns']] as const)
     if (before.phases?.[phase]?.[key] !== after.phases?.[phase]?.[key]) throw new Error(`기준 결과와 입력량이 다릅니다: ${phase}.${key}`);
+  // 표시 지연은 보낸 순간 불러온 컬럼의 단계만 표본이 된다. 표본 수가 다르면 그 지표만 비교 불가로 남긴다.
+  const incomparable = scenario === 'subagents' && before.phases?.live?.latencySamples !== after.phases?.live?.latencySamples ? ['live.p95LatencyMs'] : [];
   const names = Object.keys(after.phases ?? {});
   if (!names.length || names.length !== Object.keys(before.phases ?? {}).length)
     throw new Error('기준 결과의 측정 단계가 다릅니다.');
@@ -38,7 +40,7 @@ export function compareSummaries(scenario: string, before: Summary, after: Summa
         live: ['p95LatencyMs', 'maxFrameGapMs', 'framesOver50ms'] } as Record<string, string[]>)[phase]
       : ['p95FirstMotionMs', 'p95TailMotionMs'];
     if (!metrics) throw new Error(`알 수 없는 측정 단계입니다: ${phase}`);
-    return [phase, compareMetrics(metrics, before.phases[phase], after.phases![phase])];
+    return [phase, compareMetrics(metrics.filter(metric => !incomparable.includes(`${phase}.${metric}`)), before.phases[phase], after.phases![phase])];
   }));
-  return { ...overall, phases, passed: overall.passed && Object.values(phases).every(result => result.passed) };
+  return { ...overall, phases, ...(incomparable.length && { incomparable }), passed: overall.passed && Object.values(phases).every(result => result.passed) };
 }

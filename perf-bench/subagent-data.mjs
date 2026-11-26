@@ -4,6 +4,7 @@ import { interactionData } from './interaction-data.mjs';
 // fault는 누락 검출을 시험한다. drop-live: 단계 하나를 보낸 것으로 기록만 하고 보내지 않는다.
 // hole: history의 표시 대상 글 하나를 모의 허브의 기록에서 뺀다. 그 글이 들 페이지는 그 글 없이 이어지고(빈 페이지로 커서를 멈추지 않는다),
 // 측정은 고정 데이터 전체와 대조해 그 ID가 없음을 잡아야 한다.
+// drop-detail: 마지막 실행 중 서브 에이전트에 보낸 마지막 단계를 모든 상세 응답에서 뺀다. 지연 조회한 컬럼이면 영구 누락으로 잡혀야 한다.
 export function subagentData(count, text = 'long', { agents = 8, steps = 80, commands = 30, page = 30, live = 50, fault = 'none' } = {}) {
   const base = interactionData(count, text);
   const at = i => new Date(Date.UTC(2026, 0, 1, 1) + i * 1000).toISOString();
@@ -57,7 +58,11 @@ export function subagentData(count, text = 'long', { agents = 8, steps = 80, com
       return paged(servedShared, url);
     }
     const match = /^\/api\/tasks\/t0\/subagents\/([^/]+)\/events$/.exec(path);
-    if (match && url.searchParams.get('session') === 's0' && history.has(decodeURIComponent(match[1]))) { requests.detail++; return paged(history.get(decodeURIComponent(match[1])), url); }
+    if (match && url.searchParams.get('session') === 's0' && history.has(decodeURIComponent(match[1]))) {
+      requests.detail++;
+      const dropped = fault === 'drop-detail' ? respond.sent.findLast(sent => sent.column === `s0/${running.at(-1)?.id}`)?.id : undefined;
+      return paged(history.get(decodeURIComponent(match[1])).filter(e => e.id !== dropped), url);
+    }
     // 데스크가 실행한 작업(source: app)에만 서브 에이전트 창이 열린다.
     if (path === '/api/state') { const state = base(url); return { ...state, tasks: state.tasks.map(t => t.id === 't0' ? { ...t, source: 'app' } : t) }; }
     return base(url);
