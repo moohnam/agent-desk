@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
-import { Markdown } from './Markdown.tsx';
+import { RequestMessage } from './RequestMessage.tsx';
 import { projectColor } from './projects.ts';
 import type { Approval, Question, TaskView } from './types.ts';
 
@@ -30,7 +30,8 @@ export function queueItems(approvals: Iterable<Approval>, questions: Iterable<Qu
 }
 
 /** A compact bottom-left launcher opens the pending responses without resizing the deck. */
-export function ApprovalQueue({ items, tasks, focus, onAllow, onDeny, onOpen, onFocus }: {
+export function ApprovalQueue({ items, tasks, focus, onAllow, onDeny, onOpen, onFocus, onError }: {
+  onError?: (message: string) => void;
   items: QueueItem[]; tasks: Map<string, TaskView>; focus: number | null;
   onAllow: (a: Approval) => void; onDeny: (a: Approval) => void;
   onOpen: (item: QueueItem) => void; onFocus: (i: number | null) => void;
@@ -105,7 +106,7 @@ export function ApprovalQueue({ items, tasks, focus, onAllow, onDeny, onOpen, on
               item.approval.tool_name === REQUEST_TOOL ? (
                 <div className="request-message">
                   <span className="qtag">{String(item.approval.input?.to ?? '')}에게</span>
-                  <div className="md"><Markdown text={String(item.approval.input?.description ?? '')} mentions /></div>
+                  <RequestMessage text={String(item.approval.input?.description ?? '')} taskId={item.task_id} onError={onError} />
                 </div>
               ) : <span className="tool"><b>{item.approval.tool_name}</b> <span className="mono">{toolSummary(item.approval.tool_name, item.approval.input)}</span></span>
             ) : (

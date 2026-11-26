@@ -150,6 +150,10 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .queue-row .where .ttl { overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 .queue-row .tool { grid-column: 2 / -1; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.5; }
 .queue-row .request-message { grid-column: 2 / -1; min-width: 0; overflow-wrap: anywhere; }
+.request-preview { min-width: 0; overflow-wrap: anywhere; }
+.request-preview details { margin-top: 6px; }
+.request-preview summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.request-preview details pre { white-space: pre-wrap; }
 .queue-row .tool b { font-weight: 600; }
 .queue-row time { grid-column: 3; grid-row: 1; font-size: 11px; color: var(--faint); white-space: nowrap; }
 .queue-row .acts { display: flex; gap: 5px; grid-column: 2 / -1; justify-content: flex-end; }

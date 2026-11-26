@@ -1,6 +1,7 @@
 import { imeKey } from './keys.ts';
 import { useAnswerWriter, answerOperation } from './answerComposer.tsx';
-import { previewLink } from './documentLinks.ts';
+import { RequestMessage } from './RequestMessage.tsx';
+import { openLink } from './documentLinks.ts';
 import { Bookmark, ChevronRight, Paperclip, PenLine, Trash2 } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ENGINE_LABEL, ENGINE_SHORT, modelLabel, REQUEST_TOOL, engineOf, type ModelName } from '../../shared/compose.ts';
@@ -82,13 +83,6 @@ function author(post: Post, task: TaskView | undefined) {
 }
 
 /** @mentions and #tags in my own posts stand out, as in the compose box. */
-/** Opens a local link from a post through the hub. A hub without the route still hands app URLs to the browser. */
-const openLink = (taskId: string, onError?: (msg: string) => void) => (href: string) =>
-  previewLink(taskId,href) ? Promise.resolve() : api.open(href, taskId).catch((e: Error) => {
-    if (e.message.startsWith('no route') && /^(akb|lectern):/i.test(href)) window.location.href = href;
-    else onError?.(e.message);
-  });
-
 function richText(text: string) {
   return text.split(/((?:^|\s)[@#][^\s]+)/g).map((part, i) =>
     /^\s?[@#]/.test(part) ? <span key={i} className="mention">{part}</span> : part);
@@ -210,7 +204,7 @@ function PostViewInner(props: Props) {
         {canEditNote && editing ? <NoteEditor post={post} onClose={() => setEditing(false)} onError={props.onError} /> : post.kind === 'approval' && isAsk(p.toolName) ? (
           <AskCard post={post} approval={approval} onError={props.onError} />
         ) : post.kind === 'approval' ? (
-          <ApprovalCard post={post} approval={approval} expanded={expanded} onAllow={props.onAllow} onDeny={props.onDeny} />
+          <ApprovalCard onError={props.onError} post={post} approval={approval} expanded={expanded} onAllow={props.onAllow} onDeny={props.onDeny} />
         ) : post.kind === 'question' ? (
           <QuestionCard post={post} question={question} full={!!inThread || expanded}
             onToggle={inThread ? undefined : props.onToggle} onError={props.onError} />
@@ -236,7 +230,8 @@ function PostViewInner(props: Props) {
   );
 }
 
-function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
+function ApprovalCard({ post, approval, expanded, onAllow, onDeny, onError }: {
+  onError?: (message: string) => void;
   post: Post; approval: Approval | undefined; expanded: boolean; onAllow: () => void; onDeny: () => void;
 }) {
   const p = post.event.payload;
@@ -247,7 +242,7 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
     <div className={`approve-card${outcome ? ' resolved' : ''}`}>
       {p.toolName === REQUEST_TOOL ? (<>
         <div className="what" title={p.input?.title}>{p.input?.to}에게 {outcome ? '보낼 질문' : '질문을 보내려 합니다'}</div>
-        <div className="md"><Markdown text={String(p.input?.description ?? '')} mentions /></div>
+        <RequestMessage text={String(p.input?.description ?? '')} taskId={post.taskId} onError={onError} />
       </>) : (<>
         <div className="what">{p.toolName} {outcome ? '실행 요청' : '실행을 요청합니다'}</div>
         <pre className="mono">{expanded ? JSON.stringify(p.input, null, 2) : toolSummary(p.toolName, p.input)}</pre>

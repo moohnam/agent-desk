@@ -10,6 +10,7 @@ const dist = resolve(import.meta.dirname, '../../web/dist');
 const input = '.reply-box [data-desk-input]';
 const textarea = '.reply-box textarea';
 const mode = '.reply-box .editor-mode';
+const requestDescription = '첫 줄\n둘째 줄\n\n- **확인** [작업 문서](docs/readme.md)\n<!-- 승인 전 확인 -->';
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
 function fixtureServer() {
@@ -98,6 +99,14 @@ function fixtureServer() {
           body.approvals=['first','second'].map((id,index)=>({id,task_id:'t'+index,session_id:'s'+index,
             tool_name:'Bash',input:{command:id},status:'pending',created_at:`2026-01-02T00:00:0${index}Z`}));
         }
+        if (layout === 'request-markdown' && url.pathname === '/api/preview' && request.method === 'POST')
+          body = {name: 'readme.md', kind: 'markdown', url: '/_preview/request/readme.md', text: '승인 링크 미리보기'};
+        if (layout === 'request-markdown' && url.pathname === '/api/state') {
+          body.approvals = ['allow-request', 'deny-request'].map((id, index) => ({
+            id, task_id: 't' + index, session_id: 's' + index, tool_name: 'desk_request',
+            input: {to: '@target', description: requestDescription}, status: 'pending', created_at: `2026-01-02T00:00:0${index}Z`,
+          }));
+        }
 
         if (note && url.pathname === '/api/state') body.tasks = body.tasks.map(task => ({ ...task, kind: 'note' }));
         if (layout === 'channel' || layout === 'feed-channel') {
@@ -112,6 +121,11 @@ function fixtureServer() {
           const payload = note ? { text: '저장된 메모' } : questions ? { text: '에이전트의 질문', questions } : undefined;
           body = { events: payload ? [{ id: 300, task_id: route[1], kind: note ? 'user' : 'assistant',
             ts: '2026-01-01T00:00:00Z', payload }] : [], more: false };
+          if (layout === 'request-markdown' && route[1] === 't0') body = {events: [{
+            id: 300, task_id: 't0', kind: 'approval', ts: '2026-01-02T00:00:00Z',
+            payload: {decision: 'pending', approvalId: 'allow-request', toolName: 'desk_request',
+              input: {to: '@target', description: requestDescription}},
+          }], more: false};
           if (layout === 'note-order') body = { events: [
             { id: 300, task_id: route[1], kind: 'user', ts: '2026-01-01T00:00:00Z', edited_at: '2026-01-03T00:00:00Z',
               payload: { text: '수정한 첫 글', revision: 1 } },
@@ -1482,6 +1496,44 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       });
       await page.waitForSelector('.queue-row .md p br');
       assert.equal(await page.$eval('.queue-row .md li strong', el=>el.textContent),'확인할 항목');
+    }));
+
+    await t.test('Desk request cards preserve the original message, document links and approval decisions', () => withPage(async page => {
+      await page.setViewport({width: 1440, height: 900});
+      await page.setExtraHTTPHeaders({'x-desk-fixture': 'request-markdown'});
+      await page.goto(origin, {waitUntil: 'domcontentloaded'});
+      const row = '.queue-row[data-queue-index="0"]';
+      await page.waitForSelector(row);
+      await page.click(`${row} [aria-label="스레드 열기"]`);
+      for (const card of [row, '.thread-content [data-post="300"] .approve-card']) {
+        const summary = `${card} details summary`;
+        await page.waitForSelector(summary);
+        assert.equal(await page.$eval(summary, el => el.textContent.trim()), '원문 보기');
+        await page.click(summary);
+        assert.equal(await page.$eval(`${card} details[open] pre`, el => el.textContent), requestDescription);
+        await page.click(summary);
+      }
+
+      await page.evaluate(() => {
+        window.openedRequestDocuments = [];
+        window.addEventListener('desk-document-open', event => window.openedRequestDocuments.push(event.detail));
+      });
+      const link = `${row} .md a`;
+      await page.click(link);
+      await page.waitForFunction(() => document.querySelector('.reference-feed')?.innerText.includes('승인 링크 미리보기'));
+      await page.focus(link);
+      await page.keyboard.press('Enter');
+      const expectedDocument = {taskId: 't0', href: 'docs/readme.md'};
+      assert.deepEqual(await page.evaluate(() => window.openedRequestDocuments), [expectedDocument, expectedDocument]);
+
+      const decision = id => page.waitForRequest(request => request.method() === 'POST'
+        && new URL(request.url()).pathname === `/api/approvals/${id}`);
+      const [allowed] = await Promise.all([decision('allow-request'), page.click(`${row} .yes`)]);
+      assert.deepEqual(JSON.parse(allowed.postData()), {allow: true});
+      await page.click('.queue-row[data-queue-index="1"] .no');
+      await page.type('[role="dialog"] textarea', '다시 확인');
+      const [denied] = await Promise.all([decision('deny-request'), page.click('[role="dialog"] .danger')]);
+      assert.deepEqual(JSON.parse(denied.postData()), {allow: false, message: '다시 확인'});
     }));
 
     await t.test('each pending approval has a card until that approval is settled', () => withPage(async page => {

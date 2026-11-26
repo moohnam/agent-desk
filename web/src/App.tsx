@@ -1626,7 +1626,7 @@ export function App() {
         <div className="runner-warn" role="alert">러너 연결이 끊겼습니다. 실행 중인 세션 상태를 확인할 수 없습니다.</div>
       )}
 
-      <ApprovalQueue items={queue} tasks={hub.tasks} focus={queueFocus}
+      <ApprovalQueue onError={setToast} items={queue} tasks={hub.tasks} focus={queueFocus}
         onAllow={allow} onDeny={setDenying} onOpen={openQueueItem} onFocus={setQueueFocus} />
 
       <div className={`workspace${documentOverlay&&(referencesVisible||codeVisible)?' document-overlay':''}`} ref={workspaceRef}>

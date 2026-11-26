@@ -1,3 +1,5 @@
+import { api } from './api.ts';
+
 /** Local document links share the thread's reading pane; other files retain the OS opener. */
 export const DOCUMENT_OPEN = 'desk-document-open';
 /** Keep the originating task when a browser copies a link or opens it in another tab. */
@@ -29,3 +31,10 @@ export function previewLink(taskId:string,href:string):boolean {
   if(!isDocumentLink(href))return false;
   window.dispatchEvent(new CustomEvent(DOCUMENT_OPEN,{detail:{taskId,href}}));return true;
 }
+
+/** Opens a local link from a post through the hub. A hub without the route still hands app URLs to the browser. */
+export const openLink = (taskId: string, onError?: (msg: string) => void) => (href: string) =>
+  previewLink(taskId,href) ? Promise.resolve() : api.open(href, taskId).catch((e: Error) => {
+    if (e.message.startsWith('no route') && /^(akb|lectern):/i.test(href)) window.location.href = href;
+    else onError?.(e.message);
+  });
