@@ -1,0 +1,182 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { subagentTracker } from '../../hub/src/runner/claude.ts';
+import { Store } from '../../hub/src/db.ts';
+import { Subagents } from '../../hub/src/subagents.ts';
+import { checkHubToRunner, checkRunnerToHub, type RunnerToHub } from '../../shared/protocol.ts';
+
+const sdk = (m: Record<string, unknown>) => m as unknown as SDKMessage;
+
+test('the Claude tracker follows a subagent from its start through a follow-up to its end', () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  // A subagent's message can come before the task_started that names it; it waits for it.
+  assert.equal(track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'thinking', thinking: '…' }, { type: 'text', text: '보겠습니다' }] } })), true);
+  assert.equal(out.length, 0);
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', tool_use_id: 'call', description: '조사', task_type: 'local_agent', subagent_type: 'general-purpose', is_backgrounded: true, prompt: '찾아 줘' }));
+  track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] } }));
+  track(sdk({ type: 'user', parent_tool_use_id: 'call', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'a\nb' }] } }));
+  track(sdk({ type: 'system', subtype: 'task_progress', task_id: 'a1', description: '조사', usage: { total_tokens: 10, tool_uses: 1, duration_ms: 5 }, last_tool_name: 'Bash' }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'a1', status: 'completed', summary: '두 개', output_file: '' }));
+  // SendMessage resumes it: task_started again, the message as its prompt; its messages keep the first call's id.
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', tool_use_id: 'send', description: '조사', prompt: '하나 더' }));
+  track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'text', text: '했습니다' }] } }));
+  assert.equal(track(sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [] } })), false, 'the main conversation is not its');
+  const steps = out.filter((m) => m.type === 'subagent_event').map((m) => m.type === 'subagent_event' && `${m.subagentId}:${m.event.kind}`);
+  assert.deepEqual(steps, ['a1:user', 'a1:assistant', 'a1:tool', 'a1:tool_result', 'a1:user', 'a1:assistant']);
+  const reports = out.filter((m) => m.type === 'subagent').map((m) => m.type === 'subagent' && m.subagent);
+  assert.deepEqual(reports.map((r) => r && r.status), ['running', 'completed', 'running']);
+  assert.equal(reports[1] && reports[1].summary, '두 개');
+  assert.deepEqual(reports[1] && reports[1].usage, { tokens: 10, toolUses: 1, durationMs: 5 });
+  assert.equal(reports[2] && reports[2].agent, 'general-purpose', 'a follow-up keeps what was known');
+  assert.equal(reports[2] && reports[2].toolUseId, 'call', 'the call that started it, not the follow-up');
+  for (const m of out) assert.equal(typeof checkRunnerToHub(m), 'object');
+});
+
+test('ambient tasks are not tracked', () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'w', description: 'watch', ambient: true }));
+  assert.equal(out.length, 0);
+});
+
+test('subagent messages are checked like the rest', () => {
+  assert.equal(typeof checkRunnerToHub({ type: 'subagent', sessionId: 's', subagent: { id: 'a', type: 't', description: 'd', status: 'odd' } }), 'string');
+  assert.equal(typeof checkRunnerToHub({ type: 'subagent_event', sessionId: 's', subagentId: 'a', event: { kind: 'status' } }), 'string');
+  assert.equal(typeof checkRunnerToHub({ type: 'subagent_event', sessionId: 's', subagentId: '', event: { kind: 'user', text: 'x' } }), 'string');
+  const start = { type: 'start', sessionId: 's', engine: 'claude', cwd: '/x', prompt: 'p', permissionMode: 'auto' };
+  assert.equal(typeof checkHubToRunner({ ...start, subagents: true }), 'object');
+  assert.equal(typeof checkHubToRunner({ ...start, subagents: 'yes' }), 'string');
+  const info={id:'a',toolUseId:'call',type:'local_agent',description:'agent',status:'running'};
+  assert.equal(typeof checkHubToRunner({...start,subagentLinks:[{id:'a',toolUseId:'call',info}]}),'object');
+  for(const invalid of [{...info,id:'other'},{...info,toolUseId:'other'},{...info,description:{}},{...info,status:'invalid'}])
+    assert.equal(typeof checkHubToRunner({...start,subagentLinks:[{id:'a',toolUseId:'call',info:invalid}]}),'string');
+});
+
+test('frames of an earlier run come late and are dropped; a huge input is cut', () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', run_id: 'r1', tool_use_id: 'call', description: 'd' }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', run_id: 'r2', tool_use_id: 'send', description: 'd' }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'a1', run_id: 'r1', status: 'completed', summary: 'old', output_file: '' }));
+  const last = out.filter((m) => m.type === 'subagent').at(-1);
+  assert.equal(last?.type === 'subagent' && last.subagent.status, 'running');
+  track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'tool_use', id: 't', name: 'Write', input: { content: 'x'.repeat(200_000) } }] } }));
+  const step = out.at(-1);
+  assert.ok(step?.type === 'subagent_event' && JSON.stringify(step).length < 70_000);
+});
+
+test('a command the turn waits for is recorded only once it moves to the background', () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 't1', description: 'ls', task_type: 'local_bash', is_backgrounded: false }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: '', output_file: '' }));
+  assert.equal(out.length, 0);
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b2', tool_use_id: 't2', description: 'npm test', task_type: 'local_bash', is_backgrounded: false }));
+  track(sdk({ type: 'system', subtype: 'task_updated', task_id: 'b2', patch: { is_backgrounded: true } }));
+  const last = out.at(-1);
+  assert.ok(last?.type === 'subagent' && last.subagent.id === 'b2' && last.subagent.background === true);
+});
+
+test('a background command is recorded with its command and the end of its output', async () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  const file = join(mkdtempSync(join(tmpdir(), 'desk-output-')), 'out.txt');
+  writeFileSync(file, 'x'.repeat(5000) + 'done\n');
+  track(sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'npm test', run_in_background: true } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 'c1', description: '테스트 실행', task_type: 'local_bash', is_backgrounded: true }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: 'completed (exit code 0)', output_file: file }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const last = out.filter((m) => m.type === 'subagent').at(-1);
+  assert.ok(last?.type === 'subagent');
+  assert.equal(last.subagent.command, 'npm test');
+  assert.equal(last.subagent.status, 'completed');
+  assert.ok(last.subagent.output?.endsWith('done\n') && last.subagent.output.length <= 4002);
+});
+
+test('a long output is cut at a character, and a handed-back answer is the result', async () => {
+  const out: RunnerToHub[] = [];
+  const track = subagentTracker('s', (m) => out.push(m));
+  const file = join(mkdtempSync(join(tmpdir(), 'desk-output-')), 'out.txt');
+  writeFileSync(file, '가'.repeat(3000));
+  track(sdk({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'x' } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 'c1', description: 'd', task_type: 'local_bash', is_backgrounded: true }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'b1', status: 'completed', summary: '', output_file: file }));
+  track(sdk({ type: 'system', subtype: 'task_started', task_id: 'a1', tool_use_id: 'call', description: 'd', task_type: 'local_agent', is_backgrounded: true }));
+  track(sdk({ type: 'assistant', parent_tool_use_id: 'call', message: { content: [{ type: 'tool_use', id: 'h', name: 'SubagentHandback', input: { message: '찾았습니다' } }] } }));
+  track(sdk({ type: 'system', subtype: 'task_notification', task_id: 'a1', status: 'completed', summary: "This agent's report was delivered to you as a message", output_file: '' }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const reports = out.filter((m) => m.type === 'subagent').map((m) => m.type === 'subagent' ? m.subagent : undefined);
+  const command = reports.filter((r) => r?.id === 'b1').at(-1)!;
+  assert.ok(command.output?.startsWith('…\n가') && !command.output.includes('\uFFFD'));
+  assert.equal(reports.filter((r) => r?.id === 'a1').at(-1)?.summary, '찾았습니다');
+});
+
+test('a follow-up failure never reuses the previous run handback or progress',()=>{
+  const out:RunnerToHub[]=[];const track=subagentTracker('s',m=>out.push(m));
+  const start=(run:string)=>track(sdk({type:'system',subtype:'task_started',task_id:'a',run_id:run,tool_use_id:'call',description:'worker',prompt:run}));
+  start('r1');
+  track(sdk({type:'assistant',parent_tool_use_id:'call',message:{content:[{type:'tool_use',id:'h',name:'SubagentHandback',input:{message:'first result'}}]}}));
+  track(sdk({type:'system',subtype:'task_notification',task_id:'a',run_id:'r1',status:'completed',summary:'sent'}));
+  start('r2');
+  track(sdk({type:'system',subtype:'task_notification',task_id:'a',run_id:'r2',status:'failed',summary:'second failed'}));
+  const last=out.filter(m=>m.type==='subagent').at(-1)!;
+  assert.equal(last.subagent.summary,'second failed');assert.equal(last.subagent.status,'failed');
+  assert.equal(last.subagent.usage,undefined);
+});
+
+test('optional subagent reports and step payloads must satisfy storage and rendering contracts',()=>{
+  const info={id:'a',type:'local_agent',description:'worker',status:'running'};
+  for(const field of ['summary','command','output','agent','parentId','toolUseId','lastTool','detailNote']){
+    assert.equal(typeof checkRunnerToHub({type:'subagent',sessionId:'s',subagent:{...info,[field]:{bad:true}}}),'string',field);
+  }
+  for(const usage of [{tokens:NaN,toolUses:1,durationMs:2},{tokens:1,toolUses:-1,durationMs:2},true])assert.equal(typeof checkRunnerToHub({type:'subagent',sessionId:'s',subagent:{...info,usage}}),'string');
+  for(const event of [{kind:'assistant',text:4},{kind:'tool',name:3,toolUseId:'x'},{kind:'tool_result',toolUseId:'x',text:'x',isError:'no'}])assert.equal(typeof checkRunnerToHub({type:'subagent_event',sessionId:'s',subagentId:'a',event}),'string');
+});
+
+
+test('Claude restart termination updates a restored task before another start and preserves its identity',()=>{
+  const out:RunnerToHub[]=[];
+  const original={id:'child',toolUseId:'original',type:'local_agent',description:'기존 조사',status:'running' as const,background:true,agent:'researcher',parentId:'parent'};
+  const track=subagentTracker('s',m=>out.push(m),[{id:'child',toolUseId:'original',info:original}]);
+  track(sdk({type:'system',subtype:'task_notification',task_id:'child',status:'stopped',reason:'worker_restart',summary:'worker restarted',output_file:''}));
+  const report=out.at(-1);assert.ok(report?.type==='subagent');
+  assert.equal(report.subagent.status,'stopped');assert.equal(report.subagent.summary,'worker restarted');
+  assert.equal(report.subagent.description,original.description);assert.equal(report.subagent.type,original.type);
+  assert.equal(report.subagent.agent,original.agent);assert.equal(report.subagent.parentId,original.parentId);
+  assert.match(report.subagent.detailNote??'',/worker_restart/);
+  track(sdk({type:'system',subtype:'task_started',task_id:'child',tool_use_id:'followup',description:'새 조사',run_id:'r2'}));
+  const next=out.at(-1);assert.ok(next?.type==='subagent');
+  assert.equal(next.subagent.toolUseId,'original');assert.equal(next.subagent.detailNote,undefined);
+  for(const m of out)assert.equal(typeof checkRunnerToHub(m),'object');
+});
+
+test('Claude old links retain a terminal notice without guessing a task type or adopting an unknown task',()=>{
+  const out:RunnerToHub[]=[];const track=subagentTracker('s',m=>out.push(m),[{id:'child',toolUseId:'original'}]);
+  const stopped=(id:string)=>track(sdk({type:'system',subtype:'task_notification',task_id:id,status:'stopped',reason:'worker_restart',summary:'stopped before start',output_file:''}));
+  stopped('not-owned');assert.equal(out.length,0);
+  stopped('child');const report=out.at(-1);assert.ok(report?.type==='subagent');
+  assert.equal(report.subagent.id,'child');assert.equal(report.subagent.type,'unknown');
+  assert.equal(report.subagent.status,'stopped');assert.equal(report.subagent.summary,'stopped before start');
+  assert.match(report.subagent.detailNote??'',/worker_restart/);
+});
+
+
+test('Claude worker restart notice replaces the restored stored row without losing task metadata',()=>{
+  const store=new Store(':memory:');store.database.exec('PRAGMA foreign_keys=OFF');
+  const db=new Subagents(store,()=>{}),session={id:'s',task_id:'t'} as any;
+  const original={id:'child',toolUseId:'original',type:'local_bash',description:'background build',status:'running' as const,background:true,command:'npm run build'};
+  try{
+    db.report(session,original);
+    const track=subagentTracker(session.id,m=>{if(m.type==='subagent')db.report(session,m.subagent);},[{id:original.id,toolUseId:original.toolUseId,info:original}]);
+    track(sdk({type:'system',subtype:'task_notification',task_id:'child',status:'stopped',reason:'worker_restart',summary:'build interrupted by worker restart',output_file:''}));
+    const rows=db.list(session.task_id);assert.equal(rows.length,1);
+    assert.equal(rows[0].status,'stopped');assert.equal(rows[0].summary,'build interrupted by worker restart');
+    assert.equal(rows[0].type,'local_bash');assert.equal(rows[0].description,'background build');assert.equal(rows[0].command,'npm run build');
+    assert.match(rows[0].detailNote??'',/worker_restart/);
+  }finally{store.database.close();}
+});

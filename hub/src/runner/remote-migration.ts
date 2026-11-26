@@ -15,16 +15,19 @@ import { config } from '../config.ts';
 import { ensureSharedSkillTables, peerSkillManifest, skillDigest, syncSkillVersion } from '../shared-skill-sync.ts';
 
 type Row = Record<string, string | number | null>;
-type Table = 'project'|'task'|'session'|'event'|'approval'|'question'|'queued'|'request'|'remote_runner'|'remote_command'|'setting';
-const TABLES: Table[] = ['project','task','session','event','approval','question','queued','request','remote_runner','remote_command','setting'];
-const OWNED: Table[] = ['project','task','session','event','approval','question','queued','request','remote_runner','remote_command'];
+type Table = 'project'|'task'|'session'|'event'|'approval'|'question'|'queued'|'request'|'remote_runner'|'remote_command'|'setting'|SubagentTable;
+/** Subagent records (subagents.ts) move with their tasks; absent from bundles that have none, as before they existed. */
+type SubagentTable = 'subagent'|'subagent_event';
+const SUBAGENT_TABLES: SubagentTable[] = ['subagent','subagent_event'];
+const TABLES: Exclude<Table,SubagentTable>[] = ['project','task','session','event','approval','question','queued','request','remote_runner','remote_command','setting'];
+const OWNED: Exclude<Table,SubagentTable>[] = ['project','task','session','event','approval','question','queued','request','remote_runner','remote_command'];
 export type LegacyIds = {legacy_project_ids:string[];legacy_task_ids:string[];legacy_approval_ids:string[];legacy_question_ids:string[];
   legacy_project_names:Record<string,string>;legacy_runner_ids:string[]};
 type SkillFile = {name:string;path:string;content:string;executable:boolean};
 type CreatedSkillFiles = {files:{name:string;path:string;digest:string}[];dirs:string[]};
 type SkillMetadataBefore = {owner:Record<string,{peer_id:string;digest:string}|null>;current:Record<string,string|null>};
 const skillPinOp=(runnerId:string)=>`remote-import:${runnerId}`;
-export type RemoteTransfer = {version:1;runner_id:string;address:string;journal_id:string|null;rows:Record<Table,Row[]>;
+export type RemoteTransfer = {version:1;runner_id:string;address:string;journal_id:string|null;rows:Record<Exclude<Table,SubagentTable>,Row[]>&Partial<Record<SubagentTable,Row[]>>;
   skills:SkillFile[];legacy:LegacyIds;fingerprint:string};
 export type RemoteCommitReceipt = {runner_id:string;fingerprint:string;committed_at:string};
 export type RemoteImportReceipt = {runner_id:string;fingerprint:string;journal_id:string;verified_at:string};
@@ -120,6 +123,9 @@ const select=(db:DatabaseSync,table:Table,where='1',args:(string|number)[]=[]):R
   if (optional) for (const row of rows) if (row[optional] === null) delete row[optional];
   return rows;
 };
+const hasTable=(db:DatabaseSync,name:string)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
+/** The tables a bundle carries rows of. */
+const tablesOf=(bundle:RemoteTransfer):Table[]=>[...TABLES,...SUBAGENT_TABLES.filter(t=>bundle.rows[t])];
 const inIds=(column:string,values:string[])=>values.length?`${column} IN (${placeholders(values)})`:'0';
 
 function collect(db:DatabaseSync,runnerId:string,skills?:SkillStore):RemoteTransfer {
@@ -157,8 +163,12 @@ function collect(db:DatabaseSync,runnerId:string,skills?:SkillStore):RemoteTrans
     if(live.some(s=>s.busy||s.approvals?.length||s.background?.length))throw new Error('원격 엔진이 아직 작업 중입니다');
     const channel=db.prepare(`SELECT id FROM channel WHERE conversation_task_id IN (${placeholders(taskIds) || "''"}) LIMIT 1`).get(...taskIds);
     if(channel)throw new Error('채널 대화가 원격 작업을 참조하여 자동 이관할 수 없습니다');
-    const rows:Record<Table,Row[]>={project:projects,task:tasks,session:sessions,event:events,approval:approvals,question:questions,
+    const rows:RemoteTransfer['rows']={project:projects,task:tasks,session:sessions,event:events,approval:approvals,question:questions,
       queued,request:requests,remote_runner:[peer],remote_command:select(db,'remote_command','runner_id=?',[runnerId]),setting:select(db,'setting')};
+    for(const table of SUBAGENT_TABLES){
+      const found=hasTable(db,table)?select(db,table,inIds('task_id',taskIds),taskIds):[];
+      if(found.length)rows[table]=found;
+    }
     const legacy={legacy_project_ids:projectIds,legacy_task_ids:taskIds,legacy_approval_ids:ids(approvals),legacy_question_ids:ids(questions),
       legacy_project_names:Object.fromEntries(projects.map(p=>[String(p.id),String(p.name)])),legacy_runner_ids:[runnerId]};
     const files=skills?skillFiles(skills):[];
@@ -174,7 +184,7 @@ export function exportRemoteTransfer(db:DatabaseSync,runnerId:string,skills?:Ski
 
 function validTransfer(bundle:RemoteTransfer) {
   if(bundle?.version!==1||!/^remote-[a-zA-Z0-9-]+$/.test(bundle.runner_id)||!bundle.address||!bundle.rows||!Array.isArray(bundle.skills)
-    ||TABLES.some(t=>!Array.isArray(bundle.rows[t]))||bundle.rows.remote_runner.length!==1
+    ||TABLES.some(t=>!Array.isArray(bundle.rows[t]))||SUBAGENT_TABLES.some(t=>bundle.rows[t]!==undefined&&!Array.isArray(bundle.rows[t]))||bundle.rows.remote_runner.length!==1
     ||bundle.rows.remote_runner[0].id!==bundle.runner_id
     ||bundle.fingerprint!==hash(JSON.stringify({runnerId:bundle.runner_id,address:bundle.address,rows:bundle.rows,legacy:bundle.legacy,skills:bundle.skills})))
     throw new Error('원격 이관 묶음의 내용 또는 지문이 잘못되었습니다');
@@ -252,7 +262,7 @@ export function importRemoteTransfer(bundle:RemoteTransfer,destination:Store,jou
         syncSkillVersion(db,targetSkills,skillPeerId!,{version:1,selected:[name],files,hashes:{[name]:digest},digest});
       }
     }
-    for(const table of TABLES)for(const row of bundle.rows[table])insert(db,table,row);
+    for(const table of tablesOf(bundle))for(const row of bundle.rows[table]!)insert(db,table,row);
     if(old)db.prepare('UPDATE remote_import SET aborted_at=NULL,skill_peer_id=?,created_skill_files=?,skill_metadata_before=? WHERE runner_id=?')
       .run(skillPeerId??null,JSON.stringify(created),JSON.stringify(metadataBefore),bundle.runner_id);
     else db.prepare('INSERT INTO remote_import(runner_id,address,fingerprint,legacy_json,skill_peer_id,created_skill_files,skill_metadata_before) VALUES (?,?,?,?,?,?,?)')
@@ -268,7 +278,7 @@ export function verifyRemoteImport(bundle:RemoteTransfer,destination:DatabaseSyn
   const imported=destination.prepare('SELECT fingerprint,activated_at,aborted_at,skill_peer_id FROM remote_import WHERE runner_id=?').get(bundle.runner_id) as
     {fingerprint:string;activated_at:string|null;aborted_at:string|null;skill_peer_id:string|null}|undefined;
   if(imported?.fingerprint!==bundle.fingerprint||imported.activated_at||imported.aborted_at)throw new Error('대상 원격 DB가 준비 상태가 아닙니다');
-  for(const table of TABLES)if(JSON.stringify(select(destination,table))!==JSON.stringify(bundle.rows[table]))
+  for(const table of tablesOf(bundle))if(JSON.stringify(select(destination,table))!==JSON.stringify(bundle.rows[table]))
     throw new Error(`대상 원격 DB의 ${table} 기록이 내보낸 원본과 다릅니다`);
   if(bundle.skills.length&&!skipSkillFiles){
     if(!targetSkills)throw new Error('이관 스킬을 확인할 대상 저장소가 없습니다');
@@ -286,7 +296,7 @@ export function verifyRemoteImport(bundle:RemoteTransfer,destination:DatabaseSyn
   return {runner_id:bundle.runner_id,fingerprint:bundle.fingerprint,journal_id:journal.id,verified_at:new Date().toISOString()};
 }
 
-const EMPTY_MERGE_TABLES:Table[]=['task','session','event','approval','question','queued','request','remote_command'];
+const EMPTY_MERGE_TABLES:Exclude<Table,SubagentTable>[]=['task','session','event','approval','question','queued','request','remote_command'];
 function requireEmptyProjectMerge(bundle:RemoteTransfer,oldJournal:RemoteJournal) {
   validTransfer(bundle);
   if(EMPTY_MERGE_TABLES.some(table=>bundle.rows[table].length))throw new Error('기존 공유 러너에는 작업 없는 프로젝트만 통합할 수 있습니다');
@@ -387,7 +397,9 @@ export function abortRemoteImport(bundle:RemoteTransfer,destination:DatabaseSync
   try {
     if(destination.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_receipt'").get()
       &&destination.prepare('SELECT 1 FROM workspace_receipt LIMIT 1').get())throw new Error('대상 작업공간에서 이미 입력을 처리했습니다');
-    for(const table of ['remote_command','request','queued','question','approval','event','session','task','project','remote_runner','setting'] as Table[])
+    const importedTasks=bundle.rows.task.map(t=>String(t.id));
+    for(const table of SUBAGENT_TABLES)if(bundle.rows[table])destination.prepare(`DELETE FROM ${table} WHERE ${inIds('task_id',importedTasks)}`).run(...importedTasks);
+    for(const table of ['remote_command','request','queued','question','approval','event','session','task','project','remote_runner','setting'] as const)
       for(const row of bundle.rows[table]){
         const key=table==='setting'?'key':table==='remote_command'?'seq':'id';
         destination.prepare(`DELETE FROM ${table} WHERE ${key}=?`).run(row[key]);
@@ -430,8 +442,10 @@ export function commitRemoteTransfer(db:DatabaseSync,bundle:RemoteTransfer,verif
     if(old){if(old.fingerprint!==bundle.fingerprint)throw new Error('기존 이관 기록과 다른 묶음입니다');db.exec('COMMIT');
       return db.prepare('SELECT runner_id,fingerprint,committed_at FROM remote_migration WHERE runner_id=?').get(bundle.runner_id) as RemoteCommitReceipt;}
     if(collect(db,bundle.runner_id,sourceSkills).fingerprint!==bundle.fingerprint)throw new Error('내보낸 뒤 원본 기록이 변경되었습니다');
-    for(const table of ['event','approval','question','queued','session'] as Table[])for(const row of bundle.rows[table])
+    for(const table of ['event','approval','question','queued','session'] as Table[])for(const row of bundle.rows[table]!)
       db.prepare(`DELETE FROM ${table} WHERE id=?`).run(row.id);
+    const movedTasks=bundle.rows.task.map(t=>String(t.id));
+    for(const table of SUBAGENT_TABLES)if(hasTable(db,table))db.prepare(`DELETE FROM ${table} WHERE ${inIds('task_id',movedTasks)}`).run(...movedTasks);
     for(const row of bundle.rows.request)db.prepare('DELETE FROM request WHERE id=?').run(row.id);
     for(const row of bundle.rows.task)db.prepare('DELETE FROM task WHERE id=?').run(row.id);
     for(const row of bundle.rows.project)db.prepare('DELETE FROM project WHERE id=?').run(row.id);

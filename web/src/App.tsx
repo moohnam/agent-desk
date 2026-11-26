@@ -53,6 +53,8 @@ import { FIXED_NOTE, onDeckKey, type DeckKeyContext } from './deckKeys.ts';
 import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
 import { ThreadHead } from './ThreadHead.tsx';
+import { SubagentPanel, type SubagentPaneKeys } from './SubagentPanel.tsx';
+import { isActive, isCommand, isCurrentCommand, hasSubagentPaneTarget, backgroundRunningCount, subagentKey, useSubagents, type Subagent } from './subagents.tsx';
 import { ThreadReferences } from './ThreadReferences.tsx';
 import { useThreadReferences } from './threadReferences.ts';
 import { PANE_VISIBILITY_EVENT } from './mermaid.ts';
@@ -94,6 +96,12 @@ export function App() {
   const editorMode = useEditorMode();
   const [codeTask, setCodeTask] = useState<string | null>(null);
   const closeCode = useCallback(()=>setCodeTask(null),[]);
+  /** The task whose subagent pane is open; it shows only beside that task's thread. */
+  const [subagentTask, setSubagentTask] = useState<string | null>(null);
+  /** The subagent a chip asked the pane to show. */
+  const [subagentReveal, setSubagentReveal] = useState<{ key: string; n: number }>();
+  const subagentKeys = useRef<SubagentPaneKeys | null>(null);
+  const closeSubagents = useCallback(() => { setSubagentTask(null); setSubagentReveal(undefined); }, []);
   const rawHub = useHub();
   const hub = useRemovalView(rawHub);
   const updates = useUpdates();
@@ -256,6 +264,26 @@ export function App() {
     = useTaskEvents(threadTask, hub.onEvent, threadFocus ?? undefined, hub.synced,
       threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) : undefined, threadIsNote);
   const threadPosts = useMemo(() => buildPosts(threadIsNote ? [...threadEvents].sort(compareEvents) : threadEvents), [threadEvents, threadIsNote]);
+  const threadTaskInfo = threadTask ? hub.tasks.get(threadTask) : undefined;
+  /** Only engine sessions the desk runs have subagents to show. */
+  const subagentsShown = threadTaskInfo?.source === 'app' && threadTaskInfo.kind !== 'note';
+  const subagentReload = hub.synced + (threadTask ? hub.sourceSynced.get(splitId(threadTask)[0]) ?? 0 : 0);
+  const subagents = useSubagents(subagentsShown ? threadTask : null, subagentReload);
+  const previousByPost = useRef(new Map<number, Subagent[]>());
+  /** Subagents by the thread post whose tool call started them: chips under it. */
+  const subagentsByPost = useMemo(() => {
+    const byCall = new Map<string, Subagent[]>();
+    for (const s of subagents) if (s.toolUseId && hasSubagentPaneTarget(s)) byCall.set(s.toolUseId, [...(byCall.get(s.toolUseId) ?? []), s]);
+    const out = new Map<number, Subagent[]>();
+    if (byCall.size) for (const p of threadPosts) {
+      const items = p.activity.flatMap(e => e.kind === 'tool' ? byCall.get(e.payload.toolUseId) ?? [] : []);
+      // The same list again keeps the post from drawing again (PostView compares it by reference).
+      const previous = previousByPost.current.get(p.id);
+      if (items.length) out.set(p.id, previous?.length === items.length && previous.every((s, i) => s === items[i]) ? previous : items);
+    }
+    previousByPost.current = out;
+    return out;
+  }, [subagents, threadPosts]);
   /** The thread task's context reset (컨텍스트 재구성), if one is being prepared; never for terminal tasks. */
   const handoff = useHandoff(threadTask && hub.tasks.get(threadTask)?.source === 'app' ? threadTask : null);
   const phone = useMedia(PHONE);
@@ -542,7 +570,11 @@ export function App() {
   const documentOverlay = !canReference && (!!references.files?.length || codeVisible);
   const canRead = canReference || documentOverlay;
   const referencesVisible = !codeVisible && canRead && references.open && !!threadTask && hub.tasks.has(threadTask);
-  useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible,codeVisible]);
+  // The subagent pane takes the same place: opening the pinned posts or the code view closes it.
+  const subagentsVisible = !!subagentTask && subagentTask === threadTask && canReference && !codeVisible && !referencesVisible
+    && hub.tasks.has(subagentTask);
+  useEffect(() => { if (codeVisible || referencesVisible) setSubagentTask(null); }, [codeVisible, referencesVisible]);
+  useLayoutEffect(() => { window.dispatchEvent(new Event(PANE_VISIBILITY_EVENT)); }, [referencesVisible,codeVisible,subagentsVisible]);
   useEffect(() => {
     setReferenceTask(previous => referencesVisible ? threadTask : canRead && previous === threadTask ? previous : null);
   }, [threadTask, referencesVisible, canRead]);
@@ -703,8 +735,9 @@ export function App() {
   const select = (colId: string, postId: number) => setSelection((s) => ({ ...s, [colId]: postId }));
   const focusColumn = (i: number) => {
     const next = Math.max(0, Math.min(i, deck.length - 1));
-    if (deck[next]?.id !== THREAD && (referencesVisible || codeVisible)) {
+    if (deck[next]?.id !== THREAD && (referencesVisible || codeVisible || subagentsVisible)) {
       closeCode();
+      closeSubagents();
       references.show(false);
     }
     setActive(next);
@@ -1216,7 +1249,7 @@ export function App() {
     if (phone) { setToast('검색은 PC 화면에서 쓸 수 있습니다.'); return; }
     if (activeCol?.id !== SEARCH) searchOrigin.current = activeCol?.id;
     glideStop.current?.();
-    if (referencesVisible || codeVisible) { closeCode(); references.show(false); }
+    if (referencesVisible || codeVisible || subagentsVisible) { closeCode(); closeSubagents(); references.show(false); }
     const task = activeCol?.id === THREAD && threadTask ? hub.tasks.get(threadTask) : undefined;
     if (task) {
       const query = taskSearchQuery(task);
@@ -1276,6 +1309,21 @@ export function App() {
     if (!references.open) { setDrawer(false); setActive(threadSlot(threadAfter)); }
     references.show(!references.open);
   };
+  const toggleSubagents = () => {
+    if (subagentsVisible) { closeSubagents(); return; }
+    if (!threadTask) return;
+    if (!canReference) { setToast('서브 에이전트 창은 스레드를 옆에 띄운 넓은 화면에서 열 수 있습니다.'); return; }
+    closeCode();
+    references.show(false);
+    setDrawer(false);
+    setActive(threadSlot(threadAfter));
+    setSubagentTask(threadTask);
+  };
+  /** Opens the pane at subagent `s` (a chip under a post). */
+  const openSubagent = (s: Subagent) => {
+    if (!subagentsVisible) toggleSubagents();
+    if (canReference) setSubagentReveal(r => ({ key: subagentKey(s), n: (r?.n ?? 0) + 1 }));
+  };
   const togglePostReference = (post: Post) => {
     if (!canReference || threadTask !== post.taskId) return;
     if (!references.ids.includes(post.id)) setDrawer(false);
@@ -1324,7 +1372,9 @@ export function App() {
       switchView, setHelp, setQueueFocus, allow, setDenying, setToast, fail, openQueueItem, select, goRecent, stepColumn, edgeColumn,
       moveColumn, focusColumn, openThread, closeThread, toggleThreadFocus, openSearch, closeSearch, setDrawer,
       openDrawer, toggleExpanded, replyTo, approvalFor, setColumnDialog, pinTask, toggleByTask, setFinder, deleteColumn,
-      closeCode: codeVisible ? closeCode : undefined,
+      closeCode: codeVisible ? closeCode : subagentsVisible ? closeSubagents : undefined,
+      toggleSubagents: subagentsShown ? toggleSubagents : undefined,
+      subagentPane: subagentsVisible ? subagentKeys : undefined,
       setWidth, widthOf, toggleReferences: codeVisible ? closeCode : canRead ? toggleReferences : undefined,
       togglePostReference: canReference ? togglePostReference : undefined,
     };
@@ -1370,6 +1420,7 @@ export function App() {
       setNoteAttachment({ title: task.title, text });
       openDrawer();
     },
+    subagent: openSubagent,
   };
 
   // Per feed column, what it shows of the tasks, approvals and the rest; kept the same object while
@@ -1417,7 +1468,7 @@ export function App() {
 
   const threadIdx = deck.findIndex((c) => c.id === THREAD);
   const searchIdx = deck.findIndex((c) => c.id === SEARCH);
-  const searchCovered = codeVisible || referencesVisible || (activeCol?.id === THREAD && (!floatThread || paneCover));
+  const searchCovered = codeVisible || referencesVisible || subagentsVisible || (activeCol?.id === THREAD && (!floatThread || paneCover));
   /** One deck column; the thread is drawn outside the deck when it floats. */
   const renderColumn = (col: DeckColumn, i: number) => {
     const isThread = col.id === THREAD;
@@ -1460,6 +1511,9 @@ export function App() {
           handoff={handoff ? (handoff.open ? 'open' : 'kept') : null} onHandoff={() => threadTask && toggleHandoff(threadTask)}
           references={canRead ? { open: referencesVisible, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
+          subagents={threadTaskView && subagentsShown ? { open: subagentsVisible,
+            running: subagents.length ? subagents.filter(s => isCommand(s) ? isCurrentCommand(s) : isActive(s)).length : backgroundRunningCount(threadTaskView.background) } : undefined}
+          onSubagents={toggleSubagents}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
         <div className="feed thread-feed" ref={threadFeedRef} tabIndex={-1}
@@ -1487,7 +1541,7 @@ export function App() {
               onPostsMounted={tryFocusQuestion}
               selected={i === activeIdx ? selection[col.id] : undefined} flash={flash} expanded={expanded}
               picked={handoff?.open ? handoff.picked : undefined} referenced={canReference ? referencedIds : undefined}
-              taskId={threadTask} actions={threadActions} onError={setToast} />
+              taskId={threadTask} actions={threadActions} onError={setToast} subagents={subagentsByPost} />
             {col.posts.length === 0 && (
               <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
             )}
@@ -1608,7 +1662,9 @@ export function App() {
               requestAnimationFrame(()=>{const input=replyRef.current;input?.focus();input?.setSelectionRange(text.length,text.length);});
             }:undefined} />
         </Suspense></CodePanelBoundary>}
-        <ColumnDeck inactive={referencesVisible || codeVisible} phone={phone} elementRef={deckRef}>
+        {subagentsVisible && threadTaskView && <SubagentPanel key={threadTaskView.id} task={threadTaskView} subagents={subagents} reload={subagentReload}
+          reveal={subagentReveal} keys={subagentKeys} onClose={closeSubagents} onError={setToast} />}
+        <ColumnDeck inactive={referencesVisible || codeVisible || subagentsVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}
           {!phone && editable && (
             <button className="add-col" title="컬럼 추가 (c)" onClick={() => setColumnDialog({})}>

@@ -3,7 +3,7 @@
 // queue of turns and the busy signal that goes with it.
 
 import type { Effort, ModelName, PermissionMode } from '../../../shared/compose.ts';
-import type { EngineAdapter, RunnerToHub } from '../../../shared/protocol.ts';
+import type { EngineAdapter, RunnerToHub, SubagentInfo } from '../../../shared/protocol.ts';
 import type { RunnerMcp } from './managed-mcp.ts';
 
 /** How the runner starts a session of any engine; the adapter reports through `emit`. */
@@ -11,6 +11,9 @@ export interface StartOptions {
   sessionId: string; cwd: string; prompt: string; resume?: string; fork?: boolean; permissionMode: PermissionMode;
   model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillSnapshotHome?: string;
   instructions?: string;
+  /** The hub records subagents (`start.subagents`): report them with `subagent` and `subagent_event`. */
+  subagents?: boolean;
+  subagentLinks?: { id: string; toolUseId: string; info?: SubagentInfo }[];
   requestInputId?:string;
   onRequestStarted?(id:string):void;
   connectorMcp?: {url:string;token:string};

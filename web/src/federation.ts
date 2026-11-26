@@ -37,6 +37,9 @@ export function mapTask(source: string, index: number, t: TaskView): TaskView {
     last_event:t.last_event && mapEvent(source,index,t.last_event),pending_ask:t.pending_ask && {...t.pending_ask,event_id:eventId(index,t.pending_ask.event_id)},
     queued:t.queued.map(q=>({...q,id:scopeId(source,q.id)}))};
 }
+export function mapSubagent<T extends {task_id:string;session_id:string}>(source:string,s:T):T {
+  return {...s,task_id:scopeId(source,s.task_id),session_id:scopeId(source,s.session_id)};
+}
 function mapRequest<T extends {id:string;task_id:string;session_id:string}>(source:string,r:T):T {
   return {...r,id:scopeId(source,r.id),task_id:scopeId(source,r.task_id),session_id:scopeId(source,r.session_id)};
 }
@@ -52,6 +55,8 @@ export function mapMessage(source:string,index:number,m:HubMessage):HubMessage|n
     case 'event_updated': return {...m,event:mapEvent(source,index,m.event)};
     case 'event_removed': return {...m,task_id:scopeId(source,m.task_id),event_id:eventId(index,m.event_id)};
     case 'task': return {...m,task:mapTask(source,index,m.task)};
+    case 'subagent': return {...m,subagent:mapSubagent(source,m.subagent)};
+    case 'subagent_event': return {...m,event:mapEvent(source,index,m.event as HubEvent) as typeof m.event};
     case 'approval': return {...m,approval:mapRequest(source,m.approval)};
     case 'question': return {...m,question:mapRequest(source,m.question)};
     case 'runners': return {...m,runners:m.runners.map(r=>({...r,id:scopeId(source,r.id)}))};

@@ -4,6 +4,7 @@ import { firstPostBelow } from './layout.ts';
 import { PostView } from './PostView.tsx';
 import type { ColumnCtx, DeckColumn } from './FeedColumn.tsx';
 import type { PlacedPost, Post } from './types.ts';
+import type { Subagent } from '../../shared/api.ts';
 
 export interface ThreadPostActions {
   select(post: Post): void;
@@ -14,12 +15,15 @@ export interface ThreadPostActions {
   pick(post: Post): void;
   cutNote(post: Post, control: HTMLButtonElement): void;
   attach(post: Post): void;
+  subagent(s: Subagent): void;
 }
 
 interface Props {
   col: DeckColumn; ctx: ColumnCtx; selected?: number; target?: number; flash: number | null; expanded: Set<number>;
   picked?: number[]; referenced?: Set<number>; taskId: string | null; cuttingNoteId?: number | null;
   noteOrder?: boolean;
+  /** The subagents each post started, by post id (chips under it). */
+  subagents?: Map<number, Subagent[]>;
   actions: RefObject<ThreadPostActions>; onError: (message: string) => void;
   feed: RefObject<HTMLDivElement | null>; atBottom: RefObject<boolean>; onPostsMounted: () => void;
 }
@@ -138,6 +142,7 @@ export class ThreadPosts extends PureComponent<Props, Range, ScrollAnchor> {
         onReference={() => actions.current.reference(p)} onPick={() => actions.current.pick(p)}
         onAttachNote={() => actions.current.attach(p)}
         onCutNote={control => actions.current.cutNote(p, control)}
+        subagents={this.props.subagents?.get(p.id)} onSubagent={s => actions.current.subagent(s)}
         onSelect={() => actions.current.select(p)} onToggle={() => actions.current.toggle(p)}
         onAllow={() => actions.current.allow(p)} onDeny={() => actions.current.deny(p)} />
     ));

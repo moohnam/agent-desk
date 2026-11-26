@@ -46,7 +46,9 @@ export type HubToRunner =
    * `model`/`effort`: the task's model (alias or family) and effort; absent leaves the engine's default.
    */
   | { type: 'start'; sessionId: string; requestCredential?: string; requestInputId?: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
-      permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; ipv6DeskMcpUrl?: string; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
+      permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; ipv6DeskMcpUrl?: string; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot;
+      /** The hub records subagents: the runner may send `subagent` and `subagent_event` for this session. */
+      subagents?: true; subagentLinks?: { id: string; toolUseId: string; info?: SubagentInfo }[] }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
   | { type: 'send'; sessionId: string; requestInputId?: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   | { type: 'request_probe'; sessionId:string;requestInputId:string }
@@ -73,7 +75,36 @@ export type RunnerEvent =
   | { kind: 'status'; state: RunnerStatusState; detail?: Record<string, unknown> };
 
 /** Work the agent left running between turns, such as a subagent started in the background. */
-export interface BackgroundTask { id: string; type: string; description: string; agent?: string; state?: 'unknown' }
+export interface BackgroundTask { id: string; type: string; description: string; agent?: string; state?: 'unknown'; backgroundEvidence?: 'native' }
+
+/**
+ * A subagent or background command a session started, as far as the engine tells: Claude reports
+ * each one's start, progress and end; for the others the hub follows the background list.
+ * 'ended': it stopped running without saying how.
+ * 'unknown': recovered identity without evidence of its current execution state.
+ */
+export type SubagentStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'ended' | 'unknown';
+export interface SubagentInfo {
+  id: string; type: string; description: string; agent?: string; status: SubagentStatus;
+  /** It runs alongside the agent's turn instead of blocking the tool call that started it. */
+  background?: boolean;
+  backgroundEvidence?: 'native';
+  /** The subagent that started this one. */
+  parentId?: string;
+  /** The tool call (Agent, Bash…) that started it, in the conversation of its parent. */
+  toolUseId?: string;
+  /** A background command: the command it ran, and the end of what it printed once it ended. */
+  command?: string;
+  output?: string;
+  usage?: { tokens: number; toolUses: number; durationMs: number };
+  lastTool?: string;
+  /** Its result when it ended, or a one-line progress note while it runs. */
+  summary?: string;
+  /** The source's precise limitation, including unavailable historical records. */
+  detailNote?: string;
+}
+/** What a subagent was told ('user': its prompt or a follow-up), said and did, like a thread's events. */
+export type SubagentEvent = (Exclude<RunnerEvent, { kind: 'status' }> | { kind: 'user'; text: string }) & { sourceId?: string };
 
 /** A session the runner is still running, reported when the hub (re)connects. */
 export interface LiveSession {
@@ -91,6 +122,9 @@ export type RunnerToHub =
   | { type: 'busy'; sessionId: string; busy: boolean; awaitingContinuation?: boolean }
   /** Everything the session has running in the background now (replaces the last list). */
   | { type: 'background'; sessionId: string; tasks: BackgroundTask[] }
+  /** Only to a hub that asked for them (`start.subagents`); `subagent` replaces what was known of it. */
+  | { type: 'subagent'; sessionId: string; subagent: SubagentInfo }
+  | { type: 'subagent_event'; sessionId: string; subagentId: string; event: SubagentEvent }
   | { type: 'approval_request'; sessionId: string; approvalId: string; toolName: string; input: unknown }
   | { type: 'approval_cancelled'; sessionId: string; approvalId: string; reason?: 'expired' }
   /**
@@ -133,6 +167,23 @@ const connectorMcp = (v: unknown) => {
     && validMcpEndpoint(v.url, connectorMcpEndpoint);
 };
 const MODES = ['auto', 'default'];
+const SUBAGENT_STATUSES: string[] = ['running', 'completed', 'failed', 'stopped', 'ended', 'unknown'] satisfies SubagentStatus[];
+function validSubagentInfo(s: Record<string, unknown>) {
+  if (!str(s.id) || !s.id || !str(s.type) || !str(s.description) || !SUBAGENT_STATUSES.includes(s.status as string)) return false;
+  if (!['agent','parentId','toolUseId','command','output','lastTool','summary','detailNote'].every(k => optStr(s[k]))) return false;
+  if (s.backgroundEvidence !== undefined && s.backgroundEvidence !== 'native') return false;
+  if (s.background !== undefined && typeof s.background !== 'boolean') return false;
+  const usage=s.usage;
+  return usage === undefined || isObj(usage) && ['tokens','toolUses','durationMs'].every(k => typeof usage[k] === 'number' && Number.isFinite(usage[k]) && usage[k] >= 0);
+}
+
+function validSubagentEvent(e: Record<string, unknown>) {
+  if (!optStr(e.sourceId)) return false;
+  if (e.kind === 'user' || e.kind === 'assistant') return str(e.text);
+  if (e.kind === 'tool') return str(e.toolUseId) && str(e.name);
+  if (e.kind === 'tool_result') return str(e.toolUseId) && str(e.text) && typeof e.isError === 'boolean';
+  return false;
+}
 
 /** `m` as a hub command, or why it isn't one. */
 export function checkHubToRunner(m: unknown): HubToRunner | string {
@@ -147,7 +198,7 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
         && (m.createDirectory === undefined || m.createDirectory === true && m.resume === undefined && (m.fork === undefined || m.fork === false))
-        && connectorMcp(m.connectorMcp) && (m.ipv6DeskMcpUrl === undefined || validMcpEndpoint(m.ipv6DeskMcpUrl, ipv6DeskMcpEndpoint))
+        && connectorMcp(m.connectorMcp) && (m.subagents === undefined || m.subagents === true) && (m.subagentLinks === undefined || Array.isArray(m.subagentLinks) && m.subagentLinks.length <= 10000 && m.subagentLinks.every(x => isObj(x) && str(x.id) && str(x.toolUseId) && (x.info === undefined || isObj(x.info) && x.info.id === x.id && x.info.toolUseId === x.toolUseId && validSubagentInfo(x.info)))) && (m.ipv6DeskMcpUrl === undefined || validMcpEndpoint(m.ipv6DeskMcpUrl, ipv6DeskMcpEndpoint))
         && optStr(m.instructions) && (m.instructions === undefined || (m.instructions as string).length <= 32768) && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
         ? m as HubToRunner : 'start: bad fields';
     case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';
@@ -178,6 +229,9 @@ export function checkRunnerToHub(m: unknown): RunnerToHub | string {
     case 'event': return isObj(m.event) && str(m.event.kind) ? m as RunnerToHub : 'event: no kind';
     case 'busy': return typeof m.busy === 'boolean' ? m as RunnerToHub : 'busy: not a boolean';
     case 'background': return Array.isArray(m.tasks) ? m as RunnerToHub : 'background: no tasks';
+    case 'subagent': return isObj(m.subagent) && validSubagentInfo(m.subagent) ? m as RunnerToHub : 'subagent: bad fields';
+    case 'subagent_event': return str(m.subagentId) && m.subagentId && isObj(m.event) && validSubagentEvent(m.event)
+      ? m as RunnerToHub : 'subagent_event: bad fields';
     case 'approval_request': return str(m.approvalId) && str(m.toolName) ? m as RunnerToHub : 'approval_request: bad fields';
     case 'approval_cancelled': return str(m.approvalId) && (m.reason===undefined || m.reason==='expired')
       ? m as RunnerToHub : 'approval_cancelled: bad fields';

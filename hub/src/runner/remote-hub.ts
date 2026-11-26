@@ -232,6 +232,15 @@ export class RemoteRunners implements RunnerPort {
   }
   handle(cmd: HubToRunner, previousModel?: PreviousModel) {
     if (cmd.type === 'auth') throw new Error('unexpected auth command');
+    // This hub stores subagent reports (subagents.ts); runners send them only when asked.
+    if (cmd.type === 'start') {
+      const rows = cmd.resume && !cmd.fork ? this.db.prepare('SELECT id, info_json FROM subagent WHERE session_id = ? LIMIT 10000').all(cmd.sessionId) as {id:string;info_json:string}[] : [];
+      const links = rows.flatMap(row => {
+        const {id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command,usage,lastTool} = JSON.parse(row.info_json);
+        return typeof toolUseId === 'string' ? [{id:row.id,toolUseId,info:{id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command,usage,lastTool}}] : [];
+      });
+      cmd = { ...cmd, subagents: true, ...(links.length ? {subagentLinks:links} : {}) };
+    }
     const peer = this.sessionPeer(cmd.sessionId);
     if (!peer) { this.local.handle(cmd); return; }
     const feature = unsupported(cmd, { models: this.modelSupport.get(peer.id),
@@ -309,8 +318,15 @@ export class RemoteRunners implements RunnerPort {
     const snapshot = checkRunnerToHub({ type: 'hello', runnerId: id, host: peer.address, capabilities: { engines: input.engines }, sessions: input.sessions });
     if (typeof snapshot === 'string' || input.sessions.length > 1000 || input.sessions.some(s => !s || typeof s.sessionId !== 'string' || typeof s.busy !== 'boolean' || !Array.isArray(s.approvals) || s.approvals.some(a => !a || typeof a.approvalId !== 'string' || typeof a.toolName !== 'string') || (this.store.getSession(s.sessionId) && this.store.getSession(s.sessionId)?.runner_id !== id))) throw new HttpError(403, '다른 러너의 세션을 보고할 수 없습니다');
     let ack = peer.event_ack, previous = 0;
+    // A subagent report this hub cannot read is passed over: a record must not hold up the session's delivery.
+    const unreadable = new Set<number>();
     for (const item of input.events) {
-      const event = checkRunnerToHub(item?.value);
+      let event = checkRunnerToHub(item?.value);
+      const raw = item?.value as unknown as { type?: unknown; sessionId?: unknown } | undefined;
+      if (typeof event === 'string' && (raw?.type === 'subagent' || raw?.type === 'subagent_event') && typeof raw.sessionId === 'string') {
+        unreadable.add(item.seq);
+        event = { type: 'subagent_event', sessionId: raw.sessionId, subagentId: '-', event: { kind: 'user', text: '' } };
+      }
       if (!integer(item?.seq) || item.seq < 1 || item.seq <= previous || typeof event === 'string' || event.type === 'hello' || event.type === 'usage'
         || (item.created_at !== undefined && (typeof item.created_at !== 'string' || item.created_at.length > 30 || !Number.isFinite(Date.parse(item.created_at))))
         || (this.store.getSession(event.sessionId)?.runner_id !== id && this.store.getSession(event.sessionId))) throw new HttpError(403, '다른 러너의 이벤트이거나 잘못된 이벤트입니다');
@@ -327,7 +343,7 @@ export class RemoteRunners implements RunnerPort {
     this.db.exec('SAVEPOINT remote_exchange');
     try {
       this.db.prepare('DELETE FROM remote_command WHERE runner_id = ? AND seq <= ?').run(id, input.commandAck);
-      for (const item of input.events) if (item.seq > peer.event_ack) this.onMessage(item.value, item.created_at);
+      for (const item of input.events) if (item.seq > peer.event_ack && !unreadable.has(item.seq)) this.onMessage(item.value, item.created_at);
       this.db.prepare('UPDATE remote_runner SET journal_id = ?, event_ack = ?, last_seen = ?, engines = ?, sessions = ?, skill_snapshot = ?, instructions = ?, connector_mcp = ? WHERE id = ?')
         .run(input.journalId, ack, new Date().toISOString(), JSON.stringify(input.engines), JSON.stringify(input.sessions), input.skillSnapshot === true ? 1 : 0, input.instructions === true ? 1 : 0, input.connectorMcp === true ? 1 : 0, id);
       if (!input.more) {

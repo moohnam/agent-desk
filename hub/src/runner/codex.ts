@@ -15,6 +15,7 @@ import { codexMcpProcess } from './managed-mcp.ts';
 import { StderrTail, TurnQueue, clipResult, type StartEngine } from './engine.ts';
 import { catalogModel, catalogProblem, catalogEffort } from '../../../shared/model-catalog.ts';
 import { runnerModelCatalogs, readCodexModels } from './model-catalog.ts';
+import { CodexSubagents } from './codex-subagents.ts';
 import { CodexActivity } from './codex-activity.ts';
 import { ASK_USER, type Answers, type RunnerEvent } from '../../../shared/protocol.ts';
 
@@ -89,7 +90,7 @@ export const startCodex: StartEngine = (opts) => {
   const closed = (error?: string) => {
     if (closedEmitted) return;
     closedEmitted = true;
-    activity.stop();
+    activity.stop(); subagents?.stop();
     for (const approvalId of pending.keys()) emit({ type: 'approval_cancelled', sessionId, approvalId });
     pending.clear();
     emit(error && !closing ? { type: 'closed', sessionId, error } : { type: 'closed', sessionId });
@@ -108,7 +109,8 @@ export const startCodex: StartEngine = (opts) => {
     calls.set(id, { resolve: value=>{clearTimeout(timer);resolve(value);}, reject: error=>{clearTimeout(timer);reject(error);} });
     write({ id, method, params });
   });
-  const activity = new CodexActivity((method,params)=>request(method,params,5000),tasks=>emit({type:'background',sessionId,tasks}));
+  const subagents = opts.subagents ? new CodexSubagents(sessionId,(method,p)=>request(method,p,5000),emit) : undefined;
+  const activity = new CodexActivity((method,params)=>request(method,params,5000),tasks=>emit({type:'background',sessionId,tasks}),5000,(t,root)=>subagents?.discover(t,root));
   const respond = (id: Id, result: Json) => write({ id, result });
 
   // Writing after the process went raises EPIPE here; 'exit' reports the end.
@@ -266,6 +268,7 @@ export const startCodex: StartEngine = (opts) => {
 
   const onNotification = (method: string, p: Json) => {
     activity.notification(method,p);
+    subagents?.notification(method,p,threadId??'');
     if (p.threadId && threadId && p.threadId !== threadId) return; // sub-agent threads
     switch (method) {
       case 'turn/started': noteTurn(p.turn?.id); break;
@@ -380,7 +383,7 @@ export const startCodex: StartEngine = (opts) => {
       const message = err instanceof Error ? err.message : String(err);
       closing = true; // the failure is reported here; the kill below must not report again
       closedEmitted = true;
-      activity.stop();
+      activity.stop(); subagents?.stop();
       emit({ type: 'busy', sessionId, busy: false });
       emit({ type: 'closed', sessionId, error: `Codex 세션 시작 실패: ${message}` });
       child.kill();
@@ -441,7 +444,7 @@ export const startCodex: StartEngine = (opts) => {
     close: () => {
       if (closing) return;
       closing = true;
-      activity.stop();
+      activity.stop(); subagents?.stop();
       pending.clear();
       child.stdin.end();
       child.kill();

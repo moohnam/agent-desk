@@ -20,6 +20,7 @@ import { DeskCore, OWNER } from './core.ts';
 import { HttpError } from './errors.ts';
 import { ExternalSessions } from './external.ts';
 import { Channels, type ChannelOptions } from './channels.ts';
+import { Subagents } from './subagents.ts';
 import { AgentRequests } from './requests.ts';
 import { expandHome } from './paths.ts';
 import { Store, now, type Queued, type ScheduledReply, type Session } from './db.ts';
@@ -174,6 +175,7 @@ export class Hub extends DeskCore {
   readonly external: ExternalSessions;
   /** Read-only sources, independent of the runner. */
   readonly channels: Channels;
+  readonly subagents: Subagents;
   readonly remotes: RemoteRunners;
   /** Whether the connected runner can close a session on request (runners before it ignore the command). */
   private runnerCloses = false;
@@ -201,6 +203,7 @@ export class Hub extends DeskCore {
     });
     this.external = new ExternalSessions(this, (name, rootPath) => this.createProject(name, rootPath));
     this.channels = new Channels(store, (message) => this.publish(message), opts.channelOptions);
+    this.subagents = new Subagents(store, (message) => this.publish(message));
     const localRunner = (opts.runner ?? ((onMessage, onConnection) => new RunnerClient(onMessage, onConnection, {
       ipv6DeskMcpUrl: () => this.ipv6DeskMcpUrl,
     })))(
@@ -352,6 +355,13 @@ export class Hub extends DeskCore {
         this.requests.answerRequests(id, '대상 작업의 세션이 끝나');
     }
     for (const s of sessions) this.finishConnectorInput(s.sessionId);
+    // Subagents follow the reported background lists; those of sessions the runner no longer has stopped.
+    for (const s of sessions) { const session = this.store.getSession(s.sessionId); if (session) this.subagents.background(session, s.background ?? []); }
+    const liveIds = new Set(sessions.map((s) => s.sessionId));
+    for (const id of this.subagents.runningSessions()) {
+      const session = this.store.getSession(id);
+      if (session && ownedSession(id) && !liveIds.has(id)) this.subagents.stopped(session);
+    }
     for (const s of sessions) if (s.background?.length) { const t = this.store.getSession(s.sessionId)?.task_id; if (t) touched.push(t); }
     // Messages that waited for a session the runner no longer has will not be sent.
     const live = new Set(sessions.map((s) => s.sessionId));
@@ -1349,6 +1359,7 @@ export class Hub extends DeskCore {
           break;
         }
         this.busy.delete(session.id);
+        this.subagents.turnEnded(session, this.eventTime);
         this.finishConnectorInput(session.id);
         this.transition(taskId, session.id, 'turn_ended');
         if (m.awaitingContinuation) this.requests.backgroundFinished(session.id);
@@ -1393,7 +1404,14 @@ export class Hub extends DeskCore {
         this.settleApprovals(session.id);
         break;
       }
+      case 'subagent':
+        this.subagents.report(session, m.subagent, this.eventTime);
+        break;
+      case 'subagent_event':
+        this.subagents.event(session, m.subagentId, m.event, this.eventTime);
+        break;
       case 'background': {
+        this.subagents.background(session, m.tasks, this.eventTime);
         if (m.tasks.length) {
           this.requests.cancelBackgroundFinish(session.id);
           this.background.set(session.id, m.tasks);
@@ -1407,6 +1425,7 @@ export class Hub extends DeskCore {
         this.connectorBroker?.deactivate(session.id);
         this.busy.delete(session.id);
         this.background.delete(session.id);
+        this.subagents.stopped(session, this.eventTime);
         if (session.source !== 'app') break;
         this.requests.answerRequests(session.id, '대상 작업의 세션이 끝나');
         // Approvals the closed session was waiting on can no longer be answered.

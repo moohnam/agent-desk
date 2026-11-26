@@ -35,6 +35,7 @@ export const KEY_GROUPS: { title: string; keys: [string, string, string?][] }[] 
     ['/', '내용 검색', '스레드 선택 시 해당 작업만 검색합니다. #task: 필터를 지우면 전체 검색으로 바뀝니다. PC 화면에서 사용합니다.'],
     ['Enter', '선택한 글의 스레드 열기'],
     ['Ctrl ;', '고정 글·문서 창 열기 / 닫기', '스레드에 입력하는 중에도 사용할 수 있습니다.'],
+    ['b', '서브 에이전트·백그라운드 창 열기 / 닫기', '스레드에서 h로 창의 컬럼에 들어가 덱처럼 h/l·j/k·o·</>를 씁니다.'],
     ['q / Esc', '스레드·검색·작성 서랍 닫기', 'Emacs 스레드 답글에서는 Esc로 글 선택에 돌아가고, 다시 누르면 스레드를 닫습니다. Vim 입력창에서는 Esc가 모드를 바꿉니다. 검색 패널에 포커스가 있으면 패널을 먼저 닫습니다.'],
     ['f', '선택한 스레드 글 고정 / 해제', '스레드를 오른쪽에 나눠 볼 때 사용합니다. 보기 방식은 설정에서 바꿀 수 있습니다.'],
     ['t', '스레드 / 이전 컬럼으로 이동', '분할 화면에서 h/l은 스레드를 건너뜁니다.'],
@@ -123,6 +124,11 @@ export interface DeckKeyContext {
   togglePostReference?: (post: Post) => void;
   toggleReferences?: () => void;
   closeCode?: () => void;
+  /** Opens or closes the subagent pane beside the thread. */
+  toggleSubagents?: () => void;
+  /** The open subagent pane's keys (SubagentPanel.tsx). */
+  /** Read when a key is pressed: the pane's focus changes without the deck drawing again. */
+  subagentPane?: RefObject<import('./SubagentPanel.tsx').SubagentPaneKeys | null>;
   openSearch: () => void;
   closeSearch: () => void;
   setDrawer: (open: boolean) => void;
@@ -257,6 +263,13 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
       return;
     }
 
+    // In the subagent pane the moving keys move between its columns and posts; `h` from the thread enters it.
+    const pane = c.subagentPane?.current;
+    if (pane?.focused()) {
+      const k = e.key === 'g' && now - pendingG.current < 600 ? 'gg' : e.key;
+      if (pane.key(k)) { if (k === 'gg') pendingG.current = 0; e.preventDefault(); return; }
+    } else if (pane && (e.key === 'h' || e.key === 'ArrowLeft') && activeCol?.id === THREAD && pane.enter()) { e.preventDefault(); return; }
+
     switch (e.key) {
       case 'j': case 'ArrowDown': go(cur + 1); break;
       case 'k': case 'ArrowUp': go(cur < 0 ? 0 : cur - 1); break;
@@ -315,6 +328,10 @@ export function onDeckKey(ev: KeyboardEvent, c: DeckKeyContext) {
         if (!ev.repeat) c.togglePostReference(selectedPost);
         break;
       case 't': toggleThreadFocus(); break;
+      case 'b':
+        if (c.toggleSubagents) { if (!ev.repeat) c.toggleSubagents(); }
+        else setToast('열린 스레드가 없습니다.');
+        break;
       case 'X':
         if (threadTask && tasks.get(threadTask)?.source === 'app') toggleHandoff(threadTask);
         else setToast(threadTask ? '이 작업은 컨텍스트를 재구성할 수 없습니다.' : '열린 스레드가 없습니다.');
