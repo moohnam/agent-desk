@@ -28,7 +28,13 @@ export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[]) {
       kind:'assistant',payload:{text:'도구 기록'}};
     const stream=native.length && ['tool','tool_result'].includes(native[0].kind)?[anchor,...native]:native;
     for(const post of buildPosts(stream))rows.push({key:`${key}/${post.id}`,agent,post,summary:false});
-    const repeated=native.some(e=>e.payload.text===agent.summary);
+    // Claude's tracker stores clipResult(fullAnswer): 4000 UTF-16 units plus this exact suffix.
+    // Match that format, not an arbitrary prefix, so independent completion reasons stay visible.
+    const repeated=native.some(e=>{
+      const text=e.payload.text;
+      return typeof text==='string' && (text===agent.summary ||
+        text.length>4000 && text.slice(0,4000)+'\n…(truncated)'===agent.summary);
+    });
     const text=[!repeated && agent.summary,agent.detailNote,!agent.detailed && '상태 목록만 수신한 항목입니다. 상세 대화 기록은 제공되지 않았습니다.'].filter(Boolean).join('\n\n');
     const event:HubEvent={id:-(i*2+2),task_id:agent.task_id,session_id:agent.session_id,ts:agent.updated_at,kind:'assistant',payload:{text:text||'작업 상태가 기록됐습니다.'}};
     const post=buildPosts([event])[0];rows.push({key:`${key}/status`,agent,post,summary:true});

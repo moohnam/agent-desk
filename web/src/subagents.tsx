@@ -64,30 +64,39 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0, history?:
   const empty = { events: [] as HubEvent[], more: false, loading: true, error: undefined as string | undefined };
   const [state, setState] = useState(empty);
   const control = useRef<{ load: (older?: boolean) => Promise<void> } | undefined>(undefined);
+  const saved=useRef<{task:string;oldest?:number;newest?:number;initialized:boolean;members:Set<string>;pending:Subagent[]}|undefined>(undefined);
   const membership = history?.members.map(subagentKey).sort().join('|');
   const key = history ? `${history.taskId}/history/${membership}` : s && `${s.task_id}/${subagentKey(s)}`;
   useEffect(() => {
-    setState(empty);
+    const prior=history && saved.current?.task===history.taskId?saved.current:undefined;
+    const memberKeys=new Set(history?.members.map(subagentKey));
+    const accepts=(event:HubEvent)=>!history || event.task_id===history.taskId && memberKeys.has(`${event.session_id}/${(event as HubEvent & {subagent_id:string}).subagent_id}`);
+    setState(prev=>prior?{...prev,events:prev.events.filter(accepts),error:undefined}:empty);
     if (!s && !history) { control.current = undefined; return; }
-    let live = true, busy = false, again = false, initialized = false;
-    let oldest: number | undefined, newest: number | undefined;
+    let live = true, busy = false, again = false, initialized = prior?.initialized??false;
+    let oldest=prior?.oldest, newest=prior?.newest, repair=!!prior;
+    const pending = prior && history ? [...prior.pending.filter(a=>memberKeys.has(subagentKey(a))),...history.members.filter(a=>!prior.members.has(subagentKey(a)))] : [];
+    const save=()=>{if(history)saved.current={task:history.taskId,oldest,newest,initialized,members:memberKeys,pending:[...pending]};};
+    save();
     const load = async (older = false) => {
       if (busy) { if (!older) again = true; return; }
+      // A failed membership repair must finish before advancing the older cursor.
+      older = older && !repair;
       busy = true;
       setState(prev => ({ ...prev, loading: true, error: undefined }));
       try {
         let before = older ? oldest : undefined;
-        const boundary = newest ?? (initialized ? 0 : undefined);
+        const boundary = repair ? oldest : newest ?? (initialized ? 0 : undefined);
         let receivedNewest = newest;
         do {
           const page = history ? await api.subagentHistory(history.taskId, before) : await api.subagentEvents(s!, before);
           if (!live) return;
           const first = page.events[0]?.id;
           const last = page.events.at(-1)?.id;
-          const ownsHistory = older || !initialized || newest === undefined;
-          if (ownsHistory) oldest = first ?? oldest;
+          const ownsHistory = older || !initialized || newest === undefined || repair && (first === undefined || oldest === undefined || first <= oldest || !page.more);
+          if (ownsHistory) oldest = first === undefined ? oldest : oldest === undefined ? first : Math.min(oldest,first);
           if (last != null) receivedNewest = Math.max(receivedNewest ?? last, last);
-          setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, page.events),
+          setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, page.events.filter(accepts)),
             more: ownsHistory ? page.more : prev.more }));
           initialized = true;
           // Reconnect may span several pages. Fill down to the last server record, not a live SSE ID.
@@ -96,9 +105,20 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0, history?:
           before = first;
         } while (live);
         newest = receivedNewest;
+        // A newly ended source may have IDs below the common read boundary. Its latest page
+        // supplements the retained window without moving the shared paging cursor.
+        while(pending.length){
+          const target=pending[0];
+          const page=await api.subagentEvents(target);
+          if(!live)return;
+          setState(prev=>({...prev,events:mergeTaskEvents(prev.events,page.events.filter(accepts)),more:prev.more||page.more}));
+          pending.shift();
+        }
+        repair=false;save();
       } catch (e) { if (live) setState(prev => ({ ...prev, error: e instanceof Error ? e.message : String(e) })); }
       finally {
         busy = false;
+        if(live)save();
         if (live) {
           setState(prev => ({ ...prev, loading: false }));
           if (again) { again = false; void load(); }
@@ -112,7 +132,7 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0, history?:
         : m.event.task_id !== s!.task_id || m.event.session_id !== s!.session_id || m.event.subagent_id !== s!.id) return;
       setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, [m.event as HubEvent]) }));
     });
-    return () => { live = false; off(); control.current = undefined; };
+    return () => { save();live = false; off(); control.current = undefined; };
   }, [key]);
   useEffect(() => { void control.current?.load(); }, [key, reload]);
   return { ...state, older: () => state.more ? control.current?.load(true) : undefined, whole: () => control.current?.load() };

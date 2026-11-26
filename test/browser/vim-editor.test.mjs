@@ -578,6 +578,90 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     },false,'emacs'));
 
 
+    await t.test('subagent history retains an older page and its scroll anchor when another agent finishes',()=>withPage(async page=>{
+      await page.setViewport({width:2400,height:1000});
+      let taskId, agents=[], completedB=false;
+      const historyRequests=[], detailRequests=[];
+      const timestamp=id=>new Date(Date.UTC(2026,0,1)+id*1000).toISOString();
+      const event=(id,agent='a')=>({id,task_id:taskId,session_id:'retention-session',subagent_id:agent,
+        kind:'assistant',ts:timestamp(id),payload:{text:`보존 검증 ${agent} ${id}`}});
+      const aEvents=()=>Array.from({length:591},(_,i)=>event(i+10));
+      const respond=(request,body)=>void request.respond({status:200,contentType:'application/json',body:JSON.stringify(body)});
+      const send=message=>page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),message);
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const url=new URL(request.url()), path=url.pathname;
+        if(path==='/api/state'){
+          const state=interactionData(24)(url);state.tasks=state.tasks.map(t=>({...t,source:'app'}));
+          return respond(request,state);
+        }
+        const list=/\/tasks\/([^/]+)\/subagents$/.exec(path);
+        if(list)return respond(request,list[1]===taskId?agents:[]);
+        const history=/\/tasks\/([^/]+)\/subagents\/history$/.exec(path);
+        if(history){
+          const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):undefined;
+          historyRequests.push({before,completedB});
+          const all=history[1]===taskId&&agents.some(a=>a.id==='a'&&a.status==='completed')?aEvents():[];
+          // B's old body is below even A's previously loaded boundary. Its own endpoint must supply it.
+          if(completedB)all.push(event(5,'b'));
+          all.sort((a,b)=>a.id-b.id);
+          const eligible=all.filter(e=>before===undefined||e.id<before);
+          return respond(request,{events:eligible.slice(-500),more:eligible.length>500});
+        }
+        const detail=/\/tasks\/([^/]+)\/subagents\/([^/]+)\/events$/.exec(path);
+        if(detail){
+          detailRequests.push({agent:detail[2],before:url.searchParams.get('before'),completedB});
+          return respond(request,{events:detail[2]==='b'&&completedB?[event(5,'b')]:[],more:false});
+        }
+        void request.continue();
+      });
+      await page.goto(origin,{waitUntil:'networkidle2'});
+      await page.waitForSelector('[data-post]');await page.click('[data-post]');
+      await page.waitForSelector('.thread');
+      taskId=await page.$eval('.thread',e=>e.dataset.task);
+      const base={task_id:taskId,session_id:'retention-session',type:'local_agent',background:true,detailed:true,
+        created_at:timestamp(0),updated_at:timestamp(601)};
+      agents=[{...base,id:'a',description:'기존 완료 A',status:'completed'},
+        {...base,id:'b',description:'새 완료 B',status:'running'}];
+      for(const subagent of agents)await send({type:'subagent',subagent});
+      await page.click('[aria-label="서브 에이전트 창"]');
+      const history='[data-column="history"]';
+      const oldCard=`${history} [data-history-key="retention-session/a/10"]`;
+      await page.waitForSelector(`${history} [data-history-key="retention-session/a/101"]`);
+      assert.equal(await page.$(oldCard),null,'initial latest 500 excludes A event 10');
+      await page.click(`${history} .sa-older`);
+      await page.waitForSelector(oldCard);
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] .sa-note'));
+      assert.ok(historyRequests.some(r=>r.before===101),'the reader explicitly loaded the older page');
+      await page.$eval(oldCard,e=>{
+        const feed=e.closest('.sa-feed');
+        feed.scrollTop+=e.getBoundingClientRect().top-feed.getBoundingClientRect().top-120;
+        window.retainedHistoryCard=e;
+      });
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      const offset=()=>page.$eval(oldCard,e=>e.getBoundingClientRect().top-e.closest('.sa-feed').getBoundingClientRect().top);
+      const beforeOffset=await offset();
+      const feedHeight=await page.$eval(`${history} .sa-feed`,e=>e.clientHeight);
+      assert.ok(beforeOffset>=0&&beforeOffset<feedHeight,'A event 10 is the visible reading anchor');
+      completedB=true;
+      agents[1]={...agents[1],status:'completed',updated_at:timestamp(602)};
+      await send({type:'subagent',subagent:agents[1]});
+      // No click or user-triggered previous-page request follows B's completion.
+      await page.waitForSelector(`${history} [data-history-key="retention-session/b/5"]`);
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] .sa-note'));
+      assert.ok(detailRequests.some(r=>r.agent==='b'&&r.completedB&&r.before===null),'new member B is backfilled from its latest individual page');
+      assert.ok(historyRequests.some(r=>r.completedB&&r.before===undefined),'completion refreshes shared latest history, whose 500 events exclude A event 10');
+      assert.equal(await page.$eval(oldCard,e=>e===window.retainedHistoryCard),true,'previously read A card remains the same DOM node');
+      assert.ok(Math.abs(await offset()-beforeOffset)<=2,'A event 10 retains its viewport offset without another previous-page action');
+      assert.equal(await page.$$eval(`${history} [data-history-key="retention-session/a/10"]`,nodes=>nodes.length),1);
+      agents[0]={...agents[0],status:'running',updated_at:timestamp(603)};
+      await send({type:'subagent',subagent:agents[0]});
+      await page.waitForSelector('[data-column="retention-session/a"]');
+      await page.waitForFunction(()=>!document.querySelector('[data-column="history"] [data-subagent="retention-session/a"]'));
+      assert.ok(await page.$(`${history} [data-history-key="retention-session/b/5"]`),'resuming A leaves B history intact');
+    },false,'emacs'));
+
+
     await t.test('subagent header snapshot ignores foreground guards before history exists',()=>withPage(async page=>{
       await page.setRequestInterception(true);
       let tasks;

@@ -142,6 +142,19 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
   const [selected,setSelected]=useState<string|null>(null);
   const [expanded,setExpanded]=useState<ReadonlySet<string>>(()=>new Set());
   const feed=useRef<HTMLDivElement>(null);
+  const anchor=useRef<{key:string;offset:number;top:number}|undefined>(undefined);
+  const rememberPosition=()=>{
+    const f=feed.current;if(!f)return;
+    if(f.scrollTop<1){anchor.current=undefined;return;}
+    const edge=f.getBoundingClientRect().top;
+    const row=[...f.querySelectorAll<HTMLElement>('[data-history-key]')].find(e=>e.getBoundingClientRect().bottom>edge+1);
+    if(row)anchor.current={key:row.dataset.historyKey!,offset:row.getBoundingClientRect().top-edge,top:f.scrollTop};
+  };
+  useLayoutEffect(()=>{
+    const f=feed.current,a=anchor.current;
+    if(f&&a){const row=f.querySelector<HTMLElement>(`[data-history-key="${CSS.escape(a.key)}"]`);f.scrollTop=row?f.scrollTop+row.getBoundingClientRect().top-f.getBoundingClientRect().top-a.offset:a.top;}
+    rememberPosition();
+  },[rows]);
   const toggle=(key:string)=>{setExpanded(prev=>{const next=new Set(prev);if(!next.delete(key))next.add(key);return next;});void whole();};
   const select=(index:number)=>{const row=rows[Math.max(0,Math.min(index,rows.length-1))];if(!row)return;setSelected(row.key);feed.current?.querySelector(`[data-history-key="${CSS.escape(row.key)}"]`)?.scrollIntoView({block:'nearest'});};
   const target = reveal && agents.find(a=>subagentKey(a)===reveal.key);
@@ -164,7 +177,7 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
   return <section className={`column sa-col${focused?' focused':''}${width?' sized':''}`} data-column={HISTORY} aria-label="서브 에이전트 히스토리"
     style={width?{'--sa-w':`${width}px`} as CSSProperties:undefined} onMouseDown={onFocus}>
     <ColumnHeader><h2>서브 에이전트 히스토리</h2><span className="count">{agents.length}</span><span className="filter">최근 기록부터</span></ColumnHeader>
-    <div className="feed sa-feed" ref={feed} onScroll={e=>{const f=e.currentTarget;if(f.scrollHeight-f.scrollTop-f.clientHeight<80)void older();}}>
+    <div className="feed sa-feed" ref={feed} onScroll={e=>{rememberPosition();const f=e.currentTarget;if(f.scrollHeight-f.scrollTop-f.clientHeight<80)void older();}}>
       {!agents.length && <p className="empty">종료된 서브 에이전트 기록이 없습니다.</p>}
       {rows.map(({key,agent,post,summary})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
         <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-history"
