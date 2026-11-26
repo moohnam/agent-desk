@@ -24,8 +24,8 @@ type Summary = { current: Record<string, number>; phases?: Record<string, Record
 export function compareSummaries(scenario: string, before: Summary, after: Summary) {
   const overall = comparePerformance(scenario, before.current, after.current);
   if (scenario !== 'columns' && scenario !== 'repeat' && scenario !== 'subagents') return overall;
-  // 같은 입력량끼리만 비교한다: 보낸 실시간 단계와 읽은 기록 글 수.
-  if (scenario === 'subagents') for (const [phase, key] of [['live', 'sent'], ['older', 'posts']] as const)
+  // 같은 입력량끼리만 비교한다: 보낸 실시간 단계, 읽은 기록 글 수, 방문한 컬럼 수.
+  if (scenario === 'subagents') for (const [phase, key] of [['live', 'sent'], ['older', 'posts'], ['visit', 'columns']] as const)
     if (before.phases?.[phase]?.[key] !== after.phases?.[phase]?.[key]) throw new Error(`기준 결과와 입력량이 다릅니다: ${phase}.${key}`);
   const names = Object.keys(after.phases ?? {});
   if (!names.length || names.length !== Object.keys(before.phases ?? {}).length)
@@ -33,7 +33,9 @@ export function compareSummaries(scenario: string, before: Summary, after: Summa
   const phases = Object.fromEntries(names.map(phase => {
     if (!before.phases?.[phase]) throw new Error(`기준 결과에 단계가 없습니다: ${phase}`);
     const metrics = scenario === 'columns' ? ['motionMs', 'p95MotionMs'] : scenario === 'subagents'
-      ? ({ open: ['openMs', 'maxFrameGapMs', 'framesOver50ms'], older: ['p95PageMs'], live: ['p95LatencyMs', 'maxFrameGapMs', 'framesOver50ms'] } as Record<string, string[]>)[phase]
+      // 방문 시간은 표본이 회차당 컬럼 수뿐이고 감속된 프레임 단위로 흔들려 기록만 한다. 방문한 컬럼 수는 입력량으로 맞춘다.
+      ? ({ open: ['openMs', 'maxFrameGapMs', 'framesOver50ms'], visit: [], older: ['p95PageMs'],
+        live: ['p95LatencyMs', 'maxFrameGapMs', 'framesOver50ms'] } as Record<string, string[]>)[phase]
       : ['p95FirstMotionMs', 'p95TailMotionMs'];
     if (!metrics) throw new Error(`알 수 없는 측정 단계입니다: ${phase}`);
     return [phase, compareMetrics(metrics, before.phases[phase], after.phases![phase])];

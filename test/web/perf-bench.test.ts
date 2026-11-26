@@ -32,13 +32,15 @@ test('thread completion regression still fails', () => {
   assert.equal(comparePerformance('thread', { settledMs: 100 }, { settledMs: 121 }).passed, false);
 });
 test('a subagent pane regression fails in its own phase, and only the same input compares', () => {
-  const open = { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 4 }, older = { pages: 11, posts: 140, p95PageMs: 200 };
+  const open = { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 4 }, older = { pages: 11, posts: 140, p95PageMs: 200 }, visit = { columns: 4, medianVisitMs: 140, p95VisitMs: 150 };
   const live = { sent: 50, p95LatencyMs: 75, maxFrameGapMs: 67, framesOver50ms: 40 };
-  const baseline = { current: { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 44 }, phases: { open, older, live } };
+  const baseline = { current: { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 44 }, phases: { open, visit, older, live } };
   assert.equal(compareSummaries('subagents', baseline, baseline).passed, true);
-  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open: { ...open, openMs: 600 }, older, live } }).passed, false);
-  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, older: { ...older, p95PageMs: 400 }, live } }).passed, false);
-  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, older, live: { ...live, p95LatencyMs: 200 } } }).passed, false);
-  assert.throws(() => compareSummaries('subagents', baseline, { ...baseline, phases: { open, older, live: { ...live, sent: 49 } } }), /입력량/);
-  assert.throws(() => compareSummaries('subagents', baseline, { ...baseline, phases: { open, older: { ...older, posts: 139 }, live } }), /입력량/);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit: { ...visit, medianVisitMs: 400 }, older, live } }).passed, true);
+  assert.throws(() => compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit: { ...visit, columns: 3 }, older, live } }), /입력량/);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open: { ...open, openMs: 600 }, visit, older, live } }).passed, false);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit, older: { ...older, p95PageMs: 400 }, live } }).passed, false);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit, older, live: { ...live, p95LatencyMs: 200 } } }).passed, false);
+  assert.throws(() => compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit, older, live: { ...live, sent: 49 } } }), /입력량/);
+  assert.throws(() => compareSummaries('subagents', baseline, { ...baseline, phases: { open, visit, older: { ...older, posts: 139 }, live } }), /입력량/);
 });

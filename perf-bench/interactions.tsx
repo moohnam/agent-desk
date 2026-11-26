@@ -131,10 +131,20 @@ const missing = () => {
   return out;
 };
 (window as any).servedPages = (column: string) => served.pages.get(column) ?? [];
+/** 컬럼이 처음 기록을 받은 벽시계 시각(ms). 받은 적 없으면 null. 실시간 단계가 지연 조회 대상인지 가른다. */
+(window as any).firstServed = () => Object.fromEntries([...served.pages].map(([c, pages]) => [c, performance.timeOrigin + pages[0].at]));
+const colsBox = () => document.querySelector('.subagent-panel .sa-cols')?.getBoundingClientRect();
+/** 창의 가로 스크롤 영역에 조금이라도 보이는 컬럼. 지연 조회는 이 컬럼만 처음 기록을 부른다. */
+const visibleColumns = () => {
+  const box = colsBox();
+  return box ? panelColumns().filter(c => { const r = c.getBoundingClientRect(); return r.right > box.left + 1 && r.left < box.right - 1; }).map(c => c.getAttribute('data-column')!) : [];
+};
+const column = (key: string) => document.querySelector<HTMLElement>(`.subagent-panel [data-column="${CSS.escape(key)}"]`);
 (window as any).missingPosts = missing;
 
 let pane: any;
-// b 입력부터 창이 보일 때(feedbackMs)와, 기대 컬럼이 모두 서고 각 컬럼의 첫 페이지 글과 명령 줄이 다 그려질 때(openMs, 이중 rAF)까지.
+// b 입력부터 창이 보일 때(feedbackMs)와, 기대 컬럼이 모두 서고 처음 보이는 컬럼마다 첫 페이지 글이, 명령 컬럼이 보이면 명령 줄이 다 그려질 때(openMs, 이중 rAF)까지.
+// 화면 밖 컬럼은 지연 조회일 수 있으므로 열기에서 기다리지 않는다(visitColumns에서 따로 잰다).
 (window as any).armPane = () => {
   pane = { frames: [], done: false };
   (window as any).pane = pane;
@@ -149,17 +159,19 @@ let pane: any;
       const expected = expectedColumns();
       const columns = panelColumns().map(c => c.getAttribute('data-column')!).sort();
       const commands = served.list?.filter(isCurrentCommand).length ?? 0;
-      const complete = !!panel && !!expected && columns.join() === expected.join()
-        && expected.filter(c => c !== 'commands').every(c => served.pages.get(c)?.length) && !Object.keys(missing()).length
-        && panel.querySelectorAll('.sa-command').length === commands;
+      const visible = visibleColumns();
+      const complete = !!panel && !!expected && columns.join() === expected.join() && visible.length > 0
+        && visible.filter(c => c !== 'commands').every(c => served.pages.get(c)?.length) && !Object.keys(missing()).length
+        && (!visible.includes('commands') || panel.querySelectorAll('.sa-command').length === commands);
       if (complete && pane.openMs == null) requestAnimationFrame(() => requestAnimationFrame(() => { pane.openMs = performance.now() - pane.start; }));
       if (pane.openMs != null && now - pane.start - pane.openMs > 300) {
         pane.maxFrameGapMs = Math.max(...pane.frames);
         pane.framesOver50ms = pane.frames.filter((n: number) => n > 50).length;
         pane.longTaskMs = longTasks.filter(t => t.startTime >= pane.start && t.startTime < now).reduce((a, t) => a + t.duration, 0);
-        pane.columns = columns; pane.domNodes = document.querySelectorAll('*').length; pane.done = true;
+        pane.columns = columns; pane.visible = visibleColumns(); pane.requested = [...served.pages.keys()];
+        pane.domNodes = document.querySelectorAll('*').length; pane.done = true;
       } else if (now - pane.start > 20000) {
-        pane.error = `창이 다 그려지지 않았습니다: 컬럼 ${columns.join(',')} / 기대 ${expected?.join(',') ?? '목록 없음'}, 누락 ${JSON.stringify(missing())}, 명령 ${panel?.querySelectorAll('.sa-command').length ?? 0}/${commands}`;
+        pane.error = `창이 다 그려지지 않았습니다: 컬럼 ${columns.join(',')} / 기대 ${expected?.join(',') ?? '목록 없음'}, 보임 ${visibleColumns().join(',')}, 조회 ${[...served.pages.keys()].join(',')}, 누락 ${JSON.stringify(missing())}, 명령 ${panel?.querySelectorAll('.sa-command').length ?? 0}/${commands}`;
         pane.done = true;
       } else requestAnimationFrame(tick);
     };
@@ -167,36 +179,57 @@ let pane: any;
   }, { capture: true });
 };
 
-/** 한 컬럼의 이전 페이지를 끝까지 읽는다. 페이지마다 스크롤부터 받은 글이 모두 그려진 rAF까지 잰다. */
-(window as any).pageBack = async (column: string, toBottom: boolean) => {
-  const feed = () => document.querySelector<HTMLElement>(`.subagent-panel [data-column="${CSS.escape(column)}"] .feed`);
+const settle = (done: () => boolean, limitMs = 10000) => new Promise<boolean>(resolve => {
+  const start = performance.now();
+  const wait = () => done() ? requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))
+    : performance.now() - start > limitMs ? resolve(false) : requestAnimationFrame(wait);
+  requestAnimationFrame(wait);
+});
+/** 컬럼을 가로로 보이게 한다(덱 컬럼과 같은 scrollIntoView). */
+const reveal = async (key: string) => {
+  column(key)?.scrollIntoView({ block: 'nearest', inline: 'start' });
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+};
+/**
+ * 아직 보지 않은 컬럼을 하나씩 가로로 보이게 해, 보인 순간부터 첫 페이지를 받고 그 글이 다 그려질 때까지 잰다.
+ * requestedBefore: 보이기 전에 이미 조회했는지(즉시 조회) 아니면 보여서 조회했는지(지연 조회).
+ */
+(window as any).visitColumns = async (keys: string[]) => {
+  const out: { column: string; ms: number; requestedBefore: boolean; posts: number }[] = [];
+  for (const key of keys) {
+    const requestedBefore = !!served.pages.get(key)?.length, start = performance.now();
+    column(key)?.scrollIntoView({ block: 'nearest', inline: 'start' });
+    const ok = await settle(() => !!served.pages.get(key)?.length && !missing()[key] && visibleColumns().includes(key));
+    if (!ok) return { error: `방문한 컬럼이 기록을 표시하지 않았습니다: ${key}, 조회 ${served.pages.get(key)?.length ?? 0}회, 누락 ${JSON.stringify(missing()[key] ?? [])}` };
+    out.push({ column: key, ms: performance.now() - start, requestedBefore, posts: served.pages.get(key)!.flatMap(p => p.ids).length });
+  }
+  return { visits: out };
+};
+
+/**
+ * 한 컬럼의 이전 페이지를 끝까지 읽는다. 페이지마다 스크롤부터 받은 글이 모두 그려진 rAF까지 잰다.
+ * limit: 고정 데이터로 계산한 이전 페이지 수 상한. 넘거나, 새 페이지의 커서가 앞 페이지보다 줄지 않으면 실패한다.
+ */
+(window as any).pageBack = async (key: string, toBottom: boolean, limit: number) => {
+  await reveal(key);
   const times: number[] = [];
-  for (let guard = 0; guard < 200; guard++) {
-    const pages = served.pages.get(column) ?? [];
-    if (!pages.at(-1)?.more) break;
-    const start = performance.now(), count = pages.length;
-    const f = feed();
-    if (!f) return { error: `컬럼이 없습니다: ${column}` };
+  const older = () => (served.pages.get(key) ?? []).filter(p => p.before != null);
+  while ((served.pages.get(key) ?? []).at(-1)?.more) {
+    if (older().length > limit) return { error: `이전 페이지가 상한 ${limit}회를 넘었습니다: ${key}` };
+    const count = served.pages.get(key)!.length, start = performance.now();
+    const f = column(key)?.querySelector<HTMLElement>('.feed');
+    if (!f) return { error: `컬럼이 없습니다: ${key}` };
     f.scrollTop = toBottom ? f.scrollHeight : 0;
     f.dispatchEvent(new Event('scroll'));
-    const ok = await new Promise<boolean>(resolve => {
-      const wait = () => {
-        const now = (served.pages.get(column) ?? []);
-        if (now.length > count && !missing()[column]) requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
-        else if (performance.now() - start > 10000) resolve(false);
-        else requestAnimationFrame(wait);
-      };
-      requestAnimationFrame(wait);
-    });
-    if (!ok) return { error: `이전 페이지가 그려지지 않았습니다: ${column}, 누락 ${JSON.stringify(missing()[column] ?? [])}` };
+    const ok = await settle(() => served.pages.get(key)!.length > count && !missing()[key]);
+    if (!ok) return { error: `이전 페이지가 그려지지 않았습니다: ${key}, 누락 ${JSON.stringify(missing()[key] ?? [])}` };
+    const cursors = older().map(p => p.before!);
+    if (cursors.some((b, i) => i > 0 && b >= cursors[i - 1])) return { error: `이전 페이지 커서가 줄지 않았습니다: ${key} ${cursors.slice(-3).join(',')}` };
     times.push(performance.now() - start);
   }
-  const pages = served.pages.get(column) ?? [];
-  const cursors = pages.map(p => p.before).filter((b): b is number => b != null);
-  const advancing = cursors.every((b, i) => i === 0 || b < cursors[i - 1]);
-  const el = document.querySelector(`.subagent-panel [data-column="${CSS.escape(column)}"]`);
+  const el = column(key);
   // 제품이 스스로 이어 부른 페이지도 있으므로 받은 이전 페이지 수(served)와 직접 잰 페이지(times)를 따로 돌려준다.
-  return { times, served: pages.filter(p => p.before != null).length, more: pages.at(-1)?.more, advancing, rendered: el ? [...renderedIn(el)] : [] };
+  return { times, served: older().length, more: served.pages.get(key)?.at(-1)?.more, rendered: el ? [...renderedIn(el)] : [] };
 };
 
 /** 실시간 구간: 프레임과 긴 작업, 그리고 data-post가 처음 나타난 벽시계 시각과 컬럼. */

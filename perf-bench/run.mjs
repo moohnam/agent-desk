@@ -139,34 +139,53 @@ try {
             const open = await page.evaluate(() => { const { frames, ...rest } = window.pane; return rest; });
             if (open.error) throw new Error(open.error);
             open.requests = { history: mock.requests.history - asked.history, detail: mock.requests.detail - asked.detail };
-            // 공통 history는 아래로, 실행 중인 서브 에이전트 컬럼은 위로 끝까지 읽고 전체 기록과 대조한다.
-            const older = [];
-            for (const [column, toBottom] of [['history', true], [mock.firstRunning, false]]) {
-              const result = await page.evaluate((c, b) => window.pageBack(c, b), column, toBottom);
-              if (result.error) throw new Error(result.error);
-              if (result.more || !result.advancing) throw new Error(`이전 페이지 조회가 끝까지 진행하지 않았습니다: ${column}`);
-              const shown = new Set(result.rendered), all = mock.allPosts(column), lost = all.filter(id => !shown.has(id));
-              if (lost.length) throw new Error(`${column} 기록 ${lost.length}/${all.length}건이 화면에 없습니다: ${lost.slice(0, 5).join(',')}`);
-              older.push({ column, pages: result.served, times: result.times, posts: all.length });
-            }
-            // 창을 연 채 정해진 수의 단계를 보내고, 단계마다 해당 컬럼에 처음 나타난 시각을 보낸 시각과 대조한다.
+            // 실행 중 컬럼 하나(firstRunning)는 실시간 전에 방문해 둔다. 처음 보이는 컬럼이 history·명령뿐이어도 표시 지연을 잴 대상이 생긴다.
+            const first = open.visible.includes(mock.firstRunning) ? { visits: [] } : await page.evaluate(keys => window.visitColumns(keys), [mock.firstRunning]);
+            if (first.error) throw new Error(first.error);
+            // 1) 실시간: 처음 보이는 컬럼과 firstRunning만 방문한 상태로 정해진 수의 단계를 보낸다. 보낸 순간 그 컬럼이 기록을 이미 받았으면
+            // 표시 지연을 재고, 아직 받지 않았으면(지연 조회) 누락으로 세지 않고 방문 뒤 첫 조회에 나타나는지 확인한다.
             await page.evaluate(() => window.armWindow());
             mock.streaming = true;
             for (const until = Date.now() + 60000; mock.sent.length < liveTotal && Date.now() < until;) await new Promise(ok => setTimeout(ok, 50));
             mock.streaming = false;
             await new Promise(ok => setTimeout(ok, 1500));
             const { seen, ...frames } = await page.evaluate(() => window.finishWindow());
+            if (mock.sent.length !== liveTotal) throw new Error(`실시간 단계를 정해진 수만큼 보내지 못했습니다: ${mock.sent.length}/${liveTotal}`);
+            const loadedAt = await page.evaluate(() => window.firstServed());
             const firstSeen = new Map(seen.map(s => [s.id, s]));
-            const latencies = [], lost = [];
+            const latencies = [], lost = [], deferred = [];
             for (const sent of mock.sent) {
+              if (!(loadedAt[sent.column] <= sent.sentAt)) { deferred.push(sent); continue; }
               const shown = firstSeen.get(sent.id);
               if (shown?.column === sent.column) latencies.push(shown.at - sent.sentAt); else lost.push(sent.id);
             }
-            if (mock.sent.length !== liveTotal) throw new Error(`실시간 단계를 정해진 수만큼 보내지 못했습니다: ${mock.sent.length}/${liveTotal}`);
-            if (lost.length) throw new Error(`보낸 실시간 단계 ${lost.length}/${liveTotal}개가 해당 컬럼 카드에 나타나지 않았습니다: ${lost.slice(0, 5).join(',')}`);
+            if (lost.length) throw new Error(`보낸 실시간 단계 ${lost.length}/${liveTotal}개가 불러온 컬럼의 카드에 나타나지 않았습니다: ${lost.slice(0, 5).join(',')}`);
+            // 2) 방문: 나머지 컬럼을 하나씩 보이게 해 첫 조회와 표시를 잰다.
+            const rest = open.columns.filter(c => c !== 'commands' && !open.visible.includes(c) && c !== mock.firstRunning);
+            const visit = await page.evaluate(keys => window.visitColumns(keys), rest);
+            if (visit.error) throw new Error(visit.error);
+            const late = deferred.filter(sent => !rest.includes(sent.column));
+            if (late.length) throw new Error(`방문할 수 없는 컬럼으로 간 실시간 단계가 있습니다: ${late.map(s => s.column).join(',')}`);
+            // 방문 뒤 받은 페이지에 든 단계는 화면에 있어야 한다. 아직 받지 않은 단계는 그 컬럼에 이전 페이지가 남아 있을 때만 정상이다.
+            const shownAfter = await page.evaluate(ids => ids.filter(([id, c]) => {
+              const pages = window.servedPages(c), received = pages.some(p => p.ids.includes(id));
+              return received ? !document.querySelector(`.subagent-panel [data-column="${CSS.escape(c)}"] [data-post="${id}"]`) : !pages.at(-1)?.more;
+            }), deferred.map(s => [s.id, s.column]));
+            if (shownAfter.length) throw new Error(`지연 조회 컬럼의 실시간 단계 ${shownAfter.length}/${deferred.length}개가 방문 뒤 받은 기록에도, 남은 이전 페이지에도 없습니다: ${shownAfter.slice(0, 5).map(x => x[0]).join(',')}`);
+            // 3) 이전 페이지: 공통 history는 아래로, 실행 중 컬럼 하나는 위로 끝까지 읽고 전체 기록과 대조한다.
+            const older = [];
+            for (const [column, toBottom] of [['history', true], [mock.firstRunning, false]]) {
+              const result = await page.evaluate((c, b, limit) => window.pageBack(c, b, limit), column, toBottom, mock.pageLimit(column));
+              if (result.error) throw new Error(result.error);
+              if (result.more) throw new Error(`이전 페이지 조회가 끝까지 진행하지 않았습니다: ${column}`);
+              const shown = new Set(result.rendered), all = mock.allPosts(column), missed = all.filter(id => !shown.has(id));
+              if (missed.length) throw new Error(`${column} 기록 ${missed.length}/${all.length}건이 화면에 없습니다: ${missed.slice(0, 5).join(',')}`);
+              older.push({ column, pages: result.served, times: result.times, posts: all.length });
+            }
             if (errors.length || unexpected.length) throw new Error([...errors, ...unexpected].join('; '));
-            if (run >= 0) results.push({ run, mode, open, older, live: { ...frames, sent: mock.sent.length, latencies }, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
-            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms, 이전 페이지 ${older.map(o => `${o.column} ${o.pages}회`).join('·')}, 실시간 ${liveTotal}개 표시 검증\n`);
+            if (run >= 0) results.push({ run, mode, open, visits: [...first.visits, ...visit.visits], older, live: { ...frames, sent: mock.sent.length, deferred: deferred.length, latencies,
+              loadedColumns: Object.keys(loadedAt) }, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
+            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms(보임 ${open.visible.join('·')}), 실시간 ${liveTotal - deferred.length}개 표시·${deferred.length}개 지연 조회, 방문 ${[...first.visits, ...visit.visits].map(v => `${v.column} ${v.requestedBefore ? '이미 조회됨' : '방문 시 조회'}`).join('·')}, 이전 페이지 ${older.map(o => `${o.column} ${o.pages}회`).join('·')}\n`);
             continue;
           }
           if (scenario === 'typing') {
@@ -287,7 +306,7 @@ try {
       } finally { await page.close(); }
     }
   }
-  const median = values => { const s = values.toSorted((a,b) => a-b); return s.length % 2 ? s[(s.length-1)/2] : (s[s.length/2-1]+s[s.length/2])/2; };
+  const median = values => { if (!values.length) return 0; const s = values.toSorted((a,b) => a-b); return s.length % 2 ? s[(s.length-1)/2] : (s[s.length/2-1]+s[s.length/2])/2; };
   let summary = Object.fromEntries((scenario !== 'thread' ? [] : ['current', 'window']).map(mode => {
     const rows = results.filter(r => r.mode === mode);
     return [mode, Object.fromEntries(['firstPaintMs', 'settledMs', 'responseBytes', 'fetchMs', 'parseMs', 'deriveMs', 'postNodes', 'domNodes', 'longTaskMs', 'maxFrameGapMs'].map(key =>
@@ -302,12 +321,15 @@ try {
       detailRequests: median(opens.map(o => o.requests.detail)), domNodes: median(opens.map(o => o.domNodes)) };
     const pages = results.flatMap(r => r.older.flatMap(o => o.times));
     const older = { pages: median(results.map(r => sum(r.older.map(o => o.pages)))), measuredPages: median(results.map(r => sum(r.older.map(o => o.times.length)))), posts: median(results.map(r => sum(r.older.map(o => o.posts)))), medianPageMs: pages.length ? median(pages) : 0, p95PageMs: p95(pages) };
+    const visits = results.flatMap(r => r.visits);
+    const visit = { columns: median(results.map(r => r.visits.length)), lazy: median(results.map(r => r.visits.filter(v => !v.requestedBefore).length)),
+      medianVisitMs: visits.length ? median(visits.map(v => v.ms)) : 0, p95VisitMs: p95(visits.map(v => v.ms)) };
     const latencies = lives.flatMap(l => l.latencies);
-    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), medianLatencyMs: median(latencies), p95LatencyMs: p95(latencies),
-      maxLatencyMs: Math.max(...latencies), p95FrameMs: median(lives.map(l => l.p95FrameMs)),
+    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), deferred: sum(lives.map(l => l.deferred)), medianLatencyMs: median(latencies), p95LatencyMs: p95(latencies),
+      maxLatencyMs: latencies.length ? Math.max(...latencies) : 0, p95FrameMs: median(lives.map(l => l.p95FrameMs)),
       maxFrameGapMs: Math.max(...lives.map(l => l.maxFrameGapMs)), framesOver50ms: sum(lives.map(l => l.framesOver50ms)), longTaskMs: sum(lives.map(l => l.longTaskMs)) };
     summary = { current: { openMs: open.openMs, maxFrameGapMs: Math.max(open.maxFrameGapMs, liveSummary.maxFrameGapMs), framesOver50ms: open.framesOver50ms + liveSummary.framesOver50ms },
-      phases: { open, older, live: liveSummary } };
+      phases: { open, visit, older, live: liveSummary } };
   } else if (scenario !== 'thread' && scenario !== 'typing') {
     const samples = results.flatMap(r => r.samples);
     const p95 = xs => xs.toSorted((a,b)=>a-b)[Math.ceil(xs.length * .95)-1];
