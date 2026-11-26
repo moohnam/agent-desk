@@ -31,3 +31,10 @@ test('frame jitter tolerance and initial feedback regressions are separate', () 
 test('thread completion regression still fails', () => {
   assert.equal(comparePerformance('thread', { settledMs: 100 }, { settledMs: 121 }).passed, false);
 });
+test('a subagent pane regression fails in its own phase', () => {
+  const open = { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 4 }, live = { maxFrameGapMs: 67, framesOver50ms: 40 };
+  const baseline = { current: { openMs: 400, maxFrameGapMs: 100, framesOver50ms: 44 }, phases: { open, live } };
+  assert.equal(compareSummaries('subagents', baseline, baseline).passed, true);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open: { ...open, openMs: 600 }, live } }).passed, false);
+  assert.equal(compareSummaries('subagents', baseline, { ...baseline, phases: { open, live: { ...live, framesOver50ms: 60 } } }).passed, false);
+});

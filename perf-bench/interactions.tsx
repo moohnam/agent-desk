@@ -92,3 +92,49 @@ window.addEventListener('input', e => {
   typing.longTaskMs = longTasks.filter(t => t.startTime >= typing.started).reduce((sum, t) => sum + t.duration, 0);
   return typing;
 };
+
+// 서브 에이전트 창: b 입력부터 창이 보일 때(feedbackMs)와 모든 컬럼이 기록까지 그려질 때(openMs)까지, 이중 rAF 근삿값.
+let pane: any;
+(window as any).armPane = (expected: { columns: number; agentPosts: number; commandRows: number }) => {
+  pane = { frames: [], done: false };
+  (window as any).pane = pane;
+  window.addEventListener('keydown', e => {
+    if (!e.isTrusted || e.key !== 'b' || pane.start != null) return;
+    pane.start = e.timeStamp;
+    let previous = performance.now();
+    const tick = (now: number) => {
+      pane.frames.push(now - previous); previous = now;
+      const panel = document.querySelector('.subagent-panel');
+      if (panel && pane.feedbackMs == null) pane.feedbackMs = now - pane.start;
+      const columns = panel ? [...panel.querySelectorAll('.sa-col')] : [];
+      const agentColumns = columns.filter(c => c.getAttribute('data-column') !== 'commands');
+      const complete = columns.length === expected.columns
+        && agentColumns.every(c => c.querySelectorAll('[data-post]').length >= expected.agentPosts)
+        && (panel?.querySelectorAll('.sa-command').length ?? 0) === expected.commandRows;
+      if (complete && pane.openMs == null) requestAnimationFrame(() => requestAnimationFrame(() => { pane.openMs = performance.now() - pane.start; }));
+      if (pane.openMs != null && now - pane.start - pane.openMs > 300) {
+        pane.maxFrameGapMs = Math.max(...pane.frames);
+        pane.framesOver50ms = pane.frames.filter((n: number) => n > 50).length;
+        pane.longTaskMs = longTasks.filter(t => t.startTime >= pane.start && t.startTime < now).reduce((a, t) => a + t.duration, 0);
+        pane.domNodes = document.querySelectorAll('*').length; pane.done = true;
+      } else if (now - pane.start > 20000) { pane.error = `창이 다 그려지지 않았습니다: 컬럼 ${columns.length}/${expected.columns} ${columns.map(c => `${c.getAttribute('data-column')}:${c.querySelectorAll('[data-post]').length}`).join(',')}, 명령 ${panel?.querySelectorAll('.sa-command').length ?? 0}/${expected.commandRows}`; pane.done = true; }
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, { capture: true });
+};
+// 실시간 갱신 구간: 프레임 간격과 긴 작업만 기록한다.
+let span: any;
+(window as any).armWindow = () => {
+  span = { frames: [], started: performance.now(), done: false };
+  let previous = performance.now();
+  const tick = (now: number) => { if (span.done) return; span.frames.push(now - previous); previous = now; requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+};
+(window as any).finishWindow = () => {
+  span.done = true;
+  const sorted = [...span.frames].sort((a: number, b: number) => a - b);
+  return { frames: span.frames.length, maxFrameGapMs: Math.max(...span.frames), p95FrameMs: sorted[Math.ceil(sorted.length * .95) - 1],
+    framesOver50ms: span.frames.filter((n: number) => n > 50).length,
+    longTaskMs: longTasks.filter(t => t.startTime >= span.started).reduce((a, t) => a + t.duration, 0) };
+};

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { compareSummaries } from './compare.mts';
 import { events } from './data.mjs';
 import { interactionData } from './interaction-data.mjs';
+import { subagentData } from './subagent-data.mjs';
 
 async function verifyLive(page, sent, count) {
   if (sent < 1) throw new Error('실시간 이벤트가 발생하지 않았습니다.');
@@ -30,7 +31,7 @@ function summarizeProfile(profile) {
 const root = dirname(fileURLToPath(import.meta.url));
 const arg = (name, fallback) => Number(process.argv.find(a => a.startsWith(`--${name}=`))?.split('=')[1] ?? fallback);
 const scenario = process.argv.find(a => a.startsWith('--scenario='))?.split('=')[1] ?? 'thread';
-if (!['thread', 'columns', 'repeat', 'wheel', 'typing'].includes(scenario)) throw new Error('scenario는 thread, columns, repeat, wheel 또는 typing입니다.');
+if (!['thread', 'columns', 'repeat', 'wheel', 'typing', 'subagents'].includes(scenario)) throw new Error('scenario는 thread, columns, repeat, wheel, typing 또는 subagents입니다.');
 const fault = process.argv.find(a => a.startsWith('--fault='))?.split('=')[1] ?? 'none';
 if (!['none', 'no-scroll'].includes(fault) || (fault !== 'none' && scenario !== 'columns')) throw new Error('--fault=no-scroll은 columns에서만 지원합니다.');
 const text = process.argv.find(a => a.startsWith('--text='))?.split('=')[1] ?? 'long';
@@ -40,7 +41,11 @@ if (!['repeat', 'unique'].includes(liveText)) throw new Error('live-text는 repe
 const profile = process.argv.includes('--profile');
 const liveTasks = arg('live-tasks', 10);
 if (!Number.isInteger(liveTasks) || liveTasks < 1 || liveTasks > 10) throw new Error('live-tasks는 1..10 정수입니다.');
-const live = arg('live', 0);
+const live = arg('live', scenario === 'subagents' ? 10 : 0);
+const agents = arg('agents', 8), steps = arg('steps', 80), commands = arg('commands', 30);
+if (scenario === 'subagents' && (![agents, steps, commands].every(Number.isInteger) || agents < 2 || agents > 40 || steps < 4 || steps > 500 || commands < 0 || commands > 500 || !live))
+  throw new Error('subagents는 agents=2..40, steps=4..500, commands=0..500, live=1..50 정수가 필요합니다.');
+const mockData = () => scenario === 'subagents' ? subagentData(count, text, { agents, steps, commands }) : interactionData(count, text, liveText, liveTasks);
 if (!Number.isInteger(live) || live < 0 || live > 50 || (live && (scenario === 'thread' || process.argv.includes('--verify-feed')))) throw new Error('live=0..50; thread/verify-feed와 live는 함께 사용할 수 없습니다.');
 const count = arg('count', scenario !== 'thread' ? 40 : 500), runs = arg('runs', 3), cpu = arg('cpu', 4);
 if (![count, runs, cpu].every(Number.isInteger) || count < 24 || count > 5000 || runs < 1 || runs > 20 || cpu < 1 || cpu > 10)
@@ -54,7 +59,7 @@ try {
   await build({ configFile: false, root, plugins: [react()], logLevel: 'error',
     build: { minify: !profile, outDir: directory, emptyOutDir: true, chunkSizeWarningLimit: 10000, ...(scenario !== 'thread' ? { rolldownOptions: { input: resolve(root, 'interactions.html') } } : {}) } });
   const fixture = events(count, text);
-  let mock = interactionData(count, text, liveText, liveTasks), streamedEvents = 0;
+  let mock = mockData(), streamedEvents = 0;
   const unexpected = [];
   server = createServer(async (req, res) => {
     try {
@@ -67,8 +72,9 @@ try {
             const streamMock = mock;
             const timer = setInterval(() => {
               if (res.destroyed) { clearInterval(timer); liveTimers.delete(timer); return; }
-              for (const message of streamMock.next()) res.write(`data: ${JSON.stringify({ source: '', message })}\n\n`);
-              streamedEvents++;
+              const messages = streamMock.next();
+              for (const message of messages) res.write(`data: ${JSON.stringify({ source: '', message })}\n\n`);
+              if (messages.length) streamedEvents++;
             }, 1000 / live);
             liveTimers.add(timer);
             res.on('close', () => { clearInterval(timer); liveTimers.delete(timer); });
@@ -108,7 +114,7 @@ try {
         const errors = [];
         page.on('pageerror', e => errors.push(e.message));
         if (scenario !== 'thread') {
-          mock = interactionData(count, text, liveText, liveTasks); streamedEvents = 0;
+          mock = mockData(); streamedEvents = 0;
           await page.goto(`http://127.0.0.1:${server.address().port}/interactions.html`);
           await page.waitForFunction(() => document.querySelectorAll('.deck section[data-col]').length === 10 && document.querySelectorAll('.deck [data-post]').length >= 80, { timeout: 30000 }).catch(e => { throw new Error(`${e.message}: ${[...errors,...unexpected].join('; ')}`); });
           await new Promise(ok => setTimeout(ok, 700));
@@ -117,6 +123,34 @@ try {
             Object.defineProperty(deck, 'scrollLeft', { get() { return scroll.get.call(this); }, set() {} });
           });
           if (profile) { await cdp.send('Profiler.enable'); await cdp.send('Profiler.start'); }
+          if (scenario === 'subagents') {
+            // 측정 작업의 스레드를 열고 서브 에이전트를 띄운 글 아래 칩이 모두 그려질 때까지 기다린다.
+            await page.click('section[data-col="c0"] [data-post]');
+            await page.waitForFunction(n => document.querySelectorAll('.sa-chip').length === n, { timeout: 30000 }, mock.expected.chips)
+              .catch(e => { throw new Error(`${e.message}: 칩 ${[...errors, ...unexpected].join('; ')}`); });
+            await new Promise(ok => setTimeout(ok, 500));
+            await page.evaluate(expected => window.armPane(expected), mock.expected);
+            await page.keyboard.press('b');
+            await page.waitForFunction(() => window.pane?.done, { timeout: 30000 });
+            const open = await page.evaluate(() => { const { frames, ...rest } = window.pane; return rest; });
+            if (open.error) throw new Error(open.error);
+            const requests = mock.requests.events;
+            await new Promise(ok => setTimeout(ok, 300));
+            await page.evaluate(() => window.armWindow());
+            const before = streamedEvents;
+            mock.streaming = true;
+            await new Promise(ok => setTimeout(ok, 5000));
+            mock.streaming = false;
+            await new Promise(ok => setTimeout(ok, 500));
+            const liveSample = { ...await page.evaluate(() => window.finishWindow()), sent: streamedEvents - before };
+            if (!liveSample.sent || !mock.last) throw new Error('실시간 서브 에이전트 단계가 발생하지 않았습니다.');
+            const shown = await page.$eval(`.subagent-panel [data-column="s0/${mock.last.agent}"]`, (el, text) => el.textContent.includes(text), mock.last.text);
+            if (!shown) throw new Error('실시간 서브 에이전트 단계가 해당 컬럼에 반영되지 않았습니다.');
+            if (errors.length || unexpected.length) throw new Error([...errors, ...unexpected].join('; '));
+            if (run >= 0) results.push({ run, mode, open: { ...open, requests }, live: liveSample, cache: await page.evaluate(() => window.cacheStats()), ...(profile ? { cpuProfile: summarizeProfile((await cdp.send('Profiler.stop')).profile) } : {}) });
+            process.stderr.write(`${run < 0 ? '준비' : run + 1} subagents: 열기 ${Math.round(open.openMs)}ms, 실시간 단계 ${liveSample.sent}개 반영 검증\n`);
+            continue;
+          }
           if (scenario === 'typing') {
             await page.keyboard.press('i');
             await page.waitForSelector('.compose textarea', { visible: true });
@@ -241,7 +275,16 @@ try {
     return [mode, Object.fromEntries(['firstPaintMs', 'settledMs', 'responseBytes', 'fetchMs', 'parseMs', 'deriveMs', 'postNodes', 'domNodes', 'longTaskMs', 'maxFrameGapMs'].map(key =>
       [key, median(rows.map(r => key === 'longTaskMs' ? r.longTasks.reduce((a,b)=>a+b,0) : key === 'maxFrameGapMs' ? Math.max(0,...r.frameGaps) : r[key]))]))];
   }));
-  if (scenario !== 'thread' && scenario !== 'typing') {
+  if (scenario === 'subagents') {
+    const opens = results.map(r => r.open), lives = results.map(r => r.live), sum = xs => xs.reduce((a, b) => a + b, 0);
+    const open = { samples: opens.length, openMs: median(opens.map(o => o.openMs)), feedbackMs: median(opens.map(o => o.feedbackMs)),
+      maxFrameGapMs: Math.max(...opens.map(o => o.maxFrameGapMs)), framesOver50ms: sum(opens.map(o => o.framesOver50ms)),
+      longTaskMs: sum(opens.map(o => o.longTaskMs)), requests: median(opens.map(o => o.requests)), domNodes: median(opens.map(o => o.domNodes)) };
+    const liveSummary = { samples: lives.length, sent: sum(lives.map(l => l.sent)), p95FrameMs: median(lives.map(l => l.p95FrameMs)),
+      maxFrameGapMs: Math.max(...lives.map(l => l.maxFrameGapMs)), framesOver50ms: sum(lives.map(l => l.framesOver50ms)), longTaskMs: sum(lives.map(l => l.longTaskMs)) };
+    summary = { current: { openMs: open.openMs, maxFrameGapMs: Math.max(open.maxFrameGapMs, liveSummary.maxFrameGapMs), framesOver50ms: open.framesOver50ms + liveSummary.framesOver50ms },
+      phases: { open, live: liveSummary } };
+  } else if (scenario !== 'thread' && scenario !== 'typing') {
     const samples = results.flatMap(r => r.samples);
     const p95 = xs => xs.toSorted((a,b)=>a-b)[Math.ceil(xs.length * .95)-1];
     const summarize = xs => ({ samples: xs.length, feedbackMs: median(xs.map(s=>s.feedbackMs)),
@@ -261,11 +304,12 @@ try {
       longTaskMs: samples.reduce((n,s)=>n+s.longTaskMs,0) } };
   }
   const report = { schema: 7, environment: { platform: platform(), arch: arch(), processor: cpus()[0]?.model,
-    node: process.version, browser: await browser.version(), cpuThrottle: cpu, scenario, fault, text, live, liveText, liveTasks, profile, count, runs, build: 'production' },
-    scope: scenario === 'repeat' ? '실제 App에서 30/60/100ms 요청 간격으로 오른쪽 8회·즉시 왼쪽 4회 키 반복. CDP 왕복과 처리 시간 때문에 실제 간격은 inputs.time으로 확인한다. 마지막 입력 이후 최종 스크롤 변경까지 tailMotionMs, 첫 스크롤 변경까지 firstMotionMs. 최종 목적 컬럼 가시성 검증. 물리 입력·실제 네트워크는 미측정.' : scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
+    node: process.version, browser: await browser.version(), cpuThrottle: cpu, scenario, fault, text, live, liveText, liveTasks, profile, count, runs, build: 'production',
+    ...(scenario === 'subagents' && { agents, steps, commands }) },
+    scope: scenario === 'subagents' ? '실제 App에서 측정 작업의 스레드를 열어 서브 에이전트 칩을 그린 뒤 b로 서브 에이전트 창을 연다. feedbackMs는 b 입력부터 창이 보인 rAF, openMs는 모든 컬럼이 지시문·글과 명령 줄까지 그려진 뒤 이중 rAF까지의 근삿값이며 INP가 아님. requests는 서브 에이전트 기록 요청 수. 이어서 창을 연 채 live 빈도로 실행 중인 서브 에이전트에 단계(5번에 1번 진행 보고 포함)를 5초간 보내며 프레임 간격과 긴 작업을 기록하고, 마지막 단계가 해당 컬럼에 나타났는지 검증한다. 고정 API·루프백이며 실제 네트워크·러너·모델 실행은 포함하지 않는다.' : scenario === 'repeat' ? '실제 App에서 30/60/100ms 요청 간격으로 오른쪽 8회·즉시 왼쪽 4회 키 반복. CDP 왕복과 처리 시간 때문에 실제 간격은 inputs.time으로 확인한다. 마지막 입력 이후 최종 스크롤 변경까지 tailMotionMs, 첫 스크롤 변경까지 firstMotionMs. 최종 목적 컬럼 가시성 검증. 물리 입력·실제 네트워크는 미측정.' : scenario === 'typing' ? '실제 App 작성창에 ASCII 108자를 입력한다. beforeinput부터 input 후 이중 rAF까지의 근삿값이며 INP나 한글 IME 측정이 아님. live는 초당 새 assistant 글+작업상태 쌍의 모의 SSE 빈도이며 토큰 스트리밍과 같지 않음.' : scenario === 'wheel' ? '실제 App에서 CDP 가로 휠 입력으로 컬럼 간 이동. 8회 x 48px 입력을 16ms 대기와 함께 전달하는 동작을 오른쪽 6회·복귀 6회 반복. 실제 macOS 트랙패드 관성·물리 화면은 미측정. feedbackMs는 wheel 이벤트부터 scrollLeft 변경 뒤 rAF까지의 주 스레드 관측 근삿값으로 INP나 컴포지터 표시 지연이 아님. 고정 API, 10개 컬럼. environment.live가 0보다 크면 지정 빈도로 새 글과 작업 상태를 보낸다.' : scenario !== 'thread' ? '실제 App의 키보드 좌우 이동 12회와 H/L 순서 변경 2회. 격리된 고정 API와 10개 컬럼. feedbackMs는 실제 keydown 시각부터 상태 변경 뒤 rAF까지의 표시 근삿값이며 INP가 아님. motionMs는 마지막 스크롤 변경까지. 각 이동은 최소 400ms 및 120ms 정지 후 종료. 실제 네트워크·모델 실행·포인터 드래그 미포함. environment.live가 모의 새 글/상태 갱신 빈도다.' : '실제 ThreadPosts와 buildPosts. 고정 Markdown 데이터. window는 마지막 24개만 조회·렌더링하는 실험이며 완성된 가상 스크롤이 아님. 전송 시간은 루프백이며 실제 원격망 개선 폭을 뜻하지 않음. firstPaintMs는 이중 rAF 근삿값이며 INP가 아님.',
     summary, results };
   if (baseline) {
-    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'fault', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build'];
+    const keys = ['platform', 'arch', 'processor', 'node', 'browser', 'cpuThrottle', 'scenario', 'fault', 'text', 'live', 'liveText', 'liveTasks', 'profile', 'count', 'runs', 'build', 'agents', 'steps', 'commands'];
     if (baseline.schema !== report.schema || keys.some(k => baseline.environment?.[k] !== report.environment[k]))
       throw new Error('기준 결과의 실행 환경·횟수·데이터 조건이 다릅니다. 같은 조건으로 다시 측정하세요.');
     report.comparison = compareSummaries(scenario, baseline.summary, summary);
