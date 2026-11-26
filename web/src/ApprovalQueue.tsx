@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ENGINE_SHORT, REQUEST_TOOL, engineOf } from '../../shared/compose.ts';
 import { askSummary, isAsk } from './AskCard.tsx';
 import { relTime, toolSummary } from './format.ts';
+import { Markdown } from './Markdown.tsx';
 import { projectColor } from './projects.ts';
 import type { Approval, Question, TaskView } from './types.ts';
 
@@ -102,8 +103,10 @@ export function ApprovalQueue({ items, tasks, focus, onAllow, onDeny, onOpen, on
               <span className="tool" title={askSummary(item.approval.input)}><span className="qtag">질문</span> {askSummary(item.approval.input)}</span>
             ) : item.kind === 'approval' ? (
               item.approval.tool_name === REQUEST_TOOL ? (
-                <span className="tool" title={String((item.approval.input as { description?: string }).description ?? '')}>
-                  <span className="qtag">{String((item.approval.input as { to?: string }).to ?? '')}에게</span> {String((item.approval.input as { description?: string }).description ?? '')}</span>
+                <div className="request-message">
+                  <span className="qtag">{String(item.approval.input?.to ?? '')}에게</span>
+                  <div className="md"><Markdown text={String(item.approval.input?.description ?? '')} mentions /></div>
+                </div>
               ) : <span className="tool"><b>{item.approval.tool_name}</b> <span className="mono">{toolSummary(item.approval.tool_name, item.approval.input)}</span></span>
             ) : (
               <span className="tool" title={item.kind === 'ask' ? item.text : item.question.text}>

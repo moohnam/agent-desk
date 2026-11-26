@@ -1476,11 +1476,12 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const send = message => window.deskTestStream.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({source:'',message})}));
         const common = {task_id:'t0',session_id:'s0',created_at:new Date().toISOString()};
         send({type:'approval',approval:{...common,id:'first',tool_name:'Bash',input:{},status:'allowed'}});
-        send({type:'approval',approval:{...common,id:'next',tool_name:'desk_request',input:{to:'@target#1',description:'후속 문의'},status:'pending'}});
+        send({type:'approval',approval:{...common,id:'next',tool_name:'desk_request',input:{to:'@target#1',description:'후속 문의\n둘째 줄\n\n- **확인할 항목**'},status:'pending'}});
         for (const [i,kind] of ['tool_result','assistant','status'].entries())
           send({type:'event',event:{id:90001+i,task_id:'t0',kind,ts:common.created_at,payload:kind==='status'?{state:'turn_done'}:{text:'후속 메시지'}}});
       });
-      await page.waitForFunction(()=>document.querySelector('.queue')?.textContent.includes('후속 문의'));
+      await page.waitForSelector('.queue-row .md p br');
+      assert.equal(await page.$eval('.queue-row .md li strong', el=>el.textContent),'확인할 항목');
     }));
 
     await t.test('each pending approval has a card until that approval is settled', () => withPage(async page => {

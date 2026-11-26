@@ -247,7 +247,7 @@ function ApprovalCard({ post, approval, expanded, onAllow, onDeny }: {
     <div className={`approve-card${outcome ? ' resolved' : ''}`}>
       {p.toolName === REQUEST_TOOL ? (<>
         <div className="what" title={p.input?.title}>{p.input?.to}에게 {outcome ? '보낼 질문' : '질문을 보내려 합니다'}</div>
-        <div className="desc">{richText(String(p.input?.description ?? ''))}</div>
+        <div className="md"><Markdown text={String(p.input?.description ?? '')} mentions /></div>
       </>) : (<>
         <div className="what">{p.toolName} {outcome ? '실행 요청' : '실행을 요청합니다'}</div>
         <pre className="mono">{expanded ? JSON.stringify(p.input, null, 2) : toolSummary(p.toolName, p.input)}</pre>
