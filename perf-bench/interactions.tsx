@@ -140,11 +140,23 @@ const visibleColumns = () => {
   return box ? panelColumns().filter(c => { const r = c.getBoundingClientRect(); return r.right > box.left + 1 && r.left < box.right - 1; }).map(c => c.getAttribute('data-column')!) : [];
 };
 const column = (key: string) => document.querySelector<HTMLElement>(`.subagent-panel [data-column="${CSS.escape(key)}"]`);
-/** 기대한 실행 중 명령 중 명령 컬럼에 줄(data-command)로 그려지지 않은 것. */
-const missingCommands = () => {
-  const shown = new Set([...document.querySelectorAll('.subagent-panel [data-command]')].map(e => e.getAttribute('data-command')));
-  return (served.list ?? []).filter(isCurrentCommand).map((s: any) => `${s.session_id}/${s.id}`).filter((key: string) => !shown.has(key));
+/**
+ * 명령 컬럼 안의 줄(data-command)을 기대한 실행 중 명령 키와 대조한 문제 목록. 비었으면 일치.
+ * 빠진 키, 예상 밖 키, 같은 키의 중복 줄, 명령 컬럼 밖(다른 컬럼)에 있는 명령 줄을 구분한다.
+ */
+const commandProblems = () => {
+  const expected: string[] = (served.list ?? []).filter(isCurrentCommand).map((s: any) => `${s.session_id}/${s.id}`);
+  const inColumn = [...document.querySelectorAll('.subagent-panel [data-column="commands"] [data-command]')].map(e => e.getAttribute('data-command')!);
+  const elsewhere = [...document.querySelectorAll('.subagent-panel [data-command]')].filter(e => !e.closest('[data-column="commands"]'))
+    .map(e => `${e.getAttribute('data-command')}@${e.closest('[data-column]')?.getAttribute('data-column') ?? '?'}`);
+  return [
+    ...expected.filter(key => !inColumn.includes(key)).map(key => `빠짐 ${key}`),
+    ...[...new Set(inColumn)].filter(key => !expected.includes(key)).map(key => `예상 밖 ${key}`),
+    ...[...new Set(inColumn)].filter(key => inColumn.indexOf(key) !== inColumn.lastIndexOf(key)).map(key => `중복 ${key}`),
+    ...elsewhere.map(where => `다른 컬럼 ${where}`),
+  ];
 };
+(window as any).commandProblems = commandProblems;
 (window as any).missingPosts = missing;
 
 let pane: any;
@@ -167,7 +179,7 @@ let pane: any;
       const visible = visibleColumns();
       const complete = !!panel && !!expected && columns.join() === expected.join() && visible.length > 0
         && visible.filter(c => c !== 'commands').every(c => served.pages.get(c)?.length) && !Object.keys(missing()).length
-        && (!visible.includes('commands') || !missingCommands().length);
+        && (!visible.includes('commands') || !commandProblems().length);
       if (complete && pane.openMs == null) requestAnimationFrame(() => requestAnimationFrame(() => { pane.openMs = performance.now() - pane.start; }));
       if (pane.openMs != null && now - pane.start - pane.openMs > 300) {
         pane.maxFrameGapMs = Math.max(...pane.frames);
@@ -176,7 +188,7 @@ let pane: any;
         pane.columns = columns; pane.visible = visibleColumns(); pane.requested = [...served.pages.keys()];
         pane.domNodes = document.querySelectorAll('*').length; pane.done = true;
       } else if (now - pane.start > 20000) {
-        pane.error = `창이 다 그려지지 않았습니다: 컬럼 ${columns.join(',')} / 기대 ${expected?.join(',') ?? '목록 없음'}, 보임 ${visibleColumns().join(',')}, 조회 ${[...served.pages.keys()].join(',')}, 누락 ${JSON.stringify(missing())}, 명령 ${panel?.querySelectorAll('.sa-command').length ?? 0}/${commands}`;
+        pane.error = `창이 다 그려지지 않았습니다: 컬럼 ${columns.join(',')} / 기대 ${expected?.join(',') ?? '목록 없음'}, 보임 ${visibleColumns().join(',')}, 조회 ${[...served.pages.keys()].join(',')}, 누락 ${JSON.stringify(missing())}, 명령 ${commandProblems().join('; ') || `${commands}개 일치`}`;
         pane.done = true;
       } else requestAnimationFrame(tick);
     };
@@ -206,8 +218,8 @@ const reveal = async (key: string) => {
     const commands = key === 'commands';
     const requestedBefore = commands || !!served.pages.get(key)?.length, start = performance.now();
     column(key)?.scrollIntoView({ block: 'nearest', inline: 'start' });
-    const ok = await settle(() => visibleColumns().includes(key) && (commands ? !missingCommands().length : !!served.pages.get(key)?.length && !missing()[key]));
-    if (!ok) return { error: commands ? `방문한 명령 컬럼에 명령 ${missingCommands().length}개가 없습니다: ${missingCommands().slice(0, 5).join(',')}`
+    const ok = await settle(() => visibleColumns().includes(key) && (commands ? !commandProblems().length : !!served.pages.get(key)?.length && !missing()[key]));
+    if (!ok) return { error: commands ? `방문한 명령 컬럼의 줄이 기대와 다릅니다: ${commandProblems().slice(0, 5).join('; ')}`
       : `방문한 컬럼이 기록을 표시하지 않았습니다: ${key}, 조회 ${served.pages.get(key)?.length ?? 0}회, 누락 ${JSON.stringify(missing()[key] ?? [])}` };
     out.push({ column: key, ms: performance.now() - start, requestedBefore, posts: commands ? 0 : served.pages.get(key)!.flatMap(p => p.ids).length });
   }
