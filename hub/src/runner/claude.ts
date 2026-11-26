@@ -102,8 +102,11 @@ const fit = (event: SubagentEvent): SubagentEvent => {
  * say and do. A subagent's messages carry the id of the Agent tool call that started it, even when a
  * follow-up (SendMessage) resumes it; `task_started` ties that call to the task.
  */
-export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>[0]['emit'], links: {id:string;toolUseId:string}[] = []) {
-  const known = new Map<string, SubagentInfo>();
+export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>[0]['emit'], links: {id:string;toolUseId:string;info?:SubagentInfo}[] = []) {
+  const known = new Map<string, SubagentInfo>(links.map(link => [link.id, link.info
+    ? { ...link.info, id:link.id, toolUseId:link.toolUseId }
+    : { id:link.id, toolUseId:link.toolUseId, type:'unknown', description:'재개된 작업 '+link.id, status:'unknown',
+      detailNote:'이전 러너 연결에는 작업 유형과 설명이 없어 종료 알림만 반영합니다.' }]));
   const byToolUse = new Map(links.map(link => [link.toolUseId, link.id]));
   const early = new Map<string, SubagentEvent[]>();
   const reported = new Map<string, number>();
@@ -181,7 +184,7 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
         ...(m.is_backgrounded !== undefined && { background: m.is_backgrounded }),
         ...(m.parent_task_id && { parentId: m.parent_task_id }), ...(!previous && m.tool_use_id && { toolUseId: m.tool_use_id }),
         ...(!previous && m.tool_use_id && commands.has(m.tool_use_id) && { command: commands.get(m.tool_use_id) }),
-        summary: undefined, usage: undefined, lastTool: undefined, output: undefined,
+        summary: undefined, usage: undefined, lastTool: undefined, output: undefined, detailNote: undefined,
       };
       if (!previous && info.type === 'local_bash' && !info.background) { foreground.set(m.task_id, info); return true; }
       report(info);
@@ -210,6 +213,7 @@ export function subagentTracker(sessionId: string, emit: Parameters<StartEngine>
     } else if (m.subtype === 'task_notification') {
       if (late(m.task_id, m.run_id) || foreground.delete(m.task_id)) return true;
       update(m.task_id, { status: m.status, summary: clipResult(answers.get(m.task_id) ?? m.summary ?? ''),
+        ...(m.reason==='worker_restart' && {detailNote:'Claude 실행 프로세스가 재시작되어 기존 작업이 중단됐습니다. (worker_restart)'}),
         ...(m.usage && { usage: { tokens: m.usage.total_tokens, toolUses: m.usage.tool_uses, durationMs: m.usage.duration_ms } }) });
       // A command's output stays in its file on this machine; its end goes with the record.
       if (known.get(m.task_id)?.type === 'local_bash' && m.output_file) {

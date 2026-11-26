@@ -41,14 +41,13 @@ export class AgyChildren {
     this.brain=brain;this.details=details;
   }
   beforePrompt(session:string) {
-    if(this.timer || !uuid.test(session)) return;
-    this.dir=join(this.brain,session,'.system_generated');
-    this.seenChildren=new Set(files(join(this.dir,'subagents')));
-    this.seenMessages=new Set(files(join(this.dir,'messages')));
-    if(this.details){
-      for(const file of this.seenChildren){const child=record(join(this.dir,'subagents'),file);if(child?.conversationId!==file.slice(0,-5))continue;this.owned.add(child.conversationId);this.details.discover(child,true);}
-      for(const file of this.seenMessages)this.detailMessage(file);
-    }
+    if(!uuid.test(session)) return;
+    const dir=join(this.brain,session,'.system_generated');
+    if(this.dir && this.dir!==dir){this.waiting.clear();this.running.clear();this.stop();}
+    this.dir=dir;
+    // Parent input is also a recovery boundary for children that answered without tool events.
+    // Keep the seen sets for the same session so unchanged history does not emit again.
+    this.refresh(true,true);
   }
   observe(update:any) {
     if(update.name!=='invoke_subagent') return;
@@ -80,16 +79,15 @@ export class AgyChildren {
     }
     if(!this.timer){this.timer=setInterval(()=>this.refresh(),1500);this.timer.unref();}
   }
-  private detailMessage(file:string){
+  private detailMessage(file:string,msg:any){
     if(!this.dir||!this.details)return;
-    const msg=record(join(this.dir,'messages'),file);
     if(msg?.sender!=='system'||typeof msg.content!=='string')return;
     const match=/^Subagent ([\da-f-]+) has gone idle\.([\s\S]*)$/i.exec(msg.content);
     if(match&&this.owned.has(match[1]))this.details.idle(match[1],file,match[2].startsWith(" This was the subagent's most recent response: ")?match[2].slice(" This was the subagent's most recent response: ".length):'');
   }
   owns(session:string) { this.refresh(); return this.running.has(session); }
-  private refresh() {
-    if(!this.dir || !this.waiting.size && !this.running.size && !this.watching.size) return;
+  private refresh(force=false,existing=false) {
+    if(!this.dir || !force && !this.waiting.size && !this.running.size && !this.watching.size) return;
     const dir=this.dir;
     let changed=false;
     for(const file of files(join(dir,'subagents'))) {
@@ -97,7 +95,7 @@ export class AgyChildren {
       const child=record(join(dir,'subagents'),file);
       if(child?.conversationId!==file.slice(0,-5)) continue;
       this.seenChildren.add(file);
-      this.owned.add(child.conversationId);this.details?.discover(child,false);
+      this.owned.add(child.conversationId);this.details?.discover(child,existing);
       const role=child.subagentDescriptor?.role;
       const waiting=[...this.waiting].find(([,task])=>task.description===role) ?? this.waiting.entries().next().value;
       if(!waiting) continue;
@@ -109,16 +107,20 @@ export class AgyChildren {
       if(this.seenMessages.has(file)) continue;
       const msg=record(join(dir,'messages'),file);
       if(!msg) continue;
-      const idle=msg.sender==='system' && /^Subagent ([\da-f-]+) has gone idle\./i.exec(msg.content);
-      if(idle && !this.running.has(idle[1]) && !this.watching.has(idle[1])) continue;
-      this.seenMessages.add(file);this.detailMessage(file);
+      const idle=msg.sender==='system' && typeof msg.content==='string' && /^Subagent ([\da-f-]+) has gone idle\./i.exec(msg.content);
+      if(idle && !this.owned.has(idle[1])) continue;
+      this.seenMessages.add(file);this.detailMessage(file,msg);
       if(idle){this.watching.delete(idle[1]);if(this.running.delete(idle[1]))changed=true;}
     }
     if(changed) this.publish();
+    else this.stopIdleTimer();
+  }
+  private stopIdleTimer(){
+    if(!this.waiting.size && !this.running.size && !this.watching.size) { clearInterval(this.timer); this.timer=undefined; }
   }
   private publish() {
     this.emit([...this.waiting.values(),...this.running.values()]);
-    if(!this.waiting.size && !this.running.size && !this.watching.size) { clearInterval(this.timer); this.timer=undefined; }
+    this.stopIdleTimer();
   }
   private stop() {
     clearInterval(this.timer); this.timer=undefined; this.dir=undefined;

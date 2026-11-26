@@ -89,3 +89,34 @@ test('AGY final text arriving after native idle never resurrects running work or
   assert.equal(out.filter(m=>m.type==='subagent_event').at(-1)!.event.kind,'assistant');
   const count=out.length;tracker.close();assert.equal(out.length,count,'final response was already flushed');
 });
+
+for(const legacy of [false,true])test(`Codex history separates turn end from tool completion and preserves image calls (${legacy?'legacy':'paged'})`,async()=>{
+  const out:RunnerToHub[]=[];
+  const turns=['interrupted','failed','completed'].map((status,i)=>({id:'turn'+i,status,items:[
+    {id:'pending',type:'commandExecution',command:'sleep 20',status:'inProgress',exitCode:null,aggregatedOutput:null},
+    {id:'failed',type:'commandExecution',command:'false',status:'failed',exitCode:1,aggregatedOutput:'failed'},
+    {id:'done',type:'commandExecution',command:'true',status:'completed',exitCode:0,aggregatedOutput:'done'},
+    {id:'image',type:'imageView',path:'/tmp/input.png'},
+    {id:'answer',type:'agentMessage',text:'answer'},
+  ]}));
+  const a=new CodexSubagents('s',async(method,p)=>{
+    if(legacy&&method==='thread/turns/list')throw Error('unknown method');
+    return method==='thread/read'?{thread:{id:'child',status:{type:'idle'},...(p.includeTurns?{turns}:{})}}:{data:turns,nextCursor:null};
+  },m=>out.push(m));
+  try{
+    a.discover({id:'child',status:{type:'idle'}},'root');await a.recover('child');
+    const events=out.filter(m=>m.type==='subagent_event').map(m=>m.event);
+    for(let i=0;i<3;i++){
+      assert.equal(events.filter(e=>e.kind==='tool_result'&&e.toolUseId===`turn${i}/pending`).length,0);
+      assert.ok(events.some(e=>e.kind==='tool_result'&&e.toolUseId===`turn${i}/failed`&&e.isError));
+      assert.ok(events.some(e=>e.kind==='tool_result'&&e.toolUseId===`turn${i}/done`&&!e.isError));
+      assert.ok(events.some(e=>e.kind==='tool'&&e.toolUseId===`turn${i}/image`&&e.name==='ViewImage'&&(e.input as any).path==='/tmp/input.png'));
+    }
+    assert.equal(events.filter(e=>e.kind==='assistant').length,3,'a stopped turn still preserves supplied text without inventing tool success');
+    const count=events.length;
+    a.notification('item/completed',{threadId:'child',turnId:'turn0',item:{id:'image',type:'imageView',path:'/tmp/input.png'}},'root');
+    assert.equal(out.filter(m=>m.type==='subagent_event').length,count,'live/history image deduplicates');
+    a.notification('item/completed',{threadId:'child',turnId:'turn0',item:{id:'pending',type:'commandExecution',command:'sleep 20',status:'completed',exitCode:0,aggregatedOutput:'finished later'}},'root');
+    assert.equal(out.filter(m=>m.type==='subagent_event'&&m.event.kind==='tool_result'&&m.event.toolUseId==='turn0/pending').length,1,'a later confirmed result is not hidden by synthetic success');
+  }finally{a.stop();}
+});

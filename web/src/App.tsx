@@ -54,7 +54,7 @@ import { Chip } from './badges.tsx';
 import { EXTERNAL_NOTE, ExternalNote, FeedColumn, sameCtx, type ColumnActions, type ColumnCtx, type DeckColumn } from './FeedColumn.tsx';
 import { ThreadHead } from './ThreadHead.tsx';
 import { SubagentPanel, type SubagentPaneKeys } from './SubagentPanel.tsx';
-import { isActive, isCommand, isCurrentCommand, subagentKey, useSubagents, type Subagent } from './subagents.tsx';
+import { isActive, isCommand, isCurrentCommand, hasSubagentPaneTarget, backgroundRunningCount, subagentKey, useSubagents, type Subagent } from './subagents.tsx';
 import { ThreadReferences } from './ThreadReferences.tsx';
 import { useThreadReferences } from './threadReferences.ts';
 import { PANE_VISIBILITY_EVENT } from './mermaid.ts';
@@ -273,7 +273,7 @@ export function App() {
   /** Subagents by the thread post whose tool call started them: chips under it. */
   const subagentsByPost = useMemo(() => {
     const byCall = new Map<string, Subagent[]>();
-    for (const s of subagents) if (s.toolUseId) byCall.set(s.toolUseId, [...(byCall.get(s.toolUseId) ?? []), s]);
+    for (const s of subagents) if (s.toolUseId && hasSubagentPaneTarget(s)) byCall.set(s.toolUseId, [...(byCall.get(s.toolUseId) ?? []), s]);
     const out = new Map<number, Subagent[]>();
     if (byCall.size) for (const p of threadPosts) {
       const items = p.activity.flatMap(e => e.kind === 'tool' ? byCall.get(e.payload.toolUseId) ?? [] : []);
@@ -1512,7 +1512,7 @@ export function App() {
           references={canRead ? { open: referencesVisible, count: references.ids.length+(references.files?.length??0) } : undefined}
           onReferences={toggleReferences}
           subagents={threadTaskView && subagentsShown ? { open: subagentsVisible,
-            running: subagents.length ? subagents.filter(s => isCommand(s) ? isCurrentCommand(s) : isActive(s)).length : threadTaskView.background?.length ?? 0 } : undefined}
+            running: subagents.length ? subagents.filter(s => isCommand(s) ? isCurrentCommand(s) : isActive(s)).length : backgroundRunningCount(threadTaskView.background) } : undefined}
           onSubagents={toggleSubagents}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />

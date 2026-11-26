@@ -48,7 +48,7 @@ export type HubToRunner =
   | { type: 'start'; sessionId: string; requestCredential?: string; requestInputId?: string; engine: Engine; cwd: string; prompt: string; resume?: string; fork?: boolean; createDirectory?: true;
       permissionMode: PermissionMode; connectorMcp?: {url:string;token:string}; ipv6DeskMcpUrl?: string; instructions?: string; model?: ModelName; effort?: Effort; skills?: string[]; skillsHome?: string; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot;
       /** The hub records subagents: the runner may send `subagent` and `subagent_event` for this session. */
-      subagents?: true; subagentLinks?: { id: string; toolUseId: string }[] }
+      subagents?: true; subagentLinks?: { id: string; toolUseId: string; info?: SubagentInfo }[] }
   /** `steer`: add the message to the running turn (#now) instead of running it after (the hub queues #later). */
   | { type: 'send'; sessionId: string; requestInputId?: string; text: string; skills?: string[]; steer?: boolean; skillFiles?: SkillTransfer[]; skillSnapshot?: SkillSnapshot }
   | { type: 'request_probe'; sessionId:string;requestInputId:string }
@@ -198,7 +198,7 @@ export function checkHubToRunner(m: unknown): HubToRunner | string {
     case 'start':
       return str(m.engine) && str(m.cwd) && (m.cwd as string).startsWith('/') && str(m.prompt) && MODES.includes(m.permissionMode as string)
         && (m.createDirectory === undefined || m.createDirectory === true && m.resume === undefined && (m.fork === undefined || m.fork === false))
-        && connectorMcp(m.connectorMcp) && (m.subagents === undefined || m.subagents === true) && (m.subagentLinks === undefined || Array.isArray(m.subagentLinks) && m.subagentLinks.length <= 10000 && m.subagentLinks.every(x => isObj(x) && str(x.id) && str(x.toolUseId))) && (m.ipv6DeskMcpUrl === undefined || validMcpEndpoint(m.ipv6DeskMcpUrl, ipv6DeskMcpEndpoint))
+        && connectorMcp(m.connectorMcp) && (m.subagents === undefined || m.subagents === true) && (m.subagentLinks === undefined || Array.isArray(m.subagentLinks) && m.subagentLinks.length <= 10000 && m.subagentLinks.every(x => isObj(x) && str(x.id) && str(x.toolUseId) && (x.info === undefined || isObj(x.info) && x.info.id === x.id && x.info.toolUseId === x.toolUseId && validSubagentInfo(x.info)))) && (m.ipv6DeskMcpUrl === undefined || validMcpEndpoint(m.ipv6DeskMcpUrl, ipv6DeskMcpEndpoint))
         && optStr(m.instructions) && (m.instructions === undefined || (m.instructions as string).length <= 32768) && optStr(m.resume) && optStr(m.model) && optStr(m.effort) && strList(m.skills) && optStr(m.skillsHome) && snapshot(m.skillSnapshot)
         ? m as HubToRunner : 'start: bad fields';
     case 'send': return str(m.text) && strList(m.skills) && snapshot(m.skillSnapshot) ? m as HubToRunner : 'send: bad fields';

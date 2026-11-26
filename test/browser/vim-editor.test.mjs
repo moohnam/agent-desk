@@ -20,10 +20,17 @@ function fixtureServer() {
   const deepGroupedFeed = interactionData(1500, 'short');
   let groupedFailure = true;
   const groupedStreams = new Set();
+  const subagentStreams = new Set();
   let enrollmentPending = true;
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
+      if (url.pathname === '/__fixture/subagent-message' && request.method === 'POST') {
+        let body='';for await (const chunk of request) body+=chunk;
+        const message=JSON.parse(body);
+        for(const stream of subagentStreams)stream.write(`data: ${JSON.stringify({source:'',message})}\n\n`);
+        response.writeHead(204).end();return;
+      }
       if (url.pathname === '/__fixture/grouped-live') {
         for (let i = 0; i < 3; i++) for (const stream of groupedStreams) stream.write(`data: ${JSON.stringify({ source: '', message: {
           type: 'event', event: {id: 100001+i, task_id:url.searchParams.get('task') ?? 't9', kind:'assistant', ts:'2026-01-02T00:00:00.000Z', payload:{text:`재시도 보호 ${i}`}},
@@ -33,6 +40,7 @@ function fixtureServer() {
       if (url.pathname === '/api/streams') {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
         response.write('data: {"source":"","connected":true}\n\n');
+        subagentStreams.add(response);response.on('close',()=>subagentStreams.delete(response));
         if (request.headers['x-desk-fixture']==='queue-many') {
           approvalStreams.add(response);
           response.on('close',()=>approvalStreams.delete(response));
@@ -401,6 +409,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     },false,'emacs'));
 
     for(const width of [1440,390])await t.test(`subagent pane separates active commands from history (${width})`,()=>withPage(async page=>{
+      let backgroundItem;
       await page.setViewport({width,height:900});await page.setRequestInterception(true);
       page.on('request',request=>{
         const path=new URL(request.url()).pathname;
@@ -411,13 +420,22 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const match=/\/tasks\/([^/]+)\/subagents$/.exec(path);
         if(match){
           const base={task_id:match[1],session_id:'s',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:01Z',detailed:true,background:true};
+          backgroundItem={...base,id:'bg',toolUseId:'call-bg',type:'shell',backgroundEvidence:'native',description:'실제 백그라운드 명령',status:'running',command:'sleep fixture'};
           return void request.respond({status:200,contentType:'application/json',body:JSON.stringify([
-            {...base,id:'agent',type:'local_agent',description:'완료된 하위 작업',status:'ended',detailNote:'과거 전체 기록은 제공되지 않았습니다.'},
-            {...base,id:'bg',type:'shell',backgroundEvidence:'native',description:'실제 백그라운드 명령',status:'running',command:'sleep fixture'},
+            {...base,id:'agent',toolUseId:'call-agent',type:'local_agent',description:'완료된 하위 작업',status:'ended',detailNote:'과거 전체 기록은 제공되지 않았습니다.'},
+            backgroundItem,
             {...base,id:'legacy',type:'shell',detailed:false,description:'구버전 미확인 명령',status:'running'},
-            {...base,id:'old',type:'shell',description:'기존 오분류 종료 명령',status:'completed'},
+            {...base,id:'old',toolUseId:'call-old',type:'shell',description:'기존 오분류 종료 명령',status:'completed'},
             {...base,id:'foreground',type:'local_bash',description:'전경 명령',status:'running',background:false},
           ])});
+        }
+        const events=/\/tasks\/([^/]+)\/events$/.exec(path);
+        if(events){
+          const e={task_id:events[1],session_id:'s',ts:'2026-01-01T00:00:00Z'};
+          return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[
+            {...e,id:9001,kind:'assistant',payload:{text:'하위 작업을 시작합니다.'}},
+            ...['agent','bg','old'].map((id,i)=>({...e,id:9002+i,kind:'tool',payload:{name:'Bash',toolUseId:'call-'+id,input:{command:id}}})),
+          ],more:false})});
         }
         if(/\/subagents\/[^/]+\/events$/.test(path))return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({events:[],more:false})});
         void request.continue();
@@ -428,15 +446,51 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await page.waitForFunction(()=>document.body.textContent.includes('서브 에이전트 창은 스레드를 옆에 띄운 넓은 화면에서 열 수 있습니다.'));
         assert.equal(await page.$('.subagent-panel'),null);return;
       }
-      await page.click('[aria-label="서브 에이전트 창"]');
+      await page.waitForFunction(()=>document.querySelectorAll('.thread .sa-chip').length===2);
+      assert.equal(await page.$eval('[aria-label="서브 에이전트 창"] span',e=>e.textContent),'1');
+      assert.ok(!(await page.$eval('.thread',e=>e.textContent)).includes('명령: 기존 오분류 종료 명령'));
+      const commandChip=(await page.$$('.thread .sa-chip'))[1];
+      assert.ok((await commandChip.evaluate(e=>e.textContent)).includes('실제 백그라운드 명령'));
+      await commandChip.click();
       await page.waitForSelector('.sa-command');
       assert.equal(await page.$$eval('.sa-command',nodes=>nodes.length),1);
       const content=await page.$eval('.subagent-panel',e=>e.textContent);
       assert.ok(content.includes('실제 백그라운드 명령'));assert.ok(content.includes('완료된 하위 작업'));
       assert.ok(content.includes('과거 전체 기록은 제공되지 않았습니다.'));
       assert.ok(!content.includes('기존 오분류 종료 명령'));assert.ok(!content.includes('전경 명령'));assert.ok(!content.includes('구버전 미확인 명령'));
+      await page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),{type:'subagent',subagent:{...backgroundItem,status:'completed',updated_at:'2026-01-01T00:00:02Z'}});
+      await page.waitForFunction(()=>document.querySelectorAll('.thread .sa-chip').length===1 && !document.querySelector('.sa-command'));
+      assert.ok((await page.$eval('.thread .sa-chip',e=>e.textContent)).includes('완료된 하위 작업'));
+      assert.equal(await page.$('[aria-label="서브 에이전트 창"] span'),null);
       await page.keyboard.press('Escape');await page.waitForSelector('.subagent-panel',{hidden:true});
       assert.ok(await page.$('.thread-head'));
+    }));
+
+
+    await t.test('subagent header snapshot ignores foreground guards before history exists',()=>withPage(async page=>{
+      await page.setRequestInterception(true);
+      let tasks;
+      const guards=[{id:'tool',type:'tool',description:'foreground'},{id:'status',type:'status',description:'조회 중'},
+        {id:'legacy',type:'shell',description:'unproven'}];
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/state'){
+          const state=interactionData(24)(new URL(request.url()));
+          state.tasks=state.tasks.map(t=>({...t,source:'app',background:guards}));tasks=state.tasks;
+          return void request.respond({status:200,contentType:'application/json',body:JSON.stringify(state)});
+        }
+        if(/\/tasks\/[^/]+\/subagents$/.test(path))return void request.respond({status:200,contentType:'application/json',body:'[]'});
+        void request.continue();
+      });
+      await openReply(page,origin);await page.waitForSelector('[aria-label="서브 에이전트 창"]');
+      assert.equal(await page.$('[aria-label="서브 에이전트 창"] span'),null);
+      const id=await page.$eval('.thread',e=>e.dataset.task);
+      const task=tasks.find(t=>t.id===id);
+      await page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),{
+        type:'task',task:{...task,background:[...guards,{id:'native',type:'shell',description:'background',backgroundEvidence:'native'},
+          {id:'child',type:'local_agent',description:'child'}]},
+      });
+      await page.waitForFunction(()=>document.querySelector('[aria-label="서브 에이전트 창"] span')?.textContent==='2');
     }));
 
     for (const width of [1440,390]) await t.test(`code Escape closes only the panel after focus changes (${width})`, () => withPage(async page => {

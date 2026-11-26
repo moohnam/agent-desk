@@ -3,6 +3,11 @@
 import type { RunnerToHub, SubagentEvent, SubagentInfo } from '../../../shared/protocol.ts';
 type Json = any;
 const text = (v: unknown) => typeof v === 'string' ? v : '';
+const historyDone = (turn: Json, item: Json) => {
+  if (typeof item.status === 'string') return ['completed','failed','declined'].includes(item.status);
+  if (item.completedAtMs != null) return true;
+  return ['agentMessage','plan'].includes(item.type) && ['completed','failed','interrupted'].includes(turn.status);
+};
 const clip = (s: string) => s.length > 64000 ? s.slice(0,64000) + '\n…(truncated)' : s;
 export class CodexSubagents {
   private known = new Map<string, SubagentInfo>();
@@ -60,7 +65,7 @@ export class CodexSubagents {
             const page=await this.request('thread/turns/list',{threadId,cursor,limit:100,sortDirection:'asc',itemsView:'full'});
             if(!Array.isArray(page.data))throw Error('턴 목록 응답 오류');
             turns.push(...page.data);
-            for(const turn of page.data)for(const item of turn.items??[])this.item(threadId,turn.id,item,turn.status!=='inProgress'||item.completedAtMs!=null||['completed','failed','declined'].includes(item.status));
+            for(const turn of page.data)for(const item of turn.items??[])this.item(threadId,turn.id,item,historyDone(turn,item));
             cursor=page.nextCursor??null;
             if(cursor){if(cursors.has(cursor)||cursors.size>=100)throw Error('턴 페이지 상한');cursors.add(cursor);}
           }while(cursor);
@@ -74,7 +79,7 @@ export class CodexSubagents {
         if(r.thread?.id!==threadId || !Array.isArray(r.thread.turns))throw Error('기록 응답을 확인할 수 없습니다');
         for(const turn of r.thread.turns) {
           for(const item of turn.items??[]) this.item(threadId,turn.id,item,
-            turn.status!=='inProgress'||item.completedAtMs!=null||['completed','failed','declined'].includes(item.status));
+            historyDone(turn,item));
         }
         const last=r.thread.turns.at(-1);
         const old=this.known.get(id);if(!old)return false;
@@ -108,11 +113,11 @@ export class CodexSubagents {
     } else if(item.type==='agentMessage'&&done&&text(item.text))step('text',{kind:'assistant',text:item.text});
     else if(item.type==='plan'&&done&&text(item.text))step('text',{kind:'assistant',text:item.text});
     else {
-      const name=item.type==='commandExecution'?'Bash':item.type==='fileChange'?'Edit':item.type==='mcpToolCall'?`mcp__${item.server}__${item.tool}`:item.type==='dynamicToolCall'?item.tool:item.type==='webSearch'?'WebSearch':undefined;
+      const name=item.type==='commandExecution'?'Bash':item.type==='fileChange'?'Edit':item.type==='mcpToolCall'?`mcp__${item.server}__${item.tool}`:item.type==='dynamicToolCall'?item.tool:item.type==='webSearch'?'WebSearch':item.type==='imageView'?'ViewImage':undefined;
       if(!name)return;
-      const input=item.type==='commandExecution'?{command:item.command,cwd:item.cwd}:item.arguments??item.changes??{query:item.query};
+      const input=item.type==='commandExecution'?{command:item.command,cwd:item.cwd}:item.type==='imageView'?{path:item.path}:item.arguments??item.changes??{query:item.query};
       step('call',{kind:'tool',toolUseId:key,name,input});
-      if(done)step('result',{kind:'tool_result',toolUseId:key,isError:['failed','declined'].includes(item.status)||item.success===false||!!item.error||(item.exitCode??0)!==0,
+      if(done && item.type!=='imageView')step('result',{kind:'tool_result',toolUseId:key,isError:['failed','declined'].includes(item.status)||item.success===false||!!item.error||(item.exitCode??0)!==0,
         text:text(item.aggregatedOutput)||text(item.error?.message)||JSON.stringify(item.result??item.contentItems??item.changes??'')});
     }
   }

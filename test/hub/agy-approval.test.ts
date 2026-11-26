@@ -261,3 +261,29 @@ test('AGY restores only UUID-owned metadata and idle responses without assigning
     assert.equal(monitor.owns(child),false);assert.equal(answers.at(-1)![2],'followup result');
   }finally{monitor.reset();rmSync(dir,{recursive:true,force:true});}
 });
+
+
+test('AGY parent prompts recover new response-only completions once and release the idle watcher',t=>{
+  const dir=mkdtempSync(join(tmpdir(),'desk-agy-rescan-'));
+  const parent='11111111-1111-4111-8111-111111111111',child='22222222-2222-4222-8222-222222222222';
+  const records=join(dir,parent,'.system_generated'),answers:any[]=[],found:any[]=[],snapshots:BackgroundTask[][]=[];
+  const clears=t.mock.method(globalThis,'clearInterval');
+  const monitor=new AgyChildren(value=>snapshots.push(value),dir,{discover:(...args)=>found.push(args),idle:(...args)=>answers.push(args)});
+  const idle=(file:string,text:string)=>writeFileSync(join(records,'messages',file+'.json'),JSON.stringify({sender:'system',content:`Subagent ${child} has gone idle. This was the subagent's most recent response: ${text}`}));
+  try{
+    for(const subdir of ['subagents','messages'])mkdirSync(join(records,subdir),{recursive:true});
+    writeFileSync(join(records,'subagents',child+'.json'),JSON.stringify({conversationId:child}));
+    monitor.beforePrompt(parent);monitor.observeUpdate(child,{sessionUpdate:'agent_message_chunk'});
+    const before=clears.mock.callCount();
+    idle('33333333-3333-4333-8333-333333333333','first');monitor.owns(child);
+    assert.equal(answers.length,1);assert.ok(clears.mock.callCount()>before,'response-only idle also stops its timer');
+    idle('44444444-4444-4444-8444-444444444444','second');monitor.beforePrompt(parent);
+    assert.deepEqual(answers.map(a=>a[2]),['first','second']);
+    const counts=[answers.length,found.length,snapshots.length];
+    monitor.beforePrompt(parent);monitor.beforePrompt(parent);
+    assert.deepEqual([answers.length,found.length,snapshots.length],counts,'unchanged files do not publish status or details again');
+    monitor.observeUpdate(child,{sessionUpdate:'agent_message_chunk'});
+    idle('55555555-5555-4555-8555-555555555555','third');monitor.beforePrompt(parent);
+    assert.deepEqual(answers.map(a=>a[2]),['first','second','third'],'an active watcher does not suppress a parent-prompt rescan');
+  }finally{monitor.reset();rmSync(dir,{recursive:true,force:true});}
+});

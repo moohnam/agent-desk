@@ -48,7 +48,8 @@ test('Claude persisted links survive actual hub and runner start-option forwardi
  const remotes=new RemoteRunners(s.store,local,()=>{},()=>{},()=>{},undefined as any,()=>{},()=>{});
  try{
   remotes.handle({type:'start',sessionId:'synthetic-session',engine:'claude',cwd:process.cwd(),prompt:'followup',resume:'synthetic-engine-id'} as any);
-  assert.deepEqual(links,[{id:'agent:child',toolUseId:'original'}]);
+  assert.deepEqual(links.map(({id,toolUseId}:any)=>({id,toolUseId})),[{id:'agent:child',toolUseId:'original'}]);
+  assert.equal(links[0].info.description,'child');
   tracker({type:'system',subtype:'task_started',task_id:'agent:child',tool_use_id:'followup',description:'child',prompt:'followup prompt'});
   tracker({type:'assistant',parent_tool_use_id:'original',message:{content:[{type:'text',text:'followup answer'}]}});
   console.log('Claude actual='+JSON.stringify(s.texts())+' expected=["first prompt","followup prompt","followup answer"]');

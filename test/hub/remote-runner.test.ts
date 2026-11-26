@@ -712,7 +712,8 @@ test('managed remote resume restores only the same session original subagent too
     t.agent.runner.handle({type:'close',sessionId});t.exchange();
     t.hub.remotes.handle({type:'start',sessionId,engine:'codex',cwd:`moohnam@ws20:${t.dir}`,prompt:'followup',resume:'engine-1',permissionMode:'auto'});
     t.exchange();t.exchange();
-    assert.deepEqual(t.starts[1].subagentLinks,[{id:'child',toolUseId:'original-call'}]);
+    assert.deepEqual(t.starts[1].subagentLinks?.map(({id,toolUseId})=>({id,toolUseId})),[{id:'child',toolUseId:'original-call'}]);
+    assert.equal(t.starts[1].subagentLinks?.[0].info?.status,'completed');
     t.agent.runner.handle({type:'close',sessionId});t.exchange();
     t.hub.remotes.handle({type:'start',sessionId,engine:'codex',cwd:`moohnam@ws20:${t.dir}`,prompt:'fork',resume:'engine-1',fork:true,permissionMode:'auto'});
     t.exchange();t.exchange();

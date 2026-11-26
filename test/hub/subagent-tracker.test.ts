@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { subagentTracker } from '../../hub/src/runner/claude.ts';
+import { Store } from '../../hub/src/db.ts';
+import { Subagents } from '../../hub/src/subagents.ts';
 import { checkHubToRunner, checkRunnerToHub, type RunnerToHub } from '../../shared/protocol.ts';
 
 const sdk = (m: Record<string, unknown>) => m as unknown as SDKMessage;
@@ -49,6 +51,10 @@ test('subagent messages are checked like the rest', () => {
   const start = { type: 'start', sessionId: 's', engine: 'claude', cwd: '/x', prompt: 'p', permissionMode: 'auto' };
   assert.equal(typeof checkHubToRunner({ ...start, subagents: true }), 'object');
   assert.equal(typeof checkHubToRunner({ ...start, subagents: 'yes' }), 'string');
+  const info={id:'a',toolUseId:'call',type:'local_agent',description:'agent',status:'running'};
+  assert.equal(typeof checkHubToRunner({...start,subagentLinks:[{id:'a',toolUseId:'call',info}]}),'object');
+  for(const invalid of [{...info,id:'other'},{...info,toolUseId:'other'},{...info,description:{}},{...info,status:'invalid'}])
+    assert.equal(typeof checkHubToRunner({...start,subagentLinks:[{id:'a',toolUseId:'call',info:invalid}]}),'string');
 });
 
 test('frames of an earlier run come late and are dropped; a huge input is cut', () => {
@@ -130,4 +136,47 @@ test('optional subagent reports and step payloads must satisfy storage and rende
   }
   for(const usage of [{tokens:NaN,toolUses:1,durationMs:2},{tokens:1,toolUses:-1,durationMs:2},true])assert.equal(typeof checkRunnerToHub({type:'subagent',sessionId:'s',subagent:{...info,usage}}),'string');
   for(const event of [{kind:'assistant',text:4},{kind:'tool',name:3,toolUseId:'x'},{kind:'tool_result',toolUseId:'x',text:'x',isError:'no'}])assert.equal(typeof checkRunnerToHub({type:'subagent_event',sessionId:'s',subagentId:'a',event}),'string');
+});
+
+
+test('Claude restart termination updates a restored task before another start and preserves its identity',()=>{
+  const out:RunnerToHub[]=[];
+  const original={id:'child',toolUseId:'original',type:'local_agent',description:'기존 조사',status:'running' as const,background:true,agent:'researcher',parentId:'parent'};
+  const track=subagentTracker('s',m=>out.push(m),[{id:'child',toolUseId:'original',info:original}]);
+  track(sdk({type:'system',subtype:'task_notification',task_id:'child',status:'stopped',reason:'worker_restart',summary:'worker restarted',output_file:''}));
+  const report=out.at(-1);assert.ok(report?.type==='subagent');
+  assert.equal(report.subagent.status,'stopped');assert.equal(report.subagent.summary,'worker restarted');
+  assert.equal(report.subagent.description,original.description);assert.equal(report.subagent.type,original.type);
+  assert.equal(report.subagent.agent,original.agent);assert.equal(report.subagent.parentId,original.parentId);
+  assert.match(report.subagent.detailNote??'',/worker_restart/);
+  track(sdk({type:'system',subtype:'task_started',task_id:'child',tool_use_id:'followup',description:'새 조사',run_id:'r2'}));
+  const next=out.at(-1);assert.ok(next?.type==='subagent');
+  assert.equal(next.subagent.toolUseId,'original');assert.equal(next.subagent.detailNote,undefined);
+  for(const m of out)assert.equal(typeof checkRunnerToHub(m),'object');
+});
+
+test('Claude old links retain a terminal notice without guessing a task type or adopting an unknown task',()=>{
+  const out:RunnerToHub[]=[];const track=subagentTracker('s',m=>out.push(m),[{id:'child',toolUseId:'original'}]);
+  const stopped=(id:string)=>track(sdk({type:'system',subtype:'task_notification',task_id:id,status:'stopped',reason:'worker_restart',summary:'stopped before start',output_file:''}));
+  stopped('not-owned');assert.equal(out.length,0);
+  stopped('child');const report=out.at(-1);assert.ok(report?.type==='subagent');
+  assert.equal(report.subagent.id,'child');assert.equal(report.subagent.type,'unknown');
+  assert.equal(report.subagent.status,'stopped');assert.equal(report.subagent.summary,'stopped before start');
+  assert.match(report.subagent.detailNote??'',/worker_restart/);
+});
+
+
+test('Claude worker restart notice replaces the restored stored row without losing task metadata',()=>{
+  const store=new Store(':memory:');store.database.exec('PRAGMA foreign_keys=OFF');
+  const db=new Subagents(store,()=>{}),session={id:'s',task_id:'t'} as any;
+  const original={id:'child',toolUseId:'original',type:'local_bash',description:'background build',status:'running' as const,background:true,command:'npm run build'};
+  try{
+    db.report(session,original);
+    const track=subagentTracker(session.id,m=>{if(m.type==='subagent')db.report(session,m.subagent);},[{id:original.id,toolUseId:original.toolUseId,info:original}]);
+    track(sdk({type:'system',subtype:'task_notification',task_id:'child',status:'stopped',reason:'worker_restart',summary:'build interrupted by worker restart',output_file:''}));
+    const rows=db.list(session.task_id);assert.equal(rows.length,1);
+    assert.equal(rows[0].status,'stopped');assert.equal(rows[0].summary,'build interrupted by worker restart');
+    assert.equal(rows[0].type,'local_bash');assert.equal(rows[0].description,'background build');assert.equal(rows[0].command,'npm run build');
+    assert.match(rows[0].detailNote??'',/worker_restart/);
+  }finally{store.database.close();}
 });

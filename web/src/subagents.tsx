@@ -5,6 +5,7 @@
 import { ChevronRight } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Subagent } from '../../shared/api.ts';
+import type { BackgroundTask } from '../../shared/protocol.ts';
 import { api } from './api.ts';
 import { mergeTaskEvents } from './posts.ts';
 import type { HubEvent, HubMessage } from './types.ts';
@@ -43,8 +44,13 @@ export function useSubagents(taskId: string | null, reload = 0): Subagent[] {
       if (loaded) setList(prev => apply(prev, m.subagent));
       else early.push(m.subagent);
     });
-    api.subagents(taskId).then(items => { if (live) setList(early.reduce(apply, items)); }, () => {})
-      .finally(() => { loaded = true; });
+    api.subagents(taskId).then(items => {
+      loaded = true;
+      if (live) setList(early.reduce(apply, items));
+    }, () => {
+      loaded = true;
+      if (live) setList(prev => early.reduce(apply, prev));
+    });
     return () => { live = false; off(); };
   }, [taskId, reload]);
   return list;
@@ -126,6 +132,11 @@ export function subagentKind(s: Subagent): string {
 export const isCommand = (s: Subagent) => subagentKind(s) === '명령';
 export const isCurrentCommand = (s: Subagent) => isCommand(s) && isActive(s) && s.background !== false
   && (s.backgroundEvidence === 'native' || s.detailed && s.background === true);
+/** History stays available for agents; completed or unproven commands have no pane target. */
+export const hasSubagentPaneTarget = (s: Subagent) => !isCommand(s) || isCurrentCommand(s);
+/** A runner snapshot also contains foreground guards and status placeholders. */
+export const backgroundRunningCount = (items: BackgroundTask[] = []) => items.filter(s => s.type !== 'tool' && s.type !== 'status'
+  && (!['shell', 'local_bash'].includes(s.type) || s.backgroundEvidence === 'native')).length;
 export function subagentTitle(s: Subagent): string {
   const kind = subagentKind(s);
   return kind === '명령' ? `명령: ${s.description}` : s.description || kind;

@@ -11,12 +11,12 @@ import {api} from '../../web/src/api.ts';
 // Run the real hook with React, without a DOM renderer or copied paging implementation.
 const require=createRequire(import.meta.url);
 let source=readFileSync(new URL('../../web/src/subagents.tsx',import.meta.url),'utf8');
-source=source.slice(0,source.indexOf('const STATUS:')).replace(/^import .*lucide-react.*\n/m,'').replace(/^import '\.\/subagent-panel.css';\n/m,'');
+source=source.slice(0,source.indexOf('/** Under the post')).replace(/^import .*lucide-react.*\n/m,'').replace(/^import '\.\/subagent-panel.css';\n/m,'');
 source=source.replace("from 'react'",`from '${pathToFileURL(require.resolve('react'))}'`)
  .replace("from './api.ts'",`from '${new URL('../../web/src/api.ts',import.meta.url)}'`)
  .replace("from './posts.ts'",`from '${new URL('../../web/src/posts.ts',import.meta.url)}'`);
 const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
-const {useSubagentEvents,reportSubagent}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
+const {useSubagentEvents,useSubagents,reportSubagent,hasSubagentPaneTarget,backgroundRunningCount}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
 const event=(id:number,task_id='t')=>({id,subagent_id:'a',task_id,session_id:'s',kind:'assistant',payload:{text:'step '+id}});
 
 test('subagent initial SSE, older cursor, reconnect gaps and stale task loads converge',async()=>{
@@ -67,4 +67,43 @@ test('subagent initial SSE, older cursor, reconnect gaps and stale task loads co
     await deliver(Array.from({length:500},(_,i)=>event(i+1,'empty')),false);
     assert.equal(state.events.length,1000);assert.equal(state.more,false);
   }finally{await act(()=>root.unmount());api.subagentEvents=original;(globalThis as any).window=priorWindow;}
+});
+
+
+test('subagent list retains SSE on failed initial load and merges it into a later reload',async()=>{
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
+  const priorWindow=(globalThis as any).window;
+  (globalThis as any).window={HTMLIFrameElement:class {}};
+  const doc={nodeType:9,addEventListener(){},defaultView:(globalThis as any).window};
+  const container={nodeType:1,tagName:'DIV',ownerDocument:doc,addEventListener(){},namespaceURI:'http://www.w3.org/1999/xhtml'};
+  const original=api.subagents;
+  const requests:{resolve:(v:any)=>void,reject:(e:Error)=>void}[]=[];
+  api.subagents=()=>new Promise((resolve,reject)=>requests.push({resolve,reject}));
+  let state:any[]=[];
+  const Column=({reload=0})=>{state=useSubagents('t',reload);return null;};
+  const root=createRoot(container as any);
+  const item=(id:string,status='running',updated_at='2026-01-01T00:00:00Z')=>({id,task_id:'t',session_id:'s',type:'local_agent',status,updated_at});
+  try{
+    await act(()=>root.render(createElement(Column)));
+    await act(()=>reportSubagent({type:'subagent',subagent:item('live')}));
+    await act(async()=>requests.shift()!.reject(Error('offline')));
+    assert.deepEqual(state.map(s=>s.id),['live']);
+    await act(()=>reportSubagent({type:'subagent',subagent:item('live','completed','2026-01-01T00:00:01Z')}));
+    assert.equal(state[0].status,'completed');
+    await act(()=>root.render(createElement(Column,{reload:1})));
+    await act(()=>reportSubagent({type:'subagent',subagent:item('live','completed','2026-01-01T00:00:01Z')}));
+    await act(async()=>requests.shift()!.resolve([item('past','completed'),item('live')]));
+    assert.deepEqual(state.map(s=>s.id),['past','live']);
+    assert.equal(state[1].status,'completed');
+  }finally{await act(()=>root.unmount());api.subagents=original;(globalThis as any).window=priorWindow;}
+});
+
+test('snapshot counts and post links exclude foreground, unproven and ended commands',()=>{
+  const item=(type:string,extra:object={})=>({type,id:type,description:type,...extra});
+  assert.equal(backgroundRunningCount([item('tool'),item('status'),item('shell'),item('local_bash')]),0);
+  assert.equal(backgroundRunningCount([item('tool'),item('shell',{backgroundEvidence:'native'}),item('local_agent')]),2);
+  assert.equal(hasSubagentPaneTarget(item('shell',{status:'running',backgroundEvidence:'native'})),true);
+  assert.equal(hasSubagentPaneTarget(item('shell',{status:'completed',backgroundEvidence:'native'})),false);
+  assert.equal(hasSubagentPaneTarget(item('local_bash',{status:'running',detailed:true,background:false})),false);
+  assert.equal(hasSubagentPaneTarget(item('local_agent',{status:'completed'})),true);
 });
