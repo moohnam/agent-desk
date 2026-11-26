@@ -236,8 +236,8 @@ export class RemoteRunners implements RunnerPort {
     if (cmd.type === 'start') {
       const rows = cmd.resume && !cmd.fork ? this.db.prepare('SELECT id, info_json FROM subagent WHERE session_id = ? LIMIT 10000').all(cmd.sessionId) as {id:string;info_json:string}[] : [];
       const links = rows.flatMap(row => {
-        const {id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command} = JSON.parse(row.info_json);
-        return typeof toolUseId === 'string' ? [{id:row.id,toolUseId,info:{id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command}}] : [];
+        const {id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command,usage,lastTool} = JSON.parse(row.info_json);
+        return typeof toolUseId === 'string' ? [{id:row.id,toolUseId,info:{id,type,description,status,toolUseId,agent,parentId,background,backgroundEvidence,command,usage,lastTool}}] : [];
       });
       cmd = { ...cmd, subagents: true, ...(links.length ? {subagentLinks:links} : {}) };
     }

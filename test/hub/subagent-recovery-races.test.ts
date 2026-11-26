@@ -40,6 +40,9 @@ test('Claude persisted links survive actual hub and runner start-option forwardi
  const s=sink();let tracker:any,links:any;
  const first=subagentTracker('synthetic-session',s.emit);
  first({type:'system',subtype:'task_started',task_id:'agent:child',tool_use_id:'original',description:'child',prompt:'first prompt',is_backgrounded:true} as any);
+ first({type:'system',subtype:'task_progress',task_id:'agent:child',last_tool_name:'Read',usage:{total_tokens:314,tool_uses:2,duration_ms:4900}} as any);
+ first({type:'system',subtype:'task_updated',task_id:'agent:child',patch:{is_backgrounded:true}} as any);
+ const info=()=>JSON.parse((s.store.database.prepare('SELECT info_json FROM subagent WHERE id=?').get('agent:child') as any).info_json);
  const runner=new Runner('synthetic-runner',s.emit,{start:opts=>{
   links=opts.subagentLinks;tracker=subagentTracker(opts.sessionId,opts.emit,opts.subagentLinks);
   return {send(){},interrupt:async()=>{},setMode:async()=>{},setModel:async()=>{},resolveApproval(){},close(){}};
@@ -50,7 +53,12 @@ test('Claude persisted links survive actual hub and runner start-option forwardi
   remotes.handle({type:'start',sessionId:'synthetic-session',engine:'claude',cwd:process.cwd(),prompt:'followup',resume:'synthetic-engine-id'} as any);
   assert.deepEqual(links.map(({id,toolUseId}:any)=>({id,toolUseId})),[{id:'agent:child',toolUseId:'original'}]);
   assert.equal(links[0].info.description,'child');
+  tracker({type:'system',subtype:'task_notification',task_id:'agent:child',status:'stopped',reason:'worker_restart',summary:'worker restarted'});
+  assert.deepEqual(info().usage,{tokens:314,toolUses:2,durationMs:4900});
+  assert.equal(info().lastTool,'Read');assert.equal(info().status,'stopped');
+  assert.match(info().detailNote,/worker_restart/);
   tracker({type:'system',subtype:'task_started',task_id:'agent:child',tool_use_id:'followup',description:'child',prompt:'followup prompt'});
+  assert.equal(info().usage,undefined);assert.equal(info().lastTool,undefined);
   tracker({type:'assistant',parent_tool_use_id:'original',message:{content:[{type:'text',text:'followup answer'}]}});
   console.log('Claude actual='+JSON.stringify(s.texts())+' expected=["first prompt","followup prompt","followup answer"]');
   assert.deepEqual(s.texts(),['first prompt','followup prompt','followup answer']);
@@ -105,4 +113,25 @@ test('unchanged Codex discovery preserves recovered notes without another report
   a.discover(listed,'root');await flush();
   assert.equal(out.length,count);
  } finally {a.stop();}
+});
+
+test('AGY next prompt before first poll discovers a pending child as running but history stays unknown',()=>{
+ const s=sink(),dir=mkdtempSync('/tmp/desk15-agy-prompt-');
+ const parent='11111111-1111-4111-8111-111111111111',child='22222222-2222-4222-8222-222222222222',past='33333333-3333-4333-8333-333333333333';
+ const records=join(dir,parent,'.system_generated');
+ mkdirSync(join(records,'subagents'),{recursive:true});mkdirSync(join(records,'messages'));
+ const save=(id:string)=>writeFileSync(join(records,'subagents',id+'.json'),JSON.stringify({conversationId:id,subagentDescriptor:{role:'worker'}}));
+ save(past);
+ const details=new AgySubagents('synthetic-session',s.emit);let active:any[]=[];
+ const monitor=new AgyChildren(tasks=>{active=tasks;},dir,details);
+ try{
+  monitor.beforePrompt(parent);
+  assert.equal(s.status('agent:'+past),'unknown');assert.equal(active.length,0);
+  monitor.observe({name:'invoke_subagent',sessionUpdate:'tool_call',toolCallId:'spawn',rawInput:{Role:'worker'}});
+  save(child);monitor.beforePrompt(parent);
+  assert.deepEqual(active.map(a=>a.id),['agent:'+child]);assert.equal(s.status('agent:'+child),'running');
+  const update={sessionUpdate:'agent_message_chunk',content:{type:'text',text:'working'}};
+  monitor.observeUpdate(child,update);details.update(child,update);
+  assert.equal(s.status('agent:'+child),'running');assert.equal(s.status('agent:'+past),'unknown');
+ }finally{monitor.reset();details.close();s.close();rmSync(dir,{recursive:true,force:true});}
 });

@@ -47,7 +47,7 @@ export class AgyChildren {
     this.dir=dir;
     // Parent input is also a recovery boundary for children that answered without tool events.
     // Keep the seen sets for the same session so unchanged history does not emit again.
-    this.refresh(true,true);
+    this.refresh(true);
   }
   observe(update:any) {
     if(update.name!=='invoke_subagent') return;
@@ -86,7 +86,7 @@ export class AgyChildren {
     if(match&&this.owned.has(match[1]))this.details.idle(match[1],file,match[2].startsWith(" This was the subagent's most recent response: ")?match[2].slice(" This was the subagent's most recent response: ".length):'');
   }
   owns(session:string) { this.refresh(); return this.running.has(session); }
-  private refresh(force=false,existing=false) {
+  private refresh(force=false) {
     if(!this.dir || !force && !this.waiting.size && !this.running.size && !this.watching.size) return;
     const dir=this.dir;
     let changed=false;
@@ -95,9 +95,10 @@ export class AgyChildren {
       const child=record(join(dir,'subagents'),file);
       if(child?.conversationId!==file.slice(0,-5)) continue;
       this.seenChildren.add(file);
-      this.owned.add(child.conversationId);this.details?.discover(child,existing);
+      this.owned.add(child.conversationId);
       const role=child.subagentDescriptor?.role;
       const waiting=[...this.waiting].find(([,task])=>task.description===role) ?? this.waiting.entries().next().value;
+      this.details?.discover(child,!waiting);
       if(!waiting) continue;
       this.waiting.delete(waiting[0]);
       this.running.set(child.conversationId,{id:'agent:'+child.conversationId,type:'local_agent',description:role??'agy 서브 에이전트',state:'unknown'});
