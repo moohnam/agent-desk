@@ -7,7 +7,7 @@ import { Bot, PanelLeftClose } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
 import { elapsed, isActive, isCommand, isCurrentCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
-import { subagentHistoryPosts, withSubagentAnswers } from './subagentHistory.ts';
+import { subagentHistoryPosts, subagentPosts, withSubagentAnswers } from './subagentHistory.ts';
 import { api } from './api.ts';
 import { buildPosts, mergeTaskEvents } from './posts.ts';
 import { PostView } from './PostView.tsx';
@@ -15,8 +15,8 @@ import { Markdown } from './Markdown.tsx';
 import { useNow } from './clock.ts';
 import type { HubEvent, Post, TaskView } from './types.ts';
 
-const COLUMN_MIN = 300;
-const WIDTH_STEP = 40;
+import { MIN_WIDTH } from './columns.ts';
+import { WIDTH_STEP } from './deckKeys.ts';
 /** What Codex calls a background command it cannot name. */
 const CODEX_UNNAMED = '백그라운드 명령';
 /** The CLI's note to the parent agent that a handed-back report came as a message: nothing for a person to read. */
@@ -35,10 +35,11 @@ export interface SubagentPaneKeys { focused(): boolean; enter(): boolean; key(k:
 
 interface ColumnHandle { step(dir: 1 | -1): void; edge(dir: 1 | -1): void; toggle(): void }
 
-export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, onError }: {
+export function SubagentPanel({ task, subagents, reload, reveal, keys, threadFeed, projectColor, onClose, onError }: {
   task: TaskView; subagents: Subagent[]; reload: number;
   /** A subagent to show and focus (a chip was pressed); `n` tells a repeated press apart. */
   reveal?: { key: string; n: number };
+  threadFeed: RefObject<HTMLDivElement | null>; projectColor: string;
   keys: RefObject<SubagentPaneKeys | null>;
   onClose: () => void; onError: (message: string) => void;
 }) {
@@ -60,6 +61,17 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
   const handles = useRef(new Map<string, ColumnHandle>());
   const colsRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    const thread = threadFeed.current?.closest<HTMLElement>('[data-col="thread"]');
+    const pane = paneRef.current;
+    if (!thread || !pane) return;
+    const sync = () => pane.style.setProperty('--w', `${thread.getBoundingClientRect().width}px`);
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(thread);
+    return () => observer.disconnect();
+  }, [threadFeed]);
 
   const scrollTo = (key: string) => requestAnimationFrame(() =>
     colsRef.current?.querySelector(`[data-column="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
@@ -88,8 +100,8 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
         case 'gg': handle?.edge(-1); return true;
         case 'o': case ' ': handle?.toggle(); return true;
         case '<': case '>': {
-          const width = widths[on[focus]] ?? colsRef.current?.querySelector<HTMLElement>(`[data-column="${CSS.escape(on[focus])}"]`)?.offsetWidth ?? COLUMN_MIN;
-          setWidths({ ...widths, [on[focus]]: Math.max(COLUMN_MIN, width + (k === '>' ? WIDTH_STEP : -WIDTH_STEP)) });
+          const width = widths[on[focus]] ?? colsRef.current?.querySelector<HTMLElement>(`[data-column="${CSS.escape(on[focus])}"]`)?.offsetWidth ?? MIN_WIDTH;
+          setWidths({ ...widths, [on[focus]]: Math.max(MIN_WIDTH, width + (k === '>' ? WIDTH_STEP : -WIDTH_STEP)) });
           return true;
         }
         default: return false;
@@ -111,7 +123,7 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
   const engine = ENGINE_LABEL[engineOf(task.engine ?? 'claude')] ?? task.engine;
 
   return (
-    <aside className="thread-references subagent-panel" aria-label="서브 에이전트·백그라운드" ref={paneRef}>
+    <aside className="thread-references subagent-panel" aria-label="서브 에이전트·백그라운드" ref={paneRef} style={{'--pc':projectColor} as CSSProperties}>
       <header className="reference-head">
         <div><h2><Bot /> 서브 에이전트·백그라운드 <span>{running ? `실행 중 ${running} · ` : ''}{visibleCount}</span></h2><p>{task.project_name}#{task.seq}</p></div>
         <button className="icon-btn" title="서브 에이전트 창 닫기 (b)" aria-label="서브 에이전트 창 닫기" onClick={onClose}><PanelLeftClose /></button>
@@ -138,7 +150,8 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
 }) {
   const {events,more,loading,error,older,whole}=useSubagentEvents(undefined,reload,{taskId:task.id,members:agents});
   const [extra,setExtra]=useState<{key:string;events:HubEvent[]}>();
-  const rows=useMemo(()=>subagentHistoryPosts(agents,mergeTaskEvents(events,extra?.events??[])),[agents,events,extra]);
+  const complete = !loading && !error && !more || (extra?.events.length === 0 && extra.key);
+  const rows=useMemo(()=>subagentHistoryPosts(agents,mergeTaskEvents(events,extra?.events??[]),complete),[agents,events,extra,complete]);
   const [selected,setSelected]=useState<string|null>(null);
   const [expanded,setExpanded]=useState<ReadonlySet<string>>(()=>new Set());
   const feed=useRef<HTMLDivElement>(null);
@@ -174,15 +187,15 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
   const current=rows.findIndex(r=>r.key===selected);
   handle({step:dir=>select(current<0?0:current+dir),edge:dir=>select(dir>0?rows.length-1:0),toggle:()=>{if(selected)toggle(selected);}});
   useEffect(()=>()=>handle(null),[]);
-  return <section className={`column sa-col${focused?' focused':''}${width?' sized':''}`} data-column={HISTORY} aria-label="서브 에이전트 히스토리"
-    style={width?{'--sa-w':`${width}px`} as CSSProperties:undefined} onMouseDown={onFocus}>
+  return <section className={`column sa-col${focused?' focused':''}`} data-column={HISTORY} aria-label="서브 에이전트 히스토리"
+    style={width?{'--w':`${width}px`} as CSSProperties:undefined} onMouseDown={onFocus}>
     <ColumnHeader><h2>서브 에이전트 히스토리</h2><span className="count">{agents.length}</span><span className="filter">최근 기록부터</span></ColumnHeader>
     <div className="feed sa-feed" ref={feed} onScroll={e=>{rememberPosition();const f=e.currentTarget;if(f.scrollHeight-f.scrollTop-f.clientHeight<80)void older();}}>
-      {!agents.length && <p className="empty">종료된 서브 에이전트 기록이 없습니다.</p>}
-      {rows.map(({key,agent,post,summary})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
+      {!loading && !more && !rows.length && !error && <p className="empty">표시할 서브 에이전트 기록이 없습니다.</p>}
+      {rows.map(({key,agent,post,showStatus})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
         <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-history"
           selected={selected===key} expanded={expanded.has(key)} working={false} flash={false}
-          speaker={{name:subagentTitle(agent),avatar:'SA',tag:summary?statusText(agent):post.kind==='user'?'지시':'기록'}}
+          speaker={{name:subagentTitle(agent),avatar:'SA',tag:showStatus?statusText(agent):post.kind==='user'?'지시':'기록'}}
           onSelect={()=>setSelected(key)} onToggle={()=>toggle(key)} onAllow={()=>{}} onDeny={()=>{}} onError={onError}/>
       </div>)}
       {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}<button className="link" onClick={()=>void whole()}>다시 시도</button></p>}
@@ -197,8 +210,18 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
   handle: (h: ColumnHandle | null) => void; onFocus: () => void; onError: (message: string) => void;
 }) {
   const now = useNow();
-  const { events, more, loading, error, older, whole } = useSubagentEvents(s.detailed ? s : undefined, reload);
-  const posts = useMemo(() => buildPosts(withSubagentAnswers(events)), [events]);
+  const column = useRef<HTMLElement>(null);
+  const [seen, setSeen] = useState(typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    if (seen || !s.detailed || !column.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setSeen(true);
+    });
+    observer.observe(column.current);
+    return () => observer.disconnect();
+  }, [seen, s.detailed]);
+  const { events, more, loading, error, older, whole } = useSubagentEvents(seen && s.detailed ? s : undefined, reload);
+  const posts = useMemo(() => subagentPosts(withSubagentAnswers(events), s), [events, s]);
   // The answer to the latest instruction: a follow-up after it starts a run that answers anew.
   const answer = posts.findLast(p => p.event.payload.handback || p.kind === 'user');
   const handedBack = answer?.event.payload.handback ? answer : undefined;
@@ -208,6 +231,15 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
   const feed = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
+  const olderAnchor = useRef<{id:string; offset:number} | null>(null);
+  const loadOlder = () => {
+    const f = feed.current;
+    if (!f || loading || !more) return;
+    const edge = f.getBoundingClientRect().top;
+    const row = [...f.querySelectorAll<HTMLElement>('[data-post]')].find(el => Number(el.dataset.post)>0 && el.getBoundingClientRect().bottom>edge);
+    if (row) olderAnchor.current = {id:row.dataset.post!,offset:row.getBoundingClientRect().top-edge};
+    void older();
+  };
   const toggle = (post: Post) => {
     // Live steps come cut; opening them loads them whole.
     if (!expanded.has(post.id) && post.activity.some(e => e.payload?.clipped)) void whole();
@@ -229,8 +261,16 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
   // Follow its newest step while reading at the bottom, as the thread does.
   useLayoutEffect(() => {
     const f = feed.current;
-    if (f && atBottom.current) f.scrollTop = f.scrollHeight;
-  }, [events.length, s.status]);
+    if (!f) return;
+    const anchor = olderAnchor.current;
+    if (anchor) {
+      if (loading) return;
+      olderAnchor.current = null;
+      const row = f.querySelector(`[data-post="${anchor.id}"]`);
+      if (row) { f.scrollTop += row.getBoundingClientRect().top - f.getBoundingClientRect().top - anchor.offset; return; }
+    }
+    if (atBottom.current) f.scrollTop = f.scrollHeight;
+  }, [events.length, s.status, loading]);
 
   const firstPrompt = posts.find(p => p.kind === 'user')?.id;
   const speaker = (p: Post) => p.kind === 'user'
@@ -238,17 +278,18 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
     : { name: subagentKind(s), avatar: 'SA', ...(p.event.payload.handback && { tag: `${engine}에게 보낸 답` }) };
 
   return (
-    <section className={`column sa-col ${subagentTone(s)}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
-      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
-      <ColumnHeader><h2 title={subagentTitle(s)}>{subagentTitle(s)}</h2><span className="count">{posts.length}</span><span className="filter" title={subagentMeta(s,now)}>{subagentMeta(s,now)}</span></ColumnHeader>
-      <div className="feed sa-feed" ref={feed} onScroll={e => {
+    <section ref={column} className={`column sa-col thread-surface ${subagentTone(s)}${focused ? ' focused' : ''}`}
+      style={width ? { '--w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
+      <header className="thread-head"><div className="row1"><h2 title={subagentTitle(s)}>{subagentTitle(s)}</h2></div>
+        <div className="meta"><span>{subagentMeta(s,now)}</span><span>글 {posts.length}개</span></div></header>
+      <div className="feed sa-feed thread-feed" ref={feed} onScroll={e => {
         const f = e.currentTarget;
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
-        if (f.scrollTop < 80) void older();
+        if (f.scrollTop < 80) loadOlder();
       }}>
         {!s.detailed && <p className="sa-note">상태 목록만 수신한 항목입니다. 해당 실행의 상세 기록이 허브에 전달되지 않아 대화를 복구할 수 없습니다.</p>}
         {s.detailNote && <p className="sa-note">{s.detailNote}</p>}
-        {more && <button className="link sa-older" disabled={loading} onClick={() => void older()}>이전 기록 더 보기</button>}
+        {more && <button className="link sa-older" disabled={loading} onClick={loadOlder}>이전 기록 더 보기</button>}
         {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}</p>}
         {s.detailed && loading && !events.length && <p className="sa-note">불러오는 중…</p>}
         {posts.map(p => (
@@ -302,8 +343,8 @@ function CommandsColumn({ task, onError, commands, all, focused, width, reveal, 
   const running = commands.filter(isActive).length;
 
   return (
-    <section className={`column sa-col${running ? ' running' : ' done'}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
-      style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" data-column={COMMANDS} onMouseDown={onFocus}>
+    <section className={`column sa-col${running ? ' running' : ' done'}${focused ? ' focused' : ''}`}
+      style={width ? { '--w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" data-column={COMMANDS} onMouseDown={onFocus}>
       <ColumnHeader><h2>백그라운드 작업</h2><span className="count">{commands.length}</span><span className="filter">실행 중 {running}</span></ColumnHeader>
       <div className="feed sa-feed" ref={feed} onScroll={e => {
         const f = e.currentTarget;

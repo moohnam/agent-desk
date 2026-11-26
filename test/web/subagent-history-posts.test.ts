@@ -15,7 +15,12 @@ test('common history preserves source attribution and orphan tools in chronologi
  assert.deepEqual(tool.post.activity.map(e=>e.id),[1,3]);
  assert.equal(rows.find(r=>r.agent.id==='b'&&!r.summary)!.post.activity.length,0);
  assert.deepEqual(rows.map(r=>r.post.event.ts),rows.map(r=>r.post.event.ts).sort().reverse());
- assert.equal(rows.filter(r=>r.summary).length,2);
+ assert.equal(rows.filter(r=>r.summary).length,0);
+ assert.ok(rows.every(r=>r.showStatus));
+ assert.equal(subagentHistoryPosts(agents,[]).length,0);
+ assert.deepEqual(subagentHistoryPosts(agents,[],true).map(r=>r.agent.id).sort(),['a','b']);
+ assert.deepEqual(subagentHistoryPosts(agents,[],'s/a').map(r=>r.agent.id),['a']);
+ assert.equal(subagentHistoryPosts([{...agents[0],status:'failed'}],[])[0].post.event.payload.text,'작업 실패');
 });
 
 
@@ -39,7 +44,8 @@ test('Claude tracker long handback suppresses only its duplicate clipped history
   const rows=subagentHistoryPosts(agents,events);
   assert.equal(rows.filter(row=>row.post.event.payload.text?.startsWith('긴 답변 시작')).length,1,'only the complete answer is shown');
   assert.equal(rows.find(row=>!row.summary)!.post.event.payload.text,text);
-  assert.equal(rows.find(row=>row.summary)!.post.event.payload.text,'작업 상태가 기록됐습니다.');
+  assert.equal(rows.some(row=>row.summary),false);
+  assert.equal(rows.at(0)?.showStatus,true);
   assert.equal(subagentHistoryPosts(agents,[]).find(row=>row.summary)!.post.event.payload.text,agents[0].summary,'a page without the original answer keeps the summary');
   for(const summary of ['검증 실패로 종료했습니다.',text.slice(0,4000),text.slice(0,4000)+'\n별도 종료 사유']){
    const independent=agents.map(agent=>({...agent,status:'failed' as const,summary}));

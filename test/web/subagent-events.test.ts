@@ -121,6 +121,8 @@ test('common history retains read pages across membership changes and isolates r
  const History=({ids=['a'],reload=0,task='t'})=>{state=useSubagentEvents(undefined,reload,{taskId:task,members:members(ids,task)});return null;};
  const root=createRoot(container as any);const deliver=async(events:any[],more=false)=>{await act(async()=>requests.shift()!.resolve({events,more}));};
  try{
+  await act(()=>root.render(createElement(History,{ids:[]})));
+  assert.equal(requests.length,0,'empty membership needs no history request');
   await act(()=>root.render(createElement(History)));
   await deliver([event(600)],true);
   await act(()=>reportSubagent({type:'subagent_event',event:{...event(601),subagent_id:'running'}}));

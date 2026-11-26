@@ -68,6 +68,12 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0, history?:
   const membership = history?.members.map(subagentKey).sort().join('|');
   const key = history ? `${history.taskId}/history/${membership}` : s && `${s.task_id}/${subagentKey(s)}`;
   useEffect(() => {
+    if (history && !history.members.length) {
+      saved.current = undefined;
+      control.current = undefined;
+      setState({...empty, loading:false});
+      return;
+    }
     const prior=history && saved.current?.task===history.taskId?saved.current:undefined;
     const memberKeys=new Set(history?.members.map(subagentKey));
     const accepts=(event:HubEvent)=>!history || event.task_id===history.taskId && memberKeys.has(`${event.session_id}/${(event as HubEvent & {subagent_id:string}).subagent_id}`);

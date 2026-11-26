@@ -495,6 +495,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     await t.test('subagent columns follow concurrent lifecycles and retain isolated history across reconnect and reload',()=>withPage(async page=>{
       await page.setViewport({width:2400,height:1000});
       let taskId, snapshots=0, historyReads=0;
+      const detailReads=new Set();
       const started=Date.now()-5000;
       const timestamp=seconds=>new Date(started+seconds*1000).toISOString();
       const screenshot=async suffix=>{
@@ -502,7 +503,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const target=resolve(process.env.DESK_SUBAGENT_SCREENSHOT);
         assert.ok(target.startsWith('/private/tmp/')||target.startsWith('/tmp/'),'comparison screenshot must use a system temporary directory');
         const path=suffix?target.slice(0,target.length-extname(target).length)+'-'+suffix+'.png':target;
-        await page.screenshot({path,fullPage:true});
+        await page.screenshot({path});
       };
       let agents=[], events=[];
       const send=message=>page.evaluate(message=>fetch('/__fixture/subagent-message',{method:'POST',body:JSON.stringify(message)}),message);
@@ -519,7 +520,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const history=/\/tasks\/([^/]+)\/subagents\/history$/.exec(path);
         if(history){historyReads++;return respond(request,{events:history[1]===taskId?events:[],more:false});}
         const detail=/\/tasks\/([^/]+)\/subagents\/([^/]+)\/events$/.exec(path);
-        if(detail)return respond(request,{events:events.filter(e=>e.task_id===detail[1]&&e.subagent_id===decodeURIComponent(detail[2])),more:false});
+        if(detail){detailReads.add(decodeURIComponent(detail[2]));return respond(request,{events:events.filter(e=>e.task_id===detail[1]&&e.subagent_id===decodeURIComponent(detail[2])),more:false});}
         void request.continue();
       });
       const open=async()=>{
@@ -536,19 +537,32 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$$eval('.sa-col',nodes=>nodes.length),1,'empty history column stays present');
       const base={task_id:taskId,session_id:'parallel-session',type:'local_agent',background:true,detailed:true,
         created_at:timestamp(0),updated_at:timestamp(1),status:'running'};
+      await page.setViewport({width:1280,height:900});
       agents=[1,2,3].map(n=>({...base,id:'worker-'+n,description:'동시 작업 '+n}));
       for(const agent of agents)await send({type:'subagent',subagent:agent});
       const activeColumns=()=>page.$$eval('.sa-col[data-column]',nodes=>nodes.map(n=>n.dataset.column).filter(k=>k!=='history'&&k!=='commands').sort());
       await page.waitForFunction(()=>document.querySelectorAll('.sa-col').length===4);
       assert.deepEqual(await activeColumns(),agents.map(a=>a.session_id+'/'+a.id));
+      await page.waitForFunction(()=>document.querySelector('.sa-cols').scrollWidth>document.querySelector('.sa-cols').clientWidth);
+      assert.ok(!detailReads.has('worker-3'),'offscreen agent does not request details at startup');
+      await Promise.all([page.waitForResponse(r=>r.url().includes('/worker-3/events')),page.$eval('.sa-cols',e=>{e.scrollLeft=e.scrollWidth;})]);
+      await page.setViewport({width:2400,height:1000});
       assert.equal(await page.$('.sa-strip'),null);
       assert.equal(await page.$('.sa-col [aria-label="컬럼 닫기"]'),null);
-      assert.equal(await page.$$eval('.sa-col .col-head .col-head-row',nodes=>nodes.length),4);
+      for(const agent of agents) {
+        const selector=`[data-column="${agent.session_id}/${agent.id}"]`;
+        const fetched=detailReads.has(agent.id)?undefined:page.waitForResponse(r=>r.url().includes('/'+agent.id+'/events'));
+        await page.$eval(selector,e=>e.scrollIntoView({inline:'start'}));
+        await fetched;
+      }
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('.sa-col')).every(el=>Math.abs(el.getBoundingClientRect().width-document.querySelector('[data-col="thread"]').getBoundingClientRect().width)<1));
+      assert.equal(await page.$$eval('.sa-col.thread-surface > .thread-head',nodes=>nodes.length),3);
       events=agents.map((a,i)=>({id:12000+i,task_id:taskId,session_id:a.session_id,subagent_id:a.id,
         kind:'assistant',ts:timestamp(2),payload:{text:'검증 본문 '+a.id}}));
       for(const event of events){await send({type:'subagent_event',event});await send({type:'subagent_event',event});}
       await page.waitForFunction(()=>Array.from(document.querySelectorAll('.sa-col:not([data-column="history"]) .post')).filter(n=>n.textContent.includes('검증 본문')).length===3);
       assert.ok(!(await page.$eval('[data-column="history"]',e=>e.textContent)).includes('검증 본문'),'running agents retain their bodies only in individual columns');
+      await page.$eval('.sa-col.thread-surface',el=>el.scrollIntoView({behavior:'instant',inline:'start',block:'nearest'}));
       await screenshot('active');
       await send({type:'subagent_event',event:{...events[0],id:13000,task_id:'foreign-parent',payload:{text:'다른 부모의 본문'}}});
       await send({type:'subagent',subagent:{...agents[0],task_id:'foreign-parent',id:'foreign-worker',description:'다른 부모의 작업'}});
@@ -625,6 +639,12 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const detail=/\/tasks\/([^/]+)\/subagents\/([^/]+)\/events$/.exec(path);
         if(detail){
           detailRequests.push({agent:detail[2],before:url.searchParams.get('before'),completedB});
+          if(detail[2]==='b'&&!completedB){
+            const older=url.searchParams.has('before');
+            const rows=Array.from({length:30},(_,i)=>event((older?601:631)+i,'b'));
+            rows[older?29:0]={...rows[older?29:0],kind:older?'tool':'tool_result',payload:older?{name:'Read',toolUseId:'edge',input:{}}:{toolUseId:'edge',text:'경계 결과'}};
+            return respond(request,{events:rows,more:!older});
+          }
           return respond(request,{events:detail[2]==='b'&&completedB?[event(5,'b')]:[],more:false});
         }
         void request.continue();
@@ -639,7 +659,24 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         {...base,id:'b',description:'새 완료 B',status:'running'}];
       for(const subagent of agents)await send({type:'subagent',subagent});
       await page.click('[aria-label="서브 에이전트 창"]');
+      const active='[data-column="retention-session/b"]';
+      await page.waitForSelector(active);
+      await page.$eval(active,e=>e.scrollIntoView({inline:'start'}));
+      const resultCard=active+' .post .activity .summary';
+      await page.waitForSelector(resultCard);
+      // Expand without scrolling the feed to the top (which would load the preceding call).
+      await page.$eval(resultCard,e=>e.click());
+      assert.equal(await page.$eval(active+' .activity pre.result',e=>e.textContent),'경계 결과');
+      const reader=active+' .sa-feed', anchor=active+' [data-post="632"]';
+      const activeOffset=()=>page.$eval(anchor,e=>e.getBoundingClientRect().top-e.closest('.sa-feed').getBoundingClientRect().top);
+      const expectedOffset=await page.$eval(reader,f=>{
+        f.scrollTop=1;
+        return f.querySelector('[data-post="632"]').getBoundingClientRect().top-f.getBoundingClientRect().top;
+      });
+      await page.waitForSelector(active+' [data-post="601"]');
+      assert.ok(Math.abs(await activeOffset()-expectedOffset)<=2,'loading an earlier page keeps the current text in place');
       const history='[data-column="history"]';
+      await page.$eval(history,e=>e.scrollIntoView({inline:'start'}));
       const oldCard=`${history} [data-history-key="retention-session/a/10"]`;
       await page.waitForSelector(`${history} [data-history-key="retention-session/a/101"]`);
       assert.equal(await page.$(oldCard),null,'initial latest 500 excludes A event 10');

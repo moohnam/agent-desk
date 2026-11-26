@@ -1501,7 +1501,7 @@ export function App() {
       );
     }
     return (
-      <section key={col.id} data-col={col.id} data-task={threadTask} className={`column thread${i === activeIdx ? ' focused' : ''}`}
+      <section key={col.id} data-col={col.id} data-task={threadTask} className={`column thread thread-surface${i === activeIdx ? ' focused' : ''}`}
         style={{ '--w': `${widthOf(col.id)}px`,
           ...(threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
         onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
@@ -1663,7 +1663,7 @@ export function App() {
             }:undefined} />
         </Suspense></CodePanelBoundary>}
         {subagentsVisible && threadTaskView && <SubagentPanel key={threadTaskView.id} task={threadTaskView} subagents={subagents} reload={subagentReload}
-          reveal={subagentReveal} keys={subagentKeys} onClose={closeSubagents} onError={setToast} />}
+          threadFeed={threadFeedRef} projectColor={projectColor(threadTaskView.project_id)} reveal={subagentReveal} keys={subagentKeys} onClose={closeSubagents} onError={setToast} />}
         <ColumnDeck inactive={referencesVisible || codeVisible || subagentsVisible} phone={phone} elementRef={deckRef}>
           {deck.map((col, i) => (col.id === SEARCH || (floatThread && col.id === THREAD) ? null : renderColumn(col, i)))}
           {!phone && editable && (

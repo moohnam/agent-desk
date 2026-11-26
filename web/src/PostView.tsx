@@ -385,9 +385,10 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
   const finished = events.some((e) => e.kind === 'status' && e.payload.state === 'finished');
   const forks = events.filter((e) => e.kind === 'status' && e.payload.state === 'forked').length;
   const reset = events.some((e) => e.kind === 'status' && e.payload.state === 'context_reset');
-  if (!tools.length && !done && !modes.length && !finished && !forks && !reset) return null;
+  if (!tools.length && !results.size && !done && !modes.length && !finished && !forks && !reset) return null;
 
-  const errors = tools.filter((t) => results.get(t.payload.toolUseId)?.payload.isError).length;
+  const toolIds = new Set(tools.map(t => t.payload.toolUseId));
+  const errors = [...results.values()].filter(r => r.payload.isError).length;
   const names = [...new Set(tools.map((t) => t.payload.name))];
   const cost = done?.payload.detail?.cost_usd;
   const line = [
@@ -420,6 +421,9 @@ function Activity({ events, expanded, onToggle }: { events: HubEvent[]; expanded
                   </details>
                 </li>
               );
+            }
+            if (e.kind === 'tool_result' && !toolIds.has(e.payload.toolUseId)) {
+              return <li key={e.id} className={e.payload.isError ? 'err' : ''}>도구 결과<pre className="result">{e.payload.text}</pre></li>;
             }
             if (e.kind === 'status') {
               const d = e.payload.detail ?? {};

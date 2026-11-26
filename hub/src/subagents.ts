@@ -6,6 +6,8 @@ import type { BackgroundTask, SubagentEvent as RunnerSubagentEvent, SubagentInfo
 import type { HubMessage, Subagent, SubagentEvent } from '../../shared/api.ts';
 import { feedEvent, now, type Session, type Store } from './db.ts';
 
+export const SUBAGENT_PAGE_SIZE = 30;
+
 interface Row {
   session_id: string; id: string; task_id: string; status: string; detailed: number; listed: number;
   info_json: string; created_at: string; updated_at: string;
@@ -110,7 +112,7 @@ export class Subagents {
     return (this.db.prepare('SELECT * FROM subagent WHERE task_id = ? ORDER BY created_at, id').all(taskId) as unknown as Row[]).map(readRow);
   }
   /** Non-running agents' newest steps across all task sessions; commands stay out of this history. */
-  history(taskId: string, limit = 500, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
+  history(taskId: string, limit = SUBAGENT_PAGE_SIZE, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
     const rows = this.db.prepare(`SELECT e.* FROM subagent_event e
       JOIN subagent s ON s.session_id = e.session_id AND s.id = e.subagent_id AND s.task_id = e.task_id
       WHERE e.task_id = ? AND s.status != 'running'
@@ -119,7 +121,7 @@ export class Subagents {
     return { events: rows.slice(0, limit).reverse().map(readEvent), more: rows.length > limit };
   }
   /** A subagent's newest `limit` steps (before `before`), oldest first; `more`: older ones exist. */
-  events(taskId: string, sessionId: string, id: string, limit = 500, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
+  events(taskId: string, sessionId: string, id: string, limit = SUBAGENT_PAGE_SIZE, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
     const rows = this.db.prepare(`SELECT * FROM subagent_event WHERE task_id = ? AND session_id = ? AND subagent_id = ? AND id < ?
       ORDER BY id DESC LIMIT ?`).all(taskId, sessionId, id, before, limit + 1) as unknown as EventRow[];
     return { events: rows.slice(0, limit).reverse().map(readEvent), more: rows.length > limit };

@@ -46,25 +46,27 @@ test('task subagent history joins identities, filters commands and running agent
   } finally { f.store.database.close(); }
 });
 
-test('workspace history API shares local and remote routing and pages 500 whole events without duplicates', () => {
+test('workspace history API shares local and remote routing and pages 30 whole events without duplicates', () => {
   const f = fixture();
   try {
     const s = f.session('a');
     f.report(s, 'agent:a', 'completed');
-    for (let i = 0; i < 1001; i++) f.event(s, 'agent:a', String(i));
+    for (let i = 0; i < 61; i++) f.event(s, 'agent:a', String(i));
     const hub = { subagents: f.subagents } as Hub;
     const path = '/tasks/task/subagents/history';
     assert.equal(workspaceRoute('GET', path), 'GET /tasks/:id/subagents/history');
     const get = (query = '') => workspaceApi(hub, 'GET', new URL('http://x' + path + query));
     const latest = get();
     assert.equal(latest.status, 200);
-    assert.equal(latest.body.events.length, 500); assert.equal(latest.body.more, true);
+    assert.equal(latest.body.events.length, 30); assert.equal(latest.body.more, true);
+    const detail = workspaceApi(hub, 'GET', new URL('http://x/tasks/task/subagents/agent%3Aa/events?session=a'));
+    assert.deepEqual(detail.body, latest.body);
     const middle = get('?before=' + latest.body.events[0].id).body;
     const oldest = get('?before=' + middle.events[0].id).body;
-    assert.equal(middle.events.length, 500); assert.equal(middle.more, true);
+    assert.equal(middle.events.length, 30); assert.equal(middle.more, true);
     assert.equal(oldest.events.length, 1); assert.equal(oldest.more, false);
     assert.deepEqual([...oldest.events, ...middle.events, ...latest.body.events].map(e => e.id),
-      Array.from({ length: 1001 }, (_, i) => i + 1));
+      Array.from({ length: 61 }, (_, i) => i + 1));
     assert.deepEqual(get('?before=1').body, { events: [], more: false });
     for (const cursor of ['-1', '0', '1.5', 'NaN', '9007199254740992']) assert.throws(() => get('?before=' + cursor), /before/);
   } finally { f.store.database.close(); }

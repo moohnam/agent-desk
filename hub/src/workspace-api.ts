@@ -1,3 +1,4 @@
+import { SUBAGENT_PAGE_SIZE } from './subagents.ts';
 import { readPromptTemplates, savePromptTemplates } from './prompt-templates.ts';
 // Shared by the local HTTP API and the runner-owned workspace. Synchronous so the
 // result receipt and all engine commands can commit in one SQLite transaction.
@@ -213,14 +214,14 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         case 'GET /tasks/:id/subagents':
           return reply(200, hub.subagents.list(id));
         case 'GET /tasks/:id/subagents/history':
-          return reply(200, hub.subagents.history(id, 500, intParam(url, 'before', undefined)));
+          return reply(200, hub.subagents.history(id, SUBAGENT_PAGE_SIZE, intParam(url, 'before', undefined)));
         case 'GET /tasks/:id/subagents/:id/events': {
           // A subagent's steps, newest page first like a thread's; `session` names its session.
           const session = url.searchParams.get('session');
           if (!session) throw new HttpError(400, 'session이 필요합니다');
           let subagent: string;
           try { subagent = decodeURIComponent(parts[4]); } catch { throw new HttpError(400, '서브 에이전트 ID가 잘못되었습니다'); }
-          return reply(200, hub.subagents.events(id, session, subagent, 500, intParam(url, 'before', undefined)));
+          return reply(200, hub.subagents.events(id, session, subagent, SUBAGENT_PAGE_SIZE, intParam(url, 'before', undefined)));
         }
         case 'PATCH /tasks/:id':
           return reply(200, hub.renameTask(id, body.title));

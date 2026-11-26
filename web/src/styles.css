@@ -185,7 +185,7 @@ svg.lucide { width: 1.15em; height: 1.15em; stroke-width: 1.75; vertical-align: 
 .split-resize.dragging::after { background: var(--accent); top: 0; height: 100%; margin-top: 0; }
 .compose { flex: none; width: 300px; border-right: 1px solid var(--border); background: var(--col); display: flex; flex-direction: column; min-height: 0; }
 /* Wide screens: no snapping, so the deck glides to opened columns without a snap-back afterwards. */
-.deck { position: relative; flex: 1; min-width: 0; display: flex; gap: 8px; padding: 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
+.deck, .sa-cols { position: relative; flex: 1; min-width: 0; display: flex; gap: 8px; padding: 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
 
 .column { position: relative; flex: 0 0 var(--w, 380px); width: var(--w, 380px); display: flex; flex-direction: column; min-height: 0;
   background: transparent; border: 1px solid transparent; border-right-color: var(--border); border-radius: 0; scroll-snap-align: start; }
@@ -391,8 +391,8 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 @keyframes flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } }
 
 /* ── 스레드 컬럼 ── */
-.column.thread { background: var(--col); border-color: var(--line); border-top: 3px solid var(--pc, var(--line)); }
-.column.thread > .thread-head, .column.thread > .reply-box { background: var(--col-head); }
+.column.thread-surface { background: var(--col); border-color: var(--line); border-top: 3px solid var(--pc, var(--line)); }
+.column.thread-surface > .thread-head, .column.thread > .reply-box { background: var(--col-head); }
 .clip-note { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
 .thread-chip { flex: none; padding: 1px 7px; border-radius: 5px; color: var(--text); font-size: 11.5px; font-weight: 650; white-space: nowrap;
   background: color-mix(in srgb, var(--pc) 20%, var(--col)); box-shadow: inset 0 0 0 1px var(--pc); }
