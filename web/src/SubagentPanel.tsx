@@ -1,13 +1,15 @@
+import { ColumnHeader } from './ColumnHeader.tsx';
 // The subagent pane: in the place of the pinned posts and the code view, beside the thread. A column
 // for each of the task's subagents with what it was told, said and did, like a thread, and one column
-// of every background command, the subagents' too, in the order they started. All show; the strip
-// takes columns out and puts them back.
+// of current background commands. Finished agents share a chronological history column.
 
-import { Bot, PanelLeftClose, X } from 'lucide-react';
+import { Bot, PanelLeftClose } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
 import { elapsed, isActive, isCommand, isCurrentCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
-import { buildPosts } from './posts.ts';
+import { subagentHistoryPosts, withSubagentAnswers } from './subagentHistory.ts';
+import { api } from './api.ts';
+import { buildPosts, mergeTaskEvents } from './posts.ts';
 import { PostView } from './PostView.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useNow } from './clock.ts';
@@ -15,20 +17,6 @@ import type { HubEvent, Post, TaskView } from './types.ts';
 
 const COLUMN_MIN = 300;
 const WIDTH_STEP = 40;
-/** The tool a background subagent hands its answer back to its parent with. */
-const HANDBACK = 'SubagentHandback';
-/** A handed-back answer reads as what the subagent said; the tool's own receipt is left out. */
-function withAnswers(events: HubEvent[]): HubEvent[] {
-  const calls = new Set<string>();
-  return events.flatMap(e => {
-    if (e.kind === 'tool' && e.payload.name === HANDBACK && typeof e.payload.input?.message === 'string') {
-      calls.add(e.payload.toolUseId);
-      return [{ ...e, kind: 'assistant', payload: { text: e.payload.input.message, handback: true, clipped: e.payload.clipped } }];
-    }
-    return e.kind === 'tool_result' && calls.has(e.payload.toolUseId) ? [] : [e];
-  });
-}
-
 /** What Codex calls a background command it cannot name. */
 const CODEX_UNNAMED = '백그라운드 명령';
 /** The CLI's note to the parent agent that a handed-back report came as a message: nothing for a person to read. */
@@ -36,6 +24,7 @@ const isHandoffNotice = (summary: string) => summary.startsWith("This agent's re
 
 /** The key of the background commands' column. */
 const COMMANDS = 'commands';
+const HISTORY = 'history';
 
 /**
  * What the deck's keys (deckKeys.ts) do in the pane: `h` from the thread enters its last column;
@@ -54,15 +43,16 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
   onClose: () => void; onError: (message: string) => void;
 }) {
   const now = useNow();
-  const agents = useMemo(() => subagents.filter(s => !isCommand(s)), [subagents]);
+  const agents = useMemo(() => subagents.filter(s => !isCommand(s) && isActive(s)), [subagents]);
+  const history = useMemo(() => subagents.filter(s => !isCommand(s) && !isActive(s)), [subagents]);
   const commands = useMemo(() => subagents.filter(isCurrentCommand), [subagents]);
   const byKey = useMemo(() => new Map(agents.map(s => [subagentKey(s), s])), [agents]);
-  const columnOf = (key: string) => commands.some(s => subagentKey(s) === key) ? COMMANDS : key;
+  const columnOf = (key: string) => commands.some(s => subagentKey(s) === key) ? COMMANDS : history.some(s=>subagentKey(s)===key) ? HISTORY : key;
+  const [historyFocus,setHistoryFocus]=useState<{key:string;n:number}>();
   const [commandFocus, setCommandFocus] = useState<{ key: string; n: number }>();
-  // Every column shows (the commands' first, then the subagents as they started) but those taken out here.
-  const all = useMemo(() => [...(commands.length ? [COMMANDS] : []), ...agents.map(subagentKey)], [agents, commands]);
-  const [off, setOff] = useState<ReadonlySet<string>>(() => new Set());
-  const on = all.filter(k => !off.has(k));
+  // Active columns are automatic; finished records share one persistent history column.
+  const all = useMemo(() => [HISTORY, ...(commands.length ? [COMMANDS] : []), ...agents.map(subagentKey)], [agents, commands]);
+  const on = all;
   // The focused column by key, so a column coming in ahead of it does not move the focus.
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const focus = focusKey && on.includes(focusKey) ? on.indexOf(focusKey) : null;
@@ -74,28 +64,12 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
   const scrollTo = (key: string) => requestAnimationFrame(() =>
     colsRef.current?.querySelector(`[data-column="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
   const moveFocus = (key: string | null) => { setFocusKey(key); if (key) scrollTo(key); };
-  const toggle = (key: string) => {
-    const index = on.indexOf(key);
-    const next = new Set(off);
-    if (index < 0) {
-      next.delete(key);
-      setOff(next);
-      scrollTo(key);
-      return;
-    }
-    next.add(key);
-    setOff(next);
-    if (focusKey === key) setFocusKey(on[index + 1] ?? on[index - 1] ?? null);
-  };
-
   const revealed = !!reveal && all.includes(columnOf(reveal.key));
   useEffect(() => {
     if (!reveal || !revealed) return;
     const column = columnOf(reveal.key);
-    const next = new Set(off);
-    next.delete(column);
-    setOff(next);
     moveFocus(column);
+    if (column === HISTORY) setHistoryFocus({key:reveal.key,n:reveal.n});
     if (column === COMMANDS) setCommandFocus({ key: reveal.key, n: reveal.n });
   }, [reveal?.n, revealed]);
 
@@ -131,9 +105,8 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
     return () => window.removeEventListener('pointerdown', away);
   }, [focus]);
 
-  const visibleCount = agents.length + commands.length;
+  const visibleCount = subagents.filter(s=>!isCommand(s)).length + commands.length;
   const running = agents.filter(isActive).length + commands.length;
-  const commandsRunning = commands.filter(isActive).length;
   const setHandle = (key: string) => (h: ColumnHandle | null) => { if (h) handles.current.set(key, h); else handles.current.delete(key); };
   const engine = ENGINE_LABEL[engineOf(task.engine ?? 'claude')] ?? task.engine;
 
@@ -143,54 +116,76 @@ export function SubagentPanel({ task, subagents, reload, reveal, keys, onClose, 
         <div><h2><Bot /> 서브 에이전트·백그라운드 <span>{running ? `실행 중 ${running} · ` : ''}{visibleCount}</span></h2><p>{task.project_name}#{task.seq}</p></div>
         <button className="icon-btn" title="서브 에이전트 창 닫기 (b)" aria-label="서브 에이전트 창 닫기" onClick={onClose}><PanelLeftClose /></button>
       </header>
-      {visibleCount > 0 && (
-        <div className="sa-strip" role="group" aria-label="서브 에이전트 목록">
-          {commands.length > 0 && (
-            <button type="button" className={`sa-tab ${commandsRunning ? 'running' : 'done'}${on.includes(COMMANDS) ? ' on' : ''}`} aria-pressed={on.includes(COMMANDS)}
-              title={`백그라운드 명령을 시간 순으로 한 컬럼에서 봅니다 · 누르면 컬럼을 ${on.includes(COMMANDS) ? '뺍니다' : '넣습니다'}`} onClick={() => toggle(COMMANDS)}>
-              <span className="sa-dot" />백그라운드 작업 {commands.length}
-              {commandsRunning > 0 && <span className="sa-tabmeta">실행 중 {commandsRunning}</span>}
-            </button>
-          )}
-          {commands.length > 0 && agents.length > 0 && <span className="sa-sep" />}
-          {agents.map(s => {
-            const key = subagentKey(s);
-            const isOn = !off.has(key);
-            return (
-              <button key={key} type="button" className={`sa-tab ${subagentTone(s)}${isOn ? ' on' : ''}`} aria-pressed={isOn}
-                title={`${subagentMeta(s, now)} · 누르면 컬럼을 ${isOn ? '뺍니다' : '넣습니다'}`} onClick={() => toggle(key)}>
-                <span className="sa-dot" />{s.parentId ? '↳ ' : ''}{subagentTitle(s)}
-                <span className="sa-tabmeta">{isActive(s) ? elapsed(s, now) : statusText(s)}</span>
-              </button>
-            );
-          })}
-          <span className="sa-sep" />
-          <button type="button" className="link" disabled={!off.size} onClick={() => setOff(new Set())}>초기화</button>
-          <button type="button" className="link" disabled={!on.length} onClick={() => { setOff(new Set(all)); setFocusKey(null); }}>모두 빼기</button>
-        </div>
-      )}
       <div className="sa-cols" ref={colsRef}>
-        {!visibleCount && <p className="empty">표시할 서브 에이전트나 현재 실행 중인 백그라운드 명령이 없습니다.</p>}
-        {visibleCount > 0 && !on.length && <p className="empty">모든 컬럼을 뺐습니다. 위 목록에서 고르거나 초기화로 다시 넣으세요.</p>}
-        {on.map((key, i) => key === COMMANDS ? (
-          <CommandsColumn key={key} commands={commands} all={subagents} focused={focus === i} width={widths[key]} reveal={commandFocus}
-            handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} />
+        {on.map((key, i) => key === HISTORY ? (
+          <HistoryColumn key={key} reveal={historyFocus} task={task} agents={history} reload={reload} focused={focus===i} width={widths[key]}
+            handle={setHandle(key)} onFocus={()=>setFocusKey(key)} onError={onError} />
+        ) : key === COMMANDS ? (
+          <CommandsColumn key={key} task={task} onError={onError} commands={commands} all={subagents} focused={focus === i} width={widths[key]} reveal={commandFocus}
+            handle={setHandle(key)} onFocus={() => setFocusKey(key)} />
         ) : (
           <SubagentColumn key={key} s={byKey.get(key)!} reload={reload} task={task} engine={engine} focused={focus === i} width={widths[key]}
-            handle={setHandle(key)} onFocus={() => setFocusKey(key)} onHide={() => toggle(key)} onError={onError} />
+            handle={setHandle(key)} onFocus={() => setFocusKey(key)} onError={onError} />
         ))}
       </div>
     </aside>
   );
 }
 
-function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFocus, onHide, onError }: {
+function HistoryColumn({task, agents, reveal, reload, focused, width, handle, onFocus, onError}: {
+  task:TaskView; agents:Subagent[]; reveal?:{key:string;n:number}; reload:number; focused:boolean; width?:number;
+  handle:(h:ColumnHandle|null)=>void; onFocus:()=>void; onError:(message:string)=>void;
+}) {
+  const {events,more,loading,error,older,whole}=useSubagentEvents(undefined,reload,{taskId:task.id,members:agents});
+  const [extra,setExtra]=useState<{key:string;events:HubEvent[]}>();
+  const rows=useMemo(()=>subagentHistoryPosts(agents,mergeTaskEvents(events,extra?.events??[])),[agents,events,extra]);
+  const [selected,setSelected]=useState<string|null>(null);
+  const [expanded,setExpanded]=useState<ReadonlySet<string>>(()=>new Set());
+  const feed=useRef<HTMLDivElement>(null);
+  const toggle=(key:string)=>{setExpanded(prev=>{const next=new Set(prev);if(!next.delete(key))next.add(key);return next;});void whole();};
+  const select=(index:number)=>{const row=rows[Math.max(0,Math.min(index,rows.length-1))];if(!row)return;setSelected(row.key);feed.current?.querySelector(`[data-history-key="${CSS.escape(row.key)}"]`)?.scrollIntoView({block:'nearest'});};
+  const target = reveal && agents.find(a=>subagentKey(a)===reveal.key);
+  useEffect(()=>{
+    setExtra(undefined);
+    if(!target || !reveal)return;
+    let live=true;
+    setSelected(`${reveal.key}/status`);
+    if(target.detailed)void api.subagentEvents(target).then(page=>{if(live)setExtra({key:reveal.key,events:page.events});},e=>{if(live)onError(String(e));});
+    return ()=>{live=false;};
+  },[reveal?.n,task.id,!!target]);
+  useLayoutEffect(()=>{
+    if(!reveal||!target)return;
+    const row=rows.find(r=>subagentKey(r.agent)===reveal.key&&!r.summary)??rows.find(r=>r.key===`${reveal.key}/status`);
+    if(row){setSelected(row.key);feed.current?.querySelector(`[data-history-key="${CSS.escape(row.key)}"]`)?.scrollIntoView({block:'nearest'});}
+  },[reveal?.n,extra]);
+  const current=rows.findIndex(r=>r.key===selected);
+  handle({step:dir=>select(current<0?0:current+dir),edge:dir=>select(dir>0?rows.length-1:0),toggle:()=>{if(selected)toggle(selected);}});
+  useEffect(()=>()=>handle(null),[]);
+  return <section className={`column sa-col${focused?' focused':''}${width?' sized':''}`} data-column={HISTORY} aria-label="서브 에이전트 히스토리"
+    style={width?{'--sa-w':`${width}px`} as CSSProperties:undefined} onMouseDown={onFocus}>
+    <ColumnHeader><h2>서브 에이전트 히스토리</h2><span className="count">{agents.length}</span><span className="filter">최근 기록부터</span></ColumnHeader>
+    <div className="feed sa-feed" ref={feed} onScroll={e=>{const f=e.currentTarget;if(f.scrollHeight-f.scrollTop-f.clientHeight<80)void older();}}>
+      {!agents.length && <p className="empty">종료된 서브 에이전트 기록이 없습니다.</p>}
+      {rows.map(({key,agent,post,summary})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
+        <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-history"
+          selected={selected===key} expanded={expanded.has(key)} working={false} flash={false}
+          speaker={{name:subagentTitle(agent),avatar:'SA',tag:summary?statusText(agent):post.kind==='user'?'지시':'기록'}}
+          onSelect={()=>setSelected(key)} onToggle={()=>toggle(key)} onAllow={()=>{}} onDeny={()=>{}} onError={onError}/>
+      </div>)}
+      {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}<button className="link" onClick={()=>void whole()}>다시 시도</button></p>}
+      {loading && <p className="sa-note">불러오는 중…</p>}
+      {more && <button className="link sa-older" disabled={loading} onClick={()=>void older()}>이전 기록 더 보기</button>}
+    </div>
+  </section>;
+}
+
+function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFocus, onError }: {
   s: Subagent; reload: number; task: TaskView; engine: string; focused: boolean; width?: number;
-  handle: (h: ColumnHandle | null) => void; onFocus: () => void; onHide: () => void; onError: (message: string) => void;
+  handle: (h: ColumnHandle | null) => void; onFocus: () => void; onError: (message: string) => void;
 }) {
   const now = useNow();
   const { events, more, loading, error, older, whole } = useSubagentEvents(s.detailed ? s : undefined, reload);
-  const posts = useMemo(() => buildPosts(withAnswers(events)), [events]);
+  const posts = useMemo(() => buildPosts(withSubagentAnswers(events)), [events]);
   // The answer to the latest instruction: a follow-up after it starts a run that answers anew.
   const answer = posts.findLast(p => p.event.payload.handback || p.kind === 'user');
   const handedBack = answer?.event.payload.handback ? answer : undefined;
@@ -232,14 +227,7 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
   return (
     <section className={`column sa-col ${subagentTone(s)}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
       style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
-      <header className="col-head sa-colhead">
-        <span className="sa-dot" />
-        <div className="sa-titles">
-          <h2 title={subagentTitle(s)}>{s.parentId ? '↳ ' : ''}{subagentTitle(s)}</h2>
-          <div className="sa-meta">{subagentMeta(s, now)}</div>
-        </div>
-        <button className="icon-btn" aria-label="컬럼 닫기" title="컬럼 닫기" onClick={onHide}><X size={14} /></button>
-      </header>
+      <ColumnHeader><h2 title={subagentTitle(s)}>{subagentTitle(s)}</h2><span className="count">{posts.length}</span><span className="filter" title={subagentMeta(s,now)}>{subagentMeta(s,now)}</span></ColumnHeader>
       <div className="feed sa-feed" ref={feed} onScroll={e => {
         const f = e.currentTarget;
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
@@ -252,7 +240,7 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
         {s.detailed && loading && !events.length && <p className="sa-note">불러오는 중…</p>}
         {posts.map(p => (
           <PostView key={p.id} post={p} task={task} model={undefined} approval={undefined} colId={`subagent:${subagentKey(s)}`}
-            selected={sel === p.id} expanded={expanded.has(p.id)} working={false} flash={false} inThread speaker={speaker(p)}
+            selected={sel === p.id} expanded={expanded.has(p.id)} working={false} flash={false} speaker={speaker(p)}
             onSelect={() => setSel(p.id)} onToggle={() => toggle(p)} onAllow={() => {}} onDeny={() => {}} onError={onError} />
         ))}
         {isActive(s) ? (
@@ -270,11 +258,10 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
 }
 
 /** Every background command, the subagents' too, in the order they started: what it does, the command, how it ended and how long it took; o opens its output. */
-function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus, onHide }: {
-  commands: Subagent[]; all: Subagent[]; focused: boolean; width?: number; reveal?: { key: string; n: number };
-  handle: (h: ColumnHandle | null) => void; onFocus: () => void; onHide: () => void;
+function CommandsColumn({ task, onError, commands, all, focused, width, reveal, handle, onFocus }: {
+  task:TaskView; onError:(message:string)=>void; commands: Subagent[]; all: Subagent[]; focused: boolean; width?: number; reveal?: { key: string; n: number };
+  handle: (h: ColumnHandle | null) => void; onFocus: () => void;
 }) {
-  const now = useNow();
   const [sel, setSel] = useState<string | null>(null);
   const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
   const feed = useRef<HTMLDivElement>(null);
@@ -304,37 +291,26 @@ function CommandsColumn({ commands, all, focused, width, reveal, handle, onFocus
   return (
     <section className={`column sa-col${running ? ' running' : ' done'}${focused ? ' focused' : ''}${width ? ' sized' : ''}`}
       style={width ? { '--sa-w': `${width}px` } as CSSProperties : undefined} aria-label="백그라운드 작업" data-column={COMMANDS} onMouseDown={onFocus}>
-      <header className="col-head sa-colhead">
-        <span className="sa-dot" />
-        <div className="sa-titles">
-          <h2>백그라운드 작업</h2>
-          <div className="sa-meta">{[`${commands.length}개`, running && `실행 중 ${running}`].filter(Boolean).join(' · ')}</div>
-        </div>
-        <button className="icon-btn" aria-label="컬럼 닫기" title="컬럼 닫기" onClick={onHide}><X size={14} /></button>
-      </header>
+      <ColumnHeader><h2>백그라운드 작업</h2><span className="count">{commands.length}</span><span className="filter">실행 중 {running}</span></ColumnHeader>
       <div className="feed sa-feed" ref={feed} onScroll={e => {
         const f = e.currentTarget;
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
       }}>
-        {commands.map(s => {
-          const key = subagentKey(s), from = starter(s), isOpen = open.has(key);
-          // Codex names a command by the command itself.
-          const command = s.command ?? (s.type === 'shell' && s.description !== CODEX_UNNAMED ? s.description : undefined);
-          const title = s.command || s.type !== 'shell' ? s.description : CODEX_UNNAMED;
-          const exit = /exit code (\d+)\)?\s*$/.exec(s.summary ?? '')?.[1];
-          const result = s.output ?? (s.summary && !isHandoffNotice(s.summary) ? s.summary : undefined);
-          return (
-            <div key={key} data-command={key} className={`sa-command ${subagentTone(s)}${sel === key ? ' selected' : ''}${isOpen ? ' open' : ''}`}
-              onClick={() => { setSel(key); if (!window.getSelection()?.toString()) toggle(key); }}>
-              <div className="sa-command-head"><span className="sa-dot" /><b title={title}>{title}</b>
-                <time dateTime={s.created_at}>{new Date(s.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</time></div>
-              {command && <code className="sa-command-line" title={command}>$ {command}</code>}
-              <div className="sa-meta">{[isActive(s) ? '실행 중' : statusText(s), exit !== undefined && `종료 코드 ${exit}`, elapsed(s, now),
-                from && `${subagentTitle(from)}에서`].filter(Boolean).join(' · ')}</div>
-              {isOpen ? (result ? <pre className="sa-command-out">{result}</pre> : <div className="sa-meta">{isActive(s) ? '실행 중인 백그라운드 작업입니다. 종료되면 목록에서 사라집니다.' : '기록된 출력이 없습니다.'}</div>)
-                : result && <div className="sa-meta">{s.output ? '출력 보기 (o)' : '결과 보기 (o)'}</div>}
-            </div>
-          );
+        {commands.map((s,i) => {
+          const key=subagentKey(s),command=s.command ?? (s.type==='shell' && s.description!==CODEX_UNNAMED?s.description:undefined);
+          const output=s.output??s.summary;
+          const fence='`'.repeat(Math.max(3,...[...(output??'').matchAll(/`+/g)].map(m=>m[0].length+1)));
+          const text=s.description+(output?`\n\n현재 출력:\n\n${fence}\n${output}\n${fence}`:'');
+          const event:HubEvent={id:-(i+1),task_id:task.id,session_id:s.session_id,ts:s.created_at,kind:'assistant',payload:{text}};
+          const post=buildPosts([event])[0];
+          if(command)post.activity.push({...event,kind:'tool',payload:{toolUseId:key,name:'Bash',input:{command}}});
+          const from=starter(s);
+          return <div key={key} data-command={key} className="sa-command">
+            <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-commands"
+              selected={sel===key} expanded={open.has(key)} working={true} flash={false}
+              speaker={{name:'백그라운드 작업',avatar:'BG',tag:from?`${subagentTitle(from)} · 실행 중`:'실행 중'}}
+              onSelect={()=>setSel(key)} onToggle={()=>toggle(key)} onAllow={()=>{}} onDeny={()=>{}} onError={onError}/>
+          </div>;
         })}
       </div>
     </section>

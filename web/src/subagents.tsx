@@ -60,14 +60,15 @@ export function useSubagents(taskId: string | null, reload = 0): Subagent[] {
  * A subagent's conversation as thread events, oldest first; `more`: older steps exist. Live steps
  * come cut like a thread's; `whole()` loads the newest page again with them whole.
  */
-export function useSubagentEvents(s: Subagent | undefined, reload = 0) {
+export function useSubagentEvents(s: Subagent | undefined, reload = 0, history?: {taskId:string; members:Subagent[]}) {
   const empty = { events: [] as HubEvent[], more: false, loading: true, error: undefined as string | undefined };
   const [state, setState] = useState(empty);
   const control = useRef<{ load: (older?: boolean) => Promise<void> } | undefined>(undefined);
-  const key = s && `${s.task_id}/${subagentKey(s)}`;
+  const membership = history?.members.map(subagentKey).sort().join('|');
+  const key = history ? `${history.taskId}/history/${membership}` : s && `${s.task_id}/${subagentKey(s)}`;
   useEffect(() => {
     setState(empty);
-    if (!s) { control.current = undefined; return; }
+    if (!s && !history) { control.current = undefined; return; }
     let live = true, busy = false, again = false, initialized = false;
     let oldest: number | undefined, newest: number | undefined;
     const load = async (older = false) => {
@@ -79,7 +80,7 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0) {
         const boundary = newest ?? (initialized ? 0 : undefined);
         let receivedNewest = newest;
         do {
-          const page = await api.subagentEvents(s, before);
+          const page = history ? await api.subagentHistory(history.taskId, before) : await api.subagentEvents(s!, before);
           if (!live) return;
           const first = page.events[0]?.id;
           const last = page.events.at(-1)?.id;
@@ -106,7 +107,9 @@ export function useSubagentEvents(s: Subagent | undefined, reload = 0) {
     };
     control.current = { load };
     const off = onSubagent(m => {
-      if (m.type !== 'subagent_event' || m.event.task_id !== s.task_id || m.event.session_id !== s.session_id || m.event.subagent_id !== s.id) return;
+      if (m.type !== 'subagent_event') return;
+      if (history ? m.event.task_id !== history.taskId || !history.members.some(a=>a.session_id===m.event.session_id&&a.id===m.event.subagent_id)
+        : m.event.task_id !== s!.task_id || m.event.session_id !== s!.session_id || m.event.subagent_id !== s!.id) return;
       setState(prev => ({ ...prev, events: mergeTaskEvents(prev.events, [m.event as HubEvent]) }));
     });
     return () => { live = false; off(); control.current = undefined; };

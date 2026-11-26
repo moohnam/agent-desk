@@ -107,3 +107,29 @@ test('snapshot counts and post links exclude foreground, unproven and ended comm
   assert.equal(hasSubagentPaneTarget(item('local_bash',{status:'running',detailed:true,background:false})),false);
   assert.equal(hasSubagentPaneTarget(item('local_agent',{status:'completed'})),true);
 });
+
+test('common history replaces membership pages and ignores active and foreign SSE',async()=>{
+ (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
+ const prior=(globalThis as any).window;(globalThis as any).window={HTMLIFrameElement:class {}};
+ const doc={nodeType:9,addEventListener(){},defaultView:(globalThis as any).window};
+ const container={nodeType:1,tagName:'DIV',ownerDocument:doc,addEventListener(){},namespaceURI:'http://www.w3.org/1999/xhtml'};
+ const original=api.subagentHistory;const requests:{before?:number;resolve:(v:any)=>void}[]=[];let state:any;
+ api.subagentHistory=(_task,before)=>new Promise(resolve=>requests.push({before,resolve}));
+ const members=(ids:string[])=>ids.map(id=>({id,task_id:'t',session_id:'s'}));
+ const History=({ids=['a'],reload=0})=>{state=useSubagentEvents(undefined,reload,{taskId:'t',members:members(ids)});return null;};
+ const root=createRoot(container as any);const deliver=async(events:any[],more=false)=>{await act(async()=>requests.shift()!.resolve({events,more}));};
+ try{
+  await act(()=>root.render(createElement(History)));
+  await deliver([event(600)],true);
+  await act(()=>reportSubagent({type:'subagent_event',event:{...event(601),subagent_id:'running'}}));
+  assert.deepEqual(state.events.map((e:any)=>e.id),[600]);
+  await act(()=>{void state.older();});assert.equal(requests[0].before,600);await deliver([event(10)]);
+  await act(()=>root.render(createElement(History,{ids:['a','b']})));
+  assert.equal(state.events.length,0,'newly ended agents can have old IDs; membership changes reset the server cursor');
+  await deliver([event(5),event(10),event(600)]);
+  await act(()=>root.render(createElement(History,{ids:['b']})));
+  await deliver([{...event(5),subagent_id:'b'}]);
+  await act(()=>reportSubagent({type:'subagent_event',event:event(602)}));
+  assert.deepEqual(state.events.map((e:any)=>e.id),[5],'resumed agent history must leave the common column');
+ }finally{await act(()=>root.unmount());api.subagentHistory=original;(globalThis as any).window=prior;}
+});

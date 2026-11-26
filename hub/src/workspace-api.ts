@@ -61,6 +61,7 @@ const routes = [
   'GET /feed/:id',
   'GET /tasks/:id/events',
   'GET /tasks/:id/subagents',
+  'GET /tasks/:id/subagents/history',
   'GET /tasks/:id/subagents/:id/events',
   'PATCH /tasks/:id',
   'POST /tasks/:id/messages',
@@ -211,6 +212,8 @@ export function workspaceApi(hub: Hub, method: string, url: URL, body: Record<st
         }
         case 'GET /tasks/:id/subagents':
           return reply(200, hub.subagents.list(id));
+        case 'GET /tasks/:id/subagents/history':
+          return reply(200, hub.subagents.history(id, 500, intParam(url, 'before', undefined)));
         case 'GET /tasks/:id/subagents/:id/events': {
           // A subagent's steps, newest page first like a thread's; `session` names its session.
           const session = url.searchParams.get('session');

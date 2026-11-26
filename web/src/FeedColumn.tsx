@@ -1,3 +1,4 @@
+import { ColumnHeader } from './ColumnHeader.tsx';
 import { imeKey } from './keys.ts';
 import { ArrowDown, Ellipsis } from 'lucide-react';
 import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
@@ -236,8 +237,7 @@ export function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRe
   const project = f.projectIds?.length === 1 && !def.note && !f.taskIds?.length && !f.kinds?.length && !f.statuses?.length && !f.query
     ? projects.get(f.projectIds[0]) : undefined;
   return (
-    <header className={`col-head${project ? ' has-workdir' : ''}`}>
-      <div className="col-head-row">
+    <ColumnHeader footer={project && <code className="col-workdir" dir="ltr">{project.root_path}</code>}>
         {renaming ? (
           <input className="input col-rename" defaultValue={def.title} aria-label="컬럼 이름" autoFocus
             onFocus={(e) => e.currentTarget.select()}
@@ -257,8 +257,6 @@ export function ColumnHead({ def, loaded, total, projects, tasks, renaming, onRe
         )}
         <span className="filter" title={label}>{label}</span>
         <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
-      </div>
-      {project && <code className="col-workdir" dir="ltr">{project.root_path}</code>}
-    </header>
+    </ColumnHeader>
   );
 }

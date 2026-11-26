@@ -109,6 +109,15 @@ export class Subagents {
   list(taskId: string): Subagent[] {
     return (this.db.prepare('SELECT * FROM subagent WHERE task_id = ? ORDER BY created_at, id').all(taskId) as unknown as Row[]).map(readRow);
   }
+  /** Non-running agents' newest steps across all task sessions; commands stay out of this history. */
+  history(taskId: string, limit = 500, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
+    const rows = this.db.prepare(`SELECT e.* FROM subagent_event e
+      JOIN subagent s ON s.session_id = e.session_id AND s.id = e.subagent_id AND s.task_id = e.task_id
+      WHERE e.task_id = ? AND s.status != 'running'
+        AND json_extract(s.info_json, '$.type') NOT IN ('shell', 'local_bash') AND e.id < ?
+      ORDER BY e.id DESC LIMIT ?`).all(taskId, before, limit + 1) as unknown as EventRow[];
+    return { events: rows.slice(0, limit).reverse().map(readEvent), more: rows.length > limit };
+  }
   /** A subagent's newest `limit` steps (before `before`), oldest first; `more`: older ones exist. */
   events(taskId: string, sessionId: string, id: string, limit = 500, before = Number.MAX_SAFE_INTEGER): { events: SubagentEvent[]; more: boolean } {
     const rows = this.db.prepare(`SELECT * FROM subagent_event WHERE task_id = ? AND session_id = ? AND subagent_id = ? AND id < ?
