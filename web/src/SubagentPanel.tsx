@@ -168,14 +168,16 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
     if(f&&a){const row=f.querySelector<HTMLElement>(`[data-history-key="${CSS.escape(a.key)}"]`);f.scrollTop=row?f.scrollTop+row.getBoundingClientRect().top-f.getBoundingClientRect().top-a.offset:a.top;}
     rememberPosition();
   },[rows]);
-  const toggle=(key:string)=>{setExpanded(prev=>{const next=new Set(prev);if(!next.delete(key))next.add(key);return next;});void whole();};
+  const toggle=(key:string)=>{setExpanded(prev=>{const next=new Set(prev);if(!next.delete(key))next.add(key);return next;});if(!rows.find(r=>r.key===key)?.compact)void whole();};
   const select=(index:number)=>{const row=rows[Math.max(0,Math.min(index,rows.length-1))];if(!row)return;setSelected(row.key);feed.current?.querySelector(`[data-history-key="${CSS.escape(row.key)}"]`)?.scrollIntoView({block:'nearest'});};
   const target = reveal && agents.find(a=>subagentKey(a)===reveal.key);
   useEffect(()=>{
     setExtra(undefined);
     if(!target || !reveal)return;
     let live=true;
-    setSelected(`${reveal.key}/status`);
+    const statusKey=`${reveal.key}/status`;
+    setSelected(statusKey);
+    setExpanded(prev=>new Set(prev).add(statusKey));
     if(target.detailed)void api.subagentEvents(target).then(page=>{if(live)setExtra({key:reveal.key,events:page.events});},e=>{if(live)onError(String(e));});
     return ()=>{live=false;};
   },[reveal?.n,task.id,!!target]);
@@ -192,11 +194,19 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
     <ColumnHeader><h2>서브 에이전트 히스토리</h2><span className="count">{agents.length}</span><span className="filter">최근 기록부터</span></ColumnHeader>
     <div className="feed sa-feed" ref={feed} onScroll={e=>{rememberPosition();const f=e.currentTarget;if(f.scrollHeight-f.scrollTop-f.clientHeight<80)void older();}}>
       {!loading && !more && !rows.length && !error && <p className="empty">표시할 서브 에이전트 기록이 없습니다.</p>}
-      {rows.map(({key,agent,post,showStatus})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
-        <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-history"
+      {rows.map(({key,agent,post,showStatus,compact})=><div key={key} data-history-key={key} data-subagent={subagentKey(agent)}>
+        {compact ? <>
+          <button type="button" className={`sa-history-line${selected===key?' selected':''}`} aria-expanded={expanded.has(key)}
+            onKeyDown={e=>{if(e.key==='Enter'||e.key===' ')e.stopPropagation();}}
+            onClick={()=>{setSelected(key);toggle(key);}}>
+            <strong title={subagentTitle(agent)}>{subagentTitle(agent)}</strong><span>{statusText(agent)}</span>
+            <time dateTime={agent.updated_at} title={new Date(agent.updated_at).toLocaleString('ko-KR')}>{new Date(agent.updated_at).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'})}</time>
+          </button>
+          {expanded.has(key) && <p className="sa-note">{post.event.payload.text}</p>}
+        </> : <PostView post={post} task={task} model={undefined} approval={undefined} colId="subagent-history"
           selected={selected===key} expanded={expanded.has(key)} working={false} flash={false}
           speaker={{name:subagentTitle(agent),avatar:'SA',tag:showStatus?statusText(agent):post.kind==='user'?'지시':'기록'}}
-          onSelect={()=>setSelected(key)} onToggle={()=>toggle(key)} onAllow={()=>{}} onDeny={()=>{}} onError={onError}/>
+          onSelect={()=>setSelected(key)} onToggle={()=>toggle(key)} onAllow={()=>{}} onDeny={()=>{}} onError={onError}/>}
       </div>)}
       {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}<button className="link" onClick={()=>void whole()}>다시 시도</button></p>}
       {loading && <p className="sa-note">불러오는 중…</p>}

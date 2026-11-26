@@ -20,7 +20,7 @@ test('common history preserves source attribution and orphan tools in chronologi
  assert.equal(subagentHistoryPosts(agents,[]).length,0);
  assert.deepEqual(subagentHistoryPosts(agents,[],true).map(r=>r.agent.id).sort(),['a','b']);
  assert.deepEqual(subagentHistoryPosts(agents,[],'s/a').map(r=>r.agent.id),['a']);
- assert.equal(subagentHistoryPosts([{...agents[0],status:'failed'}],[])[0].post.event.payload.text,'작업 실패');
+ assert.equal(subagentHistoryPosts([{...agents[0],status:'failed'}],[])[0].compact,true);
 });
 
 

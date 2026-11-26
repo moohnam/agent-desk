@@ -21,3 +21,7 @@
 .sa-note { margin: 8px 12px; color: var(--muted); font-size: 12px; }
 .sa-older { display: block; margin: 8px auto; }
 .sa-cols > .empty { padding: 16px; }
+
+.sa-history-line { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 8px 15px; font: inherit; font-size: 12px; text-align: left; color: var(--muted); background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.sa-history-line strong { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
+.sa-history-line.selected, .sa-history-line:hover { background: var(--hover); }

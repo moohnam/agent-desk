@@ -475,7 +475,15 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await page.$$eval('.sa-command',nodes=>nodes.length),1);
       const content=await page.$eval('.subagent-panel',e=>e.textContent);
       assert.ok(content.includes('실제 백그라운드 명령'));assert.ok(content.includes('보존된 명령 출력'));assert.ok(content.includes('완료된 하위 작업'));
-      assert.ok(content.includes('과거 전체 기록은 제공되지 않았습니다.'));
+      assert.ok(!content.includes('과거 전체 기록은 제공되지 않았습니다.'));
+      const statusLine='[data-column="history"] .sa-history-line';
+      await page.click(statusLine);
+      assert.ok((await page.$eval('[data-column="history"]',e=>e.textContent)).includes('과거 전체 기록은 제공되지 않았습니다.'));
+      await page.focus(statusLine);
+      await page.keyboard.press('Enter');
+      assert.equal(await page.$eval(statusLine,e=>e.getAttribute('aria-expanded')),'false');
+      await page.keyboard.press('Space');
+      assert.equal(await page.$eval(statusLine,e=>e.getAttribute('aria-expanded')),'true');
       assert.equal(await page.$$eval('[data-column="history"]',nodes=>nodes.length),1);
       assert.equal(await page.$$eval('[data-column="commands"]',nodes=>nodes.length),1);
       assert.equal(await page.$('.sa-strip'),null);

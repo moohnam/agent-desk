@@ -23,7 +23,7 @@ export function subagentPosts(events: HubEvent[], agent: Subagent, anchorId = -1
 }
 
 export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[], complete: boolean | string = false) {
-  const rows: {key:string; agent:Subagent; post:Post; summary:boolean; showStatus:boolean}[]=[];
+  const rows: {key:string; agent:Subagent; post:Post; summary:boolean; compact?:boolean; showStatus:boolean}[]=[];
   const groups=new Map<string,HubEvent[]>();
   for(const event of events){
     const key=`${event.session_id}/${(event as HubEvent & {subagent_id:string}).subagent_id}`;
@@ -44,8 +44,8 @@ export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[], com
     for(const post of posts)rows.push({key:`${key}/${post.id}`,agent,post,summary:false,showStatus:!text && post===posts.at(-1)});
     const statusOnly=!posts.length && (complete===true || complete===key || agent.status==='failed' || agent.status==='stopped');
     if(!text && !statusOnly)continue;
-    const event:HubEvent={id:-(i*2+2),task_id:agent.task_id,session_id:agent.session_id,ts:agent.updated_at,kind:'assistant',payload:{text:text || (agent.status==='failed'?'작업 실패':agent.status==='stopped'?'작업 중지':'기록된 대화가 없습니다.')}};
-    const post=buildPosts([event])[0];rows.push({key:`${key}/status`,agent,post,summary:true,showStatus:true});
+    const event:HubEvent={id:-(i*2+2),task_id:agent.task_id,session_id:agent.session_id,ts:agent.updated_at,kind:'assistant',payload:{text:text || (complete===true || complete===key ? '기록된 대화가 없습니다.' : '현재 불러온 페이지에 대화가 없습니다.')}};
+    const post=buildPosts([event])[0];rows.push({key:`${key}/status`,agent,post,summary:true,compact:!posts.length && !agent.summary,showStatus:true});
   }
   return rows.sort((a,b)=>Date.parse(b.post.event.ts)-Date.parse(a.post.event.ts)||b.post.id-a.post.id||a.key.localeCompare(b.key));
 }
