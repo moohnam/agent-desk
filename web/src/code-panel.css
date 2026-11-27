@@ -1,3 +1,4 @@
+.code-panel:focus{outline:none}
 .code-panel{position:absolute;inset:8px;min-width:0;overflow:hidden;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:8px;margin:0;background:var(--col);color:var(--text);z-index:16;container-type:inline-size;font-size:13px}
 .code-panel header{display:flex;align-items:center;gap:8px;padding:8px 10px 8px 14px;border-bottom:1px solid var(--border);background:var(--col-head)}
 .code-panel header strong{flex:none;font-size:14px}.code-panel header .code-task{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
@@ -22,12 +23,13 @@
 .code-main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(180px,30%) minmax(0,1fr)}
 .code-files{overflow:auto;border-right:1px solid var(--border);background:var(--col-head);padding:6px 0}
 .code-file-filter{display:block;width:calc(100% - 16px);margin:2px 8px 6px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--col);color:var(--text);font:inherit;font-size:12px}
+.code-dir:not(:has(.code-dir-name)) .code-file{padding-left:10px}
 .code-dir-name{padding:4px 10px 2px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .code-file{display:flex;align-items:center;gap:7px;width:100%;padding:4px 10px 4px 18px;border:0;background:transparent;color:var(--text);font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
 .code-file:hover{background:var(--hover)}.code-file[aria-pressed=true]{background:var(--sel);box-shadow:inset 2px 0 0 var(--accent)}
 .code-file-name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .code-status{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:4px;font:700 10px/1 ui-monospace,monospace;flex:none}
-.code-status.modified{background:rgba(214,150,40,.16);color:#b97a10}.code-status.added,.code-status.untracked{background:rgba(40,170,90,.15);color:var(--good)}.code-status.deleted{background:rgba(220,60,60,.14);color:var(--bad)}
+.code-status.modified{background:var(--warn-bg);color:var(--warn)}.code-status.added,.code-status.untracked{background:rgba(40,170,90,.15);color:var(--good)}.code-status.deleted{background:rgba(220,60,60,.14);color:var(--bad)}
 .code-count{display:inline-flex;gap:5px;font:11.5px ui-monospace,monospace;color:var(--muted);flex:none}
 @container (max-width: 640px){
   .code-main{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
@@ -48,6 +50,7 @@
 .code-number{width:4em;flex:none;text-align:right;padding-right:8px;color:var(--muted);user-select:none;border-right:1px solid var(--border)}.code-sign{width:2em;text-align:center;flex:none;user-select:none}
 .code-line.add{background:rgba(40,170,90,.13)}.code-line.delete{background:rgba(220,60,60,.13)}.code-line.header{color:var(--muted);background:rgba(100,130,200,.1)}
 .code-diff.pickable .code-line:not(.header){cursor:text;user-select:none}
+button.code-sign{padding:0;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;cursor:inherit}button.code-sign:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .code-diff.pickable .code-line:not(.header):not(.quoted):hover{box-shadow:inset 3px 0 0 var(--border)}
 .code-line.quoted{background:rgba(70,120,230,.2);box-shadow:inset 3px 0 0 var(--accent)}
 .code-more{margin:12px;padding:6px;border:1px solid var(--border)}
@@ -60,6 +63,7 @@
 
 .code-hint{display:flex;align-items:center;gap:6px;color:var(--muted);border-top:1px dashed var(--border)}
 .code-actions{flex:none;padding:6px 8px;font-size:12px;max-height:45%;overflow:auto;border-top:1px solid var(--line);background:var(--col);box-shadow:0 -4px 12px rgba(0,0,0,.06)}
+.code-actions:focus{outline:none}
 .code-actions .row{display:flex;gap:6px;align-items:center;min-width:0}
 .code-actions .row>*{flex:none}.code-actions .row b{white-space:nowrap}
 .code-actions .code-range{flex:0 1 auto;min-width:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

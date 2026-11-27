@@ -6,8 +6,9 @@ import { promptTemplates } from './promptTemplates.ts';
 import { PromptTemplates } from './PromptTemplates.tsx';
 import { codePrompt, type PromptTemplate } from '../../shared/prompt-templates.ts';
 import type { CodeSendResult } from './codeSend.ts';
-/** The bar under the diff while lines are picked: what to do with them (quote, send with a template, copy). */
-export function CodeActions({taskId,quote,count,range,onQuote,onSend,onCopy,onClear}:{taskId:string;quote?:string;count:number;range:string;
+/** The bar under the diff while lines are picked: what to do with them (quote, send with a template, copy).
+ * Stays mounted without a pick (quote undefined) so the chosen template and the sent state carry over. */
+export function CodeActions({taskId,quote,anchor,count,range,onQuote,onSend,onCopy,onClear}:{taskId:string;quote?:string;anchor?:number;count:number;range:string;
   onQuote:(text:string)=>void;onSend:(text:string)=>Promise<CodeSendResult|undefined>;onCopy:(control:HTMLElement)=>Promise<boolean>;onClear:()=>void}) {
   const [source]=splitId(taskId);
   const [items,setItems]=useState<PromptTemplate[]>([]);
@@ -15,27 +16,37 @@ export function CodeActions({taskId,quote,count,range,onQuote,onSend,onCopy,onCl
   const [manage,setManage]=useState(false);
   const [reload,setReload]=useState(0);
   const [error,setError]=useState('');
+  const [loadError,setLoadError]=useState('');
   const [notice,setNotice]=useState('');
   const [loading,setLoading]=useState(true);
   const [busy,setBusy]=useState(false);
   const lock=useRef(false);
+  const bar=useRef<HTMLDivElement>(null);
+  const sentFromBar=useRef(false);
   const [delivered,setDelivered]=useState<string>();
   const [pending,setPending]=useState<string>();
-  // Templates load when lines are picked, so edits made elsewhere show up without a refresh button.
+  // Templates load when the panel opens and after the manager saves.
   useEffect(()=>{
-    const controller=new AbortController();setLoading(true);setError('');
+    const controller=new AbortController();setLoading(true);setLoadError('');
     void promptTemplates(undefined,controller.signal,source).then(data=>{
       if(controller.signal.aborted)return;setItems(data.items);setSelected(old=>data.items.some(item=>item.id===old)?old:'');
-    },e=>{if(!controller.signal.aborted)setError(e.message);}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+    },e=>{if(!controller.signal.aborted)setLoadError(e.message);}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});
     return()=>controller.abort();
   },[reload,source]);
+  // A new pick has not been sent: the last result belongs to the lines before it.
+  useEffect(()=>{setNotice('');setError('');},[quote]);
+  // A failed template load is tried again on each new pick (a new anchor), not on every line a drag crosses.
+  useEffect(()=>{if(quote&&loadError&&!loading)setReload(n=>n+1);},[anchor]);
+  // The send button disables itself once sent; right after that render, keep focus in the bar so Escape still lets the pick go first.
+  // Only when the send started from the bar: focus the user moved elsewhere meanwhile stays where they put it.
+  useEffect(()=>{if(busy)return;if(sentFromBar.current&&document.activeElement===document.body)bar.current?.focus();sentFromBar.current=false;},[busy]);
   const template=items.find(item=>item.id===selected);
   const message=quote?codePrompt(template?.text??'',quote):'';
   // Quoting without a template need not wait for the template list to load.
   const disabled=busy||(loading&&!!selected)||!message;
   const send=async()=>{
     if(disabled||lock.current||delivered===message)return;
-    const submitted=message;lock.current=true;setBusy(true);setError('');setNotice('');
+    const submitted=message;lock.current=true;sentFromBar.current=!!bar.current?.contains(document.activeElement);setBusy(true);setError('');setNotice('');
     try {
       const result = await onSend(submitted);
       if (result?.shared_pending) setPending(submitted);
@@ -46,7 +57,9 @@ export function CodeActions({taskId,quote,count,range,onQuote,onSend,onCopy,onCl
     } catch (e) {setPending(undefined);setError(e instanceof Error?e.message:String(e));}
     finally{lock.current=false;setBusy(false);}
   };
-  return <div className="code-actions" role="region" aria-label="선택한 줄">
+  const dialog=manage&&createPortal(<PromptTemplates source={source} onClose={()=>setManage(false)} onSaved={()=>setReload(n=>n+1)}/>,document.body);
+  if(!quote)return dialog||null;
+  return <div className="code-actions" role="region" aria-label="선택한 줄" tabIndex={-1} ref={bar}>
     <div className="row">
       <Quote size={14} aria-hidden/><b>{count}줄 선택</b><span className="code-range" title={range}>{range}</span><span className="spacer"/>
       <select aria-label="코드 프롬프트 템플릿" value={selected} disabled={busy||loading} onChange={e=>{setSelected(e.target.value);setNotice('');}}>
@@ -61,7 +74,7 @@ export function CodeActions({taskId,quote,count,range,onQuote,onSend,onCopy,onCl
     </div>
     {message&&<details><summary>전송 내용 미리보기</summary><pre aria-label="코드 전송 내용">{message}</pre></details>}
     {/* Loading shows in the template box, not as its own line, so the buttons do not move under the pointer. */}
-    {error&&<p role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
-    {manage&&createPortal(<PromptTemplates source={source} onClose={()=>setManage(false)} onSaved={()=>setReload(n=>n+1)}/>,document.body)}
+    {loadError&&<p role="alert">템플릿을 불러오지 못했습니다: {loadError}</p>}{error&&<p role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
+    {dialog}
   </div>;
 }

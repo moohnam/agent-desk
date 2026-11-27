@@ -1,4 +1,4 @@
-import { imeKey } from './keys.ts';
+import { imeKey, latinKey } from './keys.ts';
 import { setDiffWrap, useDiffWrap } from './diffWrap.ts';
 import { writeClipboardText } from './clipboard.ts';
 import { CodeActions } from './CodeActions.tsx';
@@ -57,7 +57,9 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
       });
       setReading(data.files.length>0);
       setSnapshot({data,revision});
-      setSelected(previous=>data.files.some(file=>keyOf(file)===previous)?previous:data.files[0]?keyOf(data.files[0]):undefined);
+      // The tree lists root files first, so open on the first of those.
+      const first=data.files.find(file=>!file.path.includes('/'))??data.files[0];
+      setSelected(previous=>data.files.some(file=>keyOf(file)===previous)?previous:first?keyOf(first):undefined);
     }).catch(e=>{if(!controller.signal.aborted){
       setListError(e.message);
       setReading(!!snapshot?.data.files.length);
@@ -86,11 +88,11 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     return()=>controller.abort();
   },[taskId,path,kind,snapshot,revision,commit,base,target,worktree]);
   useEffect(()=>{setLimit(200);setContent(undefined);if(scroll.current)scroll.current.scrollTop=0;},[selected]);
-  // The git preamble before the first hunk (diff --git, index, ---/+++) repeats what the file head shows.
+  // The diff --git, index and ---/+++ lines before a hunk repeat what the file head shows; mode and rename lines stay.
   const rows=useMemo(()=>{
     const all=diffLines(content?.diff??'');
     const first=all.findIndex(row=>row.kind==='header'&&row.text.startsWith('@@'));
-    return first>0?all.slice(first):all;
+    return all.filter((row,index)=>(first>=0&&index>=first)||!/^(diff --git |index |--- |\+\+\+ )/.test(row.text));
   },[content]);
   const [range,setRange]=useState<{source:CodeViewResult;anchor:number;end:number}>();
   const active=range && range.source===content && !loading ? range : undefined;
@@ -122,23 +124,31 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
   const groups=useMemo(()=>{
     const out=new Map<string,CodeViewResult['files']>();
     for(const item of snapshot?.data.files??[]){const folder=item.path.includes('/')?item.path.slice(0,item.path.lastIndexOf('/')):'';out.set(folder,[...(out.get(folder)??[]),item]);}
-    return [...out];
+    return [...out].sort((a,b)=>Number(a[0]!=='')-Number(b[0]!==''));
   },[snapshot]);
-  const ordered=groups.flatMap(([,items])=>items);
+  // The filter applies only while its box shows, so a shorter list after a scope change is never hidden by it.
+  const query=(snapshot?.data.files.length??0)>6?filter.trim().toLowerCase():'';
+  const shown=query?groups.map(([folder,items])=>[folder,items.filter(item=>item.path.toLowerCase().includes(query))] as const).filter(([,items])=>items.length):groups;
+  const ordered=shown.flatMap(([,items])=>items);
   const position=ordered.findIndex(item=>keyOf(item)===selected);
   const choose=(item:CodeViewResult['files'][number]|undefined)=>{if(item&&keyOf(item)!==selected){setContent(undefined);setSelected(keyOf(item));}};
-  const shown=filter.trim()?groups.map(([folder,items])=>[folder,items.filter(item=>item.path.toLowerCase().includes(filter.trim().toLowerCase()))] as const).filter(([,items])=>items.length):groups;
+  const nav=useRef<HTMLElement>(null);
+  useEffect(()=>{if(selected)nav.current?.querySelector(`[data-file-key="${CSS.escape(selected)}"]`)?.scrollIntoView({block:'nearest'});},[selected]);
   // Hunks: the @@ rows; the current one follows the scroll position.
   const hunks=useMemo(()=>rows.flatMap((row,index)=>row.kind==='header'&&row.text.startsWith('@@')?[index]:[]),[rows]);
   const [hunk,setHunk]=useState(0);
   useEffect(()=>setHunk(0),[rows]);
-  const reveal=(index:number)=>{
+  // A hunk near the end cannot scroll to the top, so the scroll a jump causes must not recount the hunk.
+  const jumped=useRef<number|undefined>(undefined);
+  const reveal=(index:number,hold=false)=>{
     if(index>=limit)setLimit(Math.ceil((index+1)/200)*200);
-    requestAnimationFrame(()=>scroll.current?.querySelector(`[data-diff-row="${index}"]`)?.scrollIntoView({block:'start'}));
+    requestAnimationFrame(()=>{scroll.current?.querySelector(`[data-diff-row="${index}"]`)?.scrollIntoView({block:'start'});if(hold)jumped.current=scroll.current?.scrollTop;});
   };
-  const goHunk=(dir:1|-1)=>{const next=Math.max(0,Math.min(hunks.length-1,hunk+dir));if(hunks[next]===undefined)return;setHunk(next);reveal(hunks[next]);};
+  const goHunk=(dir:1|-1)=>{const next=Math.max(0,Math.min(hunks.length-1,hunk+dir));if(hunks[next]===undefined)return;setHunk(next);reveal(hunks[next],true);};
   const followHunk=()=>{
     const pane=scroll.current;if(!pane||!hunks.length)return;
+    if(jumped.current!==undefined&&pane.scrollTop===jumped.current)return;
+    jumped.current=undefined;
     const top=pane.getBoundingClientRect().top+4;
     let current=0;
     hunks.forEach((index,i)=>{const row=pane.querySelector(`[data-diff-row="${index}"]`);if(row&&row.getBoundingClientRect().top<=top)current=i;});
@@ -146,28 +156,96 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
   };
   // Lines are picked by dragging over them (a click picks one, Shift+click extends); text selection is off in the diff.
   const dragFrom=useRef<number|null>(null);
-  useEffect(()=>{const stop=()=>{dragFrom.current=null;};window.addEventListener('pointerup',stop);window.addEventListener('pointercancel',stop);return()=>{window.removeEventListener('pointerup',stop);window.removeEventListener('pointercancel',stop);};},[]);
+  const pointer=useRef('');
+  // The line the keyboard returns to: the last sign focused or line picked, by any pointer.
+  const [cursor,setCursor]=useState<{rows:typeof rows;index:number}>();
+  const pick=(index:number,extend:boolean)=>{if(content){setRange({source:content,anchor:extend&&active?active.anchor:index,end:index});setCursor({rows,index});}};
+  // Focus on a line sign stays there; otherwise it returns to the diff so the panel keys keep working.
+  const clear=()=>{setRange(undefined);dragFrom.current=null;dragY.current=null;if(!document.activeElement?.closest('button.code-sign'))scroll.current?.focus({preventScroll:true});};
+  // Held past the top or bottom edge, a drag scrolls the diff and keeps extending to the edge line.
+  // NaN until the pointer moves: a plain click near the edge (the action bar appearing shortens the pane) must not scroll.
+  const dragY=useRef<number|null>(null);
+  const pressY=useRef(0);
+  // The release settles the pick on the line under the pointer, so a move that was not delivered before it is not lost.
+  const release=useRef((_:PointerEvent)=>{});
+  release.current=e=>{
+    if(dragFrom.current===null||!content||e.type!=='pointerup')return;
+    const index=rowAt(document.elementFromPoint(e.clientX,e.clientY));
+    if(index>=0&&rows[index].kind!=='header'&&index!==active?.end){setRange({source:content,anchor:dragFrom.current,end:index});setCursor({rows,index});}
+  };
+  const edgeScroll=useRef(()=>{});
+  edgeScroll.current=()=>{
+    const pane=scroll.current,y=dragY.current;if(!pane||y===null||dragFrom.current===null||!content)return;
+    const box=pane.getBoundingClientRect(),dir=Number.isNaN(y)?0:y>box.bottom-12?1:y<box.top+12?-1:0;
+    if(dir){
+      // At the bottom of the rendered rows, render the next page as the arrow keys do.
+      if(dir>0&&pane.scrollTop+pane.clientHeight>=pane.scrollHeight-2&&limit<rows.length)setLimit(limit+200);
+      pane.scrollTop+=dir*12;
+      const index=rowAt(document.elementFromPoint(box.left+box.width/2,Math.min(box.bottom-2,Math.max(box.top+2,y))));
+      if(index>=0&&rows[index].kind!=='header'){setRange({source:content,anchor:dragFrom.current,end:index});setCursor({rows,index});}
+    }
+    requestAnimationFrame(()=>edgeScroll.current());
+  };
+  // A drag belongs to the diff it started in: switching file or scope mid-drag ends it.
+  useEffect(()=>{dragFrom.current=null;dragY.current=null;},[content]);
+  useEffect(()=>{
+    const stop=(e?:PointerEvent)=>{if(e)release.current(e);dragFrom.current=null;dragY.current=null;};
+    // A move with no button held ends the drag even if its pointerup was lost.
+    // Edge scrolling waits for a few pixels of travel, so a click that wobbles is still a click.
+    const move=(e:PointerEvent)=>{
+      if(dragY.current===null)return;if(!(e.buttons&1)){stop();return;}
+      if(!Number.isNaN(dragY.current)||Math.abs(e.clientY-pressY.current)>=4)dragY.current=e.clientY;
+    };
+    window.addEventListener('pointerup',stop);window.addEventListener('pointercancel',stop);window.addEventListener('pointermove',move);
+    return()=>{stop();window.removeEventListener('pointerup',stop);window.removeEventListener('pointercancel',stop);window.removeEventListener('pointermove',move);};
+  },[]);
+  // One tab stop for all line signs: the cursor above, else the picked end, else the first line.
+  const signStop=cursor?.rows===rows?cursor.index:active?active.end:rows.findIndex(row=>row.kind!=='header');
+  const moveSign=(from:number,dir:1|-1,extend:boolean)=>{
+    let index=from+dir;while(index>=0&&index<rows.length&&rows[index].kind==='header')index+=dir;
+    if(index<0||index>=rows.length||!content)return;
+    const focus=()=>scroll.current?.querySelector<HTMLElement>(`[data-diff-row="${index}"] button.code-sign`)?.focus();
+    // Past the rendered rows, show the next page first, as the 다음 200줄 button would.
+    if(index>=limit){setLimit(Math.ceil((index+1)/200)*200);requestAnimationFrame(focus);}else focus();
+    // Shift+Arrow extends from the line it started on, like Shift+click and Shift+Enter.
+    if(extend)setRange({source:content,anchor:active?active.anchor:from,end:index});
+  };
   const rowAt=(target:EventTarget|null)=>{const row=(target as Element|null)?.closest?.<HTMLElement>('[data-diff-row]');return row&&scroll.current?.contains(row)?Number(row.dataset.diffRow):-1;};
   const picked=active?rows.slice(start,end+1).filter(row=>row.kind!=='header'):[];
   const pickedRange=()=>{
-    const numbers=picked.flatMap(row=>row.next??row.old??[]);
+    // One side only: mixing old and new numbers gives ranges such as 10–4.
+    const side=picked.some(row=>row.next!==undefined)?'next':'old';
+    const numbers=picked.flatMap(row=>row[side]??[]);
     return numbers.length?numbers[0]===numbers.at(-1)?String(numbers[0]):`${numbers[0]}–${numbers.at(-1)}`:'';
   };
   const fileName=(item:CodeViewResult['files'][number])=>item.path.slice(item.path.lastIndexOf('/')+1);
   const counts=(item:CodeViewResult['files'][number])=>item.binary?<span className="code-count">바이너리</span>
     :item.additions===undefined||item.deletions===undefined?<span className="code-count">미집계</span>
     :<span className="code-count"><b className="add">+{item.additions}</b><b className="del">−{item.deletions}</b></span>;
-  const marks=useMemo(()=>rows.flatMap((row,index)=>row.kind==='add'||row.kind==='delete'?[<i key={index} className={row.kind} style={{top:`${(100*index/rows.length).toFixed(2)}%`}}/>]:[]),[rows]);
-  return <aside className="code-panel" aria-label="코드 변경 보기" onKeyDown={e=>{
+  // One mark per kind and half percent of height, so a huge diff does not draw a mark per line.
+  const marks=useMemo(()=>[...new Set(rows.flatMap((row,index)=>row.kind==='add'||row.kind==='delete'?[`${row.kind} ${(Math.floor(200*index/rows.length)/2).toFixed(1)}`]:[]))]
+    .map(mark=>{const [kind,top]=mark.split(' ');return <i key={mark} className={kind} style={{top:`${top}%`}}/>;}),[rows]);
+  const pickable=!content?.binary&&rows.some(row=>row.kind!=='header');
+  // Highlighting runs once per row, not on every pick or scroll re-render.
+  const highlighted=useMemo(()=>new Map<number,string|undefined>(),[rows,lang]);
+  const highlight=(index:number)=>{
+    if(!highlighted.has(index)){const row=rows[index];highlighted.set(index,row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined);}
+    return highlighted.get(index);
+  };
+  // tabIndex -1: a click on plain text in the panel keeps focus here, so its keys and Escape order still apply.
+  return <aside className="code-panel" aria-label="코드 변경 보기" tabIndex={-1} onKeyDown={e=>{
     // Portalled dialogs retain their own Escape handler on document.
     if(!e.currentTarget.contains(e.target as Node))return;
-    const typing=(e.target as Element).closest('input, textarea, select');
-    if(!typing&&!imeKey(e.nativeEvent)&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&['[',']','n','p'].includes(e.key)){
+    const typing=(e.target as Element).closest('input, textarea, select, [data-desk-input]')||(e.target as HTMLElement).isContentEditable;
+    // By key position like the desk's own shortcuts, so ㅜ (n) and ㅔ (p) work with a Korean input source.
+    const key=latinKey(e.nativeEvent);
+    if(!typing&&!imeKey(e.nativeEvent)&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&['[',']','n','p'].includes(key)){
       e.preventDefault();e.stopPropagation();
-      if(e.key==='['||e.key===']')choose(ordered[position+(e.key===']'?1:-1)]);else goHunk(e.key==='n'?1:-1);
+      if(key==='['||key===']'){if(!e.repeat)choose(ordered[position+(key===']'?1:-1)]);}else goHunk(key==='n'?1:-1);
       return;
     }
-    if(e.key!=='Escape'||imeKey(e.nativeEvent)){e.stopPropagation();return;}
+    // Focus on the panel itself (a click on plain text) leaves desk keys such as ? and Ctrl+; to the desk.
+    if(e.key!=='Escape'||imeKey(e.nativeEvent)){if(e.target!==e.currentTarget)e.stopPropagation();return;}
     if(e.defaultPrevented||e.repeat)return;
     const select=(e.target as Element).closest('select');
     if(select&&CSS.supports('selector(select:open)')&&select.matches(':open')){
@@ -181,7 +259,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
       return;
     }
     // Picked lines are let go before the panel closes, like an open disclosure.
-    if(active){e.preventDefault();e.stopPropagation();setRange(undefined);return;}
+    if(active){e.preventDefault();e.stopPropagation();clear();return;}
     // Otherwise let the desk close this panel through its existing close action.
   }}>
     <header><strong>코드 변경</strong><span className="code-task" title={title}>{title}</span><button aria-label="코드 새로고침" title="현재 변경 다시 읽기" disabled={loading} onClick={()=>setRevision(n=>n+1)}><RefreshCw size={16}/></button><button aria-label="코드 창 닫기" onClick={onClose}><X size={16}/></button></header>
@@ -206,9 +284,11 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     {listError&&<p role="alert">목록 갱신 실패: {listError}{snapshot?' · 마지막으로 읽은 목록입니다.':''}</p>}
     {listError===REGISTERED_WORKTREE_UNAVAILABLE&&<button onClick={()=>changeWorktree(null)}>세션 작업 폴더 보기</button>}
     <div className="code-main">
-      <nav className="code-files" aria-label="변경 파일">
-        {snapshot&&snapshot.data.files.length>6&&<input className="code-file-filter" aria-label="파일 찾기" placeholder="파일 찾기" value={filter} onChange={e=>setFilter(e.target.value)}/>}
+      <nav className="code-files" aria-label="변경 파일" ref={nav}>
+        {snapshot&&snapshot.data.files.length>6&&<input className="code-file-filter" aria-label="파일 찾기" placeholder="파일 찾기" value={filter} onChange={e=>setFilter(e.target.value)}
+          onKeyDown={e=>{if(e.key==='Escape'&&filter&&!imeKey(e.nativeEvent)){e.preventDefault();e.stopPropagation();setFilter('');}}}/>}
         {!snapshot?.data.files.length&&!listing&&<p>변경 파일 없음</p>}
+        {query&&!shown.length&&<p>맞는 파일 없음</p>}
         {shown.map(([folder,items])=><div key={folder} className="code-dir">
           {folder&&<div className="code-dir-name" title={folder}>{folder}</div>}
           {items.map(item=><button key={keyOf(item)} type="button" className="code-file" aria-pressed={keyOf(item)===selected} data-file-key={keyOf(item)} title={item.path} onClick={()=>choose(item)}>
@@ -219,9 +299,9 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
       <section className="code-view">
         {file&&<div className="code-file-head">
           <button aria-label="이전 파일" title="이전 파일 ([)" disabled={position<=0} onClick={()=>choose(ordered[position-1])}><ChevronUp size={15}/></button>
-          <button aria-label="다음 파일" title="다음 파일 (])" disabled={position<0||position>=ordered.length-1} onClick={()=>choose(ordered[position+1])}><ChevronDown size={15}/></button>
+          <button aria-label="다음 파일" title="다음 파일 (])" disabled={position>=ordered.length-1} onClick={()=>choose(ordered[position+1])}><ChevronDown size={15}/></button>
           <span className="code-path" title={file.path}>{file.path.includes('/')&&<span>{file.path.slice(0,file.path.lastIndexOf('/')+1)}</span>}<b>{fileName(file)}</b></span>
-          <small>{position+1} / {ordered.length}</small>{counts(file)}
+          {position>=0&&<small>{position+1} / {ordered.length}</small>}{counts(file)}
           {hunks.length>1&&<span className="code-hunks"><button aria-label="이전 헝크" title="이전 헝크 (p)" disabled={hunk<=0} onClick={()=>goHunk(-1)}><ChevronUp size={15}/></button><small>헝크 {hunk+1} / {hunks.length}</small><button aria-label="다음 헝크" title="다음 헝크 (n)" disabled={hunk>=hunks.length-1} onClick={()=>goHunk(1)}><ChevronDown size={15}/></button></span>}
           <button aria-label="긴 줄 줄바꿈" aria-pressed={wrap} title="긴 줄 줄바꿈" onClick={()=>setDiffWrap(!wrap)}><WrapText size={15}/></button>
         </div>}
@@ -230,36 +310,52 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
         <div className="code-diff-area">
           <div className={`${wrap?'code-diff wrap':'code-diff'}${onQuote?' pickable':''}`} ref={scroll} tabIndex={0} aria-label="파일 diff" onScroll={followHunk}
             onPointerDown={e=>{
-              if(!onQuote||e.button!==0||!content)return;
+              pointer.current=e.pointerType;
+              // A finger drag scrolls; touch picks on tap (see onClick).
+              if(!onQuote||e.button!==0||!content||e.pointerType==='touch')return;
               const index=rowAt(e.target);
               if(index<0||rows[index]?.kind==='header')return;
               e.preventDefault();scroll.current?.focus({preventScroll:true});
-              const anchor=e.shiftKey&&active?active.anchor:index;
-              dragFrom.current=anchor;setRange({source:content,anchor,end:index});
+              pick(index,e.shiftKey);dragFrom.current=e.shiftKey&&active?active.anchor:index;
+              dragY.current=NaN;pressY.current=e.clientY;requestAnimationFrame(()=>edgeScroll.current());
             }}
             onPointerOver={e=>{
               if(dragFrom.current===null||!(e.buttons&1)||!content)return;
               const index=rowAt(e.target);
-              if(index>=0)setRange({source:content,anchor:dragFrom.current,end:index});
+              if(index>=0&&rows[index].kind!=='header'){setRange({source:content,anchor:dragFrom.current,end:index});setCursor({rows,index});}
+            }}
+            onClick={e=>{
+              // A tap picks a line; a second tap extends to it, since a finger has no Shift.
+              if(!onQuote||pointer.current!=='touch'||e.detail===0)return;
+              const index=rowAt(e.target);
+              if(index>=0&&rows[index]?.kind!=='header')pick(index,!!active);
             }}>
             {!loading&&!error&&!listError&&!snapshot?.data.files.length&&<p>{base&&target?'두 브랜치 사이에 변경된 파일이 없습니다.':commit?'이 커밋에서 변경된 파일이 없습니다.':'미커밋 변경이 없습니다.'}</p>}
             {content?.binary?<p>바이너리 파일은 코드 diff를 표시하지 않습니다.</p>:rows.slice(0,limit).map((row,index)=>{
-              const html=row.kind!=='header'&&lang&&hljs.getLanguage(lang)&&row.text.length<8000
-                ?hljs.highlight(row.text,{language:lang,ignoreIllegals:true}).value:undefined;
-              return <div key={index} data-diff-row={index} className={`code-line ${row.kind}${index>=start && index<=end?' quoted':''}`}><span className="code-number">{row.old??''}</span><span className="code-number">{row.next??''}</span><span className="code-sign">{row.kind==='add'?'+':row.kind==='delete'?'-':''}</span>{html===undefined?<code>{row.text||' '}</code>:<code dangerouslySetInnerHTML={{__html:html||' '}}/>}</div>;
+              const html=highlight(index);
+              const sign=row.kind==='add'?'+':row.kind==='delete'?'-':'';
+              // The sign is a button for the keyboard: Enter picks the line, Shift+Enter extends to it.
+              return <div key={index} data-diff-row={index} className={`code-line ${row.kind}${index>=start && index<=end?' quoted':''}`}><span className="code-number">{row.old??''}</span><span className="code-number">{row.next??''}</span>
+                {onQuote&&row.kind!=='header'
+                  ?<button type="button" className="code-sign" aria-label={`diff ${index+1}번째 줄 선택`} aria-pressed={index>=start&&index<=end} tabIndex={index===signStop?0:-1} onFocus={()=>setCursor({rows,index})}
+                    onClick={e=>{if(e.detail===0)pick(index,e.shiftKey);}}
+                    onKeyDown={e=>{if((e.key==='ArrowDown'||e.key==='ArrowUp')&&!e.altKey&&!e.metaKey&&!e.ctrlKey){e.preventDefault();moveSign(index,e.key==='ArrowDown'?1:-1,e.shiftKey);}}}>{sign}</button>
+                  :<span className="code-sign">{sign}</span>}
+                {html===undefined?<code>{row.text||' '}</code>:<code dangerouslySetInnerHTML={{__html:html||' '}}/>}</div>;
             })}
             {rows.length>limit&&<button className="code-more" onClick={()=>setLimit(n=>n+200)}>다음 200줄 표시 ({rows.length-limit}줄 남음)</button>}
           </div>
           {marks.length>0&&<div className="code-minimap" aria-hidden onClick={e=>{
+            scroll.current?.focus({preventScroll:true});
             const box=e.currentTarget.getBoundingClientRect();
             reveal(Math.max(0,Math.min(rows.length-1,Math.floor(rows.length*(e.clientY-box.top)/box.height))));
           }}>{marks}</div>}
         </div>
-        {onQuote&&onSend&&(active
-          ?<CodeActions taskId={taskId} quote={selectedQuote()} count={picked.length} range={`${file?fileName(file):''} ${pickedRange()}`.trim()}
-            onQuote={text=>{onQuote(text);setRange(undefined);}} onSend={onSend} onClear={()=>setRange(undefined)}
-            onCopy={control=>writeClipboardText(picked.map(row=>row.text).join('\n'),control)}/>
-          :!!rows.length&&<p className="code-hint"><Quote size={13}/>줄을 드래그해 고르면 답글에 인용하거나 바로 보낼 수 있습니다</p>)}
+        {/* Mounted while nothing is picked too, so the chosen template and sent state outlive a pick. */}
+        {onQuote&&onSend&&<CodeActions taskId={taskId} quote={active?selectedQuote():undefined} anchor={active?.anchor} count={picked.length} range={`${file?fileName(file):''} ${pickedRange()}`.trim()}
+          onQuote={text=>{onQuote(text);setRange(undefined);}} onSend={onSend} onClear={clear}
+          onCopy={control=>writeClipboardText(picked.map(row=>(row.kind==='add'?'+':row.kind==='delete'?'-':' ')+row.text).join('\n'),control)}/>}
+        {onQuote&&onSend&&!active&&pickable&&<p className="code-hint"><Quote size={13}/>{matchMedia('(pointer: coarse)').matches?'줄을 눌러 고르고 다른 줄을 눌러 범위를 늘리면':'줄을 드래그해 고르면'} 답글에 인용하거나 바로 보낼 수 있습니다</p>}
       </section>
     </div>
   </aside>;

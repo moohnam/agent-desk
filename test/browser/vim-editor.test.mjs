@@ -805,6 +805,104 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.keyboard.press('Escape');await page.waitForSelector('.thread-head',{hidden:true});
     }));
 
+    await t.test('code panel keys, filter and picks hold across keyboard, Korean input and scope changes', () => withPage(async page => {
+      await page.setViewport({width:1440,height:900});
+      const seven=Array.from({length:7},(_,i)=>({path:`src/${i%2?'odd':'even'}${i}.ts`,status:'modified'}));
+      const two=[{path:'z.ts',status:'modified'},{path:'src/y.ts',status:'modified'}];
+      // The second hunk sits near the end, so it cannot scroll to the top of the pane.
+      const diff='@@ -10,2 +3,2 @@\n-a\n-b\n+c\n+d\n'+Array.from({length:80},(_,i)=>' c'+i).join('\n')+'\n@@ -100,2 +100,2 @@\n-x\n+y\n ctx\n';
+      let templateReads=0;
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/prompt-templates'){templateReads++;return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({items:[{id:'t1',name:'리뷰',text:'리뷰해 주세요'}],revision:'r'})});}
+        if(path!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());
+        void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/test',head:'a'.repeat(40),commit:body.commit,commits:[{id:'b'.repeat(40),subject:'commit'}],files:body.commit?two:seven,...(body.path?{path:body.path,diff}:{})})});
+      });
+      await openReply(page,origin);
+      await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add');
+      const hunk=()=>page.$eval('.code-hunks small',e=>e.textContent);
+      await page.focus('.code-diff');await page.keyboard.press('n');
+      await page.waitForFunction(()=>document.querySelector('.code-hunks small').textContent==='헝크 2 / 2');
+      await new Promise(resolve=>setTimeout(resolve,300));
+      assert.equal(await hunk(),'헝크 2 / 2','a jump to a hunk near the end is not undone by its own scroll');
+      await page.$eval('.code-diff',e=>e.dispatchEvent(new KeyboardEvent('keydown',{key:'ㅔ',code:'KeyP',bubbles:true,cancelable:true})));
+      await page.waitForFunction(()=>document.querySelector('.code-hunks small').textContent==='헝크 1 / 2');
+      // Keyboard picking: one tab stop for the signs; Enter picks a line, Shift+ArrowDown extends.
+      assert.equal(await page.$$eval('button.code-sign[tabindex="0"]',n=>n.length),1,'the line signs are one tab stop');
+      await page.focus('button.code-sign[tabindex="0"]');
+      await page.keyboard.down('Shift');for(let i=0;i<3;i++)await page.keyboard.press('ArrowDown');await page.keyboard.up('Shift');
+      assert.equal(await page.$$eval('.code-line.quoted',n=>n.length),4,'Shift+Arrow without a pick extends from the starting line');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(()=>document.activeElement.closest('[data-diff-row]')?.dataset.diffRow),'4','Escape keeps focus on the line');
+      await page.keyboard.press('Tab');await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
+      assert.equal(await page.evaluate(()=>document.activeElement.closest('[data-diff-row]')?.dataset.diffRow),'4','the tab stop follows the focused line');
+      await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
+      await page.keyboard.down('Shift');for(let i=0;i<3;i++)await page.keyboard.press('ArrowDown');await page.keyboard.up('Shift');
+      assert.equal(await page.$$eval('.code-line.quoted',n=>n.length),4,'keyboard picks a range');
+      assert.match(await page.$eval('.code-actions .code-range',e=>e.textContent),/ 3–4$/,'the range uses one side of the numbers');
+      await page.waitForSelector('[aria-label="코드 프롬프트 템플릿"] option[value="t1"]');
+      await page.select('[aria-label="코드 프롬프트 템플릿"]','t1');
+      await page.click('.code-actions [aria-label="선택 해제"]');
+      assert.equal(await page.$('.code-actions'),null);
+      await page.keyboard.press('n');
+      await page.waitForFunction(()=>document.querySelector('.code-hunks small').textContent==='헝크 2 / 2');
+      await page.click('.code-line.add');
+      assert.equal(await page.$eval('[aria-label="코드 프롬프트 템플릿"]',e=>e.value),'t1','the template survives a new pick');
+      assert.equal(templateReads,1,'templates are read once, not on every pick');
+      await page.click('.code-hunks small');await page.keyboard.press('Escape');
+      assert.equal(await page.$('.code-line.quoted'),null,'Escape after a click on plain panel text lets the pick go');
+      assert.ok(await page.$('.code-panel'));
+      // The filter: ] stays within the shown files; a shorter list after a scope change is not filtered.
+      await page.type('.code-file-filter','even');await page.keyboard.press('Tab');
+      await page.focus('.code-diff');await page.keyboard.press(']');
+      await page.waitForFunction(()=>document.querySelector('.code-file[aria-pressed=true]')?.title==='src/even2.ts');
+      await page.select('[aria-label="변경 기준"]','b'.repeat(40));
+      await page.waitForFunction(()=>document.querySelectorAll('.code-file').length===2);
+      assert.deepEqual(await page.$$eval('.code-files .code-dir-name, .code-files .code-file',n=>n.map(e=>e.title||e.textContent)),['z.ts','src','src/y.ts'],'root files come before folders');
+      // A drag held below the diff scrolls it and keeps extending the pick.
+      await page.waitForSelector('.code-line.add');
+      const pane=await page.$eval('.code-diff',e=>{e.scrollTop=0;const b=e.getBoundingClientRect();return {x:b.left+b.width/2,top:b.top,bottom:b.bottom};});
+      await page.mouse.move(pane.x,pane.top+30);await page.mouse.down();await page.mouse.move(pane.x,pane.bottom+20,{steps:4});
+      await page.waitForFunction(()=>document.querySelector('.code-diff').scrollTop>100);await page.mouse.up();
+      assert.ok(await page.$$eval('.code-line.quoted',n=>n.length)>10,'the pick follows the scrolled edge');
+      // The release settles the pick on the line under it, even when no move reached that line first.
+      await page.$eval('.code-diff',e=>{e.scrollTop=0;});
+      const ends=await page.$$eval('[data-diff-row="1"], [data-diff-row="5"]',n=>n.map(e=>{const b=e.getBoundingClientRect();return {x:b.left+b.width/2,y:b.top+b.height/2};}));
+      await page.mouse.move(ends[0].x,ends[0].y);await page.mouse.down();
+      await page.evaluate(({x,y})=>window.dispatchEvent(new PointerEvent('pointerup',{clientX:x,clientY:y,bubbles:true})),ends[1]);
+      await page.mouse.up();
+      assert.equal(await page.$$eval('.code-line.quoted',n=>n.length),5,'the release settles on the line under it');
+    }));
+
+    await t.test('code panel picks lines by tap on touch and scrolls on a finger drag', () => withPage(async page => {
+      await page.setViewport({width:390,height:800,hasTouch:true,isMobile:true});
+      const diff='@@ -1,80 +1,80 @@\n'+Array.from({length:80},(_,i)=>'+line'+i).join('\n')+'\n';
+      await page.setRequestInterception(true);
+      page.on('request',request=>{
+        const path=new URL(request.url()).pathname;
+        if(path==='/api/prompt-templates')return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({items:[],revision:'r'})});
+        if(path!=='/api/code-view')return void request.continue();
+        const body=JSON.parse(request.postData());
+        void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/test',head:'a'.repeat(40),files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff}:{})})});
+      });
+      await openReply(page,origin);
+      await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add');
+      const box=await page.$eval('.code-diff',e=>{const b=e.getBoundingClientRect();return {x:Math.round(b.left+b.width/2),y:Math.round(b.top+b.height*0.7)};});
+      const cdp=await page.createCDPSession();
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[box]});
+      for(let i=1;i<=10;i++)await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x,y:box.y-20*i}]});
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      // Wait for the fling to stop, or the taps land on lines that are still moving.
+      for(let last=-1,still=0;still<3;){const now=await page.$eval('.code-diff',e=>e.scrollTop);still=now===last?still+1:0;last=now;await new Promise(resolve=>setTimeout(resolve,150));}
+      assert.ok(await page.$eval('.code-diff',e=>e.scrollTop>0),'a finger drag scrolls the diff');
+      assert.equal(await page.$('.code-line.quoted'),null,'scrolling picks nothing');
+      const lines=await page.$$('.code-line.add');
+      await lines[30].tap();await lines[32].tap();
+      assert.equal(await page.$$eval('.code-line.quoted',n=>n.length),3,'a tap picks and a second tap extends');
+    }));
+
     for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
       await page.setViewport({width,height:900});
       const commit='1'.repeat(40);
@@ -1019,8 +1117,10 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       const uncertain=sends.at(-1);
       assert.notEqual(rejected.operation,uncertain.operation,'a final rejection gets a new operation ID');
       sendStatus=200;
-      await clickText('.code-actions button','바로 전송');
+      await page.focus('.code-actions .send-code');await page.keyboard.press('Enter');
       await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('전송했습니다'));
+      // The send button disables itself once sent; focus stays in the panel so Escape lets the pick go first.
+      await page.waitForFunction(()=>document.activeElement?.closest('.code-actions'));
       await clickText('.code-actions button','바로 전송');
       assert.equal(sends.length,width===390?4:3,'same selection cannot be submitted twice after success');
       assert.equal(uncertain.operation,sends.at(-1).operation,'an uncertain result keeps its operation ID');
