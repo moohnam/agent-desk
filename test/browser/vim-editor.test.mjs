@@ -767,9 +767,13 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       for(const focus of ['opener','commit','file','body','line']){
         await open();
         if(focus==='commit'){await page.select('[aria-label="변경 기준"]','b'.repeat(40));await page.focus('[aria-label="변경 기준"]');}
-        if(focus==='file'){await page.select('[aria-label="변경 파일"]',JSON.stringify(['tracked','b.ts']));await page.focus('[aria-label="변경 파일"]');}
+        if(focus==='file'){const file=`.code-file[data-file-key='${JSON.stringify(['tracked','b.ts'])}']`;await page.click(file);await page.focus(file);}
         if(focus==='body')await page.click('.code-diff');
-        if(focus==='line')await page.click('.code-line.add button');
+        if(focus==='line'){
+          await page.click('.code-line.add');await page.keyboard.press('Escape');
+          assert.equal(await page.$('.code-line.quoted'),null,'first Escape lets the picked lines go');
+          assert.ok(await page.$('.code-panel'),'the panel stays while lines were picked');
+        }
         await closed();
       }
       await open();
@@ -781,9 +785,11 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.keyboard.press('Escape');
       assert.ok(await page.$('.code-panel'),'native select consumes its own Escape');
       await page.waitForFunction(()=>!document.querySelector('[aria-label="변경 기준"]').matches(':open'));await closed();
-      await open();await page.$$eval('.code-actions button',nodes=>nodes.find(e=>e.textContent==='템플릿 관리').click());
+      await open();await page.click('.code-line.add');await page.click('[aria-label="템플릿 관리"]');
       await page.waitForSelector('[role="dialog"]');await page.keyboard.press('Escape');
-      await page.waitForSelector('[role="dialog"]',{hidden:true});assert.ok(await page.$('.code-panel'),'dialog closes before the panel');await closed();
+      await page.waitForSelector('[role="dialog"]',{hidden:true});assert.ok(await page.$('.code-panel'),'dialog closes before the panel');
+      assert.ok(await page.$('.code-line.quoted'),'the dialog keeps the picked lines');
+      await page.focus('.code-diff');await page.keyboard.press('Escape');assert.equal(await page.$('.code-line.quoted'),null);await closed();
       await open();await page.focus('.code-diff');
       await page.$eval('.code-diff',e=>e.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,isComposing:true})));
       assert.ok(await page.$('.code-panel'),'IME cancellation does not close the panel');await closed();
@@ -838,25 +844,32 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       assert.equal(await longLine(),true,'disabling wrap restores horizontal scroll');
       await toggleWrap();
       assert.equal(await longLine(),false,'restoring wrap removes horizontal scroll again');
-      assert.ok(await page.$eval('.code-selectors',row=>{
-        const [commit,file]=Array.from(row.querySelectorAll('select'),el=>el.getBoundingClientRect());
-        return commit.width>0 && file.width>0 && commit.top===file.top &&
-          commit.right<=file.left && file.right<=row.getBoundingClientRect().right+1;
-      }),'commit and file selectors share one row within the panel');
+      assert.ok(await page.$eval('.code-panel',panel=>{
+        const box=panel.getBoundingClientRect(),basis=panel.querySelector('[aria-label="변경 기준"]').getBoundingClientRect(),
+          files=panel.querySelector('nav[aria-label="변경 파일"]').getBoundingClientRect(),diff=panel.querySelector('.code-diff').getBoundingClientRect();
+        return basis.width>0 && files.width>0 && basis.right<=box.right+1 && files.right<=box.right+1 && diff.width>0;
+      }),'the basis selector, file tree and diff stay within the panel');
+      assert.equal(await page.$$eval('nav[aria-label="변경 파일"] .code-file',nodes=>nodes.length),3,'every changed file is listed, both versions of a path apart');
       assert.equal(reads,2,'opening reads the list once and the first file once');
       assert.equal(requests[1].kind,'tracked');
       assert.equal(await page.$eval('.code-line.add .code-number:nth-child(2)',element=>element.textContent),'1');
       assert.equal(await page.$eval('.code-line.add code',element=>element.textContent),'const value = "hello";');
       assert.ok(await page.$('.reply-box'),'conversation remains mounted');
       assert.ok(await page.$eval('.code-panel',element=>element.getBoundingClientRect().right<=innerWidth),'panel controls stay inside the viewport');
-      await page.click('.code-line.delete button.code-sign');
+      await page.click('.code-line.delete');
       assert.equal(await page.$eval('.quote-code',b=>b.disabled),false);
-      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['untracked','src/example.ts']));
+      // A tree click shows its loading state on the next render: wait for that file's own response.
+      const detail=(path,kind)=>page.waitForResponse(response=>new URL(response.url()).pathname==='/api/code-view'&&JSON.parse(response.request().postData()).path===path&&JSON.parse(response.request().postData()).kind===kind);
+      const untrackedRead=detail('src/example.ts','untracked');
+      await page.click(`.code-file[data-file-key='${JSON.stringify(['untracked','src/example.ts'])}']`);
+      await untrackedRead;
       await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
       assert.equal(reads,3,'selecting the untracked version reads only that detail');
       assert.equal(requests[2].kind,'untracked');
-      assert.equal(await page.$eval('.quote-code',b=>b.disabled),true,'selection does not cross files');
-      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','src/second.ts']));
+      assert.equal(await page.$('.quote-code'),null,'selection does not cross files');
+      const secondRead=detail('src/second.ts','tracked');
+      await page.click(`.code-file[data-file-key='${JSON.stringify(['tracked','src/second.ts'])}']`);
+      await secondRead;
       await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
       assert.equal(reads,4,'switching files does not refresh the list');
       assert.equal(requests[3].path,'src/second.ts');
@@ -879,12 +892,13 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('button[aria-label="코드 변경 보기"]');
       await page.waitForSelector('.code-diff:not(.wrap)');
       assert.equal(await page.evaluate(()=>localStorage.getItem('agent-desk.diff-wrap')),'off','wrap preference survives reopening');
-      await page.waitForSelector('.code-line.delete button.code-sign');
+      await page.waitForSelector('.code-line.delete');
       await toggleWrap();
-      await page.click('.code-line.delete button.code-sign');
-      await page.keyboard.down('Shift');
-      await page.click('.code-line.add:last-child button.code-sign');
-      await page.keyboard.up('Shift');
+      // Dragging from the deleted line to the last added line picks all three.
+      const at=selector=>page.$eval(selector,node=>{const box=node.getBoundingClientRect();return {x:box.left+box.width/2,y:box.top+Math.min(8,box.height/2)};});
+      const from=await at('.code-line.delete'),to=await at('.code-line.add:last-child');
+      await page.mouse.move(from.x,from.y);await page.mouse.down();await page.mouse.move(to.x,to.y,{steps:5});await page.mouse.up();
+      assert.equal(await page.$$eval('.code-line.quoted',nodes=>nodes.length),3,'dragging picks the lines it crosses');
       await page.click('.quote-code');
       const quote=await page.$eval('.reply-box textarea',node=>node.value);
       assert.ok(quote.startsWith('검토 부탁\n\n'));
@@ -917,7 +931,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('button[aria-label="코드 새로고침"]');
       await page.waitForFunction(()=>document.querySelector('.code-panel [role="alert"]')?.textContent.includes('목록 갱신 실패')&&!document.querySelector('.code-panel [role="status"]'));
       const listReads=requests.filter(body=>!body.path).length;
-      await page.select('select[aria-label="변경 파일"]',JSON.stringify(['tracked','b.ts']));
+      await page.click(`.code-file[data-file-key='${JSON.stringify(['tracked','b.ts'])}']`);
       await waitFile('b.ts');
       assert.equal(requests.at(-1).path,'b.ts');
       assert.equal(requests.filter(body=>!body.path).length,listReads,'selection after failure only reads detail');
@@ -963,8 +977,9 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       const clickText=(selector,text)=>page.$$eval(selector,(nodes,text)=>{const node=nodes.find(node=>node.textContent===text);if(!node)throw new Error(text);node.click();},text);
       await openReply(page,origin);await page.type('.reply-box textarea','기존 초안');
       await page.click('button[aria-label="코드 변경 보기"]');
-      await page.waitForSelector('.code-line.add button');
-      await clickText('.code-actions button','템플릿 관리');
+      await page.waitForSelector('.code-line.add');
+      await page.click('.code-line.delete');await page.keyboard.down('Shift');await page.click('.code-line.add');await page.keyboard.up('Shift');
+      await page.click('[aria-label="템플릿 관리"]');
       await page.waitForFunction(()=>!Array.from(document.querySelectorAll('[role="dialog"] button')).find(b=>b.textContent==='템플릿 추가')?.disabled);
       await clickText('[role="dialog"] button','템플릿 추가');
       await page.$eval('[aria-label="템플릿 이름"]',node=>{node.select();});await page.type('[aria-label="템플릿 이름"]','코드 검토');
@@ -982,7 +997,6 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.keyboard.press('Escape');
       await page.waitForSelector('[role="dialog"]',{hidden:true});
       await page.select('[aria-label="코드 프롬프트 템플릿"]',templates.items[0].id);
-      await page.click('.code-line.delete button');await page.keyboard.down('Shift');await page.click('.code-line.add button');await page.keyboard.up('Shift');
       await page.click('.code-actions summary');
       const preview=await page.$eval('[aria-label="코드 전송 내용"]',node=>node.textContent);
       assert.ok(preview.startsWith('이 코드의 문제와 수정안을 설명해주세요.\n\n'));
@@ -1014,7 +1028,8 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('.quote-code');
       assert.equal(await page.$eval('.reply-box textarea',node=>node.value),'기존 초안\n\n'+preview+'\n');
       if(width===390)await page.click('button[aria-label="코드 변경 보기"]');
-      await clickText('.code-actions button','템플릿 관리');
+      await page.waitForSelector('.code-line.add');await page.click('.code-line.add');
+      await page.click('[aria-label="템플릿 관리"]');
       await page.waitForSelector('[aria-label="템플릿 내용"]');
       assert.equal(await page.$eval('[aria-label="템플릿 내용"]',node=>node.value),'이 코드의 문제와 수정안을 설명해주세요.');
       page.once('dialog',dialog=>dialog.accept());await clickText('[role="dialog"] button','템플릿 삭제');
@@ -1039,8 +1054,8 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       });
       await openReply(page,origin);await page.click('[aria-label="코드 변경 보기"]');
       const expect=async count=>{
-        await page.waitForFunction(n=>document.querySelector('[aria-label="비교 범위 변경량"]')?.textContent.includes(`+${n} / -2줄`),{},count);
-        assert.match(await page.$eval('[aria-label="변경 파일"] option',node=>node.textContent),new RegExp(`a.ts · \\+${count} / -2`));
+        await page.waitForFunction(n=>document.querySelector('[aria-label="비교 범위 변경량"]')?.textContent.includes(`+${n} −2`),{},count);
+        assert.equal(await page.$eval('nav[aria-label="변경 파일"] .code-file',node=>node.textContent),`Ma.ts+${count}−2`);
         const summary=await page.$eval('[aria-label="비교 범위 변경량"]',node=>node.textContent);
         assert.ok(summary.includes('바이너리 1개'));assert.ok(summary.includes('미집계 1개 (합계 제외)'));
       };
@@ -1073,7 +1088,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.waitForFunction(()=>!document.querySelector('.code-panel [role="status"]'));
       await page.select('[aria-label="대상 브랜치"]','refs/heads/feature');
       await page.waitForFunction(()=>document.querySelector('.code-line.add code')?.textContent==='committed');
-      await page.click('.code-line.add button');await page.click('.quote-code');
+      await page.click('.code-line.add');await page.click('.quote-code');
       const text=await page.$eval('.reply-box textarea',node=>node.value);
       assert.ok(text.includes('/repo-feature'));assert.ok(text.includes('refs/heads/main'));assert.ok(text.includes('refs/heads/feature'));assert.ok(text.includes('b'.repeat(40)));assert.ok(text.includes('+committed'));
       assert.equal(requests.at(-1).worktree,'/repo-feature');assert.equal(requests.at(-1).target,'refs/heads/feature');
@@ -1122,7 +1137,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         if(path.endsWith('/messages')&&request.method()==='POST'){sends.push(request);pending=request;return;}
         void request.continue();
       });
-      const open=async()=>{await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add button');await page.click('.code-line.add button');};
+      const open=async()=>{await page.click('[aria-label="코드 변경 보기"]');await page.waitForSelector('.code-line.add');await page.click('.code-line.add');};
       const send=()=>page.$$eval('.code-actions button',nodes=>nodes.find(node=>node.textContent==='바로 전송').click());
       await openReply(page,origin);await open();const sending=page.waitForRequest(request=>request.url().endsWith('/messages'));await send();await sending;
       assert.equal(sends.length,1);
