@@ -243,7 +243,10 @@ function threadTitleHarness() {
   const renamed: { id: string; title: string; revision: number }[] = [], notices: string[] = [];
   class SharedPending extends Error {}
   const jsx = (type: any, props: any) => ({ type, props });
+  const runtime = { jsx, jsxs: jsx };
+  const layout = load('ThreadLayout.tsx', { 'react/jsx-runtime': runtime });
   const module = load('ThreadHead.tsx', {
+    './ThreadLayout.tsx': layout,
     react: h.react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': {},
     '../../shared/compose.ts': compose,
     './projects.ts': { modelShort: (s: string) => s, projectColor: () => '#123456' },
@@ -253,9 +256,9 @@ function threadTitleHarness() {
   });
   const task = (id: string) => ({ id, title: `기존 ${id}`, project_id: 'project', project_name: 'project', seq: 1,
     status: 'done', engine: 'codex', source: 'app', live: false, runner_connected: true });
-  const render = (current: any) => h.render(() => module.ThreadHead({ task: current, project: undefined, model: undefined,
+  const render = (current: any) => h.render(() => layout.ThreadHeader(module.ThreadHead({ task: current, project: undefined, model: undefined,
     events: [], now: 0, draft: false, handoff: null, onClose() {}, onPin() {}, onHandoff() {}, onMenu() {},
-    onNotice: (message: string) => notices.push(message), onRenamed: (id: string, title: string, revision: number) => renamed.push({ id, title, revision }) }));
+    onNotice: (message: string) => notices.push(message), onRenamed: (id: string, title: string, revision: number) => renamed.push({ id, title, revision }) }).props));
   const find = (node: any, match: (node: any) => boolean): any => {
     if (!node || typeof node !== 'object') return undefined;
     if (match(node)) return node;

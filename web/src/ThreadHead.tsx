@@ -1,3 +1,4 @@
+import { ThreadHeader } from './ThreadLayout.tsx';
 import { ThreadUsage } from './ThreadUsage.tsx';
 import { Bot, Code2, ArrowLeft, Ellipsis, ListRestart, PanelLeft, Pin } from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
@@ -74,8 +75,25 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
     }
   };
   return (
-    <header className="thread-head">
-      <div className="row1">
+    <ThreadHeader notice={editing?.error && <p className="thread-title-error" role="alert">{editing.error}</p>}
+      meta={task && (workdir || !isNote) && <>
+          {workdir && <span className="workdir"><code dir="ltr">{workdir}</code></span>}
+          {!isNote && <>
+            <span title={`모델은 ${ENGINES.map((e) => `${modelTagsOf(e)}(${ENGINE_LABEL[e]})`).join(', ')}, effort는 #low … #max(${effortNote()}) 태그로 바꿉니다`}>
+              {ENGINE_LABEL[engineOf(task.engine)]}{model ? ` · ${modelShort(model)}` : ''}
+              {/* Switched by a tag, but no turn has run on it yet. */}
+              {task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)} (다음 턴)` : ''}
+              {task.effort ? ` · effort ${task.effort}` : ''}</span>
+            <ThreadUsage task={task} model={model} />
+            {turns > 0 && <span>턴 {turns}</span>}
+            {task.permission_mode && task.source !== 'external' && <span>요청한 승인 모드 {MODE_LABEL[task.permission_mode]}</span>}
+            {task.source === 'external' ? <span>외부 세션</span>
+              : task.runner_id ? <span title={`러너 ID: ${task.runner_id}`}>러너 {task.runner_label ?? task.runner_id} · {task.runner_connected ? '연결됨' : '연결 대기 · 마지막 확인 상태'}</span>
+              : <span>러너 {task.source === null ? '미지정' : '정보 없음'}</span>}
+            {!!task.delivery_pending && <span>러너 미수신 {task.delivery_pending}개</span>}
+            {!task.live && !task.delivery_pending && task.runner_connected !== false && task.source !== 'external' && <span title="세션이 닫혀 있습니다. 답글을 보내면 이어서 다시 시작합니다.">세션 닫힘</span>}
+          </>}
+      </>}>
         <button className="back" title="스레드 닫기 (q)" aria-label="스레드 닫기" onClick={onClose}><ArrowLeft /></button>
         {task && <span className="thread-chip" style={{ '--pc': projectColor(task.project_id) } as CSSProperties}
           title={task.source === 'external' ? workdir : `@${task.project_name}#${task.seq}로 이 작업에 보낼 수 있습니다`}>{task.project_name}#{task.seq}</span>}
@@ -107,29 +125,7 @@ export function ThreadHead({ task, project, model, events, now, draft, handoff, 
         )}
         {task && <button className="icon-btn" title="컬럼으로 고정 (p)" aria-label="컬럼으로 고정" onClick={onPin}><Pin /></button>}
         <button className="icon-btn" title="컬럼 메뉴" aria-label="컬럼 메뉴" onClick={(e) => onMenu(e.currentTarget.getBoundingClientRect())}><Ellipsis /></button>
-      </div>
-      {editing?.error && <p className="thread-title-error" role="alert">{editing.error}</p>}
-      {task && (workdir || !isNote) && (
-        <div className="meta">
-          {workdir && <span className="workdir"><code dir="ltr">{workdir}</code></span>}
-          {!isNote && <>
-            <span title={`모델은 ${ENGINES.map((e) => `${modelTagsOf(e)}(${ENGINE_LABEL[e]})`).join(', ')}, effort는 #low … #max(${effortNote()}) 태그로 바꿉니다`}>
-              {ENGINE_LABEL[engineOf(task.engine)]}{model ? ` · ${modelShort(model)}` : ''}
-              {/* Switched by a tag, but no turn has run on it yet. */}
-              {task.model && !modelMatches(task.model,model) ? ` → ${modelLabel(task.model)} (다음 턴)` : ''}
-              {task.effort ? ` · effort ${task.effort}` : ''}</span>
-            <ThreadUsage task={task} model={model} />
-            {turns > 0 && <span>턴 {turns}</span>}
-            {task.permission_mode && task.source !== 'external' && <span>요청한 승인 모드 {MODE_LABEL[task.permission_mode]}</span>}
-            {task.source === 'external' ? <span>외부 세션</span>
-              : task.runner_id ? <span title={`러너 ID: ${task.runner_id}`}>러너 {task.runner_label ?? task.runner_id} · {task.runner_connected ? '연결됨' : '연결 대기 · 마지막 확인 상태'}</span>
-              : <span>러너 {task.source === null ? '미지정' : '정보 없음'}</span>}
-            {!!task.delivery_pending && <span>러너 미수신 {task.delivery_pending}개</span>}
-            {!task.live && !task.delivery_pending && task.runner_connected !== false && task.source !== 'external' && <span title="세션이 닫혀 있습니다. 답글을 보내면 이어서 다시 시작합니다.">세션 닫힘</span>}
-          </>}
-        </div>
-      )}
-    </header>
+    </ThreadHeader>
   );
 }
 import { imeKey } from './keys.ts';

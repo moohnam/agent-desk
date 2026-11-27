@@ -9,6 +9,7 @@ const historyDone = (turn: Json, item: Json) => {
   return ['agentMessage','plan'].includes(item.type) && ['completed','failed','interrupted'].includes(turn.status);
 };
 const clip = (s: string) => s.length > 64000 ? s.slice(0,64000) + '\n…(truncated)' : s;
+const promptTools = new Set(['spawnAgent','sendInput','sendMessage','followupTask']);
 export class CodexSubagents {
   private known = new Map<string, SubagentInfo>();
   private seen = new Set<string>();
@@ -37,8 +38,9 @@ export class CodexSubagents {
   discover(t: Json, root: string) {
     if (typeof t.id !== 'string' || t.id === root) return;
     const id='agent:'+t.id, old=this.known.get(id);
+    const parent=t.parentThreadId??t.source?.subAgent?.thread_spawn?.parent_thread_id;
     this.report({ ...old,id,type:'local_agent',description:t.agentNickname||t.agentRole||old?.description||'서브 에이전트',
-      parentId:t.parentThreadId && t.parentThreadId!==root?'agent:'+t.parentThreadId:old?.parentId,
+      parentId:parent ? (parent===root ? undefined : 'agent:'+parent) : old?.parentId,
       background:true,status:t.status?.type==='active'?'running':old?.status==='running'?'ended':old?.status??'ended',
       detailNote:old ? old.detailNote : 'Codex 하위 스레드에 저장된 기록을 조회 중입니다.' });
     if (!old || !this.recoveredVersion.has(t.id) || (t.updatedAt !== undefined && this.recoveredVersion.get(t.id)!==t.updatedAt)) {
@@ -109,7 +111,7 @@ export class CodexSubagents {
     const key=turnId+'/'+item.id, step=(suffix:string,e:SubagentEvent)=>this.step(id,key+'/'+suffix,e);
     if(item.type==='userMessage') {
       const content=(item.content??[]).filter((c:Json)=>c.type==='text'&&typeof c.text==='string').map((c:Json)=>c.text).join('\n');
-      if(content)step('text',{kind:'user',text:content});
+      if(content)step('text',{kind:'user',text:content,...(typeof item.clientId==='string' && item.clientId && {codexCallId:item.clientId})});
     } else if(item.type==='agentMessage'&&done&&text(item.text))step('text',{kind:'assistant',text:item.text});
     else if(item.type==='plan'&&done&&text(item.text))step('text',{kind:'assistant',text:item.text});
     else {
@@ -123,16 +125,31 @@ export class CodexSubagents {
   }
   notification(method: string,p: Json,root: string) {
     if(method==='thread/started')return;
+    const item=p.item;
+    if(method==='item/completed' && item?.type==='collabAgentToolCall' && item.status==='completed'
+      && (p.threadId===root || this.known.has('agent:'+p.threadId)) && item.senderThreadId===p.threadId
+      && typeof item.id==='string' && promptTools.has(item.tool) && typeof item.prompt==='string' && item.prompt.trim()
+      && !/^gAAAA[A-Za-z0-9_-]{60,}={0,2}$/.test(item.prompt.trim()) && Array.isArray(item.receiverThreadIds)){
+      for(const child of item.receiverThreadIds){
+        const id='agent:'+child;
+        const receiver=this.known.get(id);
+        if(child===root || !receiver || receiver.parentId!==(p.threadId===root ? undefined : 'agent:'+p.threadId))continue;
+        // A spawn precedes all child history. Follow-ups wait behind any pages being recovered.
+        if(item.tool==='spawnAgent')this.step(id,'collab-prompt:'+item.id,{kind:'user',text:item.prompt});
+        else this.notification('codex/receivedPrompt',{threadId:child,callId:item.id,text:item.prompt},root);
+      }
+    }
     if(!this.known.has('agent:'+p.threadId)||p.threadId===root)return;
     this.versions.set(p.threadId,(this.versions.get(p.threadId)??0)+1);
-    if(method==='item/started'||method==='item/completed'){
+    if(method==='item/started'||method==='item/completed'||method==='codex/receivedPrompt'){
     const queued=this.hydrating.get(p.threadId);
     if(queued){
       const bytes=JSON.stringify(p).length;
       if(queued.events.length<128&&queued.bytes+bytes<=512*1024){queued.events.push({method,p,root});queued.bytes+=bytes;}else queued.overflow=true;
       return;
     }
-      this.item(p.threadId,p.turnId,p.item,method==='item/completed');
+      if(method==='codex/receivedPrompt')this.step('agent:'+p.threadId,'collab-prompt:'+p.callId,{kind:'user',text:p.text});
+      else this.item(p.threadId,p.turnId,p.item,method==='item/completed');
     }
     if(method==='thread/status/changed' && p.status?.type==='active')this.report({...this.known.get('agent:'+p.threadId)!,status:'running',summary:undefined});
     if(method==='thread/closed')this.report({...this.known.get('agent:'+p.threadId)!,status:'stopped'});

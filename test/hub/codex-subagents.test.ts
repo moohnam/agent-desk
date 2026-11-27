@@ -120,3 +120,35 @@ for(const legacy of [false,true])test(`Codex history separates turn end from too
     assert.equal(out.filter(m=>m.type==='subagent_event'&&m.event.kind==='tool_result'&&m.event.toolUseId==='turn0/pending').length,1,'a later confirmed result is not hidden by synthetic success');
   }finally{a.stop();}
 });
+
+test('Codex stores delivered parent instructions on the receiving child and reconciles explicit IDs across recovery',async()=>{
+  const {Store}=await import('../../hub/src/db.ts');
+  const {Subagents}=await import('../../hub/src/subagents.ts');
+  const store=new Store(':memory:');store.database.exec('PRAGMA foreign_keys=OFF');
+  const db=new Subagents(store,()=>{}),session={id:'s',task_id:'t',engine:'codex'} as import('../../hub/src/db.ts').Session;
+  let release!:(page:any)=>void;
+  const tracker=new CodexSubagents('s',async method=>method==='thread/read'?{thread:{id:'child'}}:new Promise(r=>{release=r;}),m=>{
+    if(m.type==='subagent')db.report(session,m.subagent);
+    if(m.type==='subagent_event')db.event(session,m.subagentId,m.event);
+  });
+  const send=(id:string,tool:string,prompt:string,status='completed',sender='root',method='item/completed')=>tracker.notification(method,{
+    threadId:sender,item:{id,type:'collabAgentToolCall',tool,status,prompt,senderThreadId:sender,receiverThreadIds:['child','stranger','root']}
+  },'root');
+  try{
+    tracker.discover({id:'child',parentThreadId:'root',status:{type:'active'}},'root');await flush();
+    send('one','spawnAgent','첫 지시');send('one','spawnAgent','첫 지시');
+    send('two','followupTask','다음 지시');send('three','sendInput','실패','failed');
+    send('four','wait','대기');send('five','sendMessage','외부','completed','unknown');
+    send('six','sendInput','확정 전','inProgress','root','item/started');
+    send('seven','sendMessage','gAAAA'+'x'.repeat(80));
+    const user=(id:string,clientId:string,text:string)=>({type:'userMessage',id,clientId,content:[{type:'text',text}]});
+    release({data:[{id:'turn',items:[user('u1','one','첫 지시'),user('u2','two','다음 지시')]}]});await flush();
+    send('two','followupTask','다음 지시');
+    send('again','sendInput','다음 지시');
+    tracker.discover({id:'grandchild',parentThreadId:'child',status:{type:'active'}},'root');
+    send('report','sendMessage','상위 작업에 결과 보고','completed','grandchild');
+    const rows=db.events('t','s','agent:child').events;
+    assert.deepEqual(rows.map(e=>(e.payload as {text:string}).text),['첫 지시','다음 지시','다음 지시']);
+    assert.deepEqual(db.list('t').map(s=>s.id).sort(),['agent:child','agent:grandchild']);
+  }finally{tracker.stop();store.database.close();}
+});

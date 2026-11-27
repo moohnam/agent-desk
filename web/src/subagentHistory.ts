@@ -22,7 +22,12 @@ export function subagentPosts(events: HubEvent[], agent: Subagent, anchorId = -1
   return buildPosts([anchor,...events]);
 }
 
-export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[], complete: boolean | string = false) {
+export function codexPromptNote(codex: boolean, agent: Subagent, posts: Post[], complete: boolean) {
+  if(codex && complete && agent.detailed && !agent.detailNote && !posts.some(post=>post.kind==='user'))
+    return '이 실행의 기록에 Codex 지시 원문이 없습니다.';
+}
+
+export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[], complete: boolean | string = false, codex = false) {
   const rows: {key:string; agent:Subagent; post:Post; summary:boolean; compact?:boolean; showStatus:boolean}[]=[];
   const groups=new Map<string,HubEvent[]>();
   for(const event of events){
@@ -40,7 +45,7 @@ export function subagentHistoryPosts(agents: Subagent[], events: HubEvent[], com
       return typeof text==='string' && (text===agent.summary ||
         text.length>4000 && text.slice(0,4000)+'\n…(truncated)'===agent.summary);
     });
-    const text=[!repeated && agent.summary,agent.detailNote,!agent.detailed && '상태 목록만 수신한 항목입니다. 상세 대화 기록은 제공되지 않았습니다.'].filter(Boolean).join('\n\n');
+    const text=[!repeated && agent.summary,agent.detailNote ?? codexPromptNote(codex,agent,posts,complete===true || complete===key),!agent.detailed && '상태 목록만 수신한 항목입니다. 상세 대화 기록은 제공되지 않았습니다.'].filter(Boolean).join('\n\n');
     for(const post of posts)rows.push({key:`${key}/${post.id}`,agent,post,summary:false,showStatus:!text && post===posts.at(-1)});
     const statusOnly=!posts.length && (complete===true || complete===key || agent.status==='failed' || agent.status==='stopped');
     if(!text && !statusOnly)continue;

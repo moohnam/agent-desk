@@ -1,3 +1,4 @@
+import { ThreadFeed, ThreadFrame, ThreadHeader } from './ThreadLayout.tsx';
 import { ColumnHeader } from './ColumnHeader.tsx';
 // The subagent pane: in the place of the pinned posts and the code view, beside the thread. A column
 // for each of the task's subagents with what it was told, said and did, like a thread, and one column
@@ -7,7 +8,7 @@ import { Bot, PanelLeftClose } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { ENGINE_LABEL, engineOf } from '../../shared/compose.ts';
 import { elapsed, isActive, isCommand, isCurrentCommand, statusText, subagentKey, subagentKind, subagentMeta, subagentTitle, subagentTone, useSubagentEvents, type Subagent } from './subagents.tsx';
-import { subagentHistoryPosts, subagentPosts, withSubagentAnswers } from './subagentHistory.ts';
+import { codexPromptNote, subagentHistoryPosts, subagentPosts, withSubagentAnswers } from './subagentHistory.ts';
 import { api } from './api.ts';
 import { buildPosts, mergeTaskEvents } from './posts.ts';
 import { PostView } from './PostView.tsx';
@@ -151,7 +152,7 @@ function HistoryColumn({task, agents, reveal, reload, focused, width, handle, on
   const {events,more,loading,error,older,whole}=useSubagentEvents(undefined,reload,{taskId:task.id,members:agents});
   const [extra,setExtra]=useState<{key:string;events:HubEvent[]}>();
   const complete = !loading && !error && !more || (extra?.events.length === 0 && extra.key);
-  const rows=useMemo(()=>subagentHistoryPosts(agents,mergeTaskEvents(events,extra?.events??[]),complete),[agents,events,extra,complete]);
+  const rows=useMemo(()=>subagentHistoryPosts(agents,mergeTaskEvents(events,extra?.events??[]),complete,engineOf(task.engine ?? 'claude')==='codex'),[agents,events,extra,complete,task.engine]);
   const [selected,setSelected]=useState<string|null>(null);
   const [expanded,setExpanded]=useState<ReadonlySet<string>>(()=>new Set());
   const feed=useRef<HTMLDivElement>(null);
@@ -282,23 +283,25 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
     if (atBottom.current) f.scrollTop = f.scrollHeight;
   }, [events.length, s.status, loading]);
 
+  const detailNote = s.detailNote ?? codexPromptNote(engineOf(task.engine ?? 'claude')==='codex',s,posts,seen && !loading && !more && !error);
   const firstPrompt = posts.find(p => p.kind === 'user')?.id;
   const speaker = (p: Post) => p.kind === 'user'
     ? { name: `${engine} → ${subagentKind(s) === '명령' ? '명령' : '서브 에이전트'}`, avatar: '↳', tag: p.id === firstPrompt ? '지시문' : '추가 지시' }
     : { name: subagentKind(s), avatar: 'SA', ...(p.event.payload.handback && { tag: `${engine}에게 보낸 답` }) };
 
   return (
-    <section ref={column} className={`column sa-col thread-surface ${subagentTone(s)}${focused ? ' focused' : ''}`}
-      style={width ? { '--w': `${width}px` } as CSSProperties : undefined} aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
-      <header className="thread-head"><div className="row1"><h2 title={subagentTitle(s)}>{subagentTitle(s)}</h2></div>
-        <div className="meta"><span>{subagentMeta(s,now)}</span><span>글 {posts.length}개</span></div></header>
-      <div className="feed sa-feed thread-feed" ref={feed} onScroll={e => {
+    <ThreadFrame ref={column} className={`sa-col ${subagentTone(s)}`} focused={focused} width={width}
+      aria-label={subagentTitle(s)} data-column={subagentKey(s)} onMouseDown={onFocus}>
+      <ThreadHeader meta={<><span>{subagentMeta(s,now)}</span><span>글 {posts.length}개</span></>}>
+        <h2 title={subagentTitle(s)}>{subagentTitle(s)}</h2>
+      </ThreadHeader>
+      <ThreadFeed className="sa-feed" ref={feed} onScroll={e => {
         const f = e.currentTarget;
         atBottom.current = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
         if (f.scrollTop < 80) loadOlder();
       }}>
         {!s.detailed && <p className="sa-note">상태 목록만 수신한 항목입니다. 해당 실행의 상세 기록이 허브에 전달되지 않아 대화를 복구할 수 없습니다.</p>}
-        {s.detailNote && <p className="sa-note">{s.detailNote}</p>}
+        {detailNote && <p className="sa-note">{detailNote}</p>}
         {more && <button className="link sa-older" disabled={loading} onClick={loadOlder}>이전 기록 더 보기</button>}
         {error && <p role="alert" className="sa-note">기록을 불러오지 못했습니다: {error}</p>}
         {s.detailed && loading && !events.length && <p className="sa-note">불러오는 중…</p>}
@@ -316,8 +319,8 @@ function SubagentColumn({ s, reload, task, engine, focused, width, handle, onFoc
             <Markdown text={s.summary} taskId={task.id} onNotice={onError} />
           </div>
         ) : <p className="sa-note">{statusText(s)} · {elapsed(s, now)}</p>}
-      </div>
-    </section>
+      </ThreadFeed>
+    </ThreadFrame>
   );
 }
 

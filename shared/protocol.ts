@@ -104,7 +104,7 @@ export interface SubagentInfo {
   detailNote?: string;
 }
 /** What a subagent was told ('user': its prompt or a follow-up), said and did, like a thread's events. */
-export type SubagentEvent = (Exclude<RunnerEvent, { kind: 'status' }> | { kind: 'user'; text: string }) & { sourceId?: string };
+export type SubagentEvent = (Exclude<RunnerEvent, { kind: 'status' }> | { kind: 'user'; text: string; codexCallId?: string }) & { sourceId?: string };
 
 /** A session the runner is still running, reported when the hub (re)connects. */
 export interface LiveSession {
@@ -179,7 +179,8 @@ function validSubagentInfo(s: Record<string, unknown>) {
 
 function validSubagentEvent(e: Record<string, unknown>) {
   if (!optStr(e.sourceId)) return false;
-  if (e.kind === 'user' || e.kind === 'assistant') return str(e.text);
+  if (e.kind === 'user') return str(e.text) && optStr(e.codexCallId);
+  if (e.kind === 'assistant') return str(e.text);
   if (e.kind === 'tool') return str(e.toolUseId) && str(e.name);
   if (e.kind === 'tool_result') return str(e.toolUseId) && str(e.text) && typeof e.isError === 'boolean';
   return false;

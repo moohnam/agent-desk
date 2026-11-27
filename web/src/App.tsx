@@ -1,3 +1,4 @@
+import { ThreadFrame, ThreadFeed } from './ThreadLayout.tsx';
 import { sendCode } from './codeSend.ts';
 import { lazy, Suspense } from 'react';
 import { CodePanelBoundary } from './CodePanelBoundary.tsx';
@@ -10,7 +11,7 @@ import { ANSWER_COMPOSE } from './answerComposer.tsx';
 import { DOCUMENT_OPEN, isDocumentLink } from './documentLinks.ts';
 import { compareEvents, splitId } from './federation.ts';
 import { ArrowRight, ArrowUp, Bell, BellOff, Columns3, Folder, Keyboard, LayoutDashboard, ListTodo, Network, Plus, Puzzle, Smartphone, SquarePen } from 'lucide-react';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from './api.ts';
 import { isAsk } from './AskCard.tsx';
@@ -1501,9 +1502,8 @@ export function App() {
       );
     }
     return (
-      <section key={col.id} data-col={col.id} data-task={threadTask} className={`column thread thread-surface${i === activeIdx ? ' focused' : ''}`}
-        style={{ '--w': `${widthOf(col.id)}px`,
-          ...(threadTaskView ? { '--pc': projectColor(threadTaskView.project_id) } : {}) } as CSSProperties}
+      <ThreadFrame key={col.id} data-col={col.id} data-task={threadTask} className="thread"
+        focused={i === activeIdx} width={widthOf(col.id)} accent={threadTaskView && projectColor(threadTaskView.project_id)}
         onMouseDown={() => { press(); setActive(i); setQueueFocus(null); }}>
         <ThreadHead task={threadTaskView} project={threadTaskView && projectsById.get(threadTaskView.project_id)}
           model={threadTask ? models.get(threadTask) : undefined} events={threadEvents} now={now} draft={!!threadTask && drafts.has(threadTask)}
@@ -1516,7 +1516,7 @@ export function App() {
           onSubagents={toggleSubagents}
           codeOpen={codeTask===threadTask} onCode={()=>setCodeTask(codeTask===threadTask?null:threadTask)}
           onMenu={(r) => setMenu({ colId: col.id, x: r.right, y: r.bottom })} onNotice={setToast} onRenamed={hub.updateTaskTitle} />
-        <div className="feed thread-feed" ref={threadFeedRef} tabIndex={-1}
+        <ThreadFeed ref={threadFeedRef} tabIndex={-1}
           onPointerDown={() => { threadInteracted.current = true; }}
           onTouchStart={() => { threadInteracted.current = true; }}
           onWheel={() => { threadInteracted.current = true; }}
@@ -1546,7 +1546,7 @@ export function App() {
               <p className="empty">{threadLoaded && !threadMore && !threadLoadingEarlier ? '글이 없습니다.' : '불러오는 중…'}</p>
             )}
           </div>
-        </div>
+        </ThreadFeed>
         {threadTaskView && (threadTaskView.kind === 'note' ? (
           <NoteReply key={threadTaskView.id} task={threadTaskView} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={leaveReply} onBeforeResize={beforeReplyResize} />
         ) : handoff?.open && threadTaskView.source !== 'external' ? (
@@ -1556,7 +1556,7 @@ export function App() {
           <ReplyBox key={threadTaskView.id} task={threadTaskView} projects={hub.projects} tasks={taskList} inputRef={replyRef} onError={setToast} onSend={onThreadSend} onEscape={leaveReply} onBeforeResize={beforeReplyResize} />
         ))}
         <ResizeHandle width={widthOf(col.id)} onResize={(px) => setWidth(col.id, px)} />
-      </section>
+      </ThreadFrame>
     );
   };
 

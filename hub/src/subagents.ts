@@ -59,6 +59,12 @@ export class Subagents {
     // The runner reports a subagent before its steps; steps of none it reported are not kept.
     if (!this.row(session.id, subagentId)) return;
     if (event.sourceId && this.db.prepare("SELECT 1 FROM subagent_event WHERE session_id = ? AND subagent_id = ? AND json_extract(payload_json, '$.sourceId') = ? LIMIT 1").get(session.id, subagentId, event.sourceId)) return;
+    // A parent call and a child message can share an explicit client ID.
+    // Equal text alone cannot distinguish a retry from an intentional follow-up.
+    if(session.engine==='codex' && event.kind==='user' && event.sourceId){
+      if(event.codexCallId && this.db.prepare("SELECT 1 FROM subagent_event WHERE session_id=? AND subagent_id=? AND json_extract(payload_json,'$.sourceId')=?").get(session.id,subagentId,'collab-prompt:'+event.codexCallId))return;
+      if(event.sourceId.startsWith('collab-prompt:') && this.db.prepare("SELECT 1 FROM subagent_event WHERE session_id=? AND subagent_id=? AND kind='user' AND json_extract(payload_json,'$.codexCallId')=?").get(session.id,subagentId,event.sourceId.slice('collab-prompt:'.length)))return;
+    }
     const r = this.db.prepare('INSERT INTO subagent_event (session_id, task_id, subagent_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?, ?)')
       .run(session.id, session.task_id, subagentId, at, event.kind, JSON.stringify(event));
     const stored: SubagentEvent = { id: Number(r.lastInsertRowid), session_id: session.id, task_id: session.task_id,

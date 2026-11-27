@@ -56,3 +56,14 @@ test('Claude tracker long handback suppresses only its duplicate clipped history
   assert.equal(subagentHistoryPosts(withNote,events).find(row=>row.summary)!.post.event.payload.text,note,'deduplication preserves independent detail notes');
  } finally {store.database.close();}
 });
+
+test('missing Codex instruction appears once only after all history is known',()=>{
+ const agent={id:'agent:child',session_id:'s',detailed:true,status:'completed',updated_at:'2026-01-01'} as Subagent;
+ const event=(kind:string,id:number)=>({id,kind,session_id:'s',subagent_id:agent.id,ts:'2026-01-01',payload:{text:'내용'}} as unknown as HubEvent);
+ const notices=(events:HubEvent[],complete:boolean,codex=true)=>subagentHistoryPosts([agent],events,complete,codex)
+   .filter(r=>r.post.event.payload.text?.includes('지시 원문'));
+ assert.equal(notices([event('assistant',1),event('assistant',2)],true).length,1);
+ assert.equal(notices([event('assistant',2)],false).length,0);
+ assert.equal(notices([event('assistant',2)],true,false).length,0);
+ assert.equal(notices([event('user',1),event('assistant',2)],true).length,0);
+});
