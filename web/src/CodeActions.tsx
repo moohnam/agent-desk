@@ -43,6 +43,8 @@ export function CodeActions({taskId,quote,anchor,count,range,onQuote,onSend,onCo
   const template=items.find(item=>item.id===selected);
   const message=quote?codePrompt(template?.text??'',quote):'';
   // Quoting without a template need not wait for the template list to load.
+  const currentMessage=useRef(message);
+  currentMessage.current=message;
   const disabled=busy||(loading&&!!selected)||!message;
   const send=async()=>{
     if(disabled||lock.current||delivered===message)return;
@@ -51,10 +53,10 @@ export function CodeActions({taskId,quote,anchor,count,range,onQuote,onSend,onCo
       const result = await onSend(submitted);
       if (result?.shared_pending) setPending(submitted);
       else {setPending(undefined);setDelivered(submitted);}
-      setNotice(result?.shared_pending ? '공유 러너 전달 대기열에 접수했습니다. 연결이 돌아오면 전송 결과를 확인해 주세요.'
+      if(currentMessage.current===submitted)setNotice(result?.shared_pending ? '공유 러너 전달 대기열에 접수했습니다. 연결이 돌아오면 전송 결과를 확인해 주세요.'
         : result?.queued_id ? '메시지 대기열에 넣었습니다. 보낼 수 있을 때 전달합니다.'
         : '전송했습니다. 기존 답글 초안은 유지됩니다.');
-    } catch (e) {setPending(undefined);setError(e instanceof Error?e.message:String(e));}
+    } catch (e) {setPending(undefined);if(currentMessage.current===submitted)setError(e instanceof Error?e.message:String(e));}
     finally{lock.current=false;setBusy(false);}
   };
   const dialog=manage&&createPortal(<PromptTemplates source={source} onClose={()=>setManage(false)} onSaved={()=>setReload(n=>n+1)}/>,document.body);

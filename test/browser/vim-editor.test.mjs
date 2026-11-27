@@ -854,10 +854,25 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       await page.click('.code-hunks small');await page.keyboard.press('Escape');
       assert.equal(await page.$('.code-line.quoted'),null,'Escape after a click on plain panel text lets the pick go');
       assert.ok(await page.$('.code-panel'));
+      await page.click('.code-hunks small');
+      const deskKeys=await page.evaluate(()=>{
+        const seen=[];
+        const record=e=>{seen.push(e.key);e.stopImmediatePropagation();};
+        document.addEventListener('keydown',record);
+        try{
+          for(const init of [{key:'s'},{key:'?'},{key:';',code:'Semicolon',ctrlKey:true}])
+            document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{...init,bubbles:true,cancelable:true}));
+        }finally{document.removeEventListener('keydown',record);}
+        return seen;
+      });
+      assert.deepEqual(deskKeys,['?',';'],'after clicking plain panel text only help and references reach the desk');
       // The filter: ] stays within the shown files; a shorter list after a scope change is not filtered.
       await page.type('.code-file-filter','even');await page.keyboard.press('Tab');
-      await page.focus('.code-diff');await page.keyboard.press(']');
+      await page.focus('button.code-sign[tabindex="0"]');await page.keyboard.press(']');
       await page.waitForFunction(()=>document.querySelector('.code-file[aria-pressed=true]')?.title==='src/even2.ts');
+      assert.ok(await page.$eval('.code-diff',e=>e===document.activeElement),'switching files from a line keeps keyboard focus in the diff');
+      await page.keyboard.press(']');
+      await page.waitForFunction(()=>document.querySelector('.code-file[aria-pressed=true]')?.title==='src/even4.ts');
       await page.select('[aria-label="변경 기준"]','b'.repeat(40));
       await page.waitForFunction(()=>document.querySelectorAll('.code-file').length===2);
       assert.deepEqual(await page.$$eval('.code-files .code-dir-name, .code-files .code-file',n=>n.map(e=>e.title||e.textContent)),['z.ts','src','src/y.ts'],'root files come before folders');
@@ -1231,7 +1246,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
       page.on('request',request=>{
         const path=new URL(request.url()).pathname;
         if(path==='/api/code-view'){
-          const body=JSON.parse(request.postData());return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/repo',head:'abc',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -0,0 +1 @@\n+newCode();\n'}:{})})});
+          const body=JSON.parse(request.postData());return void request.respond({status:200,contentType:'application/json',body:JSON.stringify({root:'/repo',head:'abc',files:[{path:'a.ts',status:'modified'}],...(body.path?{path:body.path,diff:'@@ -0,0 +1,2 @@\n+newCode();\n+another();\n'}:{})})});
         }
         if(request.method()==='DELETE'||path.endsWith('/reset')){queue.clear();return void request.respond({status:200,contentType:'application/json',body:'{}'});}
         if(path.endsWith('/messages')&&request.method()==='POST'){sends.push(request);pending=request;return;}
@@ -1258,6 +1273,14 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         await page.waitForFunction(()=>document.querySelector('.code-actions [role="status"]')?.textContent.includes('메시지 대기열'));
         assert.equal(queue.size,1);
       }
+      // A slow reply for the first pick must not announce a successful send on the second.
+      await page.$$eval('.code-actions button',nodes=>nodes.find(node=>node.textContent==='같은 코드로 새 요청').click());
+      const last=page.waitForRequest(request=>request.url().endsWith('/messages'));await send();await last;
+      await page.click('.code-line.add:last-child');
+      await pending.respond({status:200,contentType:'application/json',body:JSON.stringify({task_id:'t0',queued_id:'last'})});
+      await page.waitForFunction(()=>!document.querySelector('.code-actions .send-code')?.disabled);
+      assert.equal(await page.$('.code-actions [role="status"]'),null,'the second pick has not been sent');
+
     },false,'emacs'));
 
     await t.test('offscreen grouped columns wait until visible before filling', () => withPage(async page => {

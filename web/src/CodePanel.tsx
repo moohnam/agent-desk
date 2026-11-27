@@ -241,11 +241,23 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
     const key=latinKey(e.nativeEvent);
     if(!typing&&!imeKey(e.nativeEvent)&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&['[',']','n','p'].includes(key)){
       e.preventDefault();e.stopPropagation();
-      if(key==='['||key===']'){if(!e.repeat)choose(ordered[position+(key===']'?1:-1)]);}else goHunk(key==='n'?1:-1);
+      if(key==='['||key===']'){
+        const next=ordered[position+(key===']'?1:-1)];
+        if(next&&!e.repeat){
+          // The current line or action may disappear as the next file loads.
+          scroll.current?.focus({preventScroll:true});
+          choose(next);
+        }
+      }else goHunk(key==='n'?1:-1);
       return;
     }
-    // Focus on the panel itself (a click on plain text) leaves desk keys such as ? and Ctrl+; to the desk.
-    if(e.key!=='Escape'||imeKey(e.nativeEvent)){if(e.target!==e.currentTarget)e.stopPropagation();return;}
+    if(imeKey(e.nativeEvent)){e.stopPropagation();return;}
+    if(e.key!=='Escape'){
+      const help=e.key==='?'&&!e.ctrlKey&&!e.metaKey&&!e.altKey;
+      const references=e.code==='Semicolon'&&e.ctrlKey&&!e.shiftKey&&!e.metaKey&&!e.altKey;
+      if(e.target!==e.currentTarget||!(help||references))e.stopPropagation();
+      return;
+    }
     if(e.defaultPrevented||e.repeat)return;
     const select=(e.target as Element).closest('select');
     if(select&&CSS.supports('selector(select:open)')&&select.matches(':open')){
