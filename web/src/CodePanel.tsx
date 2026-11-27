@@ -1,6 +1,7 @@
 import { imeKey, latinKey } from './keys.ts';
 import { setDiffWrap, useDiffWrap } from './diffWrap.ts';
 import { writeClipboardText } from './clipboard.ts';
+import { CodeFileDivider } from './CodeFileDivider.tsx';
 import { CodeActions } from './CodeActions.tsx';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { X, RefreshCw, ChevronUp, ChevronDown, WrapText, GitCompare, Quote } from 'lucide-react';
@@ -308,6 +309,7 @@ export const CodePanel = memo(function CodePanel({taskId,title,onClose,onQuote,o
           </button>)}
         </div>)}
       </nav>
+      <CodeFileDivider/>
       <section className="code-view">
         {file&&<div className="code-file-head">
           <button aria-label="이전 파일" title="이전 파일 ([)" disabled={position<=0} onClick={()=>choose(ordered[position-1])}><ChevronUp size={15}/></button>

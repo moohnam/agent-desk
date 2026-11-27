@@ -919,7 +919,7 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
     }));
 
     for (const width of [1440,390]) await t.test(`code view stays beside conversation with highlighted diff and refreshes removed files (${width})`, () => withPage(async page => {
-      await page.setViewport({width,height:900});
+      await page.setViewport({width:width===1440?2000:width,height:900});
       const commit='1'.repeat(40);
       const longLineText='const token = '+JSON.stringify('x'.repeat(500))+';';
       let removed=false,reads=0;const requests=[];
@@ -944,6 +944,20 @@ test('Vim replies obey mode boundaries and keep IME composition separate', { tim
         const thread=document.querySelector('.thread-split').getBoundingClientRect();
         return code.right <= thread.left;
       }),'code is to the left of the conversation');
+      const axis=width===1440?'width':'height';
+      await page.waitForFunction(axis=>getComputedStyle(document.querySelector('.code-file-divider')).cursor===(axis==='width'?'col-resize':'row-resize'),{},axis);
+      const fileSize=()=>page.$eval('.code-files',(e,axis)=>e.getBoundingClientRect()[axis],axis);
+      const initial=await fileSize();
+      const divider=await page.$('.code-file-divider');
+      const grip=await divider.boundingBox();
+      const x=grip.x+grip.width/2,y=grip.y+grip.height/2;
+      await page.mouse.move(x,y);await page.mouse.down();
+      await page.mouse.move(x+(axis==='width'?60:0),y+(axis==='height'?60:0));await page.mouse.up();
+      assert.ok(Math.abs(await fileSize()-initial-60)<2,`drag on ${axis}: ${initial} → ${await fileSize()}`);
+      assert.ok(await page.evaluate(axis=>Number(localStorage.getItem('desk.codeFiles.'+axis))>0,axis));
+      await divider.click({count:2});
+      const defaultSize=axis==='width'?await page.$eval('.code-main',e=>e.clientWidth*0.3):initial;
+      assert.ok(Math.abs(await fileSize()-defaultSize)<2,`reset on ${axis}: ${defaultSize} → ${await fileSize()}`);
       const wrapControl='input[aria-label="코드 diff 긴 줄 자동 줄바꿈"]';
       const toggleWrap=async()=>{
         await page.$eval('.settings-button',button=>button.click());

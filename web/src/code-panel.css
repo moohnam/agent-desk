@@ -20,8 +20,10 @@
 .code-scope select{flex:0 1 200px;font-size:12px}.code-scope small{margin-left:auto;white-space:nowrap}
 
 /* The file tree beside the diff; above it when the panel is narrow. */
-.code-main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(180px,30%) minmax(0,1fr)}
-.code-files{overflow:auto;border-right:1px solid var(--border);background:var(--col-head);padding:6px 0}
+.code-main{flex:1;min-height:0;display:grid;grid-template-columns:clamp(120px,var(--files-width,30%),65%) 6px minmax(0,1fr)}
+.code-files{overflow:auto;background:var(--col-head);padding:6px 0}
+.code-file-divider{background:var(--col-head);border-inline-start:1px solid var(--border);cursor:col-resize;touch-action:none;user-select:none}
+.code-file-divider:hover,.code-file-divider:active{background:var(--sel)}
 .code-file-filter{display:block;width:calc(100% - 16px);margin:2px 8px 6px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--col);color:var(--text);font:inherit;font-size:12px}
 .code-dir:not(:has(.code-dir-name)) .code-file{padding-left:10px}
 .code-dir-name{padding:4px 10px 2px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -32,8 +34,8 @@
 .code-status.modified{background:var(--warn-bg);color:var(--warn)}.code-status.added,.code-status.untracked{background:rgba(40,170,90,.15);color:var(--good)}.code-status.deleted{background:rgba(220,60,60,.14);color:var(--bad)}
 .code-count{display:inline-flex;gap:5px;font:11.5px ui-monospace,monospace;color:var(--muted);flex:none}
 @container (max-width: 640px){
-  .code-main{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
-  .code-files{max-height:132px;border-right:0;border-bottom:1px solid var(--border)}
+  .code-main{grid-template-columns:minmax(0,1fr);--files-row:min(var(--files-height),65%);grid-template-rows:var(--files-row,fit-content(min(132px,65%))) 6px minmax(0,1fr)}
+  .code-file-divider{border-inline-start:0;border-top:1px solid var(--border);cursor:row-resize}
   .code-scope small{display:none}
 }
 
